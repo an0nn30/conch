@@ -23,17 +23,29 @@ public class LocalShellTtyConnector implements TtyConnector {
     private final OutputStream writer;
 
     public LocalShellTtyConnector() throws IOException {
-        String shell = System.getenv("SHELL");
-        if (shell == null || shell.isBlank()) shell = "/bin/zsh";
+        boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
 
         Map<String, String> env = new HashMap<>(System.getenv());
-        env.put("TERM",      "xterm-256color");
-        env.put("COLORTERM", "truecolor");
+        String[] cmd;
 
-        // --login so ~/.zshrc / ~/.bash_profile are sourced
-        String[] cmd = (shell.endsWith("bash") || shell.endsWith("zsh"))
-                ? new String[]{shell, "--login"}
-                : new String[]{shell};
+        if (windows) {
+            // On Windows, pty4j uses ConPTY (Windows 10 1903+) to host the shell.
+            // $SHELL is not a Windows env var; use PowerShell 5.x which is
+            // pre-installed on every Windows 10/11 machine.
+            // -NoExit keeps the session alive; -NoLogo suppresses the banner.
+            cmd = new String[]{"powershell.exe", "-NoExit", "-NoLogo"};
+        } else {
+            String shell = System.getenv("SHELL");
+            if (shell == null || shell.isBlank()) shell = "/bin/zsh";
+
+            env.put("TERM",      "xterm-256color");
+            env.put("COLORTERM", "truecolor");
+
+            // --login so ~/.zshrc / ~/.bash_profile are sourced
+            cmd = (shell.endsWith("bash") || shell.endsWith("zsh"))
+                    ? new String[]{shell, "--login"}
+                    : new String[]{shell};
+        }
 
         pty = new PtyProcessBuilder(cmd)
                 .setEnvironment(env)
