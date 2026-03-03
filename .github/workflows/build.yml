@@ -2,12 +2,16 @@
 # MobaMacOS Terminal — CI / Release pipeline
 #
 # Every push to main:
-#   1. Builds + tests on macOS and Windows in parallel
+#   1. Builds + tests on macOS (arm64 + x86_64) and Windows in parallel
 #   2. Packages platform-native installers versioned 1.0.<run_number>
-#   3. Creates a GitHub Release with the .dmg and .exe attached
+#   3. Creates a GitHub Release with all three installers attached
 #
-# To cut a release, just push (or merge a PR) to main.
-# Versions:  1.0.1, 1.0.2, 1.0.3 … (GitHub Actions run number)
+# macOS runners:
+#   macos-latest  → arm64  (Apple Silicon M-series)   — 3x Linux rate
+#   macos-13      → x86_64 (Intel)                    — 3x Linux rate
+#
+# jpackage bundles the JRE of the host platform, so we must build on each
+# arch separately — there is no universal binary option.
 # =============================================================================
 
 name: Build
@@ -18,17 +22,24 @@ on:
   pull_request:
     branches: [main, master]
 
-# APP_VERSION is available to every job and step.
-# github.run_number starts at 1 and increments with every workflow run.
 env:
   APP_VERSION: 1.0.${{ github.run_number }}
 
 jobs:
 
-  # ── macOS .app + .dmg ──────────────────────────────────────────────────────
+  # ── macOS .app + .dmg (arm64 and x86_64) ───────────────────────────────────
   build-mac:
-    name: macOS
-    runs-on: macos-latest
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest   # arm64 — Apple Silicon
+            arch:   arm64
+          - runner: macos-13       # x86_64 — Intel
+            arch:   x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -51,10 +62,18 @@ jobs:
       - name: Package .dmg
         run: make APP_VERSION=$APP_VERSION dmg
 
+      # Rename the .dmg to include the CPU architecture so both files can
+      # coexist in the same release (e.g. MobaMacOS Terminal-1.0.5-arm64.dmg).
+      - name: Rename .dmg with architecture suffix
+        run: |
+          for f in dist/mac/*.dmg; do
+            mv "$f" "${f%.dmg}-${{ matrix.arch }}.dmg"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-dist
-          path: dist/mac/
+          name: macos-dist-${{ matrix.arch }}
+          path: dist/mac/*.dmg
           retention-days: 30
 
   # ── Windows .exe ───────────────────────────────────────────────────────────
@@ -122,12 +141,11 @@ jobs:
           path: dist/win/
           retention-days: 30
 
-  # ── GitHub Release (every push to main) ───────────────────────────────────
+  # ── GitHub Release (every push to main) ────────────────────────────────────
   release:
     name: Release
     needs: [build-mac, build-win]
     runs-on: ubuntu-latest
-    # Skip on pull requests — only publish releases from actual merges to main.
     if: github.event_name == 'push'
     permissions:
       contents: write
@@ -135,9 +153,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Download all three artifacts into a flat staging directory.
       - uses: actions/download-artifact@v4
         with:
-          name: macos-dist
+          pattern: macos-dist-*
+          merge-multiple: true
           path: dist/mac/
 
       - uses: actions/download-artifact@v4
