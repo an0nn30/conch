@@ -47,8 +47,17 @@ public class SshSessionManager {
         // TODO: replace PromiscuousVerifier with a proper known_hosts manager
         ssh.addHostKeyVerifier(new PromiscuousVerifier());
 
-        // --- Connect (optionally via ProxyCommand) ---------------------------
-        String proxyCmd = server.getProxyCommand();
+        // --- Connect (optionally via ProxyJump or ProxyCommand) --------------
+        // ProxyCommand wins if both are set. ProxyJump is converted to the
+        // equivalent "ssh -W %h:%p <jumphost>" ProxyCommand so that the
+        // existing ProxyCommandSocket handles the tunnelling transparently.
+        String proxyCmd  = server.getProxyCommand();
+        String proxyJump = server.getProxyJump();
+        if (proxyCmd == null || proxyCmd.isBlank()) {
+            if (proxyJump != null && !proxyJump.isBlank()) {
+                proxyCmd = "ssh -W %h:%p " + proxyJump;
+            }
+        }
         if (proxyCmd != null && !proxyCmd.isBlank()) {
             String expandedCmd = expandProxyCommand(proxyCmd, server.getHost(), server.getPort());
             ssh.setSocketFactory(new ProxyCommandSocketFactory(expandedCmd));

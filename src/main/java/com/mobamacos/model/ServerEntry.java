@@ -12,8 +12,10 @@ public class ServerEntry {
     private String username;
     private String password = "";
     private String privateKeyPath = "";
-    /** ProxyCommand from ~/.ssh/config, e.g. "cloudflared access ssh --hostname %h" */
+    /** ProxyCommand, e.g. "cloudflared access ssh --hostname %h" or "ssh -W %h:%p bastion" */
     private String proxyCommand = "";
+    /** ProxyJump host, e.g. "user@bastion.example.com" or "bastion:2222" */
+    private String proxyJump = "";
     /** True when imported from ~/.ssh/config — never persisted back to that file */
     private boolean fromSshConfig = false;
 
@@ -45,6 +47,8 @@ public class ServerEntry {
     public void   setPrivateKeyPath(String p)  { this.privateKeyPath = p; }
     public String getProxyCommand()              { return proxyCommand; }
     public void   setProxyCommand(String cmd)   { this.proxyCommand = cmd; }
+    public String getProxyJump()                { return proxyJump; }
+    public void   setProxyJump(String jump)     { this.proxyJump = jump; }
     public boolean isFromSshConfig()            { return fromSshConfig; }
     public void    setFromSshConfig(boolean b)  { this.fromSshConfig = b; }
 

@@ -20,6 +20,9 @@ public class NewConnectionDialog extends JDialog {
     private JTextField    userField;
     private JPasswordField passField;
     private JTextField    keyField;
+    private JComboBox<String>       proxyTypeCombo;
+    private JLabel                  proxyValueLabel;
+    private JTextField              proxyValueField;
     private JComboBox<ServerFolder> folderCombo;
 
     public NewConnectionDialog(Window parent, ConfigManager configManager) {
@@ -38,7 +41,7 @@ public class NewConnectionDialog extends JDialog {
     // -----------------------------------------------------------------------
 
     private void initUI(ServerFolder preselectedFolder) {
-        setSize(520, 440);
+        setSize(520, 530);
         setLocationRelativeTo(getParent());
         setResizable(false);
 
@@ -96,6 +99,36 @@ public class NewConnectionDialog extends JDialog {
         keyPanel.add(browse, BorderLayout.EAST);
         content.add(keyPanel, fc);
 
+        // ── Proxy section ─────────────────────────────────────────────────────
+        GridBagConstraints sep = new GridBagConstraints();
+        sep.gridx = 0; sep.gridwidth = 2; sep.fill = GridBagConstraints.HORIZONTAL;
+        sep.insets = new Insets(10, 0, 2, 0);
+        sep.gridy = row++;
+        content.add(new JSeparator(), sep);
+
+        GridBagConstraints hdr = new GridBagConstraints();
+        hdr.gridx = 0; hdr.gridwidth = 2; hdr.anchor = GridBagConstraints.WEST;
+        hdr.insets = new Insets(0, 0, 4, 0);
+        hdr.gridy = row++;
+        JLabel proxyHeader = new JLabel("Proxy / Tunnel (optional)");
+        proxyHeader.setFont(proxyHeader.getFont().deriveFont(java.awt.Font.BOLD));
+        content.add(proxyHeader, hdr);
+
+        lc.gridy = row; fc.gridy = row++;
+        content.add(label("Proxy Type:"), lc);
+        proxyTypeCombo = new JComboBox<>(new String[]{"None", "ProxyJump", "ProxyCommand"});
+        content.add(proxyTypeCombo, fc);
+
+        lc.gridy = row; fc.gridy = row++;
+        proxyValueLabel = label("Jump Host:");
+        content.add(proxyValueLabel, lc);
+        proxyValueField = new JTextField(22);
+        proxyValueField.setEnabled(false);
+        content.add(proxyValueField, fc);
+
+        proxyTypeCombo.addActionListener(e -> updateProxyFields());
+        // ─────────────────────────────────────────────────────────────────────
+
         lc.gridy = row; fc.gridy = row;
         content.add(label("Folder:"), lc);
         folderCombo = new JComboBox<>();
@@ -126,6 +159,34 @@ public class NewConnectionDialog extends JDialog {
         getRootPane().setDefaultButton(saveConnect);
     }
 
+    private void updateProxyFields() {
+        String type = (String) proxyTypeCombo.getSelectedItem();
+        boolean enabled = !"None".equals(type);
+        proxyValueField.setEnabled(enabled);
+
+        if ("ProxyJump".equals(type)) {
+            proxyValueLabel.setText("Jump Host:");
+            proxyValueField.putClientProperty("JTextField.placeholderText",
+                    "user@bastion.example.com  or  bastion:2222");
+            proxyValueField.setToolTipText(
+                    "<html>SSH jump host — equivalent to <code>ssh -J</code><br>"
+                    + "Format: <code>[user@]host[:port]</code><br>"
+                    + "The system <code>ssh</code> binary handles auth for the jump host.</html>");
+        } else if ("ProxyCommand".equals(type)) {
+            proxyValueLabel.setText("Command:");
+            proxyValueField.putClientProperty("JTextField.placeholderText",
+                    "ssh -W %h:%p bastion   or   cloudflared access ssh --hostname %h");
+            proxyValueField.setToolTipText(
+                    "<html>Arbitrary proxy command whose stdin/stdout become the SSH transport.<br>"
+                    + "<code>%h</code> → target host &nbsp; <code>%p</code> → target port</html>");
+        } else {
+            proxyValueLabel.setText("Jump Host:");
+            proxyValueField.putClientProperty("JTextField.placeholderText", "");
+            proxyValueField.setToolTipText(null);
+        }
+        proxyValueField.repaint();
+    }
+
     private void browseForKey() {
         JFileChooser fc = new JFileChooser(System.getProperty("user.home") + "/.ssh");
         fc.setDialogTitle("Select Private Key");
@@ -153,6 +214,14 @@ public class NewConnectionDialog extends JDialog {
         entry.setUsername(user);
         entry.setPassword(new String(passField.getPassword()));
         entry.setPrivateKeyPath(keyField.getText().strip());
+
+        String proxyType  = (String) proxyTypeCombo.getSelectedItem();
+        String proxyValue = proxyValueField.getText().strip();
+        if ("ProxyJump".equals(proxyType) && !proxyValue.isEmpty()) {
+            entry.setProxyJump(proxyValue);
+        } else if ("ProxyCommand".equals(proxyType) && !proxyValue.isEmpty()) {
+            entry.setProxyCommand(proxyValue);
+        }
 
         ServerFolder folder = (ServerFolder) folderCombo.getSelectedItem();
         if (folder == null && !configManager.getConfig().getFolders().isEmpty()) {

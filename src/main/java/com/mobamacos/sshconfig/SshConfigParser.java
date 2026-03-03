@@ -30,6 +30,7 @@ public class SshConfigParser {
             int    port         = 22;
             String identityFile = "";
             String proxyCommand = "";
+            String proxyJump    = "";
 
             String line;
             while ((line = reader.readLine()) != null) {
@@ -42,7 +43,7 @@ public class SshConfigParser {
                     // Commit the previous block
                     if (alias != null && !alias.contains("*") && hostname != null) {
                         folder.getServers().add(buildEntry(alias, hostname, port, user,
-                                identityFile, proxyCommand));
+                                identityFile, proxyCommand, proxyJump));
                     }
                     // Start a new block — a Host line can have multiple aliases separated by spaces;
                     // we use the first one as the display name.
@@ -53,6 +54,7 @@ public class SshConfigParser {
                     port         = 22;
                     identityFile = "";
                     proxyCommand = "";
+                    proxyJump    = "";
 
                 } else if (lower.startsWith("hostname ")) {
                     hostname = line.substring(9).strip();
@@ -65,13 +67,15 @@ public class SshConfigParser {
                     identityFile = line.substring(13).strip();
                 } else if (lower.startsWith("proxycommand ")) {
                     proxyCommand = line.substring(13).strip();
+                } else if (lower.startsWith("proxyjump ")) {
+                    proxyJump = line.substring(10).strip();
                 }
             }
 
             // Commit the last block
             if (alias != null && !alias.contains("*") && hostname != null) {
                 folder.getServers().add(buildEntry(alias, hostname, port, user,
-                        identityFile, proxyCommand));
+                        identityFile, proxyCommand, proxyJump));
             }
 
         } catch (IOException e) {
@@ -83,10 +87,11 @@ public class SshConfigParser {
 
     private static ServerEntry buildEntry(String alias, String hostname, int port,
                                           String user, String identityFile,
-                                          String proxyCommand) {
+                                          String proxyCommand, String proxyJump) {
         ServerEntry entry = new ServerEntry(alias, hostname, port, user);
         entry.setPrivateKeyPath(expandTilde(identityFile));
         entry.setProxyCommand(proxyCommand);
+        entry.setProxyJump(proxyJump);
         entry.setFromSshConfig(true);
         return entry;
     }
