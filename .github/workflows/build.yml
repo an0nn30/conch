@@ -6,19 +6,18 @@
 #
 # Artifacts produced:
 #   MobaMacOS Terminal-1.0.N-arm64.dmg      macOS Apple Silicon
-#   MobaMacOS Terminal-1.0.N-x86_64.dmg     macOS Intel
 #   mobamacos-terminal_1.0.N_arm64.deb      Linux Debian/Ubuntu  arm64
 #   mobamacos-terminal_1.0.N_amd64.deb      Linux Debian/Ubuntu  x86_64
 #   mobamacos-terminal-1.0.N-1.aarch64.rpm  Linux Fedora/RHEL    arm64
 #   mobamacos-terminal-1.0.N-1.x86_64.rpm   Linux Fedora/RHEL    x86_64
 #   MobaMacOS Terminal-1.0.N.msi            Windows x86_64
 #
-# macOS runners:   macos-latest (arm64) + macos-13 (x86_64)  — 10x Linux rate
+# macOS runners:   macos-latest (arm64 only — GitHub retired macos-13 Intel)
+#                  For an Intel x86_64 .dmg, add a self-hosted Intel runner.
 # Linux runners:   ubuntu-latest (x86_64) + ubuntu-24.04-arm (arm64)
-# Windows runner:  windows-latest (x86_64)                   — 2x Linux rate
+# Windows runner:  windows-latest (x86_64)
 #
-# jpackage bundles the host JRE, so cross-compilation is not possible;
-# each platform/arch must be built on a matching runner.
+# jpackage bundles the host JRE; cross-compilation is not possible.
 # =============================================================================
 
 name: Build
@@ -34,19 +33,13 @@ env:
 
 jobs:
 
-  # ── macOS .app + .dmg (arm64 and x86_64) ──────────────────────────────────
+  # ── macOS .app + .dmg (arm64) ──────────────────────────────────────────────
+  # GitHub retired the macos-13 Intel runner in 2025, so only arm64 is
+  # available as a GitHub-hosted runner.  For x86_64, add a self-hosted
+  # Intel Mac runner and uncomment the matrix entry below.
   build-mac:
-    name: macOS (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest   # arm64 — Apple Silicon
-            arch:   arm64
-          - runner: macos-13       # x86_64 — Intel
-            arch:   x86_64
+    name: macOS (arm64)
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -69,17 +62,15 @@ jobs:
       - name: Package .dmg
         run: make APP_VERSION=$APP_VERSION dmg
 
-      # jpackage names all macOS DMGs identically regardless of arch, so we
-      # add the arch suffix here before uploading.
       - name: Add architecture suffix to .dmg
         run: |
           for f in dist/mac/*.dmg; do
-            mv "$f" "${f%.dmg}-${{ matrix.arch }}.dmg"
+            mv "$f" "${f%.dmg}-arm64.dmg"
           done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-dist-${{ matrix.arch }}
+          name: macos-dist
           path: dist/mac/*.dmg
           retention-days: 30
 
@@ -113,8 +104,6 @@ jobs:
       - name: Install RPM build tools
         run: sudo apt-get install -y rpm
 
-      # Stage the JAR manually to avoid re-invoking Maven via the Makefile's
-      # PHONY dependency chain.
       - name: Stage JAR
         run: |
           mkdir -p target/package-input
@@ -160,7 +149,7 @@ jobs:
           path: dist/linux/
           retention-days: 30
 
-  # ── Windows .exe (x86_64) ─────────────────────────────────────────────────
+  # ── Windows .msi (x86_64) ─────────────────────────────────────────────────
   build-win:
     name: Windows
     runs-on: windows-latest
@@ -195,9 +184,6 @@ jobs:
       - name: Install WiX Toolset
         run: choco install wixtoolset --no-progress -y
 
-      # MSI is the native Windows Installer format — integrates with Add/Remove
-      # Programs, Group Policy, and enterprise deployment tools.
-      # Note: --win-shortcut-prompt is EXE-only and is not valid for MSI.
       - name: Package .msi
         shell: pwsh
         run: |
@@ -230,38 +216,54 @@ jobs:
     name: Release
     needs: [build-mac, build-linux, build-win]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    # always() lets this job evaluate its own condition even when a dependency
+    # failed.  We then gate on: push event + Windows succeeded (minimum viable
+    # release) + nothing was cancelled mid-run.
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      needs.build-win.result == 'success' &&
+      !contains(needs.*.result, 'cancelled')
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      # Download whatever artifacts were produced — steps are skipped if the
+      # corresponding build job didn't succeed, so a partial build still
+      # produces a release with whatever installers are available.
+      - name: Download macOS artifacts
+        if: needs.build-mac.result == 'success'
+        uses: actions/download-artifact@v4
         with:
-          pattern: macos-dist-*
-          merge-multiple: true
+          name: macos-dist
           path: dist/mac/
 
-      - uses: actions/download-artifact@v4
+      - name: Download Linux artifacts
+        if: needs.build-linux.result == 'success'
+        uses: actions/download-artifact@v4
         with:
           pattern: linux-dist-*
           merge-multiple: true
           path: dist/linux/
 
-      - uses: actions/download-artifact@v4
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
         with:
           name: windows-dist
           path: dist/win/
 
+      # Collect whichever files were downloaded and attach them all.
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          FILES=()
+          for f in dist/mac/*.dmg dist/linux/*.deb dist/linux/*.rpm dist/win/*.msi; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
           gh release create "v$APP_VERSION" \
             --title "MobaMacOS Terminal v$APP_VERSION" \
             --generate-notes \
-            dist/mac/*.dmg \
-            dist/linux/*.deb \
-            dist/linux/*.rpm \
-            dist/win/*.msi
+            "${FILES[@]}"
