@@ -1,0 +1,157 @@
+# =============================================================================
+# MobaMacOS Terminal — CI / Release pipeline
+#
+# Jobs:
+#   build-mac  — compiles, tests, and packages macOS .app + .dmg
+#   build-win  — compiles, tests, and packages Windows .exe
+#   release    — creates a GitHub Release on version tags (v*.*.*)
+#
+# Artifacts are retained for 30 days on every push/PR.
+# A GitHub Release with the .dmg and .exe is created when you push a tag:
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+# =============================================================================
+
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main, master]
+
+jobs:
+
+  # ── macOS .app + .dmg ──────────────────────────────────────────────────────
+  build-mac:
+    name: macOS
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build + test
+        run: mvn package -q
+
+      - name: Generate macOS icon (.icns)
+        run: make icons-mac
+
+      # make app-mac / dmg each depend on the PHONY `stage` target which
+      # re-runs `mvn package -DskipTests`; that's fast with the Maven cache.
+      - name: Package .app
+        run: make app-mac
+
+      - name: Package .dmg
+        run: make dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: dist/mac/
+          retention-days: 30
+
+  # ── Windows .exe ───────────────────────────────────────────────────────────
+  build-win:
+    name: Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build + test
+        run: mvn package -q
+
+      # Stage the fat JAR manually so we don't re-invoke Maven via the
+      # Makefile's PHONY `jar` target.
+      - name: Stage JAR
+        shell: bash
+        run: |
+          mkdir -p target/package-input
+          cp target/mobamacos-terminal-0.1.0-SNAPSHOT.jar target/package-input/
+
+      # ImageMagick (magick) is pre-installed on windows-latest.
+      - name: Generate Windows icon (.ico)
+        shell: bash
+        run: |
+          magick src/main/package/app-icon-512.png \
+            -define icon:auto-resize=256,128,64,48,32,16 \
+            src/main/package/mobamacos-terminal.ico
+
+      # WiX Toolset 3.x is required by jpackage --type exe.
+      # windows-latest typically includes it; this ensures it's present and
+      # adds it to PATH for the packaging step.
+      - name: Install WiX Toolset
+        run: choco install wixtoolset --no-progress -y
+
+      - name: Package .exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\win | Out-Null
+          & "$env:JAVA_HOME\bin\jpackage" `
+            --input          "target\package-input"                      `
+            --main-jar       "mobamacos-terminal-0.1.0-SNAPSHOT.jar"     `
+            --main-class     "com.mobamacos.Main"                        `
+            --name           "MobaMacOS Terminal"                        `
+            --app-version    "1.0.0"                                     `
+            --vendor         "MobaMacOS"                                 `
+            --description    "A MobaXterm-inspired SSH client for macOS" `
+            --java-options   "-Xmx512m"                                  `
+            --java-options   "-Dfile.encoding=UTF-8"                     `
+            --type           exe                                         `
+            --dest           "dist\win"                                  `
+            --icon           "src\main\package\mobamacos-terminal.ico"   `
+            --win-dir-chooser                                            `
+            --win-menu                                                   `
+            --win-shortcut                                               `
+            --win-shortcut-prompt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/win/
+          retention-days: 30
+
+  # ── GitHub Release (version tags only) ────────────────────────────────────
+  release:
+    name: Release
+    needs: [build-mac, build-win]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-dist
+          path: dist/mac/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/win/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "MobaMacOS Terminal ${{ github.ref_name }}" \
+            --generate-notes \
+            dist/mac/*.dmg \
+            dist/win/*.exe
