@@ -20,6 +20,11 @@ public class AppConfig {
     private boolean leftPanelCollapsed = false;
     private int     rightPanelWidth    = 240;
     private boolean rightPanelCollapsed = false;
+    // Saved tunnels
+    private List<SavedTunnel> tunnels    = new ArrayList<>();
+
+    public List<SavedTunnel> getTunnels()                    { return tunnels; }
+    public void setTunnels(List<SavedTunnel> tunnels)        { this.tunnels = tunnels; }
 
     public List<ServerFolder> getFolders()            { return folders; }
     public void setFolders(List<ServerFolder> folders){ this.folders = folders; }

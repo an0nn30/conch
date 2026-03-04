@@ -1,9 +1,9 @@
 package com.github.an0nn30.conch.ui.dialogs;
 
 import com.github.an0nn30.conch.config.ConfigManager;
+import com.github.an0nn30.conch.model.SavedTunnel;
 import com.github.an0nn30.conch.model.ServerEntry;
 import com.github.an0nn30.conch.model.ServerFolder;
-import com.github.an0nn30.conch.model.TunnelConfig;
 import com.github.an0nn30.conch.ssh.TunnelManager;
 
 import javax.swing.*;
@@ -100,7 +100,7 @@ public class NewTunnelDialog extends JDialog {
         statusLabel.setBorder(new EmptyBorder(0, 24, 0, 24));
 
         // Buttons
-        connectBtn = new JButton("Connect");
+        connectBtn = new JButton("Save & Connect");
         JButton cancelBtn = new JButton("Cancel");
         connectBtn.addActionListener(e -> connect());
         cancelBtn.addActionListener(e -> dispose());
@@ -112,9 +112,8 @@ public class NewTunnelDialog extends JDialog {
 
         setLayout(new BorderLayout());
         add(form,        BorderLayout.CENTER);
-        add(statusLabel, BorderLayout.SOUTH);
 
-        // Wrap form + buttons together below the form
+        // Wrap status + buttons together below the form
         JPanel south = new JPanel(new BorderLayout());
         south.add(statusLabel, BorderLayout.NORTH);
         south.add(buttons,     BorderLayout.SOUTH);
@@ -143,24 +142,30 @@ public class NewTunnelDialog extends JDialog {
         ServerEntry server = (ServerEntry) serverCombo.getSelectedItem();
         if (server == null) { statusLabel.setText("Select an SSH server."); return; }
 
-        TunnelConfig config = new TunnelConfig(
-                server, localPort, remoteHost, remotePort, labelField.getText());
+        // -- Create SavedTunnel and persist -----------------------------------
+        SavedTunnel saved = new SavedTunnel(
+                server.getHost(), server.getPort(), server.getUsername(),
+                localPort, remoteHost, remotePort, labelField.getText());
 
-        // -- Connect in background -------------------------------------------
+        configManager.getConfig().getTunnels().add(saved);
+        configManager.saveConfig();
+
+        // -- Activate in background -------------------------------------------
         connectBtn.setEnabled(false);
         connectBtn.setText("Connecting\u2026");
         statusLabel.setText(" ");
 
-        SwingWorker<TunnelManager.ActiveTunnel, Void> worker = new SwingWorker<>() {
+        SwingWorker<Void, Void> worker = new SwingWorker<>() {
             @Override
-            protected TunnelManager.ActiveTunnel doInBackground() throws Exception {
-                return tunnelManager.start(config);
+            protected Void doInBackground() throws Exception {
+                tunnelManager.activate(saved, server);
+                return null;
             }
 
             @Override
             protected void done() {
                 connectBtn.setEnabled(true);
-                connectBtn.setText("Connect");
+                connectBtn.setText("Save & Connect");
                 try {
                     get();
                     if (onConnected != null) onConnected.run();

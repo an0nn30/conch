@@ -82,6 +82,7 @@ public class ConfigManager {
         copy.setFontName(config.getFontName());
         copy.setTerminalBackground(config.getTerminalBackground());
         copy.setTerminalForeground(config.getTerminalForeground());
+        copy.setTunnels(config.getTunnels());
         for (ServerFolder f : config.getFolders()) {
             if (!"SSH Config".equals(f.getName())) {
                 copy.getFolders().add(f);
