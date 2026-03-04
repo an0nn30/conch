@@ -13,9 +13,11 @@ import java.awt.geom.AffineTransform;
 public class SidePanel extends JPanel {
 
     private final FileTransferPanel filePanel;
+    private final ToolsPanel        toolsPanel;
 
-    public SidePanel(FileTransferPanel filePanel) {
-        this.filePanel = filePanel;
+    public SidePanel(FileTransferPanel filePanel, ToolsPanel toolsPanel) {
+        this.filePanel  = filePanel;
+        this.toolsPanel = toolsPanel;
         initUI();
     }
 
@@ -35,7 +37,7 @@ public class SidePanel extends JPanel {
         CardLayout cards = new CardLayout();
         JPanel content = new JPanel(cards);
         content.add(filePanel,                    "Files");
-        content.add(buildPlaceholderPanel("Tools"),  "Tools");
+        content.add(toolsPanel,                   "Tools");
         content.add(buildPlaceholderPanel("Macros"), "Macros");
 
         tabBar.addTab("Files",  AppIcons.TAB_FILES,  () -> cards.show(content, "Files"));

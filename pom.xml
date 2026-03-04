@@ -6,7 +6,7 @@
 
     <groupId>com.mobamacos</groupId>
     <artifactId>mobamacos-terminal</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>MobaMacOS Terminal</name>
 
@@ -97,6 +97,21 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
             <version>2.0.9</version>
+        </dependency>
+
+        <!-- Groovy — plugin scripting engine.
+             The groovy jar already includes groovy.grape.* (GrapeIvy etc).
+             Ivy is declared optional in the Groovy POM so we must add it explicitly;
+             without it @Grab cannot resolve Maven dependencies at runtime. -->
+        <dependency>
+            <groupId>org.apache.groovy</groupId>
+            <artifactId>groovy</artifactId>
+            <version>4.0.21</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.ivy</groupId>
+            <artifactId>ivy</artifactId>
+            <version>2.5.2</version>
         </dependency>
     </dependencies>
 

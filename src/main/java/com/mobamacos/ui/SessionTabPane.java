@@ -3,12 +3,14 @@ package com.mobamacos.ui;
 import com.jediterm.terminal.ui.JediTermWidget;
 import com.mobamacos.config.ConfigManager;
 import com.mobamacos.model.ServerEntry;
+import com.mobamacos.plugin.api.SessionHandle;
 import com.mobamacos.ssh.MoshTtyConnector;
 import com.mobamacos.ssh.MoshTtyConnector.CwdListener;
 import com.mobamacos.ssh.SshjTtyConnector;
 import com.mobamacos.ssh.SshSessionManager;
 import com.mobamacos.terminal.LocalShellTtyConnector;
 import com.mobamacos.terminal.TerminalSettingsProvider;
+import net.schmizz.sshj.SSHClient;
 
 import javax.swing.*;
 import javax.swing.SwingUtilities;
@@ -329,6 +331,56 @@ public class SessionTabPane extends JPanel {
             }
         };
         worker.execute();
+    }
+
+    // -----------------------------------------------------------------------
+    // Plugin API: session handle access
+    // -----------------------------------------------------------------------
+
+    /** Returns a {@link SessionHandle} for the currently active tab, or {@code null}. */
+    public SessionHandle getActiveSessionHandle() {
+        Component comp = tabbedPane.getSelectedComponent();
+        if (comp instanceof JediTermWidget w) return buildHandle(w);
+        return null;
+    }
+
+    /** Returns {@link SessionHandle}s for every open tab. */
+    public List<SessionHandle> getAllSessionHandles() {
+        List<SessionHandle> handles = new ArrayList<>();
+        for (int i = 0; i < tabbedPane.getTabCount(); i++) {
+            Component comp = tabbedPane.getComponentAt(i);
+            if (comp instanceof JediTermWidget w) {
+                SessionHandle h = buildHandle(w);
+                if (h != null) handles.add(h);
+            }
+        }
+        return handles;
+    }
+
+    /** Returns a {@link SessionHandle} for the local terminal, or {@code null}. */
+    public SessionHandle getLocalSessionHandle() {
+        for (LocalShellTtyConnector c : localConnectorMap.values()) {
+            return new SessionHandle("local",
+                    text -> { try { c.write(text); } catch (Exception ignored) {} });
+        }
+        return null;
+    }
+
+    private SessionHandle buildHandle(JediTermWidget w) {
+        ServerEntry server = sessionMap.get(w);
+        if (server != null) {
+            SshjTtyConnector conn = connectorMap.get(w);
+            SSHClient sshClient = conn != null ? conn.getSshClient() : null;
+            return new SessionHandle(server.getName(), server.getHost(),
+                    server.getUsername(), null, sshClient,
+                    text -> { try { if (conn != null) conn.write(text); } catch (Exception ignored) {} });
+        }
+        LocalShellTtyConnector local = localConnectorMap.get(w);
+        if (local != null) {
+            return new SessionHandle("local",
+                    text -> { try { local.write(text); } catch (Exception ignored) {} });
+        }
+        return null;
     }
 
     /**

@@ -4,12 +4,16 @@ import com.mobamacos.config.ConfigManager;
 import com.mobamacos.model.AppConfig;
 import com.mobamacos.model.ServerEntry;
 import com.mobamacos.model.ServerFolder;
+import com.mobamacos.plugin.PluginContext;
+import com.mobamacos.plugin.PluginManager;
 import com.mobamacos.ssh.TunnelManager;
 import com.mobamacos.theme.ThemeManager;
 import com.mobamacos.ui.dialogs.NewConnectionDialog;
 import com.mobamacos.ui.dialogs.PreferencesDialog;
 import com.mobamacos.ui.dialogs.ResumeSessionsDialog;
 import com.mobamacos.ui.files.FileTransferPanel;
+
+import java.nio.file.Paths;
 
 import javax.swing.*;
 import java.awt.*;
@@ -44,7 +48,13 @@ public class MainWindow extends JFrame {
         filePanel      = new FileTransferPanel();
         sessionTabPane.addSessionListener(filePanel);
 
-        sidePanel    = new SidePanel(filePanel);
+        java.nio.file.Path configDir = Paths.get(System.getProperty("user.home"), ".mobamacos");
+        PluginManager  pluginManager  = new PluginManager(configDir);
+        PluginContext  pluginContext   = new PluginContext(sessionTabPane,
+                sessionTabPane.getSshManager(), configManager);
+        ToolsPanel     toolsPanel     = new ToolsPanel(pluginContext, pluginManager, configDir);
+
+        sidePanel    = new SidePanel(filePanel, toolsPanel);
         sessionsPanel = new SessionsPanel(configManager, sessionTabPane);
 
         // Menu bar
@@ -53,10 +63,6 @@ public class MainWindow extends JFrame {
         menuBuilder.setSessionsPanel(sessionsPanel);
         setJMenuBar(menuBuilder.build());
 
-        // macOS: transparent title bar with action buttons
-        if (System.getProperty("os.name", "").toLowerCase().contains("mac")) {
-            setupTransparentTitleBar();
-        }
 
         // Layout: [left panel] | [terminals] | [sessions]
         rightSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, sessionTabPane, sessionsPanel);
@@ -190,30 +196,29 @@ public class MainWindow extends JFrame {
     // -----------------------------------------------------------------------
 
     /**
-     * Enables the macOS transparent/unified title bar and extends window content
-     * into the title bar area.  A 28-px strip is added at the top of the content
-     * pane; it leaves ~72 px on the left clear for the traffic-light buttons and
-     * places compact action buttons on the right.
+     * Enables the macOS transparent/unified title bar.
+     *
+     * With {@code fullWindowContent=true} the root pane starts at y=0 (behind the
+     * native title bar), so the JMenuBar — which the root-pane layout places first —
+     * naturally occupies the title-bar area.  We just need to:
+     *   1. Add a left inset to clear the traffic-light buttons.
+     *   2. Push a couple of quick-action buttons to the far right via glue.
      */
     private void setupTransparentTitleBar() {
         getRootPane().putClientProperty("apple.awt.transparentTitleBar", Boolean.TRUE);
         getRootPane().putClientProperty("apple.awt.fullWindowContent",   Boolean.TRUE);
 
-        JPanel strip = new JPanel(new BorderLayout());
-        strip.setOpaque(false);
-        strip.setPreferredSize(new Dimension(0, 28));
+        JMenuBar menuBar = getJMenuBar();
+        if (menuBar == null) return;
 
-        // Left: clear the traffic-light buttons (close/minimise/zoom sit at ~x=8-62)
-        strip.add(Box.createHorizontalStrut(72), BorderLayout.WEST);
+        // Left inset clears the traffic-light buttons (close/minimise/zoom ~70 px wide)
+        menuBar.setBorder(BorderFactory.createEmptyBorder(0, 72, 0, 8));
 
-        // Right: compact action buttons
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 4));
-        right.setOpaque(false);
-        right.add(titleBarButton("+", "New SSH Connection (⌘N)",    this::showNewConnectionDialog));
-        right.add(titleBarButton("⚙", "Preferences (⌘,)",           this::showPreferencesDialog));
-        strip.add(right, BorderLayout.EAST);
-
-        add(strip, BorderLayout.NORTH);
+        // Glue pushes everything added after this point to the far right
+        menuBar.add(Box.createHorizontalGlue());
+        menuBar.add(titleBarButton("+",  "New SSH Connection (⌘N)", this::showNewConnectionDialog));
+        menuBar.add(titleBarButton("⚙", "Preferences (⌘,)",        this::showPreferencesDialog));
+        menuBar.add(Box.createHorizontalStrut(8));
     }
 
     private static JButton titleBarButton(String text, String tooltip, Runnable action) {

@@ -13,10 +13,6 @@ public class Main {
         // macOS-specific tweaks
         System.setProperty("com.apple.mrj.application.apple.menu.about.name", "MobaMacOS");
         System.setProperty("apple.awt.application.name", "MobaMacOS Terminal");
-        if (System.getProperty("os.name", "").toLowerCase().contains("mac")) {
-            // Move the menu bar to the macOS system menu bar (screen top)
-            System.setProperty("apple.laf.useScreenMenuBar", "true");
-        }
 
         SwingUtilities.invokeLater(() -> {
             try {

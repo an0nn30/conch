@@ -2,6 +2,7 @@ package com.mobamacos.ssh;
 
 import com.jediterm.core.util.TermSize;
 import com.jediterm.terminal.TtyConnector;
+import net.schmizz.sshj.SSHClient;
 import net.schmizz.sshj.connection.channel.direct.Session;
 import org.jetbrains.annotations.NotNull;
 
@@ -40,6 +41,7 @@ public class SshjTtyConnector implements TtyConnector {
     private final OutputStream  outputStream;
     private final String        name;
     private final String        startupCommand;
+    private final SSHClient     sshClient;
 
     private volatile CwdListener cwdListener;
 
@@ -50,16 +52,21 @@ public class SshjTtyConnector implements TtyConnector {
     // Construction
     // -----------------------------------------------------------------------
 
-    public SshjTtyConnector(Session.Shell shell, String name, String startupCommand) throws IOException {
+    public SshjTtyConnector(Session.Shell shell, String name, String startupCommand,
+                             SSHClient sshClient) throws IOException {
         this.shell          = shell;
         this.outputStream   = shell.getOutputStream();
         this.reader         = new InputStreamReader(shell.getInputStream(), StandardCharsets.UTF_8);
         this.name           = name;
         this.startupCommand = startupCommand != null ? startupCommand : "";
+        this.sshClient      = sshClient;
         injectShellIntegration();
     }
 
     public void setCwdListener(CwdListener l) { this.cwdListener = l; }
+
+    /** Returns the underlying {@link SSHClient} for plugin exec commands. */
+    public SSHClient getSshClient() { return sshClient; }
 
     // -----------------------------------------------------------------------
     // TtyConnector
