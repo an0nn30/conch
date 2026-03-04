@@ -25,8 +25,20 @@ name: Build
 on:
   push:
     branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'Makefile'
+      - 'lib/**'
+      - '.github/workflows/build.yml'
   pull_request:
     branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'Makefile'
+      - 'lib/**'
+      - '.github/workflows/build.yml'
 
 jobs:
 
