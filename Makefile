@@ -34,8 +34,10 @@ TARGET_DIR     := target
 DIST_DIR       := dist
 STAGE_DIR      := $(TARGET_DIR)/package-input
 
-# Name that maven-shade-plugin writes (matches pom.xml artifactId + version)
-SHADED_JAR     := $(TARGET_DIR)/mobamacos-terminal-0.1.0-SNAPSHOT.jar
+# Name that maven-shade-plugin writes (matches pom.xml artifactId + version).
+# Extracted dynamically so bumping pom.xml is the only change needed.
+POM_VERSION    := $(shell $(MVN) help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo UNKNOWN)
+SHADED_JAR     := $(TARGET_DIR)/mobamacos-terminal-$(POM_VERSION).jar
 
 # ── Icon sources (from bundled Paper icon theme) ───────────────────────────────
 ICON_SRC_512   := src/main/package/app-icon-512.png
