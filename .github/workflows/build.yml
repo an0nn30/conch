@@ -4,13 +4,13 @@
 # Every push to main builds all platform variants in parallel and publishes
 # a GitHub Release with every installer attached.
 #
-# Artifacts produced:
-#   MobaMacOS Terminal-1.0.N-arm64.dmg      macOS Apple Silicon
-#   mobamacos-terminal_1.0.N_arm64.deb      Linux Debian/Ubuntu  arm64
-#   mobamacos-terminal_1.0.N_amd64.deb      Linux Debian/Ubuntu  x86_64
-#   mobamacos-terminal-1.0.N-1.aarch64.rpm  Linux Fedora/RHEL    arm64
-#   mobamacos-terminal-1.0.N-1.x86_64.rpm   Linux Fedora/RHEL    x86_64
-#   MobaMacOS Terminal-1.0.N.msi            Windows x86_64
+# Artifacts produced (version read from pom.xml):
+#   MobaMacOS Terminal-X.Y.Z-arm64.dmg      macOS Apple Silicon
+#   mobamacos-terminal_X.Y.Z_arm64.deb      Linux Debian/Ubuntu  arm64
+#   mobamacos-terminal_X.Y.Z_amd64.deb      Linux Debian/Ubuntu  x86_64
+#   mobamacos-terminal-X.Y.Z-1.aarch64.rpm  Linux Fedora/RHEL    arm64
+#   mobamacos-terminal-X.Y.Z-1.x86_64.rpm   Linux Fedora/RHEL    x86_64
+#   MobaMacOS Terminal-X.Y.Z.msi            Windows x86_64
 #
 # macOS runners:   macos-latest (arm64 only — GitHub retired macos-13 Intel)
 #                  For an Intel x86_64 .dmg, add a self-hosted Intel runner.
@@ -28,10 +28,26 @@ on:
   pull_request:
     branches: [main, master]
 
-env:
-  APP_VERSION: 1.0.${{ github.run_number }}
-
 jobs:
+
+  # ── Extract version from pom.xml ───────────────────────────────────────────
+  version:
+    name: Extract version
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+      - name: Read version from pom.xml
+        id: get_version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout | sed 's/-SNAPSHOT//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   # ── macOS .app + .dmg (arm64) ──────────────────────────────────────────────
   # GitHub retired the macos-13 Intel runner in 2025, so only arm64 is
@@ -40,6 +56,9 @@ jobs:
   build-mac:
     name: macOS (arm64)
     runs-on: macos-latest
+    needs: [version]
+    env:
+      APP_VERSION: ${{ needs.version.outputs.app_version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +97,9 @@ jobs:
   build-linux:
     name: Linux (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: [version]
+    env:
+      APP_VERSION: ${{ needs.version.outputs.app_version }}
 
     strategy:
       fail-fast: false
@@ -155,6 +177,9 @@ jobs:
   build-win:
     name: Windows
     runs-on: windows-latest
+    needs: [version]
+    env:
+      APP_VERSION: ${{ needs.version.outputs.app_version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -218,8 +243,10 @@ jobs:
   # ── GitHub Release (every push to main) ───────────────────────────────────
   release:
     name: Release
-    needs: [build-mac, build-linux, build-win]
+    needs: [version, build-mac, build-linux, build-win]
     runs-on: ubuntu-latest
+    env:
+      APP_VERSION: ${{ needs.version.outputs.app_version }}
     # always() lets this job evaluate its own condition even when a dependency
     # failed.  We then gate on: push event + Windows succeeded (minimum viable
     # release) + nothing was cancelled mid-run.
