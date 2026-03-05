@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/conch_core",
+    "crates/conch_session",
+    "crates/conch_plugin",
+    "crates/conch_app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# Workspace crates
+conch_core = { path = "crates/conch_core" }
+conch_session = { path = "crates/conch_session" }
+conch_plugin = { path = "crates/conch_plugin" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6.0"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
+
+# Optimize crypto crates even in debug builds (PBKDF2 is ~100x slower unoptimized)
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.cbc]
+opt-level = 3
+[profile.dev.package.ecb]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3

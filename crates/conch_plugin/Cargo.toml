@@ -1,0 +1,23 @@
+[package]
+name = "conch_plugin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conch_core = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send"] }
+
+# Crypto (for plugin-facing crypto API)
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+ecb = { version = "0.1", features = ["alloc"] }
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+sha2 = "0.10"
+hmac = "0.12"
+rand = "0.8"
+base64 = "0.22"

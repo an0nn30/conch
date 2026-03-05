@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Conch
+Comment=Terminal Emulator with SSH session management
+Exec=conch
+Icon=conch
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;
+Keywords=terminal;ssh;shell;

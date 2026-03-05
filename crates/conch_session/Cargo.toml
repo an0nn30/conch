@@ -1,0 +1,23 @@
+[package]
+name = "conch_session"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conch_core = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+os_pipe = "1.2"
+
+# Terminal emulation
+alacritty_terminal = "0.25"
+
+dirs = { workspace = true }
+
+# SSH
+russh = "0.57"
+russh-sftp = "2.1"

@@ -1,0 +1,24 @@
+[package]
+name = "conch_terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conch_core = { workspace = true }
+conch_session = { workspace = true }
+parking_lot = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+
+# Terminal emulation (for types)
+alacritty_terminal = "0.25"
+
+# UI framework
+iced = { version = "0.14", features = ["wgpu", "tokio"] }
+# Using iced::wgpu re-export instead of direct wgpu dep
+
+# Font rasterization
+cosmic-text = "0.15"
+
+# GPU buffer serialization
+bytemuck = { version = "1", features = ["derive"] }

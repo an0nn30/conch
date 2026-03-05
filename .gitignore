@@ -1,0 +1,31 @@
+# Build artifacts
+/target
+**/target
+
+# Cargo lock is committed for binaries
+# Cargo.lock
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# macOS packaging intermediates
+*.iconset/
+Conch.app/
+*.dmg
+
+# cross-rs
+.cross/
+
+# Logs
+*.log
