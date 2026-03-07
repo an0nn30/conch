@@ -2,9 +2,21 @@
 
 use std::path::PathBuf;
 
+/// Which pane is active in the file browser when focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileBrowserPane {
+    #[default]
+    Local,
+    Remote,
+}
+
 /// State for the file browser panel.
 #[derive(Debug, Clone)]
 pub struct FileBrowserState {
+    /// Whether the file browser has keyboard focus.
+    pub focused: bool,
+    /// Which pane (local/remote) is active for keyboard navigation.
+    pub active_pane: FileBrowserPane,
     pub local_path: PathBuf,
     pub local_entries: Vec<FileListEntry>,
     pub local_path_edit: String,
@@ -46,6 +58,8 @@ impl Default for FileBrowserState {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let local_path_edit = home.to_string_lossy().into_owned();
         Self {
+            focused: false,
+            active_pane: FileBrowserPane::default(),
             local_path: home,
             local_entries: Vec::new(),
             local_path_edit,

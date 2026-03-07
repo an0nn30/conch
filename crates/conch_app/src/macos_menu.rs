@@ -170,8 +170,8 @@ pub fn setup_menu_bar(plugin_names: &[String]) {
 
         // ── View ──
         let view_menu = make_menu(mtm, "View");
-        view_menu.addItem(&make_item(mtm, "Toggle Left Toolbar", sel!(toggleLeftSidebar:), "1", &responder));
-        view_menu.addItem(&make_item(mtm, "Toggle Right Toolbar", sel!(toggleRightSidebar:), "2", &responder));
+        view_menu.addItem(&make_item(mtm, "Toggle Left Toolbar", sel!(toggleLeftSidebar:), "", &responder));
+        view_menu.addItem(&make_item(mtm, "Toggle Right Toolbar", sel!(toggleRightSidebar:), "", &responder));
         let view_item = NSMenuItem::new(mtm);
         view_item.setSubmenu(Some(&view_menu));
         main_menu.addItem(&view_item);

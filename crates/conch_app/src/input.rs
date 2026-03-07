@@ -70,6 +70,8 @@ pub struct ResolvedShortcuts {
     pub focus_quick_connect: Option<KeyBinding>,
     pub focus_plugin_search: Option<KeyBinding>,
     pub new_window: Option<KeyBinding>,
+    pub focus_files: Option<KeyBinding>,
+    pub zen_mode: Option<KeyBinding>,
 }
 
 impl ResolvedShortcuts {
@@ -85,6 +87,8 @@ impl ResolvedShortcuts {
             focus_quick_connect: KeyBinding::parse(&config.focus_quick_connect),
             focus_plugin_search: KeyBinding::parse(&config.focus_plugin_search),
             new_window: KeyBinding::parse(&config.new_window),
+            focus_files: KeyBinding::parse(&config.focus_files),
+            zen_mode: KeyBinding::parse(&config.zen_mode),
         }
     }
 
@@ -100,6 +104,8 @@ impl ResolvedShortcuts {
             &self.focus_quick_connect,
             &self.focus_plugin_search,
             &self.new_window,
+            &self.focus_files,
+            &self.zen_mode,
         ];
         if bindings.iter().any(|b| b.as_ref().is_some_and(|kb| kb.matches(key, modifiers))) {
             return true;

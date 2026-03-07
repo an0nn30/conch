@@ -668,7 +668,13 @@ fn show_file_pane(
     kind: PaneKind,
     icons: Option<&IconCache>,
 ) -> SidebarAction {
+    use crate::ui::file_browser::FileBrowserPane;
+
     let mut action = SidebarAction::None;
+    let pane_focused = state.focused && match kind {
+        PaneKind::Local => state.active_pane == FileBrowserPane::Local,
+        PaneKind::Remote => state.active_pane == FileBrowserPane::Remote,
+    };
 
     let (label, entries, current_path, path_edit, selected): (&str, &[FileListEntry], Option<&PathBuf>, &mut String, &mut Option<usize>) = match kind {
         PaneKind::Remote => (
@@ -687,8 +693,13 @@ fn show_file_pane(
         ),
     };
 
-    // Header
-    ui.strong(label);
+    // Header (highlight when this pane has keyboard focus).
+    if pane_focused {
+        let accent = Color32::from_rgb(47, 101, 202);
+        ui.colored_label(accent, egui::RichText::new(format!("▸ {label}")).strong());
+    } else {
+        ui.strong(label);
+    }
 
     // Check if remote is disconnected
     if kind == PaneKind::Remote && current_path.is_none() {

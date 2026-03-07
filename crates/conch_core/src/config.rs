@@ -353,6 +353,10 @@ pub struct KeyboardConfig {
     pub focus_plugin_search: String,
     #[serde(default = "default_new_window")]
     pub new_window: String,
+    #[serde(default = "default_focus_files")]
+    pub focus_files: String,
+    #[serde(default = "default_zen_mode")]
+    pub zen_mode: String,
 }
 
 fn default_theme() -> String { "dracula".into() }
@@ -369,6 +373,8 @@ fn default_toggle_right_sidebar() -> String { "cmd+shift+e".into() }
 fn default_focus_quick_connect() -> String { "cmd+/".into() }
 fn default_focus_plugin_search() -> String { "cmd+shift+p".into() }
 fn default_new_window() -> String { "cmd+shift+n".into() }
+fn default_focus_files() -> String { "cmd+shift+f".into() }
+fn default_zen_mode() -> String { "cmd+shift+z".into() }
 
 impl Default for FontFamily {
     fn default() -> Self { Self { family: default_font_name() } }
@@ -405,6 +411,8 @@ impl Default for KeyboardConfig {
             focus_quick_connect: default_focus_quick_connect(),
             focus_plugin_search: default_focus_plugin_search(),
             new_window: default_new_window(),
+            focus_files: default_focus_files(),
+            zen_mode: default_zen_mode(),
         }
     }
 }

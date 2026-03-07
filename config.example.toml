@@ -122,6 +122,8 @@ toggle_left_sidebar = "cmd+shift+b"
 toggle_right_sidebar = "cmd+shift+e"
 focus_quick_connect = "cmd+/"
 focus_plugin_search = "cmd+shift+p"
+focus_files = "cmd+shift+f"
+zen_mode = "cmd+shift+z"
 
 # ---------------------------------------------------------------------------
 # Conch — UI Settings
