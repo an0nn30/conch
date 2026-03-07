@@ -288,8 +288,8 @@ impl ConchApp {
             self.remove_session(id);
         }
 
-        // Quit when the last session exits.
-        if self.state.sessions.is_empty() {
+        // Quit when the last session exits (and no SSH connections are pending).
+        if self.state.sessions.is_empty() && self.pending_ssh_connections.is_empty() {
             self.quit_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

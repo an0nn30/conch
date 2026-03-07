@@ -16,6 +16,7 @@ help:
 	@echo "  linux-arm64    Build .deb and .rpm for Linux ARM64 (requires cross)"
 	@echo "  windows        Build .exe for Windows x86_64 (requires cross)"
 	@echo "  all            Build all targets"
+	@echo "  release V=x.y.z  Bump version, tag, and push"
 	@echo "  clean          Remove build artifacts"
 	@echo ""
 	@echo "Version: $(VERSION)"
@@ -106,6 +107,25 @@ windows:
 # ---------------------------------------------------------------------------
 .PHONY: all
 all: dmg-universal linux-amd64 linux-arm64 windows
+
+# ---------------------------------------------------------------------------
+# Release: make release V=0.2.2
+# ---------------------------------------------------------------------------
+.PHONY: release
+release:
+ifndef V
+	$(error Usage: make release V=x.y.z)
+endif
+	@echo "Releasing v$(V)..."
+	sed -i '' 's/^version = ".*"/version = "$(V)"/' Cargo.toml
+	sed -i '' 's|<string>[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*</string>|<string>$(V)</string>|g' packaging/macos/Info.plist
+	cargo check --workspace
+	git add Cargo.toml packaging/macos/Info.plist Cargo.lock
+	git commit -m "release: v$(V)"
+	git tag -a "v$(V)" -m "v$(V)"
+	git push origin main
+	git push origin "v$(V)"
+	@echo "Released v$(V)"
 
 # ---------------------------------------------------------------------------
 # Clean
