@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::connector::EventProxy;
 use crate::sftp::SftpFileProvider;
-use super::client::{ConnectParams, ClientHandler, connect_shell};
+use super::client::{ConnectParams, ClientHandler, ShellConnectResult, SshConnection, connect_shell};
 
 /// SSH terminal session — bridges an async SSH channel to alacritty_terminal's Term.
 pub struct SshSession {
@@ -44,6 +44,28 @@ impl Dimensions for TermSize {
     fn columns(&self) -> usize { self.columns }
 }
 
+/// Result of a password authentication attempt.
+pub enum SshPasswordResult {
+    /// Password accepted — session is ready.
+    Connected(SshSession),
+    /// Wrong password — pending auth returned for retry.
+    WrongPassword(SshConnectResult),
+}
+
+/// Result of an SSH session connect attempt.
+pub enum SshConnectResult {
+    /// Fully connected session ready to use.
+    Connected(SshSession),
+    /// Server reached but needs password — holds pending auth + pre-built terminal state.
+    NeedsPassword {
+        pending_auth: super::client::PendingAuth,
+        term: Arc<FairMutex<Term<EventProxy>>>,
+        event_proxy: EventProxy,
+        event_rx: mpsc::UnboundedReceiver<alacritty_terminal::event::Event>,
+        term_config: term::Config,
+    },
+}
+
 impl SshSession {
     /// Connect to an SSH server and set up the terminal bridge.
     pub async fn connect(
@@ -51,7 +73,7 @@ impl SshSession {
         cols: u16,
         rows: u16,
         term_config: term::Config,
-    ) -> Result<Self> {
+    ) -> Result<SshConnectResult> {
         let (event_proxy, event_rx) = EventProxy::new();
 
         // Create terminal state
@@ -59,20 +81,72 @@ impl SshSession {
             columns: cols as usize,
             lines: rows as usize,
         };
-        let term = Term::new(term_config, &term_size, event_proxy.clone());
+        let term = Term::new(term_config.clone(), &term_size, event_proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
         // Connect SSH
-        let ssh_conn = connect_shell(params, cols as u32, rows as u32)
+        let result = connect_shell(params, cols as u32, rows as u32)
             .await
             .context("Failed to establish SSH shell session")?;
 
-        let ssh_handle = Arc::new(ssh_conn.handle);
+        match result {
+            ShellConnectResult::Connected(ssh_conn) => {
+                Ok(SshConnectResult::Connected(
+                    Self::finish_setup(ssh_conn, term, event_proxy, event_rx),
+                ))
+            }
+            ShellConnectResult::NeedsPassword(pending_auth) => {
+                Ok(SshConnectResult::NeedsPassword {
+                    pending_auth,
+                    term,
+                    event_proxy,
+                    event_rx,
+                    term_config,
+                })
+            }
+        }
+    }
 
-        // Create input channel
+    /// Try password auth on a pending connection. On success, returns a connected session.
+    /// On wrong password, returns the `SshConnectResult::NeedsPassword` back so the caller
+    /// can prompt again. On connection error, returns `Err`.
+    pub async fn try_password(
+        mut pending_auth: super::client::PendingAuth,
+        password: &str,
+        term: Arc<FairMutex<Term<EventProxy>>>,
+        event_proxy: EventProxy,
+        event_rx: mpsc::UnboundedReceiver<alacritty_terminal::event::Event>,
+        term_config: term::Config,
+    ) -> Result<SshPasswordResult> {
+        match pending_auth.try_password(password).await? {
+            true => {
+                let ssh_conn = pending_auth.open_shell().await?;
+                Ok(SshPasswordResult::Connected(
+                    Self::finish_setup(ssh_conn, term, event_proxy, event_rx),
+                ))
+            }
+            false => {
+                Ok(SshPasswordResult::WrongPassword(SshConnectResult::NeedsPassword {
+                    pending_auth,
+                    term,
+                    event_proxy,
+                    event_rx,
+                    term_config,
+                }))
+            }
+        }
+    }
+
+    /// Wire up the SSH connection to the terminal bridge.
+    fn finish_setup(
+        ssh_conn: SshConnection,
+        term: Arc<FairMutex<Term<EventProxy>>>,
+        event_proxy: EventProxy,
+        event_rx: mpsc::UnboundedReceiver<alacritty_terminal::event::Event>,
+    ) -> Self {
+        let ssh_handle = Arc::new(ssh_conn.handle);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
 
-        // Spawn the bridge task
         let term_clone = Arc::clone(&term);
         tokio::spawn(ssh_bridge_task(
             ssh_conn.channel,
@@ -81,12 +155,12 @@ impl SshSession {
             input_rx,
         ));
 
-        Ok(Self {
+        Self {
             term,
             input_tx,
             event_rx: Some(event_rx),
             ssh_handle,
-        })
+        }
     }
 
     /// Send raw bytes to the SSH channel (keyboard input).

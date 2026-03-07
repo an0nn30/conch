@@ -85,6 +85,8 @@ pub struct AppState {
     pub ssh_config_hosts: Vec<ServerEntry>,
     pub sidebar_tab: SidebarTab,
     pub new_connection_form: Option<NewConnectionForm>,
+    /// When editing an existing server, stores its address for in-place update.
+    pub editing_server_addr: Option<crate::ui::session_panel::ServerAddress>,
     pub file_browser: FileBrowserState,
     pub show_left_sidebar: bool,
     pub show_right_sidebar: bool,
@@ -109,6 +111,7 @@ impl AppState {
             ssh_config_hosts: Vec::new(),
             sidebar_tab: SidebarTab::default(),
             new_connection_form: None,
+            editing_server_addr: None,
             file_browser: FileBrowserState::default(),
             show_left_sidebar,
             show_right_sidebar,

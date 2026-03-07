@@ -47,8 +47,7 @@ pub enum SessionPanelAction {
     },
     /// Delete a server entry.
     DeleteServer { addr: ServerAddress },
-    /// Open the edit dialog for a server entry (stub — not yet wired).
-    #[allow(dead_code)]
+    /// Open the edit dialog for a server entry.
     EditServer { addr: ServerAddress },
     /// Open the new connection dialog.
     OpenNewConnectionDialog,
@@ -83,6 +82,9 @@ pub struct SessionPanelState {
 
     // -- delete confirmation --
     confirm_delete: Option<DeleteTarget>,
+
+    // -- pending edit (set by context menu, consumed by main panel fn) --
+    pending_edit: Option<ServerAddress>,
 
     // -- quick connect search --
     pub quick_connect_query: String,
@@ -374,6 +376,11 @@ pub fn show_session_panel(
             });
     }
 
+    // Consume pending edit request from context menu.
+    if let Some(addr) = panel_state.pending_edit.take() {
+        return SessionPanelAction::EditServer { addr };
+    }
+
     action
 }
 
@@ -599,7 +606,7 @@ fn show_server_entry_editable(
     // Right-click context menu
     resp.context_menu(|ui| {
         if ui.button("Edit…").clicked() {
-            // Stub — will open edit dialog later.
+            panel_state.pending_edit = Some(addr.clone());
             ui.close_menu();
         }
         if ui.button("Rename").clicked() {

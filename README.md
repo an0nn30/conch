@@ -14,8 +14,8 @@ A cross-platform terminal emulator with SSH session management, built in Rust wi
 
 ## Features
 
-- **Terminal emulation** — Full terminal via [alacritty_terminal](https://github.com/alacritty/alacritty), supporting 256-color, truecolor, mouse reporting, bracketed paste, and application cursor mode
-- **SSH session management** — Saved connections with proxy jump/command support, organized in folders
+- **Terminal emulation** — Full terminal via [alacritty_terminal](https://github.com/alacritty/alacritty), supporting 256-color, truecolor, mouse reporting, bracketed paste, application cursor mode, and drag-and-drop file paths
+- **SSH session management** — Saved connections with proxy jump/command support, organized in folders with inline edit/rename/delete; interactive password prompt when key auth is unavailable
 - **Multi-window & tabs** — Multiple local and SSH sessions with Cmd+number switching, open extra windows with Cmd+Shift+N
 - **File browser** — Dual-pane local/remote browser with SFTP upload/download and progress tracking
 - **SSH tunnels** — Persistent local port forwarding with activate/deactivate

@@ -64,14 +64,41 @@ impl SshConnection {
     }
 }
 
-/// Connect to an SSH server and open an interactive shell.
-pub async fn connect_shell(
-    params: &ConnectParams,
+/// Result of a shell connection attempt.
+pub enum ShellConnectResult {
+    /// Fully connected with an authenticated shell.
+    Connected(SshConnection),
+    /// TCP/SSH connected but needs a password to authenticate.
+    NeedsPassword(PendingAuth),
+}
+
+/// A connection that is waiting for password authentication.
+pub struct PendingAuth {
+    handle: Handle<ClientHandler>,
+    user: String,
     cols: u32,
     rows: u32,
-) -> Result<SshConnection> {
-    // Determine the effective proxy command: explicit proxy_command takes
-    // priority, then proxy_jump is converted to `ssh -W %h:%p <jump>`.
+}
+
+impl PendingAuth {
+    /// Try password authentication. Returns `true` on success, `false` on wrong password.
+    /// Returns an error only on connection/protocol failure.
+    pub async fn try_password(&mut self, password: &str) -> Result<bool> {
+        let result = self.handle
+            .authenticate_password(&self.user, password)
+            .await
+            .context("Password authentication failed")?;
+        Ok(result.success())
+    }
+
+    /// Open a shell after successful authentication. Consumes self.
+    pub async fn open_shell(self) -> Result<SshConnection> {
+        open_shell_owned(self.handle, self.cols, self.rows).await
+    }
+}
+
+/// Establish TCP+SSH connection to a server (shared between connect_shell and connect_tunnel).
+async fn establish_connection(params: &ConnectParams) -> Result<Handle<ClientHandler>> {
     let effective_proxy = params
         .proxy_command
         .clone()
@@ -81,8 +108,8 @@ pub async fn connect_shell(
             })
         });
 
-    let mut handle = if let Some(proxy_cmd) = &effective_proxy {
-        super::proxy::connect_via_proxy(proxy_cmd, params).await?
+    if let Some(proxy_cmd) = &effective_proxy {
+        super::proxy::connect_via_proxy(proxy_cmd, params).await
     } else {
         let config = Arc::new(client::Config::default());
         let handler = ClientHandler;
@@ -96,25 +123,50 @@ pub async fn connect_shell(
 
         client::connect(config, sock_addr, handler)
             .await
-            .context("Failed to connect to SSH server")?
-    };
+            .context("Failed to connect to SSH server")
+    }
+}
 
-    // Authenticate
-    authenticate(&mut handle, &params.user, &params.identity_file, &params.password).await?;
+/// Connect to an SSH server and open an interactive shell.
+pub async fn connect_shell(
+    params: &ConnectParams,
+    cols: u32,
+    rows: u32,
+) -> Result<ShellConnectResult> {
+    let mut handle = establish_connection(params).await?;
 
-    // Open a session channel
+    match authenticate(&mut handle, &params.user, &params.identity_file, &params.password).await? {
+        AuthResult::Ok => {
+            let conn = open_shell_owned(handle, cols, rows).await?;
+            Ok(ShellConnectResult::Connected(conn))
+        }
+        AuthResult::NeedsPassword => {
+            Ok(ShellConnectResult::NeedsPassword(PendingAuth {
+                handle,
+                user: params.user.clone(),
+                cols,
+                rows,
+            }))
+        }
+    }
+}
+
+/// Open a session channel, request PTY and shell — takes ownership of the handle.
+async fn open_shell_owned(
+    handle: Handle<ClientHandler>,
+    cols: u32,
+    rows: u32,
+) -> Result<SshConnection> {
     let channel = handle
         .channel_open_session()
         .await
         .context("Failed to open session channel")?;
 
-    // Request PTY
     channel
         .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
         .await
         .context("Failed to request PTY")?;
 
-    // Request shell
     channel
         .request_shell(true)
         .await
@@ -123,13 +175,21 @@ pub async fn connect_shell(
     Ok(SshConnection { handle, channel })
 }
 
+/// Result of the authentication cascade.
+enum AuthResult {
+    /// Successfully authenticated.
+    Ok,
+    /// Key/agent auth failed but connection is alive — need a password.
+    NeedsPassword,
+}
+
 /// Authenticate using a cascade: explicit key → default keys → agent → password.
 async fn authenticate(
     handle: &mut Handle<ClientHandler>,
     user: &str,
     identity_file: &Option<PathBuf>,
     password: &Option<String>,
-) -> Result<()> {
+) -> Result<AuthResult> {
     // 1. Try explicit identity file
     if let Some(path) = identity_file {
         let expanded = expand_tilde(path);
@@ -137,7 +197,7 @@ async fn authenticate(
             log::debug!("Trying explicit key: {}", expanded.display());
             if try_key_auth(handle, user, &expanded).await? {
                 log::debug!("Authenticated with explicit key: {}", expanded.display());
-                return Ok(());
+                return Ok(AuthResult::Ok);
             }
             log::debug!("Explicit key auth failed: {}", expanded.display());
         } else {
@@ -158,7 +218,7 @@ async fn authenticate(
             log::debug!("Trying default key: {}", key_path.display());
             if try_key_auth(handle, user, key_path).await? {
                 log::debug!("Authenticated with key: {}", key_path.display());
-                return Ok(());
+                return Ok(AuthResult::Ok);
             }
             log::debug!("Key auth failed: {}", key_path.display());
         }
@@ -168,22 +228,24 @@ async fn authenticate(
     log::debug!("Trying SSH agent auth (SSH_AUTH_SOCK={:?})", std::env::var("SSH_AUTH_SOCK").ok());
     if try_agent_auth(handle, user).await? {
         log::debug!("Authenticated via SSH agent");
-        return Ok(());
+        return Ok(AuthResult::Ok);
     }
     log::debug!("SSH agent auth failed or unavailable");
 
-    // 4. Try password
+    // 4. Try password if provided
     if let Some(pass) = password {
         let result = handle
             .authenticate_password(user, pass)
             .await
             .context("Password authentication failed")?;
         if result.success() {
-            return Ok(());
+            return Ok(AuthResult::Ok);
         }
+        bail!("Password authentication failed for user '{}'", user);
     }
 
-    bail!("All authentication methods failed for user '{}'", user)
+    // No password provided and key/agent auth failed — ask for password
+    Ok(AuthResult::NeedsPassword)
 }
 
 /// Try authenticating with a private key file.
@@ -257,41 +319,18 @@ pub async fn connect_tunnel(params: &ConnectParams) -> Result<Arc<Handle<ClientH
         params.host, params.port, params.proxy_command, params.proxy_jump,
     );
 
-    let effective_proxy = params
-        .proxy_command
-        .clone()
-        .or_else(|| {
-            params.proxy_jump.as_ref().map(|jump| {
-                format!("ssh -W %h:%p {jump}")
-            })
-        });
-
-    let mut handle = if let Some(ref proxy_cmd) = effective_proxy {
-        log::debug!("connect_tunnel: connecting via proxy: {proxy_cmd}");
-        super::proxy::connect_via_proxy(proxy_cmd, params).await?
-    } else {
-        let config = Arc::new(client::Config::default());
-        let handler = ClientHandler;
-
-        let addr = format!("{}:{}", params.host, params.port);
-        log::debug!("connect_tunnel: resolving address {addr}");
-        let sock_addr = addr
-            .to_socket_addrs()
-            .context("Failed to resolve SSH host")?
-            .next()
-            .context("No address found for SSH host")?;
-
-        log::debug!("connect_tunnel: TCP connecting to {sock_addr}");
-        client::connect(config, sock_addr, handler)
-            .await
-            .context("Failed to connect to SSH server")?
-    };
+    let mut handle = establish_connection(params).await?;
 
     log::debug!("connect_tunnel: TCP connected, authenticating as '{}'", params.user);
-    authenticate(&mut handle, &params.user, &params.identity_file, &params.password).await?;
-    log::debug!("connect_tunnel: authentication succeeded");
-
-    Ok(Arc::new(handle))
+    match authenticate(&mut handle, &params.user, &params.identity_file, &params.password).await? {
+        AuthResult::Ok => {
+            log::debug!("connect_tunnel: authentication succeeded");
+            Ok(Arc::new(handle))
+        }
+        AuthResult::NeedsPassword => {
+            bail!("All authentication methods failed for tunnel to '{}' (password required but not provided)", params.user)
+        }
+    }
 }
 
 /// Expand ~ to home directory in paths.

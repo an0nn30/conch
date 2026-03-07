@@ -41,6 +41,8 @@ pub struct NewConnectionForm {
     pub folder_index: usize,
     /// Auto-focus the host field on first render.
     pub focus_host: bool,
+    /// True when editing an existing server (changes dialog title and save behavior).
+    pub editing: bool,
 }
 
 impl Default for NewConnectionForm {
@@ -58,9 +60,11 @@ impl Default for NewConnectionForm {
             proxy_value: String::new(),
             folder_index: 0,
             focus_host: true,
+            editing: false,
         }
     }
 }
+
 
 impl NewConnectionForm {
     /// Create a form pre-filled with sensible defaults (port 22, current user).
@@ -72,12 +76,41 @@ impl NewConnectionForm {
         }
     }
 
+    /// Create a form pre-filled from an existing server entry (for editing).
+    pub fn from_server_entry(entry: &ServerEntry, folder_index: usize) -> Self {
+        let (proxy_type, proxy_value) = if let Some(ref pj) = entry.proxy_jump {
+            (ProxyType::ProxyJump, pj.clone())
+        } else if let Some(ref pc) = entry.proxy_command {
+            (ProxyType::ProxyCommand, pc.clone())
+        } else {
+            (ProxyType::None, String::new())
+        };
+
+        let has_advanced = proxy_type != ProxyType::None;
+
+        Self {
+            name: entry.name.clone(),
+            host: entry.host.clone(),
+            port: entry.port.to_string(),
+            user: entry.user.clone(),
+            password: String::new(),
+            identity_file: entry.identity_file.clone().unwrap_or_default(),
+            startup_command: entry.startup_command.clone().unwrap_or_default(),
+            show_advanced: has_advanced,
+            proxy_type,
+            proxy_value,
+            folder_index,
+            focus_host: false,
+            editing: true,
+        }
+    }
+
     pub fn port_value(&self) -> u16 {
         self.port.parse().unwrap_or(22)
     }
 
     /// Build a `ServerEntry` from the current form state.
-    fn to_server_entry(&self) -> ServerEntry {
+    pub fn to_server_entry(&self) -> ServerEntry {
         let name = if self.name.trim().is_empty() {
             format!("{}@{}", self.user, self.host)
         } else {
@@ -158,8 +191,9 @@ pub fn show_new_connection(
     folder_names: &[String],
 ) -> DialogAction {
     let mut action = DialogAction::None;
+    let title = if form.editing { "Edit SSH Connection" } else { "New SSH Connection" };
 
-    egui::Window::new("New SSH Connection")
+    egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])

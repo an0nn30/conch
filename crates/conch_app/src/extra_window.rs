@@ -331,6 +331,44 @@ impl ExtraWindow {
             }
         }
 
+        // Drag-and-drop files → paste paths into the terminal.
+        if forward_to_pty {
+            let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+            if !dropped.is_empty() {
+                if let Some(session) = self.active_session() {
+                    let paths: Vec<String> = dropped
+                        .iter()
+                        .filter_map(|f| f.path.as_ref())
+                        .map(|p| {
+                            let s = p.to_string_lossy().into_owned();
+                            if s.contains(' ') {
+                                format!("'{s}'")
+                            } else {
+                                s
+                            }
+                        })
+                        .collect();
+                    if !paths.is_empty() {
+                        let text = paths.join(" ");
+                        let bracketed = session
+                            .backend
+                            .term()
+                            .try_lock_unfair()
+                            .map_or(false, |term| {
+                                term.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+                            });
+                        if bracketed {
+                            session.backend.write(b"\x1b[200~");
+                            session.backend.write(text.as_bytes());
+                            session.backend.write(b"\x1b[201~");
+                        } else {
+                            session.backend.write(text.as_bytes());
+                        }
+                    }
+                }
+            }
+        }
+
         // On Linux/Windows, forward Ctrl+C/X to the PTY as control characters.
         if forward_to_pty {
             if ctrl_c_for_pty {

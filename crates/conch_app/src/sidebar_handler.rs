@@ -30,6 +30,48 @@ impl ConchApp {
         let _ = config::save_sessions(&self.state.sessions_config);
     }
 
+    /// Save or update a server entry. If editing (editing_server_addr is set),
+    /// replaces the existing entry in-place (or moves it if folder changed).
+    /// Otherwise appends to the folder.
+    pub(crate) fn save_or_update_server(
+        &mut self,
+        entry: conch_core::models::ServerEntry,
+        folder_index: usize,
+    ) {
+        if let Some(addr) = self.state.editing_server_addr.take() {
+            // Check if the folder changed (user wants to move the server).
+            let same_folder = self
+                .state
+                .sessions_config
+                .folders
+                .get(folder_index)
+                .map(|f| {
+                    !addr.folder_path.is_empty() && f.name == addr.folder_path[0]
+                })
+                .unwrap_or(false);
+
+            if same_folder {
+                // Replace in-place.
+                if let Some(server) = find_server_mut(&mut self.state.sessions_config.folders, &addr) {
+                    *server = entry;
+                }
+            } else {
+                // Delete from old location and add to new folder.
+                delete_server(&mut self.state.sessions_config.folders, &addr);
+                if self.state.sessions_config.folders.is_empty() {
+                    self.state.sessions_config.folders
+                        .push(conch_core::models::ServerFolder::new("Servers"));
+                }
+                let idx = folder_index.min(self.state.sessions_config.folders.len() - 1);
+                self.state.sessions_config.folders[idx].servers.push(entry);
+            }
+            let _ = config::save_sessions(&self.state.sessions_config);
+        } else {
+            // New: append to folder.
+            self.save_server_entry(entry, folder_index);
+        }
+    }
+
     pub(crate) fn handle_sidebar_action(&mut self, action: SidebarAction) {
         match action {
             SidebarAction::NavigateLocal(path) => {
@@ -253,7 +295,22 @@ impl ConchApp {
                 delete_server(&mut self.state.sessions_config.folders, &addr);
                 let _ = config::save_sessions(&self.state.sessions_config);
             }
-            SessionPanelAction::EditServer { .. } => {}
+            SessionPanelAction::EditServer { addr } => {
+                // Find the folder index for the form's folder dropdown.
+                let folder_index = self
+                    .state
+                    .sessions_config
+                    .folders
+                    .iter()
+                    .position(|f| !addr.folder_path.is_empty() && f.name == addr.folder_path[0])
+                    .unwrap_or(0);
+
+                if let Some(server) = find_server_mut(&mut self.state.sessions_config.folders, &addr) {
+                    let form = NewConnectionForm::from_server_entry(server, folder_index);
+                    self.state.new_connection_form = Some(form);
+                    self.state.editing_server_addr = Some(addr);
+                }
+            }
             SessionPanelAction::OpenNewConnectionDialog => {
                 self.state.new_connection_form =
                     Some(NewConnectionForm::with_defaults());

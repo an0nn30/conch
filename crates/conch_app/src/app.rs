@@ -21,7 +21,7 @@ use crate::input::ResolvedShortcuts;
 use crate::mouse::{Selection, handle_terminal_mouse};
 use crate::plugins::scan_plugin_dirs;
 use crate::sessions::{create_local_session, load_local_entries, open_local_terminal};
-use crate::ssh::show_connecting_screen;
+use crate::ssh::{self, show_connecting_screen};
 use crate::state::{AppState, Session, SessionBackend};
 use crate::terminal::widget::{get_selected_text, measure_cell_size, show_terminal};
 use conch_plugin::{PluginCommand, PluginMeta, PluginResponse};
@@ -69,10 +69,18 @@ fn cmd_shortcut(key: &str) -> egui::WidgetText {
 /// Cursor blink interval in milliseconds.
 pub(crate) const CURSOR_BLINK_MS: u128 = 500;
 
+/// Result from an async SSH connection attempt.
+pub(crate) enum SshConnectOutcome {
+    Connected(SshSession),
+    NeedsPassword(conch_session::SshConnectResult),
+    WrongPassword(conch_session::SshConnectResult),
+    Failed(String),
+}
+
 /// Receives the result of an async SSH connection attempt.
 pub(crate) struct PendingSsh {
     pub(crate) id: Uuid,
-    pub(crate) rx: std::sync::mpsc::Receiver<Result<SshSession, String>>,
+    pub(crate) rx: std::sync::mpsc::Receiver<SshConnectOutcome>,
 }
 
 /// Display info for a pending SSH connection (shown in the connecting tab).
@@ -85,6 +93,14 @@ pub(crate) struct PendingSshInfo {
     pub(crate) started: Instant,
     /// If the connection failed, the error message to display.
     pub(crate) error: Option<String>,
+    /// True when waiting for user to enter password.
+    pub(crate) needs_password: bool,
+    /// Password entry buffer for the password prompt.
+    pub(crate) password_buf: String,
+    /// Focus the password field on next frame.
+    pub(crate) password_focus: bool,
+    /// Pending auth state held while waiting for password input.
+    pub(crate) pending_auth: Option<conch_session::SshConnectResult>,
 }
 
 /// A resolved plugin keybinding ready for matching.
@@ -360,25 +376,22 @@ impl ConchApp {
         }
 
         // Poll pending SSH connections.
-        let mut completed = Vec::new();
+        let mut completed: Vec<(usize, Uuid, SshConnectOutcome)> = Vec::new();
         for (i, pending) in self.pending_ssh_connections.iter().enumerate() {
             match pending.rx.try_recv() {
-                Ok(Ok(ssh)) => completed.push((i, pending.id, Ok(ssh))),
-                Ok(Err(err)) => {
-                    log::error!("SSH connection failed: {err}");
-                    completed.push((i, pending.id, Err(err)));
-                }
+                Ok(outcome) => completed.push((i, pending.id, outcome)),
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     log::error!("SSH connection channel dropped");
-                    completed.push((i, pending.id, Err("Connection channel dropped".into())));
+                    completed.push((i, pending.id, SshConnectOutcome::Failed("Connection channel dropped".into())));
                 }
             }
         }
         // Remove in reverse order to keep indices valid.
-        for (i, id, result) in completed.into_iter().rev() {
+        for (i, id, outcome) in completed.into_iter().rev() {
             self.pending_ssh_connections.remove(i);
-            if let Ok(mut ssh_session) = result {
+            match outcome {
+                SshConnectOutcome::Connected(mut ssh_session) => {
                 self.pending_ssh_info.remove(&id);
                 let event_rx = ssh_session.take_event_rx();
 
@@ -409,10 +422,31 @@ impl ConchApp {
                 };
                 self.state.sessions.insert(id, session);
                 // Tab already exists in tab_order from start_ssh_connect.
-            } else if let Err(err) = result {
-                // Connection failed — keep the tab but show the error.
-                if let Some(info) = self.pending_ssh_info.get_mut(&id) {
-                    info.error = Some(err);
+                }
+                SshConnectOutcome::NeedsPassword(pending_result) => {
+                    // Server is reachable but needs a password — show password prompt.
+                    if let Some(info) = self.pending_ssh_info.get_mut(&id) {
+                        info.needs_password = true;
+                        info.password_focus = true;
+                        info.pending_auth = Some(pending_result);
+                    }
+                }
+                SshConnectOutcome::WrongPassword(pending_result) => {
+                    // Wrong password — prompt again.
+                    if let Some(info) = self.pending_ssh_info.get_mut(&id) {
+                        info.needs_password = true;
+                        info.password_focus = true;
+                        info.password_buf.clear();
+                        info.error = Some("Incorrect password.".into());
+                        info.pending_auth = Some(pending_result);
+                    }
+                }
+                SshConnectOutcome::Failed(err) => {
+                    log::error!("SSH connection failed: {err}");
+                    // Connection failed — keep the tab but show the error.
+                    if let Some(info) = self.pending_ssh_info.get_mut(&id) {
+                        info.error = Some(err);
+                    }
                 }
             }
         }
@@ -752,7 +786,7 @@ impl eframe::App for ConchApp {
                 .collect();
             match new_connection::show_new_connection(ctx, &mut form, &folder_names) {
                 DialogAction::Save { entry, folder_index } => {
-                    self.save_server_entry(entry, folder_index);
+                    self.save_or_update_server(entry, folder_index);
                 }
                 DialogAction::SaveAndConnect {
                     entry,
@@ -765,7 +799,7 @@ impl eframe::App for ConchApp {
                     let identity_file = entry.identity_file.clone();
                     let proxy_command = entry.proxy_command.clone();
                     let proxy_jump = entry.proxy_jump.clone();
-                    self.save_server_entry(entry, folder_index);
+                    self.save_or_update_server(entry, folder_index);
                     self.start_ssh_connect(
                         host,
                         port,
@@ -776,7 +810,9 @@ impl eframe::App for ConchApp {
                         password,
                     );
                 }
-                DialogAction::Cancel => {}
+                DialogAction::Cancel => {
+                    self.state.editing_server_addr = None;
+                }
                 DialogAction::None => {
                     self.state.new_connection_form = Some(form);
                 }
@@ -1535,16 +1571,51 @@ impl eframe::App for ConchApp {
                             size_info.columns() as u16,
                             size_info.rows() as u16,
                         );
-                    } else if let Some(info) = self.pending_ssh_info.get(&id) {
-                        // Connecting or error screen.
-                        let is_connecting = info.error.is_none();
-                        if show_connecting_screen(ui, info) {
-                            // User clicked "Close Tab" on the error screen.
-                            self.pending_ssh_info.remove(&id);
-                            self.state.tab_order.retain(|&tab_id| tab_id != id);
-                            if self.state.active_tab == Some(id) {
-                                self.state.active_tab = self.state.tab_order.last().copied();
+                    } else if let Some(info) = self.pending_ssh_info.get_mut(&id) {
+                        // Connecting, password prompt, or error screen.
+                        let is_connecting = info.error.is_none() && !info.needs_password;
+                        match show_connecting_screen(ui, info) {
+                            ssh::ConnectingScreenAction::Close => {
+                                self.pending_ssh_info.remove(&id);
+                                self.state.tab_order.retain(|&tab_id| tab_id != id);
+                                if self.state.active_tab == Some(id) {
+                                    self.state.active_tab = self.state.tab_order.last().copied();
+                                }
                             }
+                            ssh::ConnectingScreenAction::SubmitPassword(password) => {
+                                if let Some(info) = self.pending_ssh_info.get_mut(&id) {
+                                    if let Some(pending_result) = info.pending_auth.take() {
+                                        // Take ownership and spawn async password auth.
+                                        info.needs_password = false;
+                                        info.started = Instant::now();
+                                        let (tx, rx) = std::sync::mpsc::channel();
+                                        self.pending_ssh_connections.push(PendingSsh { id, rx });
+                                        self.rt.spawn(async move {
+                                            match pending_result {
+                                                conch_session::SshConnectResult::NeedsPassword {
+                                                    pending_auth, term, event_proxy, event_rx, term_config,
+                                                } => {
+                                                    match SshSession::try_password(
+                                                        pending_auth, &password, term, event_proxy, event_rx, term_config,
+                                                    ).await {
+                                                        Ok(conch_session::SshPasswordResult::Connected(session)) => {
+                                                            let _ = tx.send(SshConnectOutcome::Connected(session));
+                                                        }
+                                                        Ok(conch_session::SshPasswordResult::WrongPassword(pending)) => {
+                                                            let _ = tx.send(SshConnectOutcome::WrongPassword(pending));
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(SshConnectOutcome::Failed(format!("{e:#}")));
+                                                        }
+                                                    }
+                                                }
+                                                conch_session::SshConnectResult::Connected(_) => unreachable!(),
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                            ssh::ConnectingScreenAction::None => {}
                         }
                         if is_connecting {
                             ctx.request_repaint();
@@ -1586,6 +1657,45 @@ impl eframe::App for ConchApp {
                         session.backend.write(b"\x1b[201~");
                     } else {
                         session.backend.write(text.as_bytes());
+                    }
+                }
+            }
+        }
+
+        // Drag-and-drop files → paste paths into the terminal.
+        if forward_to_pty {
+            let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+            if !dropped.is_empty() {
+                if let Some(session) = self.state.active_session() {
+                    let paths: Vec<String> = dropped
+                        .iter()
+                        .filter_map(|f| f.path.as_ref())
+                        .map(|p| {
+                            let s = p.to_string_lossy().into_owned();
+                            // Quote paths containing spaces.
+                            if s.contains(' ') {
+                                format!("'{s}'")
+                            } else {
+                                s
+                            }
+                        })
+                        .collect();
+                    if !paths.is_empty() {
+                        let text = paths.join(" ");
+                        let bracketed = session
+                            .backend
+                            .term()
+                            .try_lock_unfair()
+                            .map_or(false, |term| {
+                                term.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+                            });
+                        if bracketed {
+                            session.backend.write(b"\x1b[200~");
+                            session.backend.write(text.as_bytes());
+                            session.backend.write(b"\x1b[201~");
+                        } else {
+                            session.backend.write(text.as_bytes());
+                        }
                     }
                 }
             }
