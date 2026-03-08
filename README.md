@@ -1,45 +1,116 @@
-# Conch
+<p align="center">
+  <img src="crates/conch_app/icons/app-icon-512.png" alt="Conch" width="128" />
+</p>
 
-A cross-platform terminal emulator with SSH session management, built in Rust with [egui](https://github.com/emilk/egui).
+<h1 align="center">Conch</h1>
 
-[![Build macOS ARM64](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml)
-[![Build macOS x86](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml)
-[![Build Windows](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml)
-[![Build Linux AMD64](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml)
-[![Build Linux ARM64](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/an0nn30/rusty_conch/actions/workflows/release.yml)
+<p align="center">
+  A fast, cross-platform terminal emulator and SSH manager with a Lua plugin system.<br/>
+  Built in Rust. Runs on macOS, Windows, and Linux.
+</p>
 
-![Conch Terminal](docs/screenshot-terminal.png)
+<p align="center">
+  <a href="https://github.com/an0nn30/rusty_conch/actions/workflows/ci.yml">
+    <img src="https://github.com/an0nn30/rusty_conch/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <a href="https://github.com/an0nn30/rusty_conch/releases">
+    <img src="https://img.shields.io/github/v/release/an0nn30/rusty_conch?label=Download" alt="Latest Release" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License" />
+  </a>
+</p>
+
+---
 
 ![Conch with Panels](docs/screenshot-panels.png)
 
+## Why Conch?
+
+Most terminal emulators do one thing well. SSH clients do another. File transfer tools are a third app entirely. Conch puts them all in one window — terminal, SSH sessions, SFTP file browser, and a plugin system that lets you build your own tools on top.
+
+Think MobaXterm, but open source, cross-platform, and extensible.
+
 ## Features
 
-- **Terminal emulation** — Full terminal via [alacritty_terminal](https://github.com/alacritty/alacritty), supporting 256-color, truecolor, mouse reporting, bracketed paste, application cursor mode, and drag-and-drop file paths
-- **SSH session management** — Saved connections with proxy jump/command support, organized in folders with inline edit/rename/delete; interactive password prompt when key auth is unavailable
-- **Multi-window & tabs** — Multiple local and SSH sessions with Cmd+number switching, open extra windows with Cmd+Shift+N
-- **File browser** — Dual-pane local/remote browser with SFTP upload/download and progress tracking
-- **SSH tunnels** — Persistent local port forwarding with activate/deactivate
-- **Lua plugin system** — Extend Conch with Lua 5.4 scripts: action plugins for one-shot tasks, panel plugins for live sidebar dashboards. Full API for session interaction, UI dialogs, cryptography, networking (port scanning, DNS), custom keybindings, and icons ([Plugin docs](docs/plugins.md))
-- **Configurable** — Alacritty-compatible config format with Conch-specific extensions for keyboard shortcuts, cursor style, font, colors, and environment variables
-- **Native feel** — Optional macOS native menu bar or transparent in-window title bar menu; window decorations configurable (full, transparent, buttonless, none)
-- **IPC** — Control running instances via `conch msg new-window` / `conch msg new-tab` CLI commands
-- **Cross-platform** — macOS (ARM64 + Intel), Windows, Linux (AMD64 + ARM64)
+**Terminal** — Full terminal emulation powered by [alacritty_terminal](https://github.com/alacritty/alacritty). 256-color, truecolor, mouse reporting, bracketed paste, tabs, multi-window.
+
+**SSH Sessions** — Save connections with proxy jump support, organized in folders. Password and key authentication. Quick-connect from the sidebar.
+
+**File Browser** — Side-by-side local and remote file browsing. Drag-and-drop SFTP uploads and downloads with progress tracking.
+
+**SSH Tunnels** — Persistent local port forwarding you can activate and deactivate without closing your session.
+
+**Lightweight** — ~80 MB memory, ~2% idle CPU. No Electron. Native GPU-accelerated rendering via OpenGL.
+
+## Plugins
+
+Conch has a **Lua 5.4 plugin system** that lets you extend the terminal with your own tools. Plugins run in a sandboxed environment and have access to a rich API.
+
+### What can plugins do?
+
+- Run commands on local or SSH sessions (silently, without touching your terminal)
+- Show interactive form dialogs (text inputs, dropdowns, checkboxes)
+- Display toast notifications with action buttons
+- Build live-updating sidebar dashboards
+- Encrypt and decrypt data, scan ports, resolve DNS
+- Bind to custom keyboard shortcuts
+- Set custom icons
+
+### Two plugin types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| **Action** | Run-once scripts triggered from the menu or a keybinding | Encrypt/Decrypt tool |
+| **Panel** | Persistent sidebar tabs with live-updating widgets | System monitor, Port scanner |
+
+### Getting started with plugins
+
+Drop a `.lua` file in `~/.config/conch/plugins/` and it appears in the Plugins tab. That's it.
+
+```lua
+-- name: Hello World
+-- description: A simple action plugin
+-- author: You
+
+function setup()
+    app.notify("Hello from a plugin!")
+end
+```
+
+Conch ships with example plugins to get you started:
+
+| Plugin | Type | What it does |
+|--------|------|--------------|
+| **System Info** | Panel | Live hostname, memory, disk, CPU load, top processes |
+| **Port Scanner** | Panel | TCP port scanning with service identification |
+| **Encrypt/Decrypt** | Action | AES encryption (CBC, GCM, ECB) with PBKDF2 key derivation |
+
+```bash
+# Symlink the examples into your plugins directory
+ln -s /path/to/rusty_conch/examples/plugins/*.lua ~/.config/conch/plugins/
+```
+
+### VS Code extension
+
+The [Conch Plugin Support](editors/vscode/) extension provides Lua API completions, hover docs, and `conch check` diagnostics for plugin development.
+
+See the full **[Plugin Documentation](docs/plugins.md)** for the complete API reference.
 
 ## Installation
 
-### From Release
+### Download
 
-Download the latest release for your platform from the [Releases](https://github.com/an0nn30/rusty_conch/releases) page:
+Grab the latest build from the [Releases](https://github.com/an0nn30/rusty_conch/releases) page:
 
 | Platform | Artifact |
 |----------|----------|
-| macOS (Apple Silicon) | `Conch-x.x.x-macos-arm64.dmg` |
-| macOS (Intel) | `Conch-x.x.x-macos-x86_64.dmg` |
-| Windows | `Conch-x.x.x-windows-x86_64.zip` |
+| macOS (Universal) | `.dmg` |
+| Windows | `.msi` installer or portable `.exe` |
 | Linux (AMD64) | `.deb` / `.rpm` |
 | Linux (ARM64) | `.deb` / `.rpm` |
 
-### From Source
+### Build from source
 
 Requires Rust 1.85+ (edition 2024).
 
@@ -49,7 +120,8 @@ cd rusty_conch
 cargo build --release -p conch_app
 ```
 
-#### Linux Dependencies
+<details>
+<summary>Linux dependencies</summary>
 
 ```bash
 sudo apt-get install -y \
@@ -57,13 +129,13 @@ sudo apt-get install -y \
   libxkbcommon-dev libwayland-dev libgtk-3-dev libssl-dev pkg-config
 ```
 
+</details>
+
 ## Configuration
 
-Conch uses an Alacritty-compatible TOML config with additional `[conch.*]` sections.
+Conch uses an Alacritty-compatible TOML config at `~/.config/conch/config.toml` (Linux/macOS) or `%APPDATA%\conch\config.toml` (Windows).
 
-**Config location:** `~/.config/conch/config.toml` (Linux/macOS) or `%APPDATA%\conch\config.toml` (Windows)
-
-See the [Alacritty config docs](https://alacritty.org/config-alacritty.html) for `[window]`, `[font]`, `[colors]`, and `[terminal]` sections. Conch adds:
+Standard [Alacritty config](https://alacritty.org/config-alacritty.html) sections (`[window]`, `[font]`, `[colors]`, `[terminal]`) work as-is. Conch adds its own sections:
 
 ```toml
 [conch.keyboard]
@@ -71,76 +143,39 @@ new_tab = "cmd+t"
 close_tab = "cmd+w"
 new_window = "cmd+shift+n"
 new_connection = "cmd+n"
-quit = "cmd+q"
 toggle_left_sidebar = "cmd+shift+b"
 toggle_right_sidebar = "cmd+shift+e"
-focus_quick_connect = "cmd+/"          # toggle: opens/closes right sidebar
-focus_plugin_search = "cmd+shift+p"
 
+# Bind plugins to keyboard shortcuts
 [conch.keyboard.plugins]
 "system-info.open_panel" = "cmd+shift+i"
-"port-scanner.open_panel" = "cmd+shift+o"
 "encrypt-decrypt.run" = "cmd+shift+y"
 
 [conch.ui]
-native_menu_bar = false    # true = macOS global menu, false = in-window menu
+native_menu_bar = false
 font_size = 13.0
-
-[window]
-decorations = "Full"       # Full, Transparent, Buttonless, or None
 ```
 
-## Plugins
-
-Conch has a Lua 5.4 plugin system for automating tasks, building tools, and extending the terminal.
-
-- **Action plugins** — run-once scripts triggered from the Tools menu, sidebar, or keyboard shortcut
-- **Panel plugins** — persistent sidebar tabs with live-updating dashboards (system info, port scanning, etc.)
-
-Plugins can interact with local and SSH sessions (silently, without disturbing the terminal), show form dialogs, encrypt/decrypt data, scan ports, resolve DNS, declare custom keybindings, and set custom icons.
-
-**Quick start:** Drop a `.lua` file in `~/.config/conch/plugins/` and it appears in the Plugins panel.
-
-Conch ships with example plugins in `examples/plugins/` — symlink them to get started:
-
-```bash
-ln -s /path/to/rusty_conch/examples/plugins/*.lua ~/.config/conch/plugins/
-```
-
-| Plugin | Type | Description |
-|--------|------|-------------|
-| System Info | Panel | Live hostname, memory, disk, load, top processes (macOS/Linux) |
-| Port Scanner | Panel | TCP port scanning with server dropdown, service identification |
-| Encrypt/Decrypt | Action | AES encryption/decryption with PBKDF2 key derivation |
-
-See the full **[Plugin System Documentation](docs/plugins.md)** for the complete API reference.
+An example config is included in releases as `config.example.toml`.
 
 ## Project Structure
 
 ```
 crates/
-  conch_core/      # Data models, config, color schemes (no framework deps)
-  conch_session/   # SSH/local session management, PTY, SFTP, tunnels
-  conch_plugin/    # Lua plugin runtime, API bindings (session, app, ui, crypto, net)
-  conch_app/       # eframe/egui application, UI, terminal renderer
-    src/
-      app.rs           # Main application loop, dialogs, menus
-      extra_window.rs  # Secondary window rendering & tab management
-      mouse.rs         # Terminal mouse handling (selection + forwarding)
-      input.rs         # Keyboard input → escape sequence translation
-      state.rs         # Session, AppState, SessionBackend types
-      terminal/        # Terminal widget, color conversion, size info
-      ui/              # Sidebar, session panel, file browser, dialogs
-      plugins.rs       # Plugin command handling, keybinding resolution
-      shortcuts.rs     # Keyboard shortcut dispatch
-      icons.rs         # Icon loading and texture cache
-      ipc.rs           # Unix socket IPC listener
-      macos_menu.rs    # Native macOS menu bar via objc2
-packaging/
-  macos/           # Info.plist for .app bundle
-  linux/           # .desktop file
+  conch_core/      Core data models, config, color schemes
+  conch_session/   SSH/local session management, PTY, SFTP, tunnels
+  conch_plugin/    Lua plugin runtime and API bindings
+  conch_app/       GUI application (eframe/egui)
+editors/
+  vscode/          VS Code extension for plugin development
+examples/
+  plugins/         Example plugins (system-info, port-scanner, encrypt-decrypt)
 ```
+
+## Contributing
+
+Conch is early-stage and actively developed. Bug reports, feature requests, and pull requests are welcome.
 
 ## License
 
-MIT
+[Apache 2.0](LICENSE)
