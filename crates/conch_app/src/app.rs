@@ -164,6 +164,9 @@ pub struct ConchApp {
     // Session panel UI state (inline rename, new-folder input)
     pub(crate) session_panel_state: SessionPanelState,
 
+    // Window title dedup (avoid send_viewport_cmd every frame)
+    pub(crate) last_window_title: String,
+
     // Transient UI state
     pub(crate) use_native_menu: bool,
     /// The right sidebar was opened temporarily for quick connect (Cmd+/).
@@ -302,6 +305,7 @@ impl ConchApp {
             transfers: Vec::new(),
             icon_cache: None,
             session_panel_state: SessionPanelState::default(),
+            last_window_title: String::new(),
             use_native_menu,
             quick_connect_opened_sidebar: false,
             plugin_search_opened_sidebar: false,
@@ -599,12 +603,18 @@ impl eframe::App for ConchApp {
             }
         }
 
-        // Cursor blink.
+        // Cursor blink — toggle visibility and schedule the next blink.
+        // Use request_repaint_after instead of request_repaint to avoid
+        // driving the app at 60fps continuously when idle.
         let now = Instant::now();
-        if now.duration_since(self.last_blink).as_millis() >= CURSOR_BLINK_MS {
+        let elapsed = now.duration_since(self.last_blink).as_millis();
+        if elapsed >= CURSOR_BLINK_MS {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = now;
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(CURSOR_BLINK_MS as u64));
+        } else {
+            let remaining = CURSOR_BLINK_MS - elapsed;
+            ctx.request_repaint_after(std::time::Duration::from_millis(remaining as u64));
         }
 
         self.poll_events(ctx);
@@ -1730,11 +1740,14 @@ impl eframe::App for ConchApp {
                 format!("{name} — Conch")
             })
             .unwrap_or_else(|| "Conch".into());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
-        // Poll for async events (SSH, plugins, tunnels) at ~10 Hz when idle.
+        if window_title != self.last_window_title {
+            self.last_window_title = window_title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
+        }
+        // Poll for async events (SSH, plugins, tunnels) at ~2 Hz when idle.
         // Active terminal output triggers immediate repaints via Wakeup events,
         // and cursor blink already requests repaint every 500ms.
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
         // Keep window state in memory each frame so on_exit can persist it.
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {

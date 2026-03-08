@@ -140,10 +140,14 @@ impl ExtraWindow {
 
         // Cursor blink.
         let now = Instant::now();
-        if now.duration_since(self.last_blink).as_millis() >= CURSOR_BLINK_MS {
+        let elapsed = now.duration_since(self.last_blink).as_millis();
+        if elapsed >= CURSOR_BLINK_MS {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = now;
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(CURSOR_BLINK_MS as u64));
+        } else {
+            let remaining = CURSOR_BLINK_MS - elapsed;
+            ctx.request_repaint_after(std::time::Duration::from_millis(remaining as u64));
         }
 
         // Poll terminal events.
