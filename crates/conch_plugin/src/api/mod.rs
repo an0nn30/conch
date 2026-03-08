@@ -47,6 +47,28 @@ pub struct SessionInfoData {
     pub session_type: String, // "local" or "ssh"
 }
 
+/// Severity/style level for notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NotificationLevel {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// A rich notification request from a plugin (or internal app code).
+#[derive(Debug, Clone)]
+pub struct NotificationRequest {
+    pub title: Option<String>,
+    pub body: String,
+    pub level: NotificationLevel,
+    /// Duration in seconds. `None` = default (5s). `Some(0)` = persistent until dismissed.
+    pub duration_secs: Option<f32>,
+    /// If non-empty, notification blocks and returns the clicked button label.
+    pub buttons: Vec<String>,
+}
+
 /// Commands that a plugin can send to the host application.
 #[derive(Debug, Clone)]
 pub enum PluginCommand {
@@ -58,8 +80,8 @@ pub enum PluginCommand {
     OpenSession { name: String },
     /// Copy text to clipboard.
     Clipboard(String),
-    /// Show a notification to the user.
-    Notify(String),
+    /// Show a notification toast.
+    Notify(NotificationRequest),
     /// Log a message.
     Log(String),
     /// Append text to the plugin output panel.

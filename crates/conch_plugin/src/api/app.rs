@@ -1,6 +1,6 @@
 use mlua::{Lua, Result as LuaResult};
 
-use super::{PluginCommand, PluginContext, PluginResponse};
+use super::{NotificationLevel, NotificationRequest, PluginCommand, PluginContext, PluginResponse};
 
 /// Register the `app` table into the Lua state.
 pub fn register(lua: &Lua, ctx: PluginContext) -> LuaResult<()> {
@@ -26,13 +26,74 @@ pub fn register(lua: &Lua, ctx: PluginContext) -> LuaResult<()> {
         })?,
     )?;
 
-    // app.notify(msg) — show notification
+    // app.notify(msg_or_table) — show notification
+    // Simple: app.notify("hello")
+    // Rich:   app.notify({ title="Done", body="Scan complete", level="success", duration=5, buttons={"Yes","No"} })
+    // When buttons are provided, blocks and returns the clicked button label.
     let ctx_notify = ctx.clone();
     app.set(
         "notify",
-        lua.create_function(move |_lua, msg: String| {
-            ctx_notify.send_fire_and_forget(PluginCommand::Notify(msg));
-            Ok(())
+        lua.create_async_function(move |_lua, arg: mlua::Value| {
+            let ctx = ctx_notify.clone();
+            async move {
+                let (request, has_buttons) = match arg {
+                    mlua::Value::String(s) => {
+                        let msg = s.to_string_lossy().to_string();
+                        (NotificationRequest {
+                            title: None,
+                            body: msg,
+                            level: NotificationLevel::Info,
+                            duration_secs: None,
+                            buttons: Vec::new(),
+                        }, false)
+                    }
+                    mlua::Value::Table(tbl) => {
+                        let title: Option<String> = tbl.get("title").ok();
+                        let body: String = tbl.get("body").unwrap_or_default();
+                        let level_str: String = tbl.get("level").unwrap_or_default();
+                        let level = match level_str.as_str() {
+                            "success" => NotificationLevel::Success,
+                            "warning" | "warn" => NotificationLevel::Warning,
+                            "error" | "err" => NotificationLevel::Error,
+                            _ => NotificationLevel::Info,
+                        };
+                        let duration_secs: Option<f32> = tbl.get("duration").ok();
+                        let buttons: Vec<String> = if let Ok(btns) = tbl.get::<mlua::Table>("buttons") {
+                            btns.sequence_values::<String>().filter_map(|r| r.ok()).collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let has_buttons = !buttons.is_empty();
+                        (NotificationRequest {
+                            title,
+                            body,
+                            level,
+                            duration_secs,
+                            buttons,
+                        }, has_buttons)
+                    }
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "app.notify() expects a string or table argument".into(),
+                        ));
+                    }
+                };
+
+                if has_buttons {
+                    // Blocking: wait for the user to click a button
+                    let resp = ctx.send_command(PluginCommand::Notify(request)).await;
+                    match resp {
+                        PluginResponse::Output(label) => Ok(mlua::Value::String(
+                            _lua.create_string(&label)?,
+                        )),
+                        _ => Ok(mlua::Value::Nil),
+                    }
+                } else {
+                    // Fire-and-forget
+                    ctx.send_fire_and_forget(PluginCommand::Notify(request));
+                    Ok(mlua::Value::Nil)
+                }
+            }
         })?,
     )?;
 

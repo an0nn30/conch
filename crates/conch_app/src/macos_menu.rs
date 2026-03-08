@@ -118,7 +118,7 @@ static RESPONDER: LazyLock<Mutex<Option<Retained<MenuResponder>>>> =
     LazyLock::new(|| Mutex::new(None));
 
 /// Set up the native macOS menu bar. Call once at startup.
-pub fn setup_menu_bar(plugin_names: &[String]) {
+pub fn setup_menu_bar(plugins: &[(usize, String)]) {
     let mtm = MainThreadMarker::new().expect("setup_menu_bar must be called from the main thread");
     let responder = MenuResponder::create();
 
@@ -156,11 +156,11 @@ pub fn setup_menu_bar(plugin_names: &[String]) {
         // ── Tools ──
         let tools_menu = make_menu(mtm, "Tools");
         tools_menu.addItem(&make_item(mtm, "SSH Tunnels...", sel!(sshTunnels:), "", &responder));
-        if !plugin_names.is_empty() {
+        if !plugins.is_empty() {
             tools_menu.addItem(&NSMenuItem::separatorItem(mtm));
-            for (i, name) in plugin_names.iter().enumerate() {
+            for (idx, name) in plugins {
                 let item = make_item(mtm, name, sel!(runPlugin:), "", &responder);
-                item.setTag(i as isize);
+                item.setTag(*idx as isize);
                 tools_menu.addItem(&item);
             }
         }

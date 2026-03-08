@@ -113,9 +113,30 @@ impl ConchApp {
                 self.pending_clipboard = Some(text);
                 let _ = resp_tx.send(PluginResponse::Ok);
             }
-            PluginCommand::Notify(msg) => {
-                log::info!("[plugin] {msg}");
-                let _ = resp_tx.send(PluginResponse::Ok);
+            PluginCommand::Notify(request) => {
+                use crate::notifications::Notification;
+                if request.buttons.is_empty() {
+                    // Fire-and-forget notification
+                    self.notifications.push(Notification::simple(
+                        request.body,
+                        request.title,
+                        request.level,
+                        request.duration_secs,
+                        discovered_idx,
+                    ));
+                    let _ = resp_tx.send(PluginResponse::Ok);
+                } else {
+                    // Blocking notification with buttons — response sent when user clicks
+                    self.notifications.push(Notification::with_buttons(
+                        request.body,
+                        request.title,
+                        request.level,
+                        request.buttons,
+                        resp_tx,
+                        discovered_idx,
+                    ));
+                    // Don't send response here — it'll be sent when button is clicked
+                }
             }
             PluginCommand::Log(msg) => {
                 log::info!("[plugin] {msg}");

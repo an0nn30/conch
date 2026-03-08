@@ -226,6 +226,9 @@ pub struct ConchApp {
     /// Pending icon loads from plugins (path validated but texture not yet created — needs egui Context).
     pub(crate) pending_plugin_icons: Vec<(usize, Vec<u8>)>,
 
+    // Notifications
+    pub(crate) notifications: crate::notifications::NotificationManager,
+
     // IPC socket listener
     pub(crate) ipc_listener: Option<crate::ipc::IpcListener>,
 }
@@ -259,9 +262,10 @@ impl ConchApp {
         #[cfg(target_os = "macos")]
         if use_native_menu {
             let loaded = &state.persistent.loaded_plugins;
-            let names: Vec<String> = discovered_plugins
+            let plugins: Vec<(usize, String)> = discovered_plugins
                 .iter()
-                .filter(|p| {
+                .enumerate()
+                .filter(|(_, p)| {
                     p.plugin_type == conch_plugin::PluginType::Action && {
                         let filename = p.path.file_name()
                             .unwrap_or_default()
@@ -270,9 +274,9 @@ impl ConchApp {
                         loaded.contains(&filename)
                     }
                 })
-                .map(|p| p.name.clone())
+                .map(|(i, p)| (i, p.name.clone()))
                 .collect();
-            crate::macos_menu::setup_menu_bar(&names);
+            crate::macos_menu::setup_menu_bar(&plugins);
         }
 
         let mut app = Self {
@@ -333,6 +337,7 @@ impl ConchApp {
             plugin_keybinds: Vec::new(),
             plugin_icons: HashMap::new(),
             pending_plugin_icons: Vec::new(),
+            notifications: crate::notifications::NotificationManager::new(),
             ipc_listener: crate::ipc::IpcListener::start(),
         };
 
@@ -1708,6 +1713,17 @@ impl eframe::App for ConchApp {
             }
         }
 
+        // Render notification toasts (overlay, on top of everything).
+        if let Some(plugin_idx) = self.notifications.show(ctx) {
+            // User clicked a notification linked to a panel plugin — navigate to it.
+            if !self.state.show_left_sidebar {
+                self.state.show_left_sidebar = true;
+                self.state.persistent.layout.left_panel_collapsed = false;
+                let _ = config::save_persistent_state(&self.state.persistent);
+            }
+            self.state.sidebar_tab = sidebar::SidebarTab::PluginPanel(plugin_idx);
+        }
+
         let window_title = self.state.active_session()
             .map(|s| {
                 let name = s.custom_title.as_ref().unwrap_or(&s.title);
@@ -1772,6 +1788,35 @@ impl eframe::App for ConchApp {
 }
 
 impl ConchApp {
+    /// Push an internal notification (not from a plugin).
+    #[allow(dead_code)]
+    pub(crate) fn notify(&mut self, body: impl Into<String>, level: conch_plugin::NotificationLevel) {
+        self.notifications.push(crate::notifications::Notification::simple(
+            body.into(),
+            None,
+            level,
+            None,
+            None,
+        ));
+    }
+
+    /// Push an internal notification with a title.
+    #[allow(dead_code)]
+    pub(crate) fn notify_with_title(
+        &mut self,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        level: conch_plugin::NotificationLevel,
+    ) {
+        self.notifications.push(crate::notifications::Notification::simple(
+            body.into(),
+            Some(title.into()),
+            level,
+            None,
+            None,
+        ));
+    }
+
     /// Persist current window size and zoom factor to state.toml.
     fn save_window_state(&mut self, ctx: &egui::Context) {
         // Read the current inner rect from the viewport.
