@@ -174,7 +174,7 @@ Plugins must be explicitly **loaded** before they are active. The Plugins sideba
 - A **panel** badge for panel-type plugins
 - An **Apply** button that appears when changes are pending
 
-Load state is persisted across sessions in `state.toml`. When panel plugin load state changes, a restart prompt is shown.
+Load state is persisted across sessions in `state.toml`. Panel plugins are activated and deactivated in-place without requiring a restart.
 
 ### Running Plugins
 
@@ -304,7 +304,7 @@ end
 |----------|---------|-------------|
 | `app.open_session(name)` | — | Open a saved SSH connection by server name or host |
 | `app.clipboard(text)` | — | Copy text to the system clipboard |
-| `app.notify(msg)` | — | Show a notification |
+| `app.notify(msg_or_table)` | `string\|nil` | Show a toast notification (see [Notifications](#notifications)) |
 | `app.log(msg)` | — | Log a message (visible in application logs) |
 | `app.servers()` | `table` | Get a list of all configured server names |
 | `app.server_details()` | `table` | Get servers with `name` and `host` fields |
@@ -423,6 +423,105 @@ net.scan_range("localhost", 1, 100)
 local elapsed = net.time() - t0
 print(string.format("Scan took %.1fs", elapsed))
 ```
+
+## Notifications
+
+Plugins can show toast notifications that slide in from the top-right corner of the app. Notifications support different severity levels, auto-dismiss or persistent display, and optional interactive buttons.
+
+### Simple Notification
+
+Pass a string for a quick fire-and-forget notification:
+
+```lua
+app.notify("Scan complete!")
+```
+
+This shows an info-level toast that auto-dismisses after 5 seconds.
+
+### Rich Notifications
+
+Pass a table for full control:
+
+```lua
+app.notify({
+    title = "Scan Complete",
+    body = "Found 3 open ports on 192.168.1.1",
+    level = "success",
+    duration = 8
+})
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `body` | `string` | (required) | Main notification text |
+| `title` | `string` | `nil` | Optional bold heading |
+| `level` | `string` | `"info"` | Severity: `"info"`, `"success"`, `"warning"`, `"error"` |
+| `duration` | `number` | `5` | Seconds before auto-dismiss. `0` = stays until manually dismissed |
+| `buttons` | `table` | `nil` | List of button labels (makes the call blocking) |
+
+### Notification with Buttons
+
+When `buttons` is provided, `app.notify()` **blocks** until the user clicks a button and returns the clicked label:
+
+```lua
+local answer = app.notify({
+    title = "Confirm",
+    body = "Delete the backup file?",
+    level = "warning",
+    buttons = {"Yes", "No"}
+})
+
+if answer == "Yes" then
+    session.exec("rm backup.tar.gz")
+    app.notify({ title = "Done", body = "Backup deleted.", level = "success" })
+end
+```
+
+Button notifications are always persistent (they stay until clicked or dismissed with the ✕ button). If dismissed without clicking a button, `app.notify()` returns an empty string.
+
+### Notification Behavior
+
+- Notifications stack vertically from the top-right corner
+- Slide-in animation on appear, slide-out on dismiss
+- Click the ✕ button to dismiss any notification early
+- For panel plugins, clicking a non-button notification opens the plugin's panel
+- Multiple notifications can be visible simultaneously
+- Notifications render on top of all other UI content
+
+### Levels
+
+| Level | Accent | Use For |
+|-------|--------|---------|
+| `"info"` | Blue | General messages, status updates |
+| `"success"` | Green | Completed operations, confirmations |
+| `"warning"` | Yellow/Orange | Potential issues, confirmations needed |
+| `"error"` | Red | Failures, critical problems |
+
+## Plugin Validation
+
+Use `conch check` to validate plugin files without launching the GUI:
+
+```bash
+conch check my-plugin.lua
+conch check plugins/*.lua
+```
+
+The checker validates:
+
+- **Header metadata** — well-formed `plugin-name`, `plugin-type`, `plugin-keybind`, `plugin-version`, `plugin-icon` comments
+- **Lua syntax** — parses and loads the script in a sandboxed environment
+- **API usage** — validates function names and argument counts for all API tables (`session`, `app`, `ui`, `crypto`, `net`)
+- **Lifecycle functions** — invokes `setup()`, `render()`, `on_click()`, and `on_keybind()` to catch API errors inside function bodies
+- **Common mistakes** — warns if `main()` is defined (should be `setup()`/`render()`), or if a panel plugin defines neither `setup()` nor `render()`
+
+Output uses a GCC-style format for editor integration:
+
+```
+my-plugin.lua:7:1: error: in setup(): session.exec() expects 1 argument(s), got 2
+my-plugin.lua: warning: missing plugin-description header comment
+```
+
+Exit code is `0` if no errors (warnings are OK), `1` if any errors were found.
 
 ## Sandboxing
 
