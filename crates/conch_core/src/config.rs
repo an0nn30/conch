@@ -131,6 +131,14 @@ pub struct TerminalConfig {
     /// Cursor appearance (Alacritty `[terminal.cursor]`).
     #[serde(default)]
     pub cursor: CursorConfig,
+    /// Scroll sensitivity multiplier (0.0–1.0). Lower = slower scrolling.
+    /// Default 0.15, tuned for macOS trackpads. Increase for mice.
+    #[serde(default = "default_scroll_sensitivity")]
+    pub scroll_sensitivity: f32,
+}
+
+fn default_scroll_sensitivity() -> f32 {
+    0.15
 }
 
 /// Cursor configuration (Alacritty `[terminal.cursor]`).
@@ -239,6 +247,7 @@ impl Default for TerminalConfig {
             shell: TerminalShell::default(),
             env: std::collections::HashMap::new(),
             cursor: CursorConfig::default(),
+            scroll_sensitivity: default_scroll_sensitivity(),
         }
     }
 }

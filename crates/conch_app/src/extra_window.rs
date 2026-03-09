@@ -285,6 +285,7 @@ impl ExtraWindow {
                                 &term,
                                 &write_fn,
                                 cell_height,
+                                user_config.terminal.scroll_sensitivity,
                             );
                         }
 

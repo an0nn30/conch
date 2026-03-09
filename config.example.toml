@@ -85,6 +85,10 @@ startup_command = ""
 # Whether to automatically wrap the shell in tmux.
 use_tmux = false
 
+# Scroll sensitivity multiplier (0.0–1.0). Lower = slower scrolling.
+# Default 0.15, tuned for macOS trackpads. Increase for external mice.
+scroll_sensitivity = 0.15
+
 [terminal.env]
 
 # Extra environment variables set in the terminal.

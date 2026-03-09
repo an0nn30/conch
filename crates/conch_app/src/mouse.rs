@@ -25,6 +25,10 @@ pub struct Selection {
     last_click_time: Option<Instant>,
     /// Where the last click was (cell coords, for multi-click proximity check).
     last_click_cell: Option<(usize, usize)>,
+    /// Whether the current scroll session (including momentum) started over the terminal.
+    /// Prevents trackpad momentum from leaking into the terminal when the pointer
+    /// moves away from the panel where scrolling originated.
+    scroll_engaged: bool,
 }
 
 /// Maximum interval between clicks to count as multi-click.
@@ -99,6 +103,7 @@ pub fn encode_mouse(button: u8, col: usize, row: usize, sgr: bool, press: bool) 
 /// - `term` — the terminal for word/line selection queries.
 /// - `write_fn` — callback to write escape bytes to the session's PTY.
 /// - `cell_height` — height of a single cell in pixels (for scroll conversion).
+/// - `scroll_sensitivity` — multiplier for scroll delta (0.0–1.0, lower = slower).
 pub fn handle_terminal_mouse(
     ctx: &egui::Context,
     response: &egui::Response,
@@ -107,6 +112,7 @@ pub fn handle_terminal_mouse(
     term: &Arc<FairMutex<Term<EventProxy>>>,
     write_fn: &dyn Fn(&[u8]),
     cell_height: f32,
+    scroll_sensitivity: f32,
 ) {
     use alacritty_terminal::term::TermMode;
 
@@ -124,18 +130,42 @@ pub fn handle_terminal_mouse(
         })
         .unwrap_or((false, false, false, false, false));
 
-    // Scroll events (mouse wheel) — always process.
+    // Scroll events (mouse wheel) — only process when scrolling originated over
+    // the terminal. We use raw_scroll_delta (physical input only, no momentum) to
+    // detect the start of a scroll gesture, and smooth_scroll_delta (includes
+    // momentum smoothing) for the actual scroll amount. This prevents trackpad
+    // momentum from leaking into the terminal when the user scrolls in a panel
+    // and then moves the pointer over the terminal while momentum is still active.
     let scroll_delta = ctx.input(|i| i.smooth_scroll_delta);
-    if scroll_delta.y.abs() > 0.5 {
+    let raw_scroll = ctx.input(|i| i.raw_scroll_delta);
+    let pointer_over_terminal = ctx
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|pos| response.rect.contains(pos));
+
+    // raw_scroll_delta is non-zero only on actual physical scroll input (wheel
+    // ticks, trackpad touch), not during momentum. Use it to decide whether
+    // this is a new gesture that started over the terminal.
+    if raw_scroll.y.abs() > 0.1 {
+        // Physical scroll input — engage/disengage based on pointer position.
+        selection.scroll_engaged = pointer_over_terminal;
+    } else if scroll_delta.y.abs() < 0.1 {
+        // No scroll at all (raw + smooth both idle) — reset for next gesture.
+        selection.scroll_engaged = false;
+    }
+    // else: smooth momentum only (raw is zero) — keep scroll_engaged as-is.
+
+    // Dampen trackpad scroll — macOS trackpads produce very large pixel deltas
+    // which translate to too many lines per frame. Scale down to feel natural.
+    let dampened_delta = scroll_delta.y * scroll_sensitivity;
+
+    if dampened_delta.abs() > 0.5 && selection.scroll_engaged {
         if mouse_mode {
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                if response.rect.contains(pos) {
-                    let (col, row) = pixel_to_cell(pos, response.rect.min, size_info);
-                    // Scroll up = button 64, scroll down = button 65.
-                    let button = if scroll_delta.y > 0.0 { 64u8 } else { 65u8 };
-                    let bytes = encode_mouse(button, col, row, sgr, true);
-                    write_fn(&bytes);
-                }
+                let (col, row) = pixel_to_cell(pos, response.rect.min, size_info);
+                // Scroll up = button 64, scroll down = button 65.
+                let button = if dampened_delta > 0.0 { 64u8 } else { 65u8 };
+                let bytes = encode_mouse(button, col, row, sgr, true);
+                write_fn(&bytes);
             }
         }
         // Not in mouse mode: handle scrollback or alt-screen arrow conversion.
@@ -143,8 +173,8 @@ pub fn handle_terminal_mouse(
         // the original main-window behaviour.)
         if alt_screen && alternate_scroll {
             // Convert scroll to arrow key sequences (for less, man, etc.).
-            let lines = (scroll_delta.y.abs() / cell_height).max(1.0) as usize;
-            let arrow = if scroll_delta.y > 0.0 {
+            let lines = (dampened_delta.abs() / cell_height).max(1.0) as usize;
+            let arrow = if dampened_delta > 0.0 {
                 if app_cursor { b"\x1bOA".as_slice() } else { b"\x1b[A".as_slice() }
             } else {
                 if app_cursor { b"\x1bOB".as_slice() } else { b"\x1b[B".as_slice() }
@@ -154,8 +184,8 @@ pub fn handle_terminal_mouse(
             }
         } else if !alt_screen && !mouse_mode {
             // Normal screen: scroll through scrollback history.
-            let lines = (scroll_delta.y.abs() / cell_height).max(1.0) as i32;
-            let delta = if scroll_delta.y > 0.0 { lines } else { -lines };
+            let lines = (dampened_delta.abs() / cell_height).max(1.0) as i32;
+            let delta = if dampened_delta > 0.0 { lines } else { -lines };
             if let Some(mut t) = term.try_lock_unfair() {
                 t.scroll_display(alacritty_terminal::grid::Scroll::Delta(delta));
             }

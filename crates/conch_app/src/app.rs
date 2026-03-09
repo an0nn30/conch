@@ -1971,6 +1971,7 @@ impl eframe::App for ConchApp {
                                 &term,
                                 &write_fn,
                                 cell_height,
+                                self.state.user_config.terminal.scroll_sensitivity,
                             );
                         }
 
