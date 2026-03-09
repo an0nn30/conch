@@ -10,9 +10,46 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Changelog — generate release notes and create the GitHub Release
+  # ---------------------------------------------------------------------------
+  changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(./.github/workflows/generate_changelog.sh)
+          # Write to file to avoid escaping issues.
+          echo "$BODY" > /tmp/release_body.md
+          cat /tmp/release_body.md
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Try to edit an existing release first (in case upload_asset.sh created a draft).
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --draft --notes-file /tmp/release_body.md
+          else
+            gh release create "$TAG" --draft --title "$TAG" --notes-file /tmp/release_body.md
+          fi
+
+  # ---------------------------------------------------------------------------
   # macOS — universal binary (ARM64 + x86_64)
   # ---------------------------------------------------------------------------
   macos:
+    needs: changelog
     runs-on: macos-latest
     permissions:
       contents: write
@@ -72,6 +109,7 @@ jobs:
   # Windows — portable exe + MSI installer
   # ---------------------------------------------------------------------------
   windows:
+    needs: changelog
     runs-on: windows-latest
     permissions:
       contents: write
@@ -123,6 +161,7 @@ jobs:
   # Linux — deb + rpm for AMD64 and ARM64
   # ---------------------------------------------------------------------------
   linux:
+    needs: changelog
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -208,6 +247,7 @@ jobs:
   # Extras — VS Code extension, example config & plugins
   # ---------------------------------------------------------------------------
   extras:
+    needs: changelog
     runs-on: ubuntu-latest
     permissions:
       contents: write

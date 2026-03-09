@@ -125,7 +125,14 @@ endif
 	git tag -a "v$(V)" -m "v$(V)" -f
 	git push origin main
 	git push origin "v$(V)"
-	@echo "Released v$(V)"
+	@echo ""
+	@echo "Tag v$(V) pushed — GitHub Actions will build artifacts and generate the changelog."
+	@echo "To preview the changelog locally, run: make changelog"
+	@echo ""
+
+.PHONY: changelog
+changelog:
+	@./.github/workflows/generate_changelog.sh
 
 # ---------------------------------------------------------------------------
 # Clean
