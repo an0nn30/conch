@@ -31,7 +31,7 @@ pub fn parse_ssh_config() -> Result<Vec<ServerEntry>> {
     Ok(parse_ssh_config_str(&contents))
 }
 
-fn ssh_config_path() -> PathBuf {
+pub fn ssh_config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("~"))
         .join(".ssh")

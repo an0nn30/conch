@@ -42,6 +42,9 @@ font-kit = "0.14"
 # Shell program lookup
 which = "7"
 
+# File watching for live-reload
+notify = "7"
+
 # Terminal emulation (for types)
 alacritty_terminal = "0.25"
 

@@ -335,7 +335,7 @@ pub struct ColorsConfig {
     pub appearance_mode: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyboardConfig {
     #[serde(default = "default_new_tab")]
     pub new_tab: String,
@@ -547,7 +547,7 @@ pub fn config_dir() -> PathBuf {
         .join("conch")
 }
 
-fn config_path() -> PathBuf { config_dir().join("config.toml") }
+pub fn config_path() -> PathBuf { config_dir().join("config.toml") }
 fn state_path() -> PathBuf { config_dir().join("state.toml") }
 fn sessions_path() -> PathBuf { config_dir().join("sessions.toml") }
 

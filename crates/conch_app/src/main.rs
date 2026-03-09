@@ -19,6 +19,7 @@ mod notifications;
 mod state;
 mod terminal;
 mod ui;
+mod watcher;
 
 use std::sync::Arc;
 
