@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A single SSH server entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerEntry {
     pub name: String,
     pub host: String,

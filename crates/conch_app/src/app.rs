@@ -894,13 +894,8 @@ impl ConchApp {
 
     /// Reload SSH config (~/.ssh/config) and update the session panel.
     fn live_reload_ssh_config(&mut self) {
-        let old_count = self.state.ssh_config_hosts.len();
-        let old_names: Vec<String> = self
-            .state
-            .ssh_config_hosts
-            .iter()
-            .map(|h| h.name.clone())
-            .collect();
+        let old_hosts = self.state.ssh_config_hosts.clone();
+        let old_names: Vec<String> = old_hosts.iter().map(|h| h.name.clone()).collect();
 
         match ssh_config::parse_ssh_config() {
             Ok(hosts) => {
@@ -915,6 +910,9 @@ impl ConchApp {
                     .filter(|n| !new_names.contains(n))
                     .map(|s| s.as_str())
                     .collect();
+
+                // Detect property changes (host, port, user, etc.) when names stay the same.
+                let properties_changed = hosts != old_hosts && added.is_empty() && removed.is_empty();
 
                 self.state.ssh_config_hosts = hosts;
 
@@ -935,11 +933,10 @@ impl ConchApp {
                         None,
                         None,
                     ));
-                } else if self.state.ssh_config_hosts.len() != old_count {
-                    // Host entries changed but names are the same (config modified).
-                    log::info!("Live-reload: SSH config updated");
+                } else if properties_changed {
+                    log::info!("Live-reload: SSH host properties updated");
                     self.notifications.push(crate::notifications::Notification::simple(
-                        "SSH configuration reloaded".into(),
+                        "SSH host properties updated".into(),
                         Some("SSH Config Reloaded".into()),
                         conch_plugin::NotificationLevel::Info,
                         None,
