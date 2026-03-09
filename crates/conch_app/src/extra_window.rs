@@ -109,6 +109,8 @@ fn cmd_shortcut(key: &str) -> egui::WidgetText {
 
 pub struct ExtraWindow {
     pub viewport_id: egui::ViewportId,
+    /// The initial viewport builder (set once, used every frame).
+    pub(crate) viewport_builder: egui::ViewportBuilder,
     pub sessions: HashMap<Uuid, Session>,
     pub tab_order: Vec<Uuid>,
     pub active_tab: Option<Uuid>,
@@ -159,12 +161,13 @@ pub struct ExtraWindow {
 }
 
 impl ExtraWindow {
-    pub fn new(viewport_id: egui::ViewportId, session: Session) -> Self {
+    pub fn new(viewport_id: egui::ViewportId, viewport_builder: egui::ViewportBuilder, session: Session) -> Self {
         let id = session.id;
         let mut sessions = HashMap::new();
         sessions.insert(id, session);
         Self {
             viewport_id,
+            viewport_builder,
             sessions,
             tab_order: vec![id],
             active_tab: Some(id),

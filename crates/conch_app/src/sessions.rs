@@ -48,6 +48,45 @@ impl ConchApp {
         );
     }
 
+    /// Build a `ViewportBuilder` for extra windows that matches the main window's
+    /// decoration config.
+    pub(crate) fn build_extra_viewport(&self) -> egui::ViewportBuilder {
+        use config::WindowDecorations;
+        let native_menu = self.use_native_menu;
+        let mut builder = egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 600.0]);
+        match self.state.user_config.window.decorations {
+            WindowDecorations::Full => {
+                if cfg!(target_os = "macos") && !native_menu {
+                    builder = builder
+                        .with_fullsize_content_view(true)
+                        .with_titlebar_shown(true)
+                        .with_title_shown(false);
+                } else {
+                    builder = builder
+                        .with_title_shown(true)
+                        .with_titlebar_shown(true);
+                }
+            }
+            WindowDecorations::Transparent => {
+                builder = builder
+                    .with_fullsize_content_view(true)
+                    .with_titlebar_shown(true)
+                    .with_title_shown(false)
+                    .with_transparent(true);
+            }
+            WindowDecorations::Buttonless => {
+                builder = builder
+                    .with_decorations(false)
+                    .with_transparent(true);
+            }
+            WindowDecorations::None => {
+                builder = builder.with_decorations(false);
+            }
+        }
+        builder
+    }
+
     /// Open a new OS window with a fresh local terminal tab.
     pub(crate) fn spawn_extra_window(&mut self) {
         let cwd = self.state
@@ -60,7 +99,8 @@ impl ConchApp {
         let num = self.next_viewport_num;
         self.next_viewport_num += 1;
         let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
-        self.extra_windows.push(ExtraWindow::new(viewport_id, session));
+        let builder = self.build_extra_viewport();
+        self.extra_windows.push(ExtraWindow::new(viewport_id, builder, session));
     }
 
     /// Resize all sessions if the computed grid dimensions changed.

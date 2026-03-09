@@ -1112,7 +1112,8 @@ impl eframe::App for ConchApp {
                             let num = self.next_viewport_num;
                             self.next_viewport_num += 1;
                             let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
-                            self.extra_windows.push(ExtraWindow::new(viewport_id, session));
+                            let builder = self.build_extra_viewport();
+                            self.extra_windows.push(ExtraWindow::new(viewport_id, builder, session));
                         }
                     }
                     crate::ipc::IpcMessage::CreateTab { working_directory } => {
@@ -2274,39 +2275,9 @@ impl eframe::App for ConchApp {
                 if win.should_close {
                     continue;
                 }
-                let mut builder = egui::ViewportBuilder::default()
-                    .with_title(&win.title)
-                    .with_inner_size([800.0, 600.0]);
-                // Apply same window decorations as the main window.
-                match shared.user_config.window.decorations {
-                    config::WindowDecorations::Full => {
-                        if cfg!(target_os = "macos") && !shared.use_native_menu {
-                            builder = builder
-                                .with_fullsize_content_view(true)
-                                .with_titlebar_shown(true)
-                                .with_title_shown(false);
-                        } else {
-                            builder = builder
-                                .with_title_shown(true)
-                                .with_titlebar_shown(true);
-                        }
-                    }
-                    config::WindowDecorations::Transparent => {
-                        builder = builder
-                            .with_fullsize_content_view(true)
-                            .with_titlebar_shown(true)
-                            .with_title_shown(false)
-                            .with_transparent(true);
-                    }
-                    config::WindowDecorations::Buttonless => {
-                        builder = builder
-                            .with_decorations(false)
-                            .with_transparent(true);
-                    }
-                    config::WindowDecorations::None => {
-                        builder = builder.with_decorations(false);
-                    }
-                }
+                // Use the stored builder (set at creation) and update title.
+                let builder = win.viewport_builder.clone()
+                    .with_title(&win.title);
                 let vid = win.viewport_id;
                 ctx.show_viewport_immediate(vid, builder, |vp_ctx, _class| {
                     win.update(vp_ctx, &shared);
