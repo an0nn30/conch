@@ -361,6 +361,8 @@ pub struct KeyboardConfig {
     pub zen_mode: String,
     #[serde(default = "default_ssh_tunnels")]
     pub ssh_tunnels: String,
+    #[serde(default = "default_toggle_bottom_panel")]
+    pub toggle_bottom_panel: String,
 
     /// Plugin keybinding overrides. Keys are "plugin-filename.action_name",
     /// values are binding strings like "cmd+shift+i".
@@ -386,6 +388,7 @@ fn default_new_window() -> String { "cmd+shift+n".into() }
 fn default_focus_files() -> String { "cmd+shift+f".into() }
 fn default_zen_mode() -> String { "cmd+shift+z".into() }
 fn default_ssh_tunnels() -> String { "cmd+shift+t".into() }
+fn default_toggle_bottom_panel() -> String { "cmd+j".into() }
 
 impl Default for FontFamily {
     fn default() -> Self { Self { family: default_font_name() } }
@@ -425,6 +428,7 @@ impl Default for KeyboardConfig {
             focus_files: default_focus_files(),
             zen_mode: default_zen_mode(),
             ssh_tunnels: default_ssh_tunnels(),
+            toggle_bottom_panel: default_toggle_bottom_panel(),
             plugins: HashMap::new(),
         }
     }

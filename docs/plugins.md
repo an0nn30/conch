@@ -23,7 +23,7 @@ Conch ships with example plugins in `examples/plugins/`:
 | **System Info** (`system-info.lua`) | Panel | Cmd+Shift+I | Live system information — hostname, memory, disk, load average, top processes. Platform-aware (macOS/Linux). |
 | **Port Scanner** (`port-scanner.lua`) | Panel | Cmd+Shift+O | TCP port scanner with common port detection, range scanning, and service identification. |
 | **Encrypt / Decrypt** (`encrypt-decrypt.lua`) | Action | Cmd+Shift+Y | AES encryption/decryption (CBC, GCM, ECB) with PBKDF2 key derivation. |
-| **Demo Bottom Panel** (`demo-bottom-panel.lua`) | Bottom Panel | Cmd+Shift+B | Showcase of bottom-panel widgets — service table, cluster stats, progress bars, live scrolling logs, action buttons. |
+| **Demo Bottom Panel** (`demo-bottom-panel.lua`) | Bottom Panel | Cmd+Shift+D | Showcase of bottom-panel widgets — service table, cluster stats, progress bars, live scrolling logs, action buttons. |
 
 To use them, symlink into your plugins directory:
 

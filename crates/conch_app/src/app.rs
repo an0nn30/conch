@@ -1207,12 +1207,10 @@ impl eframe::App for ConchApp {
                                 self.toggle_right_sidebar();
                                 ui.close_menu();
                             }
-                            if !self.bottom_panel_tabs.is_empty() {
-                                let bottom_check = if self.show_bottom_panel { "✓ " } else { "   " };
-                                if ui.button(format!("{bottom_check}Bottom Panel")).clicked() {
-                                    self.show_bottom_panel = !self.show_bottom_panel;
-                                    ui.close_menu();
-                                }
+                            let bottom_check = if self.show_bottom_panel { "✓ " } else { "   " };
+                            if ui.add(egui::Button::new(format!("{bottom_check}Bottom Panel")).shortcut_text(cmd_shortcut("J"))).clicked() {
+                                self.toggle_bottom_panel();
+                                ui.close_menu();
                             }
                             ui.separator();
                             if ui.button("Preferences...").clicked() {
@@ -2001,6 +1999,9 @@ impl ConchApp {
             }
             MenuAction::ToggleRightSidebar => {
                 self.toggle_right_sidebar();
+            }
+            MenuAction::ToggleBottomPanel => {
+                self.toggle_bottom_panel();
             }
             MenuAction::Preferences => {
                 self.preferences_form =

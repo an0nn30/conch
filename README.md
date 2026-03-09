@@ -57,12 +57,13 @@ Conch has a **Lua 5.4 plugin system** that lets you extend the terminal with you
 - Bind to custom keyboard shortcuts
 - Set custom icons
 
-### Two plugin types
+### Three plugin types
 
 | Type | Description | Example |
 |------|-------------|---------|
 | **Action** | Run-once scripts triggered from the menu or a keybinding | Encrypt/Decrypt tool |
 | **Panel** | Persistent sidebar tabs with live-updating widgets | System monitor, Port scanner |
+| **Bottom Panel** | Tabbed panels below the terminal for logs, monitoring, etc. | Service dashboard |
 
 ### Getting started with plugins
 
@@ -85,6 +86,7 @@ Conch ships with example plugins to get you started:
 | **System Info** | Panel | Live hostname, memory, disk, CPU load, top processes |
 | **Port Scanner** | Panel | TCP port scanning with service identification |
 | **Encrypt/Decrypt** | Action | AES encryption (CBC, GCM, ECB) with PBKDF2 key derivation |
+| **Demo Bottom Panel** | Bottom Panel | Service dashboard with tables, stats, progress bars, live logs |
 
 ```bash
 # Symlink the examples into your plugins directory
@@ -145,6 +147,7 @@ sudo apt-get install -y \
 | `Cmd+/` | Quick connect (toggle) |
 | `Cmd+Shift+B` | Toggle file browser sidebar |
 | `Cmd+Shift+E` | Toggle sessions sidebar |
+| `Cmd+J` | Toggle bottom panel |
 | `Cmd+Shift+F` | Focus file browser |
 | `Cmd+Shift+P` | Plugin search |
 | `Cmd+Shift+T` | SSH tunnels manager |
@@ -167,6 +170,7 @@ new_window = "cmd+shift+n"
 new_connection = "cmd+n"
 toggle_left_sidebar = "cmd+shift+b"
 toggle_right_sidebar = "cmd+shift+e"
+toggle_bottom_panel = "cmd+j"
 
 # Bind plugins to keyboard shortcuts
 [conch.keyboard.plugins]
@@ -191,7 +195,7 @@ crates/
 editors/
   vscode/          VS Code extension for plugin development
 examples/
-  plugins/         Example plugins (system-info, port-scanner, encrypt-decrypt)
+  plugins/         Example plugins (system-info, port-scanner, encrypt-decrypt, demo-bottom-panel)
 ```
 
 ## Contributing

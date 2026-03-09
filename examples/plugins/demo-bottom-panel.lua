@@ -2,7 +2,7 @@
 -- plugin-description: Showcase of bottom-panel widgets — tables, logs, progress, key-values
 -- plugin-type: bottom-panel
 -- plugin-version: 1.0.0
--- plugin-keybind: open_panel = cmd+shift+b | Toggle Demo Bottom Panel
+-- plugin-keybind: open_panel = cmd+shift+d | Toggle Demo Bottom Panel
 
 -- Simulated log buffer
 local log_lines = {}

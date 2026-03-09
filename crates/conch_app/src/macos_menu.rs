@@ -22,6 +22,7 @@ pub enum MenuAction {
     SshTunnels,
     ToggleLeftSidebar,
     ToggleRightSidebar,
+    ToggleBottomPanel,
     Preferences,
     AboutConch,
     RunPlugin(usize),
@@ -86,6 +87,11 @@ define_class!(
         #[unsafe(method(toggleRightSidebar:))]
         fn toggle_right_sidebar(&self, _sender: *mut AnyObject) {
             push_action(MenuAction::ToggleRightSidebar);
+        }
+
+        #[unsafe(method(toggleBottomPanel:))]
+        fn toggle_bottom_panel(&self, _sender: *mut AnyObject) {
+            push_action(MenuAction::ToggleBottomPanel);
         }
 
         #[unsafe(method(openPreferences:))]
@@ -172,6 +178,7 @@ pub fn setup_menu_bar(plugins: &[(usize, String)]) {
         let view_menu = make_menu(mtm, "View");
         view_menu.addItem(&make_item(mtm, "Toggle Left Toolbar", sel!(toggleLeftSidebar:), "", &responder));
         view_menu.addItem(&make_item(mtm, "Toggle Right Toolbar", sel!(toggleRightSidebar:), "", &responder));
+        view_menu.addItem(&make_item(mtm, "Toggle Bottom Panel", sel!(toggleBottomPanel:), "", &responder));
         let view_item = NSMenuItem::new(mtm);
         view_item.setSubmenu(Some(&view_menu));
         main_menu.addItem(&view_item);
