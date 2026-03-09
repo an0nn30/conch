@@ -13,6 +13,7 @@ impl ConchApp {
             || self.tunnel_dialog.is_some()
             || self.active_plugin_dialog.is_some()
             || self.plugin_progress.is_some()
+            || self.notification_history_dialog.is_some()
     }
 
     /// Close the topmost dialog. Returns true if a dialog was closed.
@@ -23,6 +24,10 @@ impl ConchApp {
         }
         if self.plugin_progress.is_some() {
             self.plugin_progress = None;
+            return true;
+        }
+        if self.notification_history_dialog.is_some() {
+            self.notification_history_dialog = None;
             return true;
         }
         if self.show_about {

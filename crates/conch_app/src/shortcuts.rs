@@ -145,6 +145,14 @@ impl ConchApp {
                                 return;
                             }
                         }
+                        if let Some(ref kb) = self.shortcuts.notification_history {
+                            if kb.matches(key, modifiers) {
+                                self.notification_history_dialog = Some(
+                                    crate::ui::dialogs::notification_history::NotificationHistoryState::new(),
+                                );
+                                return;
+                            }
+                        }
                         if let Some(ref kb) = self.shortcuts.toggle_bottom_panel {
                             if kb.matches(key, modifiers) {
                                 self.toggle_bottom_panel();

@@ -183,6 +183,7 @@ pub struct ConchApp {
     // Tunnel management
     pub(crate) tunnel_manager: TunnelManager,
     pub(crate) tunnel_dialog: Option<TunnelManagerState>,
+    pub(crate) notification_history_dialog: Option<crate::ui::dialogs::notification_history::NotificationHistoryState>,
     /// IDs of currently active tunnels (refreshed each frame from TunnelManager).
     pub(crate) tunnel_active_ids: Vec<Uuid>,
     /// Receives results from async tunnel activation attempts.
@@ -375,6 +376,7 @@ impl ConchApp {
             preferences_form: None,
             tunnel_manager: TunnelManager::new(),
             tunnel_dialog: None,
+            notification_history_dialog: None,
             tunnel_active_ids: Vec::new(),
             pending_tunnel_results: Vec::new(),
             rename_tab_id: None,
@@ -1404,6 +1406,22 @@ impl eframe::App for ConchApp {
             }
         }
 
+        // Notification history dialog.
+        if let Some(mut dialog) = self.notification_history_dialog.take() {
+            use crate::ui::dialogs::notification_history::{self, NotificationHistoryAction};
+            let action = notification_history::show_notification_history(
+                ctx,
+                &mut dialog,
+                self.notifications.history(),
+            );
+            match action {
+                NotificationHistoryAction::Close => {}
+                NotificationHistoryAction::None => {
+                    self.notification_history_dialog = Some(dialog);
+                }
+            }
+        }
+
         // Plugin dialog (form, prompt, confirm, alert, error, text, table).
         if let Some(mut dialog) = self.active_plugin_dialog.take() {
             if plugin_dialog::show_plugin_dialog(ctx, &mut dialog) {
@@ -1515,6 +1533,13 @@ impl eframe::App for ConchApp {
                             let bottom_check = if self.show_bottom_panel { "✓ " } else { "   " };
                             if ui.add(egui::Button::new(format!("{bottom_check}Bottom Panel")).shortcut_text(cmd_shortcut("J"))).clicked() {
                                 self.toggle_bottom_panel();
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Notification History...").clicked() {
+                                self.notification_history_dialog = Some(
+                                    crate::ui::dialogs::notification_history::NotificationHistoryState::new(),
+                                );
                                 ui.close_menu();
                             }
                             ui.separator();
@@ -2298,6 +2323,11 @@ impl ConchApp {
             }
             MenuAction::SshTunnels => {
                 self.tunnel_dialog = Some(TunnelManagerState::new());
+            }
+            MenuAction::NotificationHistory => {
+                self.notification_history_dialog = Some(
+                    crate::ui::dialogs::notification_history::NotificationHistoryState::new(),
+                );
             }
             MenuAction::ToggleLeftSidebar => {
                 self.toggle_left_sidebar();

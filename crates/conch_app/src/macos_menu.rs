@@ -20,6 +20,7 @@ pub enum MenuAction {
     NewLocalTerminal,
     NewSshSession,
     SshTunnels,
+    NotificationHistory,
     ToggleLeftSidebar,
     ToggleRightSidebar,
     ToggleBottomPanel,
@@ -77,6 +78,11 @@ define_class!(
         #[unsafe(method(sshTunnels:))]
         fn ssh_tunnels(&self, _sender: *mut AnyObject) {
             push_action(MenuAction::SshTunnels);
+        }
+
+        #[unsafe(method(notificationHistory:))]
+        fn notification_history(&self, _sender: *mut AnyObject) {
+            push_action(MenuAction::NotificationHistory);
         }
 
         #[unsafe(method(toggleLeftSidebar:))]
@@ -179,6 +185,8 @@ pub fn setup_menu_bar(plugins: &[(usize, String)]) {
         view_menu.addItem(&make_item(mtm, "Toggle Left Toolbar", sel!(toggleLeftSidebar:), "", &responder));
         view_menu.addItem(&make_item(mtm, "Toggle Right Toolbar", sel!(toggleRightSidebar:), "", &responder));
         view_menu.addItem(&make_item(mtm, "Toggle Bottom Panel", sel!(toggleBottomPanel:), "", &responder));
+        view_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        view_menu.addItem(&make_item(mtm, "Notification History...", sel!(notificationHistory:), "", &responder));
         let view_item = NSMenuItem::new(mtm);
         view_item.setSubmenu(Some(&view_menu));
         main_menu.addItem(&view_item);

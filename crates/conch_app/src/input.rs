@@ -74,6 +74,7 @@ pub struct ResolvedShortcuts {
     pub zen_mode: Option<KeyBinding>,
     pub ssh_tunnels: Option<KeyBinding>,
     pub toggle_bottom_panel: Option<KeyBinding>,
+    pub notification_history: Option<KeyBinding>,
 }
 
 impl ResolvedShortcuts {
@@ -93,6 +94,7 @@ impl ResolvedShortcuts {
             zen_mode: KeyBinding::parse(&config.zen_mode),
             ssh_tunnels: KeyBinding::parse(&config.ssh_tunnels),
             toggle_bottom_panel: KeyBinding::parse(&config.toggle_bottom_panel),
+            notification_history: KeyBinding::parse(&config.notification_history),
         }
     }
 
@@ -112,6 +114,7 @@ impl ResolvedShortcuts {
             &self.zen_mode,
             &self.ssh_tunnels,
             &self.toggle_bottom_panel,
+            &self.notification_history,
         ];
         if bindings.iter().any(|b| b.as_ref().is_some_and(|kb| kb.matches(key, modifiers))) {
             return true;

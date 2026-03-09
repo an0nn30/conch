@@ -4,10 +4,18 @@
 //! duration, and slide back out.  They can optionally contain buttons that
 //! send a response back to the caller (plugin or internal app code).
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use conch_plugin::{NotificationLevel, PluginResponse};
 use tokio::sync::mpsc;
+
+/// A record of a past notification for the history dialog.
+pub(crate) struct HistoryEntry {
+    pub(crate) timestamp: SystemTime,
+    pub(crate) source: String,
+    pub(crate) body: String,
+    pub(crate) level: NotificationLevel,
+}
 
 /// Animation durations.
 const ANIM_IN_MS: u64 = 300;
@@ -165,17 +173,33 @@ impl Notification {
 /// Manages the notification stack and renders them as an overlay.
 pub(crate) struct NotificationManager {
     notifications: Vec<Notification>,
+    history: Vec<HistoryEntry>,
 }
 
 impl NotificationManager {
     pub(crate) fn new() -> Self {
         Self {
             notifications: Vec::new(),
+            history: Vec::new(),
         }
     }
 
     pub(crate) fn push(&mut self, notification: Notification) {
+        self.history.push(HistoryEntry {
+            timestamp: SystemTime::now(),
+            source: notification.title.clone().unwrap_or_else(|| "Notification".into()),
+            body: notification.body.clone(),
+            level: notification.level,
+        });
+        // Cap history at 500 entries.
+        if self.history.len() > 500 {
+            self.history.remove(0);
+        }
         self.notifications.push(notification);
+    }
+
+    pub(crate) fn history(&self) -> &[HistoryEntry] {
+        &self.history
     }
 
     #[allow(dead_code)]
@@ -332,7 +356,7 @@ enum CardAction {
     ClickButton(String),
 }
 
-fn level_colors(level: NotificationLevel, dark_mode: bool) -> (egui::Color32, egui::Color32) {
+pub(crate) fn level_colors(level: NotificationLevel, dark_mode: bool) -> (egui::Color32, egui::Color32) {
     if dark_mode {
         match level {
             NotificationLevel::Info => (
