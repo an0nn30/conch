@@ -540,27 +540,69 @@ impl ConchApp {
                         error,
                     } => {
                         // Update matching in-progress transfer, or add a new entry.
+                        let is_upload = self
+                            .transfers
+                            .iter()
+                            .find(|t| t.filename == filename && !t.done)
+                            .map(|t| t.upload)
+                            .unwrap_or(true);
                         if let Some(ts) = self
                             .transfers
                             .iter_mut()
                             .find(|t| t.filename == filename && !t.done)
                         {
                             ts.done = true;
-                            ts.error = if success { None } else { error };
+                            ts.error = if success { None } else { error.clone() };
                             if success {
                                 ts.bytes_transferred = ts.total_bytes;
                             }
                         } else {
                             self.transfers.push(sidebar::TransferStatus {
-                                filename,
+                                filename: filename.clone(),
                                 upload: true,
                                 done: true,
-                                error: if success { None } else { error },
+                                error: if success { None } else { error.clone() },
                                 bytes_transferred: 0,
                                 total_bytes: 0,
                                 cancel: Arc::new(AtomicBool::new(false)),
                             });
                         }
+
+                        // Show toast notification for the transfer result.
+                        let direction = if is_upload { "Upload" } else { "Download" };
+                        if success {
+                            self.notifications.push(
+                                crate::notifications::Notification::simple(
+                                    format!("{direction} complete: {filename}"),
+                                    Some(format!("{direction} Successful")),
+                                    conch_plugin::NotificationLevel::Success,
+                                    None,
+                                    None,
+                                ),
+                            );
+                        } else if error.as_deref() == Some("cancelled") {
+                            self.notifications.push(
+                                crate::notifications::Notification::simple(
+                                    format!("{direction} cancelled: {filename}"),
+                                    Some(format!("{direction} Cancelled")),
+                                    conch_plugin::NotificationLevel::Warning,
+                                    None,
+                                    None,
+                                ),
+                            );
+                        } else {
+                            let msg = error.unwrap_or_else(|| "unknown error".into());
+                            self.notifications.push(
+                                crate::notifications::Notification::simple(
+                                    format!("{direction} failed: {filename}\n{msg}"),
+                                    Some(format!("{direction} Failed")),
+                                    conch_plugin::NotificationLevel::Error,
+                                    Some(8.0),
+                                    None,
+                                ),
+                            );
+                        }
+
                         // Refresh both panes after a transfer completes.
                         if let Some(tx) = &self.sftp_cmd_tx {
                             if let Some(rp) = &self.state.file_browser.remote_path {
