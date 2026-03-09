@@ -322,9 +322,17 @@ impl ConchApp {
             }
             PluginCommand::PanelPollEvent => {
                 if let Some(idx) = discovered_idx {
+                    // Check button events first.
                     if let Some(events) = self.panel_button_events.get_mut(&idx) {
                         if let Some(button_id) = events.pop() {
                             let _ = resp_tx.send(PluginResponse::PanelEvent(button_id));
+                            return;
+                        }
+                    }
+                    // Then check keybind events.
+                    if let Some(events) = self.panel_keybind_events.get_mut(&idx) {
+                        if let Some(action) = events.pop() {
+                            let _ = resp_tx.send(PluginResponse::KeybindTriggered(action));
                             return;
                         }
                     }
@@ -334,10 +342,17 @@ impl ConchApp {
             }
             PluginCommand::PanelWaitEvent => {
                 if let Some(idx) = discovered_idx {
-                    // Check if there's already a pending button event
+                    // Check if there's already a pending button event.
                     if let Some(events) = self.panel_button_events.get_mut(&idx) {
                         if let Some(button_id) = events.pop() {
                             let _ = resp_tx.send(PluginResponse::PanelEvent(button_id));
+                            return;
+                        }
+                    }
+                    // Check keybind events.
+                    if let Some(events) = self.panel_keybind_events.get_mut(&idx) {
+                        if let Some(action) = events.pop() {
+                            let _ = resp_tx.send(PluginResponse::KeybindTriggered(action));
                             return;
                         }
                     }
@@ -504,6 +519,7 @@ impl ConchApp {
         self.panel_names.remove(&idx);
         self.panel_widgets.remove(&idx);
         self.panel_button_events.remove(&idx);
+        self.panel_keybind_events.remove(&idx);
         self.panel_event_waiters.remove(&idx);
         self.plugin_icons.remove(&idx);
         // Switch back to Plugins tab
@@ -563,6 +579,7 @@ impl ConchApp {
         self.panel_names.remove(&idx);
         self.panel_widgets.remove(&idx);
         self.panel_button_events.remove(&idx);
+        self.panel_keybind_events.remove(&idx);
         self.panel_event_waiters.remove(&idx);
         self.plugin_icons.remove(&idx);
         self.bottom_panel_tabs.retain(|&i| i != idx);
@@ -693,10 +710,10 @@ impl ConchApp {
                     let _ = tx.send(PluginResponse::KeybindTriggered(action));
                 } else {
                     // Queue for next poll
-                    self.panel_button_events
+                    self.panel_keybind_events
                         .entry(plugin_idx)
                         .or_default()
-                        .push(format!("__keybind:{}", action));
+                        .push(action);
                 }
                 return;
             }

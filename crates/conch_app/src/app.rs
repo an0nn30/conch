@@ -228,6 +228,8 @@ pub struct ConchApp {
     pub(crate) panel_names: std::collections::HashMap<usize, String>,
     /// Pending button click events for panel plugins, keyed by plugin index.
     pub(crate) panel_button_events: std::collections::HashMap<usize, Vec<String>>,
+    /// Pending keybind events for panel plugins, keyed by plugin index.
+    pub(crate) panel_keybind_events: std::collections::HashMap<usize, Vec<String>>,
     /// Response senders waiting for panel events, keyed by plugin index.
     pub(crate) panel_event_waiters: std::collections::HashMap<usize, tokio::sync::mpsc::UnboundedSender<conch_plugin::PluginResponse>>,
     /// Checkbox states in the plugin list (mirrors loaded state, user toggles before applying).
@@ -389,10 +391,11 @@ impl ConchApp {
             bottom_panel_tabs: Vec::new(),
             active_bottom_panel: None,
             show_bottom_panel: !bottom_panel_collapsed,
-            bottom_panel_height: bottom_panel_height,
+            bottom_panel_height,
             panel_widgets: std::collections::HashMap::new(),
             panel_names: std::collections::HashMap::new(),
             panel_button_events: std::collections::HashMap::new(),
+            panel_keybind_events: std::collections::HashMap::new(),
             panel_event_waiters: std::collections::HashMap::new(),
             pending_plugin_loads: Vec::new(),
             plugin_keybinds: Vec::new(),
