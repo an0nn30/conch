@@ -36,6 +36,20 @@ use crate::ui::sidebar::{self, SidebarAction};
 pub(crate) const DEFAULT_COLS: u16 = 80;
 pub(crate) const DEFAULT_ROWS: u16 = 24;
 
+/// Get current process RSS in MB.
+fn get_rss_mb() -> f64 {
+    let pid = std::process::id();
+    // `ps -o rss=` returns RSS in KB on both macOS and Linux.
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "rss="])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map(|kb| kb / 1024.0)
+        .unwrap_or(0.0)
+}
+
 /// Build a `WidgetText` for a menu shortcut like "⌘T" with the ⌘ glyph
 /// scaled down so it visually matches the key character height.
 fn cmd_shortcut(key: &str) -> egui::WidgetText {
@@ -202,6 +216,16 @@ pub struct ConchApp {
     pub(crate) next_viewport_num: u32,
     /// Index of the focused extra window, or `None` if the main window is focused.
     pub(crate) focused_extra_window: Option<usize>,
+    /// The main window is hidden (acting as invisible coordinator while extra
+    /// windows are still open). All main-window UI rendering is skipped.
+    pub(crate) main_window_hidden: bool,
+    /// Benchmark hidden-window mode: spawn extra window, hide main, log stats.
+    pub(crate) bench_hidden_mode: bool,
+    /// Benchmark with extra window (both visible).
+    pub(crate) bench_extra_mode: bool,
+    pub(crate) bench_frame_count: u64,
+    pub(crate) bench_start: Option<Instant>,
+    pub(crate) bench_last_report: Option<Instant>,
 
     // Plugin engine
     pub(crate) discovered_plugins: Vec<PluginMeta>,
@@ -386,6 +410,12 @@ impl ConchApp {
             extra_windows: Vec::new(),
             next_viewport_num: 1,
             focused_extra_window: None,
+            main_window_hidden: false,
+            bench_hidden_mode: false,
+            bench_extra_mode: false,
+            bench_frame_count: 0,
+            bench_start: None,
+            bench_last_report: None,
             discovered_plugins,
             running_plugins: Vec::new(),
             plugin_output_lines: Vec::new(),
@@ -450,13 +480,20 @@ impl ConchApp {
             self.remove_session(id);
         }
 
-        // Quit when the last session exits (and no SSH connections are pending or failed).
+        // When all main-window sessions exit, either hide (if extra windows
+        // are still open) or quit the app.
         if self.state.sessions.is_empty()
             && self.pending_ssh_connections.is_empty()
             && self.pending_ssh_info.is_empty()
+            && !self.main_window_hidden
         {
-            self.quit_requested = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if self.extra_windows.iter().any(|w| !w.should_close) {
+                self.main_window_hidden = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                self.quit_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
 
         // Poll pending SSH connections.
@@ -999,8 +1036,32 @@ impl ConchApp {
 
 impl eframe::App for ConchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frame_start = Instant::now();
+
         if !self.style_applied {
             self.apply_initial_style(ctx);
+        }
+
+        // --bench-extra: spawn extra window on first styled frame (both visible).
+        if self.bench_extra_mode && self.extra_windows.is_empty() && self.style_applied {
+            self.spawn_extra_window();
+            self.bench_extra_mode = false; // one-shot
+        }
+
+        // --bench-hidden: on first frame after style is applied, spawn an
+        // extra window and hide the main window.
+        if self.bench_hidden_mode && !self.main_window_hidden && self.style_applied {
+            self.spawn_extra_window();
+            self.main_window_hidden = true;
+            self.bench_start = Some(Instant::now());
+            self.bench_last_report = Some(Instant::now());
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Shut down main-window sessions.
+            let ids: Vec<_> = self.state.sessions.keys().copied().collect();
+            for id in ids {
+                self.remove_session(id);
+            }
+            eprintln!("[bench] Hidden-window mode active. Reporting every 2s.");
         }
 
         // Measure cell size from the monospace font, and re-measure when
@@ -1204,14 +1265,62 @@ impl eframe::App for ConchApp {
         // Keyboard/paste forwarding is deferred until after all panels render,
         // so that egui's focus state reflects the current frame (see end of update).
 
-        // Save window state before closing.
-        let closing = self.quit_requested
-            || ctx.input(|i| i.viewport().close_requested());
-        if closing {
-            self.save_window_state(ctx);
+        // Handle close request on the main window.
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested && !self.quit_requested {
+            if self.extra_windows.iter().any(|w| !w.should_close) {
+                // Extra windows still open — hide main window instead of exiting.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.main_window_hidden = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                // Shut down main-window sessions so we don't leak shell processes.
+                let ids: Vec<_> = self.state.sessions.keys().copied().collect();
+                for id in ids {
+                    self.remove_session(id);
+                }
+            } else {
+                self.save_window_state(ctx);
+            }
         }
         if self.quit_requested {
+            self.save_window_state(ctx);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // When the main window is hidden, skip all main-window UI rendering.
+        // Only process extra windows, plugin events, and check whether to exit.
+        if self.main_window_hidden {
+            // Slow the hidden window's repaint cadence — we only need to poll
+            // plugin events and check extra window status, not render UI.
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            let t0 = Instant::now();
+            self.render_extra_windows(ctx);
+            let t_extra = t0.elapsed();
+            // If all extra windows are now closed, actually quit.
+            if self.extra_windows.is_empty() {
+                self.quit_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            // Bench reporting.
+            if self.bench_hidden_mode {
+                self.bench_frame_count += 1;
+                let now = Instant::now();
+                if let Some(last) = self.bench_last_report {
+                    if now.duration_since(last).as_secs() >= 2 {
+                        let elapsed = self.bench_start.map(|s| now.duration_since(s).as_secs_f64()).unwrap_or(0.0);
+                        let frame_ms = now.duration_since(frame_start).as_secs_f64() * 1000.0;
+                        let poll_ms = (frame_start.elapsed().as_secs_f64() - t_extra.as_secs_f64()) * 1000.0;
+                        let extra_ms = t_extra.as_secs_f64() * 1000.0;
+                        let rss_mb = get_rss_mb();
+                        eprintln!(
+                            "[bench] t={elapsed:.1}s  frames={}  total={frame_ms:.2}ms  poll={poll_ms:.2}ms  extra_win={extra_ms:.2}ms  rss={rss_mb:.1}MB",
+                            self.bench_frame_count,
+                        );
+                        self.bench_last_report = Some(now);
+                    }
+                }
+            }
+            return;
         }
 
         // -- Dialogs (floating windows, rendered before panels) --
@@ -1465,9 +1574,10 @@ impl eframe::App for ConchApp {
             // user can still move the window by dragging the first terminal line.
             if decorations == WindowDecorations::Buttonless {
                 let drag_h = self.cell_height.max(6.0);
+                let drag_frame = egui::Frame::NONE.fill(ctx.style().visuals.panel_fill);
                 egui::TopBottomPanel::top("drag_region")
                     .exact_height(drag_h)
-                    .frame(egui::Frame::NONE)
+                    .frame(drag_frame)
                     .show(ctx, |ui| {
                         let rect = ui.available_rect_before_wrap();
                         let response = ui.interact(rect, ui.id().with("drag"), egui::Sense::drag());
@@ -1653,7 +1763,7 @@ impl eframe::App for ConchApp {
                 .map(|(idx, name)| (*idx, name.clone()))
                 .collect();
             let action = if self.state.show_left_sidebar {
-                sidebar::show_tab_strip(ctx, &mut self.state.sidebar_tab, icons, &panel_tabs, &self.plugin_icons);
+                sidebar::show_tab_strip(ctx, &mut self.state.sidebar_tab, icons, &panel_tabs, &self.plugin_icons, egui::Id::new("sidebar_tabs"));
                 sidebar::show_sidebar_content(
                     ctx,
                     &self.state.sidebar_tab,
@@ -1668,6 +1778,7 @@ impl eframe::App for ConchApp {
                     &self.panel_widgets,
                     &self.panel_names,
                     &mut self.pending_plugin_loads,
+                    egui::Id::new("sidebar_content"),
                 )
             } else {
                 SidebarAction::None
@@ -1968,8 +2079,17 @@ impl eframe::App for ConchApp {
                 &self.panel_names,
                 &mut self.bottom_panel_height,
                 &mut self.show_bottom_panel,
+                egui::Id::new("bottom_panel"),
             );
             self.handle_bottom_panel_action(bp_action);
+
+            // Thin spacer above the bottom panel so the terminal's
+            // click_and_drag sense doesn't overlap the resize handle.
+            let grab = ctx.style().interaction.resize_grab_radius_side;
+            egui::TopBottomPanel::bottom(egui::Id::new("bottom_panel_resize_spacer"))
+                .exact_height(grab)
+                .frame(egui::Frame::NONE)
+                .show(ctx, |_ui| {});
         }
 
         // Central panel (active terminal or connecting screen).
@@ -2228,9 +2348,42 @@ impl eframe::App for ConchApp {
         }
         self.state.persistent.layout.zoom_factor = ctx.zoom_factor();
 
-        // Render extra windows via show_viewport_immediate.
-        // We take the vec out to satisfy the borrow checker — the closure
-        // borrows each ExtraWindow mutably while we read shared state from self.
+        self.render_extra_windows(ctx);
+
+        // Bench reporting for normal mode.
+        if self.bench_start.is_some() && !self.bench_hidden_mode {
+            self.bench_frame_count += 1;
+            let now = Instant::now();
+            if let Some(last) = self.bench_last_report {
+                if now.duration_since(last).as_secs() >= 2 {
+                    let elapsed = self.bench_start.map(|s| now.duration_since(s).as_secs_f64()).unwrap_or(0.0);
+                    let frame_ms = now.duration_since(frame_start).as_secs_f64() * 1000.0;
+                    let rss_mb = get_rss_mb();
+                    eprintln!(
+                        "[bench] t={elapsed:.1}s  frames={} frame_time={frame_ms:.2}ms  rss={rss_mb:.1}MB  extra_windows={}",
+                        self.bench_frame_count,
+                        self.extra_windows.len(),
+                    );
+                    self.bench_last_report = Some(now);
+                }
+            }
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Shut down sessions in extra windows.
+        for win in &self.extra_windows {
+            for session in win.sessions.values() {
+                session.backend.shutdown();
+            }
+        }
+        let _ = config::save_persistent_state(&self.state.persistent);
+    }
+}
+
+impl ConchApp {
+    /// Render extra windows and process their pending actions.
+    fn render_extra_windows(&mut self, ctx: &egui::Context) {
         let mut extra = std::mem::take(&mut self.extra_windows);
         let mut focused_extra: Option<usize> = None;
         {
@@ -2275,7 +2428,6 @@ impl eframe::App for ConchApp {
                 if win.should_close {
                     continue;
                 }
-                // Use the stored builder (set at creation) and update title.
                 let builder = win.viewport_builder.clone()
                     .with_title(&win.title);
                 let vid = win.viewport_id;
@@ -2288,7 +2440,7 @@ impl eframe::App for ConchApp {
             }
         }
         self.focused_extra_window = focused_extra;
-        // Process pending actions from extra windows.
+
         for win in &mut extra {
             for action in win.pending_actions.drain(..) {
                 use crate::extra_window::ExtraWindowAction;
@@ -2342,23 +2494,11 @@ impl eframe::App for ConchApp {
                 }
             }
         }
-        // Remove closed windows and put the rest back.
+
         extra.retain(|w| !w.should_close);
         self.extra_windows = extra;
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Shut down sessions in extra windows.
-        for win in &self.extra_windows {
-            for session in win.sessions.values() {
-                session.backend.shutdown();
-            }
-        }
-        let _ = config::save_persistent_state(&self.state.persistent);
-    }
-}
-
-impl ConchApp {
     /// Push an internal notification (not from a plugin).
     #[allow(dead_code)]
     pub(crate) fn notify(&mut self, body: impl Into<String>, level: conch_plugin::NotificationLevel) {
