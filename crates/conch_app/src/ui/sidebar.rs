@@ -842,8 +842,10 @@ fn show_file_pane(
         }
     }
 
-    // File table
-    let status_bar_height = 18.0;
+    // File table — reserve space for the status bar below.
+    // The 18px covers the "N items" label + spacing; the extra 20px accounts
+    // for the table header row that sits outside max_scroll_height.
+    let status_bar_height = 38.0;
     let table_height = (ui.available_height() - status_bar_height).max(0.0);
     TableBuilder::new(ui)
         .striped(true)
