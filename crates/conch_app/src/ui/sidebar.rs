@@ -497,6 +497,7 @@ fn show_files_panel(
     // Top pane: remote (if connected) or second local.
     let top_pane_kind = if remote_connected { PaneKind::Remote } else { PaneKind::Local2 };
     ui.allocate_ui(Vec2::new(ui.available_width(), pane_height), |ui| {
+        ui.set_min_height(pane_height);
         ui.push_id("top_pane", |ui| {
             let a = show_file_pane(ui, state, top_pane_kind, icons);
             if !matches!(a, SidebarAction::None) {
