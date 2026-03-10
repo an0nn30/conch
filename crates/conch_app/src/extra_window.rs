@@ -73,35 +73,7 @@ pub(crate) enum ExtraWindowAction {
     BottomPanelAction(BottomPanelAction),
 }
 
-// ---------------------------------------------------------------------------
-// Menu shortcut helper (duplicated from app.rs to avoid pub(crate) change)
-// ---------------------------------------------------------------------------
-
-fn cmd_shortcut(key: &str) -> egui::WidgetText {
-    use egui::text::LayoutJob;
-    let key_size = 12.0;
-    let cmd_size = key_size * 0.62;
-    let mut job = LayoutJob::default();
-    job.append(
-        "\u{2318}",
-        0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::proportional(cmd_size),
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    job.append(
-        key,
-        1.0,
-        egui::TextFormat {
-            font_id: egui::FontId::proportional(key_size),
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    job.into()
-}
+use crate::ui::widgets::cmd_shortcut;
 
 // ---------------------------------------------------------------------------
 // ExtraWindow
@@ -152,8 +124,7 @@ pub struct ExtraWindow {
     rename_tab_buf: String,
     rename_tab_focus: bool,
 
-    // Window focus tracking
-    #[allow(dead_code)]
+    // Window focus tracking (for FOCUS_IN_OUT terminal mode)
     window_focused: bool,
 
     // Actions for ConchApp to process after update()
@@ -398,6 +369,27 @@ impl ExtraWindow {
         // 1. Track OS-level focus for this window.
         self.is_focused = ctx.input(|i| i.focused);
 
+        // Track focus changes and send FOCUS_IN_OUT events to terminal.
+        {
+            let now_focused = ctx.input(|i| i.focused);
+            if now_focused != self.window_focused {
+                self.window_focused = now_focused;
+                if let Some(session) = self.active_session() {
+                    let focus_mode = session
+                        .backend
+                        .term()
+                        .try_lock_unfair()
+                        .map_or(false, |term| {
+                            term.mode().contains(alacritty_terminal::term::TermMode::FOCUS_IN_OUT)
+                        });
+                    if focus_mode {
+                        let seq = if now_focused { b"\x1b[I" } else { b"\x1b[O" };
+                        session.backend.write(seq);
+                    }
+                }
+            }
+        }
+
         // 2. Measure cell size, re-measure when pixels_per_point changes.
         let ppp = ctx.pixels_per_point();
         if !self.cell_size_measured || self.last_pixels_per_point != ppp {
@@ -525,13 +517,13 @@ impl ExtraWindow {
         if decorations == WindowDecorations::Buttonless {
             let drag_h = self.cell_height.max(6.0);
             let drag_frame = egui::Frame::NONE.fill(ctx.style().visuals.panel_fill);
-            egui::TopBottomPanel::top("extra_drag_region")
+            egui::TopBottomPanel::top(egui::Id::from(self.viewport_id).with("drag_region"))
                 .exact_height(drag_h)
                 .frame(drag_frame)
                 .show(ctx, |ui| {
                     let rect = ui.available_rect_before_wrap();
                     let response =
-                        ui.interact(rect, ui.id().with("extra_drag"), egui::Sense::drag());
+                        ui.interact(rect, ui.id().with("drag"), egui::Sense::drag());
                     if response.drag_started() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
@@ -547,7 +539,7 @@ impl ExtraWindow {
                 _ => cfg!(target_os = "macos"),
             };
             if needs_spacer {
-                egui::TopBottomPanel::top("extra_titlebar_spacer")
+                egui::TopBottomPanel::top(egui::Id::from(self.viewport_id).with("titlebar_spacer"))
                     .exact_height(28.0)
                     .frame(egui::Frame::NONE)
                     .show(ctx, |_ui| {});
@@ -581,7 +573,7 @@ impl ExtraWindow {
                 shared.icon_cache.as_ref(),
                 &panel_tabs,
                 shared.plugin_icons,
-                egui::Id::new("extra_sidebar_tabs"),
+                egui::Id::from(self.viewport_id).with("sidebar_tabs"),
             );
             sidebar::show_sidebar_content(
                 ctx,
@@ -597,7 +589,7 @@ impl ExtraWindow {
                 shared.panel_widgets,
                 shared.panel_names,
                 &mut self.pending_plugin_loads,
-                egui::Id::new("extra_sidebar_content"),
+                egui::Id::from(self.viewport_id).with("sidebar_content"),
             )
         } else {
             SidebarAction::None
@@ -610,7 +602,7 @@ impl ExtraWindow {
         let mut panel_action = SessionPanelAction::None;
         if self.show_right_sidebar {
             let icons = shared.icon_cache.as_ref();
-            egui::SidePanel::right("extra_right_sidebar")
+            egui::SidePanel::right(egui::Id::from(self.viewport_id).with("right_sidebar"))
                 .resizable(true)
                 .default_width(220.0)
                 .width_range(100.0..=400.0)
@@ -703,7 +695,7 @@ impl ExtraWindow {
                 shared.panel_names,
                 &mut self.bottom_panel_height,
                 &mut self.show_bottom_panel,
-                egui::Id::new("extra_bottom_panel"),
+                egui::Id::from(self.viewport_id).with("bottom_panel"),
             );
             if !matches!(bp_action, BottomPanelAction::None) {
                 self.pending_actions
@@ -713,7 +705,7 @@ impl ExtraWindow {
             // Thin spacer above the bottom panel so the terminal's
             // click_and_drag sense doesn't overlap the resize handle.
             let grab = ctx.style().interaction.resize_grab_radius_side;
-            egui::TopBottomPanel::bottom(egui::Id::new("extra_bottom_panel_resize_spacer"))
+            egui::TopBottomPanel::bottom(egui::Id::from(self.viewport_id).with("bottom_panel_spacer"))
                 .exact_height(grab)
                 .frame(egui::Frame::NONE)
                 .show(ctx, |_ui| {});
@@ -882,7 +874,10 @@ impl ExtraWindow {
             .unwrap_or_else(|| "Conch".into());
         self.title = window_title.clone();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        // Repaint cadence is driven by cursor blink (step 3) and terminal
+        // Wakeup events. No need for an additional unconditional repaint.
+        // Schedule a fallback repaint at 2 Hz for async polling (SSH, plugins).
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 
     // -------------------------------------------------------------------
@@ -898,7 +893,7 @@ impl ExtraWindow {
         bottom_pad: i8,
         left_pad: i8,
     ) {
-        egui::TopBottomPanel::top("extra_menu_bar")
+        egui::TopBottomPanel::top(egui::Id::from(self.viewport_id).with("menu_bar"))
             .frame(
                 egui::Frame::side_top_panel(ctx.style().as_ref()).inner_margin(egui::Margin {
                     top: top_pad,
@@ -1082,7 +1077,7 @@ impl ExtraWindow {
         user_config: &config::UserConfig,
         icon_cache: &Option<IconCache>,
     ) {
-        egui::TopBottomPanel::top("extra_tab_bar")
+        egui::TopBottomPanel::top(egui::Id::from(self.viewport_id).with("tab_bar"))
             .exact_height(28.0)
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
@@ -1577,7 +1572,7 @@ impl ExtraWindow {
                     self.toggle_bottom_panel(bottom_panel_tabs);
                 }
                 KbAction::Quit => {
-                    self.should_close = true;
+                    self.pending_actions.push(ExtraWindowAction::QuitApp);
                 }
                 KbAction::WriteBytes(bytes) => {
                     if let Some(session) = self.active_session() {

@@ -50,35 +50,7 @@ fn get_rss_mb() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Build a `WidgetText` for a menu shortcut like "⌘T" with the ⌘ glyph
-/// scaled down so it visually matches the key character height.
-fn cmd_shortcut(key: &str) -> egui::WidgetText {
-    use egui::text::LayoutJob;
-    let key_size = 12.0;
-    // The ⌘ glyph is inherently ~40% taller than digit glyphs at the same
-    // point size, so we shrink it proportionally to get matching cap height.
-    let cmd_size = key_size * 0.62;
-    let mut job = LayoutJob::default();
-    job.append(
-        "⌘",
-        0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::proportional(cmd_size),
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    job.append(
-        key,
-        1.0, // small gap between ⌘ and key
-        egui::TextFormat {
-            font_id: egui::FontId::proportional(key_size),
-            valign: egui::Align::Center,
-            ..Default::default()
-        },
-    );
-    job.into()
-}
+use crate::ui::widgets::cmd_shortcut;
 
 /// Cursor blink interval in milliseconds.
 pub(crate) const CURSOR_BLINK_MS: u128 = 500;

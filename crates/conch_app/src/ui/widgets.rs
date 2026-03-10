@@ -1,5 +1,33 @@
 //! Shared UI widget helpers for consistent styling.
 
+/// Build a `WidgetText` for a menu shortcut like "⌘T" with the ⌘ glyph
+/// scaled down so it visually matches the key character height.
+pub fn cmd_shortcut(key: &str) -> egui::WidgetText {
+    use egui::text::LayoutJob;
+    let key_size = 12.0;
+    let cmd_size = key_size * 0.62;
+    let mut job = LayoutJob::default();
+    job.append(
+        "\u{2318}",
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(cmd_size),
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.append(
+        key,
+        1.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(key_size),
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.into()
+}
+
 /// Standard inner margin for text edit fields.
 pub const TEXT_EDIT_MARGIN: egui::Margin = egui::Margin {
     left: 4,
