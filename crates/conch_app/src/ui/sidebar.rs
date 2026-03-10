@@ -95,6 +95,7 @@ pub fn show_tab_strip(
     icons: Option<&IconCache>,
     panel_tabs: &[(usize, String)],
     plugin_icons: &HashMap<usize, egui::TextureHandle>,
+    panel_id: egui::Id,
 ) {
     // Build the tab list: fixed tabs + dynamic panel plugin tabs.
     let mut tabs = vec![
@@ -110,7 +111,7 @@ pub fn show_tab_strip(
         });
     }
 
-    egui::SidePanel::left("sidebar_tabs")
+    egui::SidePanel::left(panel_id)
         .resizable(false)
         .exact_width(TAB_STRIP_WIDTH)
         .frame(egui::Frame::NONE)
@@ -239,10 +240,11 @@ pub fn show_sidebar_content(
     panel_widgets: &HashMap<usize, Vec<conch_plugin::PanelWidget>>,
     panel_names: &HashMap<usize, String>,
     pending_plugin_loads: &mut Vec<bool>,
+    panel_id: egui::Id,
 ) -> SidebarAction {
     let mut action = SidebarAction::None;
 
-    egui::SidePanel::left("sidebar_content")
+    egui::SidePanel::left(panel_id)
         .resizable(true)
         .default_width(200.0)
         .min_width(100.0)

@@ -30,17 +30,19 @@ pub fn show_bottom_panel(
     panel_names: &HashMap<usize, String>,
     height: &mut f32,
     visible: &mut bool,
+    panel_id: egui::Id,
 ) -> BottomPanelAction {
     let mut action = BottomPanelAction::None;
 
-    egui::TopBottomPanel::bottom("bottom_panel")
+    let resp = egui::TopBottomPanel::bottom(panel_id)
         .resizable(true)
         .default_height(*height)
         .height_range(BOTTOM_PANEL_MIN_HEIGHT..=BOTTOM_PANEL_MAX_HEIGHT)
         .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::ZERO))
         .show(ctx, |ui| {
-            // Track the actual height after user resize.
-            *height = ui.available_rect_before_wrap().height();
+            let avail = ui.available_rect_before_wrap();
+            ui.set_min_height(avail.height());
+            *height = avail.height();
 
             // Tab bar at the top of the bottom panel.
             let tab_bar_height = 24.0;
@@ -101,6 +103,24 @@ pub fn show_bottom_panel(
             }
         });
 
+    // egui's PanelState stores the frame's rendered rect, which is derived
+    // from the content's min_rect. If content is taller than the panel, the
+    // stored rect inflates and the panel snaps back to a larger size on the
+    // next frame. Fix: overwrite the stored rect with a rect whose height
+    // matches the tracked panel height, so content size never drives panel
+    // size.
+    {
+        let mut corrected = resp.response.rect;
+        // For a bottom panel, the top edge moves; bottom edge stays.
+        corrected.min.y = corrected.max.y - *height;
+        ctx.data_mut(|d| {
+            d.insert_persisted(
+                panel_id,
+                egui::containers::panel::PanelState { rect: corrected },
+            );
+        });
+    }
+
     action
 }
 
@@ -119,104 +139,91 @@ fn render_panel_widgets(
         return action;
     }
 
-    // Check if any widget is ScrollText — if so, split rendering to avoid
-    // nested vertical ScrollAreas (inner would get unbounded height from outer).
-    let has_scroll_text = widgets.iter().any(|w| matches!(w, conch_plugin::PanelWidget::ScrollText(_)));
+    let has_scroll_text = widgets
+        .iter()
+        .any(|w| matches!(w, conch_plugin::PanelWidget::ScrollText(_)));
 
-    let render_regular = |ui: &mut egui::Ui, action: &mut BottomPanelAction| {
-        for widget in widgets {
-            match widget {
-                conch_plugin::PanelWidget::ScrollText(_) => {} // rendered separately
-                conch_plugin::PanelWidget::Heading(text) => {
-                    ui.add_space(4.0);
-                    ui.strong(text);
-                    ui.add_space(2.0);
-                }
-                conch_plugin::PanelWidget::Text(text) => {
-                    ui.label(RichText::new(text).monospace().size(11.0));
-                }
-                conch_plugin::PanelWidget::Label(text) => {
-                    ui.label(text);
-                }
-                conch_plugin::PanelWidget::Separator => {
-                    ui.separator();
-                }
-                conch_plugin::PanelWidget::Table { columns, rows } => {
-                    let num_cols = columns.len();
-                    if num_cols > 0 {
-                        TableBuilder::new(ui)
-                            .striped(true)
-                            .resizable(true)
-                            .columns(Column::remainder().at_least(40.0), num_cols)
-                            .header(16.0, |mut header| {
-                                for col in columns {
-                                    header.col(|ui| {
-                                        ui.label(RichText::new(col).strong().size(10.0));
-                                    });
-                                }
-                            })
-                            .body(|body| {
-                                body.rows(16.0, rows.len(), |mut row| {
-                                    let idx = row.index();
-                                    if let Some(cells) = rows.get(idx) {
-                                        for cell in cells {
-                                            row.col(|ui| {
-                                                ui.label(
-                                                    RichText::new(cell).size(11.0).monospace(),
-                                                );
-                                            });
-                                        }
-                                    }
-                                });
-                            });
-                    }
-                }
-                conch_plugin::PanelWidget::Progress { label, fraction, text } => {
-                    ui.label(RichText::new(label).size(11.0));
-                    let bar = egui::ProgressBar::new(*fraction)
-                        .text(text)
-                        .desired_width(ui.available_width());
-                    ui.add(bar);
-                }
-                conch_plugin::PanelWidget::Button { id, label } => {
-                    if ui.button(label).clicked() {
-                        *action = BottomPanelAction::PanelButtonClick {
-                            plugin_idx,
-                            button_id: id.clone(),
-                        };
-                    }
-                }
-                conch_plugin::PanelWidget::KeyValue { key, value } => {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(key).strong().size(11.0));
-                        ui.label(RichText::new(value).size(11.0).monospace());
-                    });
-                }
-            }
-        }
-    };
-
-    if has_scroll_text {
-        render_regular(ui, &mut action);
-        for widget in widgets {
-            if let conch_plugin::PanelWidget::ScrollText(lines) = widget {
-                egui::ScrollArea::vertical()
-                    .id_salt(("bottom_scroll_text", plugin_idx))
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
+    // Single ScrollArea wraps all content. When ScrollText is present we
+    // stick to the bottom so log-style output auto-scrolls.
+    egui::ScrollArea::vertical()
+        .id_salt(("bottom_panel_plugin", plugin_idx))
+        .stick_to_bottom(has_scroll_text)
+        .show(ui, |ui| {
+            for widget in widgets {
+                match widget {
+                    conch_plugin::PanelWidget::ScrollText(lines) => {
                         for line in lines {
                             ui.label(RichText::new(line).monospace().size(11.0));
                         }
-                    });
+                    }
+                    conch_plugin::PanelWidget::Heading(text) => {
+                        ui.add_space(4.0);
+                        ui.strong(text);
+                        ui.add_space(2.0);
+                    }
+                    conch_plugin::PanelWidget::Text(text) => {
+                        ui.label(RichText::new(text).monospace().size(11.0));
+                    }
+                    conch_plugin::PanelWidget::Label(text) => {
+                        ui.label(text);
+                    }
+                    conch_plugin::PanelWidget::Separator => {
+                        ui.separator();
+                    }
+                    conch_plugin::PanelWidget::Table { columns, rows } => {
+                        let num_cols = columns.len();
+                        if num_cols > 0 {
+                            TableBuilder::new(ui)
+                                .striped(true)
+                                .resizable(true)
+                                .columns(Column::remainder().at_least(40.0), num_cols)
+                                .header(16.0, |mut header| {
+                                    for col in columns {
+                                        header.col(|ui| {
+                                            ui.label(RichText::new(col).strong().size(10.0));
+                                        });
+                                    }
+                                })
+                                .body(|body| {
+                                    body.rows(16.0, rows.len(), |mut row| {
+                                        let idx = row.index();
+                                        if let Some(cells) = rows.get(idx) {
+                                            for cell in cells {
+                                                row.col(|ui| {
+                                                    ui.label(
+                                                        RichText::new(cell).size(11.0).monospace(),
+                                                    );
+                                                });
+                                            }
+                                        }
+                                    });
+                                });
+                        }
+                    }
+                    conch_plugin::PanelWidget::Progress { label, fraction, text } => {
+                        ui.label(RichText::new(label).size(11.0));
+                        let bar = egui::ProgressBar::new(*fraction)
+                            .text(text)
+                            .desired_width(ui.available_width());
+                        ui.add(bar);
+                    }
+                    conch_plugin::PanelWidget::Button { id, label } => {
+                        if ui.button(label).clicked() {
+                            action = BottomPanelAction::PanelButtonClick {
+                                plugin_idx,
+                                button_id: id.clone(),
+                            };
+                        }
+                    }
+                    conch_plugin::PanelWidget::KeyValue { key, value } => {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(key).strong().size(11.0));
+                            ui.label(RichText::new(value).size(11.0).monospace());
+                        });
+                    }
+                }
             }
-        }
-    } else {
-        egui::ScrollArea::vertical()
-            .id_salt(("bottom_panel_plugin", plugin_idx))
-            .show(ui, |ui| {
-                render_regular(ui, &mut action);
-            });
-    }
+        });
 
     action
 }

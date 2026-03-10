@@ -32,6 +32,19 @@ use conch_core::config;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Benchmark: log per-frame timing and resource usage to stderr.
+    #[arg(long)]
+    bench: bool,
+
+    /// Benchmark with extra window (both visible).
+    #[arg(long)]
+    bench_extra: bool,
+
+    /// Benchmark hidden-window mode: launch main + extra window, hide main,
+    /// and log per-frame timing / resource usage to stderr.
+    #[arg(long)]
+    bench_hidden: bool,
 }
 
 #[derive(Subcommand)]
@@ -239,9 +252,28 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let bench = cli.bench;
+    let bench_extra = cli.bench_extra;
+    let bench_hidden = cli.bench_hidden;
+
     eframe::run_native(
         "Conch",
         options,
-        Box::new(move |_cc| Ok(Box::new(ConchApp::new(rt)))),
+        Box::new(move |_cc| {
+            let mut app = ConchApp::new(rt);
+            if bench || bench_extra || bench_hidden {
+                app.bench_hidden_mode = bench_hidden;
+                app.bench_start = Some(std::time::Instant::now());
+                app.bench_last_report = Some(std::time::Instant::now());
+                if bench_extra {
+                    // Spawn extra window but keep main visible.
+                    app.bench_extra_mode = true;
+                    eprintln!("[bench] Extra-window mode (both visible). Reporting every 2s.");
+                } else if bench {
+                    eprintln!("[bench] Normal mode. Reporting every 2s.");
+                }
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
