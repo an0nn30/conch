@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.github.an0nn30.conch</string>
     <key>CFBundleVersion</key>
-    <string>0.1.1</string>
+    <string>0.2.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.1</string>
+    <string>0.2.0</string>
     <key>CFBundleExecutable</key>
     <string>conch</string>
     <key>CFBundleIconFile</key>
