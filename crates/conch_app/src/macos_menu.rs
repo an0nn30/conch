@@ -276,10 +276,6 @@ pub fn set_tabbing_identifier(identifier: &str) {
     }
 }
 
-/// Track which NSWindow pointers we've already added to the tab group.
-static TABBED_WINDOW_PTRS: LazyLock<Mutex<Vec<usize>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-
 /// Configure all windows for native macOS tab grouping.
 ///
 /// Sets tabbingMode to Preferred and tabbingIdentifier on all windows.
@@ -305,74 +301,65 @@ pub fn configure_native_tabs(identifier: &str) {
         window.setTabbingMode(NSWindowTabbingMode::Preferred);
     }
 
-    // Seed the tracking set with the initial windows.
-    if let Ok(mut known) = TABBED_WINDOW_PTRS.lock() {
-        for window in windows.iter() {
-            if !window.isVisible() {
-                continue;
-            }
-            let ptr = objc2::rc::Retained::as_ptr(&window) as usize;
-            if !known.contains(&ptr) {
-                known.push(ptr);
-            }
-        }
-    }
 }
 
 /// Configure any newly created windows for native tab grouping.
 /// Sets tabbingIdentifier and tabbingMode on windows that haven't been seen yet,
 /// then uses addTabbedWindow:ordered: to explicitly merge them into the tab group.
+/// Merge a newly created window into an existing window's native tab group.
+///
+/// Finds the most recently focused visible window (the key window) and
+/// adds any other visible window that isn't already tabbed with it.
+/// Must be called after the new viewport's NSWindow exists (deferred by
+/// a couple of frames from spawn_extra_window).
 pub fn add_window_to_tab_group() {
     use objc2_app_kit::{NSWindowOrderingMode, NSWindowTabbingMode};
     let mtm = MainThreadMarker::new()
         .expect("add_window_to_tab_group must be called from the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    let windows = app.windows();
-
-    let mut known = TABBED_WINDOW_PTRS.lock().unwrap();
     let ns_id = NSString::from_str("com.conch.terminal");
 
-    let mut host: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> = None;
-    let mut new_wins: Vec<objc2::rc::Retained<objc2_app_kit::NSWindow>> = Vec::new();
+    // Use the main window (first visible window) as the host.
+    // The newly spawned window will be the one NOT yet in a tab group.
+    let windows = app.windows();
+    let visible: Vec<_> = windows.iter().filter(|w| w.isVisible()).collect();
 
-    for window in windows.iter() {
-        // Skip internal/invisible windows (AppKit panels, etc.)
-        if !window.isVisible() {
+    log::info!("add_window_to_tab_group: {} visible windows", visible.len());
+
+    if visible.len() < 2 {
+        return;
+    }
+
+    // Ensure all visible windows have the right tabbing config.
+    for w in &visible {
+        w.setTabbingIdentifier(&ns_id);
+        w.setTabbingMode(NSWindowTabbingMode::Preferred);
+    }
+
+    // Find a host: a window that already has tabbedWindows.
+    // Fall back to the first visible window.
+    let host = visible.iter()
+        .find(|w| w.tabbedWindows().is_some())
+        .or(visible.first())
+        .cloned();
+
+    let Some(host_win) = host else { return };
+    let host_ptr = objc2::rc::Retained::as_ptr(&host_win) as usize;
+
+    // Collect windows already in the host's tab group.
+    let tabbed_ptrs: Vec<usize> = host_win.tabbedWindows()
+        .map(|tabs| tabs.iter().map(|w| objc2::rc::Retained::as_ptr(&w) as usize).collect())
+        .unwrap_or_default();
+
+    // Add any visible window that isn't already in the tab group.
+    for w in &visible {
+        let ptr = objc2::rc::Retained::as_ptr(w) as usize;
+        if ptr == host_ptr || tabbed_ptrs.contains(&ptr) {
             continue;
         }
-        let ptr = objc2::rc::Retained::as_ptr(&window) as usize;
-        if known.contains(&ptr) {
-            if host.is_none() {
-                host = Some(window.clone());
-            }
-        } else {
-            window.setTabbingIdentifier(&ns_id);
-            window.setTabbingMode(NSWindowTabbingMode::Preferred);
-            known.push(ptr);
-            new_wins.push(window.clone());
-        }
-    }
-    drop(known);
-
-    // Explicitly add new windows to the host's tab group.
-    if let Some(host_win) = host {
-        for new_win in &new_wins {
-            host_win.addTabbedWindow_ordered(new_win, NSWindowOrderingMode::Above);
-            new_win.makeKeyAndOrderFront(None);
-        }
-    }
-}
-
-/// Remove closed windows from the native tab tracking set.
-pub fn cleanup_native_tab_tracking() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let app = NSApplication::sharedApplication(mtm);
-    let windows = app.windows();
-    let live: Vec<usize> = windows.iter()
-        .map(|w| objc2::rc::Retained::as_ptr(&w) as usize)
-        .collect();
-    if let Ok(mut known) = TABBED_WINDOW_PTRS.lock() {
-        known.retain(|ptr| live.contains(ptr));
+        log::info!("Adding window to native tab group via addTabbedWindow");
+        host_win.addTabbedWindow_ordered(w, NSWindowOrderingMode::Above);
+        w.makeKeyAndOrderFront(None);
     }
 }
 

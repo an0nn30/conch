@@ -2510,15 +2510,8 @@ impl ConchApp {
             }
         }
 
-        let had_closed = extra.iter().any(|w| w.should_close);
         extra.retain(|w| !w.should_close);
         self.extra_windows = extra;
-
-        // Clean up native tab tracking when windows are removed.
-        #[cfg(target_os = "macos")]
-        if had_closed && self.use_native_tabs {
-            crate::macos_menu::cleanup_native_tab_tracking();
-        }
     }
 
     /// Push an internal notification (not from a plugin).
