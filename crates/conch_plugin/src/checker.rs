@@ -299,7 +299,7 @@ fn check_lua(source: &str, path: &Path, meta: &Option<PluginMeta>, diags: &mut V
 
     // Check lifecycle functions for panel plugins.
     if let Some(meta) = meta {
-        if meta.plugin_type == PluginType::Panel {
+        if matches!(meta.plugin_type, PluginType::Panel | PluginType::BottomPanel | PluginType::SessionPanel) {
             check_panel_lifecycle(&lua, diags);
         }
     }

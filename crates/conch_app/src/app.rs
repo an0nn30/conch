@@ -225,6 +225,12 @@ pub struct ConchApp {
     /// Height of the bottom panel strip in logical pixels.
     pub(crate) bottom_panel_height: f32,
 
+    // Session panel plugins (right sidebar bottom half)
+    /// Indices of active session-panel plugins (tab order).
+    pub(crate) session_panel_tabs: Vec<usize>,
+    /// Which session panel plugin tab is currently selected.
+    pub(crate) active_session_panel_tab: Option<usize>,
+
     // Panel plugins (shared state for both sidebar and bottom panels)
     /// Widget lists for active panel plugins, keyed by discovered_plugins index.
     pub(crate) panel_widgets: std::collections::HashMap<usize, Vec<conch_plugin::PanelWidget>>,
@@ -414,6 +420,9 @@ impl ConchApp {
             active_bottom_panel: None,
             show_bottom_panel: !bottom_panel_collapsed,
             bottom_panel_height,
+
+            session_panel_tabs: Vec::new(),
+            active_session_panel_tab: None,
             panel_widgets: std::collections::HashMap::new(),
             panel_names: std::collections::HashMap::new(),
             panel_button_events: std::collections::HashMap::new(),
@@ -1747,6 +1756,7 @@ impl eframe::App for ConchApp {
                         description: meta.description.clone(),
                         is_panel: meta.plugin_type == conch_plugin::PluginType::Panel,
                         is_bottom_panel: meta.plugin_type == conch_plugin::PluginType::BottomPanel,
+                        is_session_panel: meta.plugin_type == conch_plugin::PluginType::SessionPanel,
                         is_loaded,
                     }
                 })
@@ -1805,8 +1815,9 @@ impl eframe::App for ConchApp {
             }
         }
 
-        // Right sidebar (session / server tree).
+        // Right sidebar (session / server tree + optional plugin tabs).
         let mut panel_action = SessionPanelAction::None;
+        let mut sp_plugin_action = crate::ui::session_panel_plugins::SessionPanelPluginAction::None;
         if self.state.show_right_sidebar {
             let icons = self.icon_cache.as_ref();
             egui::SidePanel::right("right_sidebar")
@@ -1814,13 +1825,43 @@ impl eframe::App for ConchApp {
                 .default_width(220.0)
                 .width_range(100.0..=400.0)
                 .show(ctx, |ui| {
-                    panel_action = session_panel::show_session_panel(
-                        ui,
-                        &self.state.sessions_config.folders,
-                        &self.state.ssh_config_hosts,
-                        icons,
-                        &mut self.session_panel_state,
-                    );
+                    let has_plugin_tabs = !self.session_panel_tabs.is_empty();
+                    if has_plugin_tabs {
+                        // Split: top half = sessions, bottom half = plugin tabs
+                        let available = ui.available_height();
+                        let pane_height = available / 2.0;
+
+                        ui.allocate_ui(egui::vec2(ui.available_width(), pane_height), |ui| {
+                            panel_action = session_panel::show_session_panel(
+                                ui,
+                                &self.state.sessions_config.folders,
+                                &self.state.ssh_config_hosts,
+                                icons,
+                                &mut self.session_panel_state,
+                            );
+                        });
+
+                        ui.separator();
+
+                        ui.allocate_ui(egui::vec2(ui.available_width(), ui.available_height()), |ui| {
+                            sp_plugin_action = crate::ui::session_panel_plugins::show_session_panel_plugins(
+                                ui,
+                                &self.session_panel_tabs,
+                                &mut self.active_session_panel_tab,
+                                &self.panel_widgets,
+                                &self.panel_names,
+                            );
+                        });
+                    } else {
+                        // Full height sessions panel (no plugins active)
+                        panel_action = session_panel::show_session_panel(
+                            ui,
+                            &self.state.sessions_config.folders,
+                            &self.state.ssh_config_hosts,
+                            icons,
+                            &mut self.session_panel_state,
+                        );
+                    }
                 });
         }
         // Escape in the quick connect search bar → restore sidebar to previous state.
@@ -1832,6 +1873,7 @@ impl eframe::App for ConchApp {
             }
         }
         self.handle_session_panel_action(panel_action);
+        self.handle_session_panel_plugin_action(sp_plugin_action);
 
         // Tab bar — only shown when multiple tabs are open.
         if self.state.tab_order.len() > 1 {
@@ -2423,6 +2465,7 @@ impl ConchApp {
                         description: meta.description.clone(),
                         is_panel: meta.plugin_type == conch_plugin::PluginType::Panel,
                         is_bottom_panel: meta.plugin_type == conch_plugin::PluginType::BottomPanel,
+                        is_session_panel: meta.plugin_type == conch_plugin::PluginType::SessionPanel,
                         is_loaded,
                     }
                 })

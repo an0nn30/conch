@@ -1079,7 +1079,7 @@ impl ExtraWindow {
                                     .plugin_display
                                     .iter()
                                     .enumerate()
-                                    .filter(|(_, p)| !p.is_panel && !p.is_bottom_panel && p.is_loaded)
+                                    .filter(|(_, p)| !p.is_panel && !p.is_bottom_panel && !p.is_session_panel && p.is_loaded)
                                     .map(|(i, p)| (i, p.name.clone()))
                                     .collect();
                                 if !loaded_actions.is_empty() {

@@ -61,6 +61,16 @@ Bottom panels use the same widget API as sidebar panels (`ui.panel_*` functions)
 
 The bottom panel area is resizable (drag the top edge), collapsible (toggle from View menu or the close button), and its state persists across sessions.
 
+### Session Panel Plugins
+
+Session panel plugins render in the bottom half of the right sidebar (below the SSH sessions tree). When one or more session panel plugins are active, the right sidebar splits 50/50 — sessions on top, tabbed plugin area on the bottom. Multiple session panel plugins share the space via tabs. Declare a session panel plugin with:
+
+```lua
+-- plugin-type: session-panel
+```
+
+Session panels use the same widget API and lifecycle as other panel types. They are ideal for server-related tools like quick stats, connection logs, or monitoring dashboards that you want visible alongside your session list. Right-click a tab to close it.
+
 ## Plugin Header
 
 Every plugin should start with metadata comments:
@@ -81,7 +91,7 @@ These comments must be at the top of the file (before any code).
 | `plugin-name` | No | Display name (defaults to filename) |
 | `plugin-description` | No | Short description shown in the sidebar |
 | `plugin-version` | No | Semver version string |
-| `plugin-type` | No | `panel` for panel plugins (default: action) |
+| `plugin-type` | No | `panel`, `bottom-panel`, or `session-panel` (default: action) |
 | `plugin-icon` | No | Path to a 16x16 icon (PNG, JPEG, GIF, BMP, WebP, ICO) |
 | `plugin-keybind` | No | Keyboard shortcut declaration (repeatable) |
 

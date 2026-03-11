@@ -256,6 +256,7 @@ pub struct PluginDisplayInfo {
     pub description: String,
     pub is_panel: bool,
     pub is_bottom_panel: bool,
+    pub is_session_panel: bool,
     pub is_loaded: bool,
 }
 
@@ -368,7 +369,7 @@ fn show_plugins_panel(
     // Enter on search bar → run first matching loaded action plugin
     if search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         if let Some(&(orig_idx, plugin)) = filtered.first() {
-            if !plugin.is_panel && !plugin.is_bottom_panel && plugin.is_loaded {
+            if !plugin.is_panel && !plugin.is_bottom_panel && !plugin.is_session_panel && plugin.is_loaded {
                 action = SidebarAction::RunPlugin(orig_idx);
             }
         }
@@ -417,6 +418,12 @@ fn show_plugins_panel(
                                             egui::RichText::new("bottom")
                                                 .size(9.0)
                                                 .color(Color32::from_rgb(180, 140, 80)),
+                                        );
+                                    } else if plugin.is_session_panel {
+                                        ui.label(
+                                            egui::RichText::new("session")
+                                                .size(9.0)
+                                                .color(Color32::from_rgb(160, 120, 200)),
                                         );
                                     } else if plugin.is_panel {
                                         ui.label(

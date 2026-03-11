@@ -57,13 +57,14 @@ Conch has a **Lua 5.4 plugin system** that lets you extend the terminal with you
 - Bind to custom keyboard shortcuts
 - Set custom icons
 
-### Three plugin types
+### Four plugin types
 
 | Type | Description | Example |
 |------|-------------|---------|
 | **Action** | Run-once scripts triggered from the menu or a keybinding | Encrypt/Decrypt tool |
 | **Panel** | Persistent sidebar tabs with live-updating widgets | System monitor, Port scanner |
 | **Bottom Panel** | Tabbed panels below the terminal for logs, monitoring, etc. | Service dashboard |
+| **Session Panel** | Tabbed panels in the bottom half of the right sidebar | Server stats, Connection logs |
 
 ### Getting started with plugins
 

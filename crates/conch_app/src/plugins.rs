@@ -455,6 +455,10 @@ impl ConchApp {
             self.activate_bottom_panel_plugin(idx);
             return;
         }
+        if meta.plugin_type == PluginType::SessionPanel {
+            self.activate_session_panel_plugin(idx);
+            return;
+        }
         let (ctx, commands_rx) = PluginContext::new();
         let path = meta.path.clone();
         self.rt.spawn(async move {
@@ -592,6 +596,81 @@ impl ConchApp {
         }
     }
 
+    /// Activate a session-panel plugin: start it and add a right sidebar tab.
+    pub(crate) fn activate_session_panel_plugin(&mut self, idx: usize) {
+        // Don't activate twice
+        if self.panel_names.contains_key(&idx) {
+            self.active_session_panel_tab = Some(idx);
+            return;
+        }
+        let Some(meta) = self.discovered_plugins.get(idx).cloned() else {
+            return;
+        };
+        let (ctx, commands_rx) = PluginContext::new();
+        let path = meta.path.clone();
+        let name = meta.name.clone();
+        let icon_path = meta.icon.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = run_panel_plugin(&path, ctx).await {
+                log::error!("Session panel plugin '{}' failed: {e}", path.display());
+            }
+        });
+        self.running_plugins.push(RunningPlugin {
+            meta,
+            discovered_idx: Some(idx),
+            commands_rx,
+            pending_dialogs: Vec::new(),
+        });
+        self.panel_names.insert(idx, name);
+        self.panel_widgets.insert(idx, Vec::new());
+        if let Some(icon_path) = &icon_path {
+            if let Some(bytes) = load_icon_bytes(icon_path) {
+                self.pending_plugin_icons.push((idx, bytes));
+            }
+        }
+        if !self.session_panel_tabs.contains(&idx) {
+            self.session_panel_tabs.push(idx);
+        }
+        self.active_session_panel_tab = Some(idx);
+    }
+
+    /// Deactivate a session-panel plugin: stop it and remove its tab.
+    pub(crate) fn deactivate_session_panel_plugin(&mut self, idx: usize) {
+        if let Some(meta) = self.discovered_plugins.get(idx) {
+            let path = meta.path.clone();
+            if let Some(pos) = self.running_plugins.iter().position(|rp| rp.meta.path == path) {
+                self.running_plugins.remove(pos);
+            }
+        }
+        self.panel_names.remove(&idx);
+        self.panel_widgets.remove(&idx);
+        self.panel_button_events.remove(&idx);
+        self.panel_keybind_events.remove(&idx);
+        self.panel_event_waiters.remove(&idx);
+        self.plugin_icons.remove(&idx);
+        self.session_panel_tabs.retain(|&i| i != idx);
+        if self.active_session_panel_tab == Some(idx) {
+            self.active_session_panel_tab = self.session_panel_tabs.first().copied();
+        }
+    }
+
+    /// Handle an action from the session panel plugin area.
+    pub(crate) fn handle_session_panel_plugin_action(
+        &mut self,
+        action: crate::ui::session_panel_plugins::SessionPanelPluginAction,
+    ) {
+        use crate::ui::session_panel_plugins::SessionPanelPluginAction;
+        match action {
+            SessionPanelPluginAction::PanelButtonClick { plugin_idx, button_id } => {
+                self.send_panel_button_event(plugin_idx, button_id);
+            }
+            SessionPanelPluginAction::DeactivatePanel(idx) => {
+                self.deactivate_session_panel_plugin(idx);
+            }
+            SessionPanelPluginAction::None => {}
+        }
+    }
+
     /// Send a button click event to a panel plugin.
     pub(crate) fn send_panel_button_event(&mut self, plugin_idx: usize, button_id: String) {
         // If there's a waiter, send immediately
@@ -684,6 +763,11 @@ impl ConchApp {
                 } else if meta.plugin_type == PluginType::BottomPanel {
                     self.active_bottom_panel = Some(plugin_idx);
                     self.show_bottom_panel = true;
+                } else if meta.plugin_type == PluginType::SessionPanel {
+                    self.active_session_panel_tab = Some(plugin_idx);
+                    if !self.state.show_right_sidebar {
+                        self.state.show_right_sidebar = true;
+                    }
                 }
             }
             "run" => {
@@ -755,6 +839,8 @@ impl ConchApp {
         let mut to_deactivate = Vec::new();
         let mut to_activate_bottom = Vec::new();
         let mut to_deactivate_bottom = Vec::new();
+        let mut to_activate_session = Vec::new();
+        let mut to_deactivate_session = Vec::new();
         for (i, meta) in self.discovered_plugins.iter().enumerate() {
             let filename = meta.path.file_name()
                 .unwrap_or_default()
@@ -775,6 +861,12 @@ impl ConchApp {
                 } else if !now_loaded && was_loaded {
                     to_deactivate_bottom.push(i);
                 }
+            } else if meta.plugin_type == PluginType::SessionPanel {
+                if now_loaded && !was_loaded {
+                    to_activate_session.push(i);
+                } else if !now_loaded && was_loaded {
+                    to_deactivate_session.push(i);
+                }
             }
         }
         for idx in to_deactivate {
@@ -788,6 +880,12 @@ impl ConchApp {
         }
         for idx in to_activate_bottom {
             self.activate_bottom_panel_plugin(idx);
+        }
+        for idx in to_deactivate_session {
+            self.deactivate_session_panel_plugin(idx);
+        }
+        for idx in to_activate_session {
+            self.activate_session_panel_plugin(idx);
         }
 
         // Re-resolve plugin keybindings with new load state
@@ -803,7 +901,8 @@ impl ConchApp {
         for (i, meta) in self.discovered_plugins.iter().enumerate() {
             let is_panel = meta.plugin_type == PluginType::Panel;
             let is_bottom = meta.plugin_type == PluginType::BottomPanel;
-            if !is_panel && !is_bottom {
+            let is_session = meta.plugin_type == PluginType::SessionPanel;
+            if !is_panel && !is_bottom && !is_session {
                 continue;
             }
             let filename = meta.path.file_name()
@@ -839,6 +938,13 @@ impl ConchApp {
                     self.bottom_panel_tabs.push(i);
                     if self.active_bottom_panel.is_none() {
                         self.active_bottom_panel = Some(i);
+                    }
+                }
+                // Session panels get added to the session panel tabs
+                if is_session && !self.session_panel_tabs.contains(&i) {
+                    self.session_panel_tabs.push(i);
+                    if self.active_session_panel_tab.is_none() {
+                        self.active_session_panel_tab = Some(i);
                     }
                 }
             }
