@@ -363,6 +363,25 @@ pub enum SftpEvent {
     RsyncAvailable(bool),
 }
 
+/// Spawn a task that forwards `TransferProgress` messages to the UI as `SftpEvent`s.
+/// Returns the sender for the fallback transfer and the join handle.
+fn spawn_progress_forwarder(
+    result_tx: std::sync::mpsc::Sender<SftpEvent>,
+    filename: String,
+) -> (mpsc::UnboundedSender<TransferProgress>, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<TransferProgress>();
+    let handle = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            let _ = result_tx.send(SftpEvent::TransferProgress {
+                filename: filename.clone(),
+                bytes_transferred: p.bytes_transferred,
+                total_bytes: p.total_bytes,
+            });
+        }
+    });
+    (tx, handle)
+}
+
 /// Long-running async task that owns an `SftpFileProvider` and serves listing
 /// and transfer requests over channels. When `connect_info` is provided and
 /// rsync is available on both sides, file transfers use rsync over SSH instead
@@ -494,19 +513,8 @@ pub async fn run_sftp_worker(
                         Ok(()) => Ok(()),
                         Err(e) => {
                             log::warn!("rsync upload failed, falling back to SFTP: {e}");
-                            let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<TransferProgress>();
-                            let fb_result_tx = result_tx.clone();
-                            let fb_filename = filename.clone();
-                            let fb_handle = tokio::spawn(async move {
-                                while let Some(p) = fallback_rx.recv().await {
-                                    let _ = fb_result_tx.send(SftpEvent::TransferProgress {
-                                        filename: fb_filename.clone(),
-                                        bytes_transferred: p.bytes_transferred,
-                                        total_bytes: p.total_bytes,
-                                    });
-                                }
-                            });
-                            let r = provider.upload(&local_path, &remote_path, Some(fallback_tx), &cancel).await;
+                            let (fb_tx, fb_handle) = spawn_progress_forwarder(result_tx.clone(), filename.clone());
+                            let r = provider.upload(&local_path, &remote_path, Some(fb_tx), &cancel).await;
                             let _ = fb_handle.await;
                             r
                         }
@@ -562,19 +570,8 @@ pub async fn run_sftp_worker(
                         Ok(()) => Ok(()),
                         Err(e) => {
                             log::warn!("rsync download failed, falling back to SFTP: {e}");
-                            let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<TransferProgress>();
-                            let fb_result_tx = result_tx.clone();
-                            let fb_filename = filename.clone();
-                            let fb_handle = tokio::spawn(async move {
-                                while let Some(p) = fallback_rx.recv().await {
-                                    let _ = fb_result_tx.send(SftpEvent::TransferProgress {
-                                        filename: fb_filename.clone(),
-                                        bytes_transferred: p.bytes_transferred,
-                                        total_bytes: p.total_bytes,
-                                    });
-                                }
-                            });
-                            let r = provider.download(&remote_path, &local_path, Some(fallback_tx), &cancel).await;
+                            let (fb_tx, fb_handle) = spawn_progress_forwarder(result_tx.clone(), filename.clone());
+                            let r = provider.download(&remote_path, &local_path, Some(fb_tx), &cancel).await;
                             let _ = fb_handle.await;
                             r
                         }
