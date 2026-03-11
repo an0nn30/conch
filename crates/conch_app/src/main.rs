@@ -9,6 +9,7 @@ mod platform;
 mod sessions;
 mod shortcuts;
 mod state;
+mod tab_bar;
 mod terminal;
 mod watcher;
 

@@ -61,9 +61,6 @@ impl ConchApp {
                             if kb.matches(key, modifiers) {
                                 if let Some(id) = self.state.active_tab {
                                     self.remove_session(id);
-                                    if self.state.sessions.is_empty() {
-                                        self.open_local_tab();
-                                    }
                                 }
                                 return;
                             }

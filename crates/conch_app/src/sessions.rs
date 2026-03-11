@@ -12,8 +12,14 @@ const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
 impl ConchApp {
-    /// Close a session and activate the previous tab.
+    /// Close a session with tab close animation and activate the previous tab.
     pub(crate) fn remove_session(&mut self, id: Uuid) {
+        let title = self.state.sessions.get(&id)
+            .map(|s| s.display_title().to_string())
+            .unwrap_or_default();
+        let index = self.state.tab_order.iter().position(|&t| t == id).unwrap_or(0);
+        self.tab_bar_state.begin_close(id, title, index);
+
         if let Some(session) = self.state.sessions.remove(&id) {
             session.pty.shutdown();
         }

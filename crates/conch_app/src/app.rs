@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use conch_core::config;
-use egui::{Color32, RichText, ViewportCommand};
+use egui::{Color32, ViewportCommand};
 
 use crate::extra_window::ExtraWindow;
 use crate::input::ResolvedShortcuts;
@@ -35,6 +35,9 @@ pub struct ConchApp {
     pub(crate) last_blink: Instant,
     pub(crate) terminal_frame_cache: TerminalFrameCache,
 
+    // Tab bar.
+    pub(crate) tab_bar_state: crate::tab_bar::TabBarState,
+
     // Multi-window.
     pub(crate) extra_windows: Vec<ExtraWindow>,
     pub(crate) next_viewport_num: u32,
@@ -42,6 +45,7 @@ pub struct ConchApp {
     // System.
     pub(crate) ipc_listener: Option<IpcListener>,
     pub(crate) file_watcher: Option<FileWatcher>,
+    pub(crate) has_ever_had_session: bool,
     pub(crate) quit_requested: bool,
     pub(crate) use_native_menu: bool,
     pub(crate) rt: Arc<tokio::runtime::Runtime>,
@@ -75,10 +79,12 @@ impl ConchApp {
             cursor_visible: true,
             last_blink: Instant::now(),
             terminal_frame_cache: TerminalFrameCache::default(),
+            tab_bar_state: crate::tab_bar::TabBarState::default(),
             extra_windows: Vec::new(),
             next_viewport_num: 1,
             ipc_listener,
             file_watcher,
+            has_ever_had_session: false,
             quit_requested: false,
             use_native_menu,
             rt,
@@ -243,9 +249,14 @@ impl eframe::App for ConchApp {
         self.handle_file_changes();
         self.handle_ipc();
 
-        // Open initial tab if no sessions exist.
+        // Open initial tab on first frame, close app when all sessions have exited.
         if self.state.sessions.is_empty() {
+            if self.has_ever_had_session {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+                return;
+            }
             self.open_local_tab();
+            self.has_ever_had_session = true;
         }
 
         // Handle copy from selection (Cmd+C on macOS).
@@ -314,39 +325,17 @@ impl eframe::App for ConchApp {
             255,
         );
 
-        // Tab bar at the top.
-        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let tab_order = self.state.tab_order.clone();
-                for &id in &tab_order {
-                    if let Some(session) = self.state.sessions.get(&id) {
-                        let is_active = self.state.active_tab == Some(id);
-                        let title = session.display_title();
-                        let text = if is_active {
-                            RichText::new(title).size(11.0).strong()
-                        } else {
-                            RichText::new(title).size(11.0)
-                        };
-                        let resp = ui.selectable_label(is_active, text);
-                        if resp.clicked() {
-                            self.state.active_tab = Some(id);
-                        }
-                        // Middle-click to close.
-                        if resp.middle_clicked() {
-                            self.remove_session(id);
-                            if self.state.sessions.is_empty() {
-                                self.open_local_tab();
-                            }
-                        }
-                    }
+        // Tab bar at the top (only when more than one tab).
+        for action in crate::tab_bar::show(ctx, &self.state, &mut self.tab_bar_state) {
+            match action {
+                crate::tab_bar::TabBarAction::SwitchTo(id) => {
+                    self.state.active_tab = Some(id);
                 }
-
-                // "+" button to add a new tab.
-                if ui.small_button("+").on_hover_text("New tab").clicked() {
-                    self.open_local_tab();
+                crate::tab_bar::TabBarAction::Close(id) => {
+                    self.remove_session(id);
                 }
-            });
-        });
+            }
+        }
 
         // Central panel: terminal.
         let mut pending_resize: Option<(u16, u16)> = None;
