@@ -326,6 +326,24 @@ impl eframe::App for ConchApp {
             255,
         );
 
+        // Buttonless: no native title bar, so add a thin drag region at the top
+        // so the user can still move the window.
+        if self.state.user_config.window.decorations == config::WindowDecorations::Buttonless {
+            let drag_h = self.cell_height.max(6.0);
+            egui::TopBottomPanel::top("drag_region")
+                .exact_height(drag_h)
+                .frame(egui::Frame::NONE.fill(Color32::from_rgba_unmultiplied(
+                    bg_color.r(), bg_color.g(), bg_color.b(), 180,
+                )))
+                .show(ctx, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    let response = ui.interact(rect, ui.id().with("drag"), egui::Sense::drag());
+                    if response.drag_started() {
+                        ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+                    }
+                });
+        }
+
         // Tab bar at the top (only when more than one tab).
         for action in crate::tab_bar::show(ctx, &self.state, &mut self.tab_bar_state) {
             match action {
