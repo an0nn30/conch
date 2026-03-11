@@ -57,11 +57,11 @@ y = 0.0
 [colors]
 
 # Color scheme name. Themes are loaded from ~/.config/conch/themes/<name>.toml.
-# Built-in themes include: dracula, solarized-dark, solarized-light, gruvbox,
-# nord, one-dark, tokyo-night, catppuccin-mocha, etc.
+# Built-in fallback: dracula.
 theme = "dracula"
 
 # UI appearance mode: "dark", "light", or "system".
+# Controls the native title bar and egui widget styling.
 appearance_mode = "dark"
 
 # ---------------------------------------------------------------------------
@@ -74,16 +74,7 @@ appearance_mode = "dark"
 program = ""
 
 # Arguments passed to the shell program.
-# Example: to launch tmux via bash:
-#   program = "/opt/homebrew/bin/bash"
-#   args = ["-c", "/opt/homebrew/bin/tmux"]
 args = []
-
-# Command to send to the shell after it starts (e.g. "tmux attach || tmux new").
-startup_command = ""
-
-# Whether to automatically wrap the shell in tmux.
-use_tmux = false
 
 # Scroll sensitivity multiplier (0.0–1.0). Lower = slower scrolling.
 # Default 0.15, tuned for macOS trackpads. Increase for external mice.
@@ -120,32 +111,8 @@ blinking = true
 new_tab = "cmd+t"
 close_tab = "cmd+w"
 new_window = "cmd+shift+n"
-new_connection = "cmd+n"
 quit = "cmd+q"
-toggle_left_sidebar = "cmd+shift+b"
-toggle_right_sidebar = "cmd+shift+e"
-focus_quick_connect = "cmd+/"
-focus_plugin_search = "cmd+shift+p"
-focus_files = "cmd+shift+f"
 zen_mode = "cmd+shift+z"
-ssh_tunnels = "cmd+shift+t"
-toggle_bottom_panel = "cmd+j"
-notification_history = "cmd+shift+h"
-
-# Plugin keybinding overrides.
-# Keys are "plugin-filename-stem.action_name", values are binding strings.
-[conch.keyboard.plugins]
-# "system-info.open_panel" = "cmd+shift+i"
-# "encrypt-decrypt.run" = "cmd+shift+y"
-# "demo-bottom-panel.open_panel" = "cmd+shift+d"
-
-# ---------------------------------------------------------------------------
-# Conch — Plugin Engine
-# ---------------------------------------------------------------------------
-
-# Set to false to completely disable the plugin engine.
-# The Lua runtime will not load and no plugins will be scanned or run.
-# plugins_enabled = false
 
 # ---------------------------------------------------------------------------
 # Conch — UI Settings

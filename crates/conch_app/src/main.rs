@@ -19,6 +19,17 @@ use app::ConchApp;
 use clap::{Parser, Subcommand};
 use conch_core::config;
 
+/// Apply the configured appearance mode to egui and the native window chrome.
+pub(crate) fn apply_appearance_mode(ctx: &egui::Context, mode: config::AppearanceMode) {
+    let (theme_pref, sys_theme) = match mode {
+        config::AppearanceMode::Dark => (egui::ThemePreference::Dark, egui::SystemTheme::Dark),
+        config::AppearanceMode::Light => (egui::ThemePreference::Light, egui::SystemTheme::Light),
+        config::AppearanceMode::System => (egui::ThemePreference::System, egui::SystemTheme::SystemDefault),
+    };
+    ctx.set_theme(theme_pref);
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(sys_theme));
+}
+
 #[derive(Parser)]
 #[command(name = "conch", about = "Conch terminal emulator")]
 struct Cli {
@@ -191,10 +202,13 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let appearance_mode = user_config.colors.appearance_mode;
+
     eframe::run_native(
         "Conch",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            apply_appearance_mode(&cc.egui_ctx, appearance_mode);
             Ok(Box::new(ConchApp::new(rt)))
         }),
     )

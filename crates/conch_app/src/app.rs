@@ -171,7 +171,7 @@ impl ConchApp {
     }
 
     /// Handle file watcher events.
-    fn handle_file_changes(&mut self) {
+    fn handle_file_changes(&mut self, ctx: &egui::Context) {
         let Some(watcher) = &mut self.file_watcher else { return };
         let changes = watcher.poll();
         for change in changes {
@@ -182,6 +182,7 @@ impl ConchApp {
                         self.shortcuts = ResolvedShortcuts::from_config(&new_config.conch.keyboard);
                         let scheme = conch_core::color_scheme::resolve_theme(&new_config.colors.theme);
                         self.state.colors = ResolvedColors::from_scheme(&scheme);
+                        crate::apply_appearance_mode(ctx, new_config.colors.appearance_mode);
                         self.state.user_config = new_config;
                     }
                 }
@@ -246,7 +247,7 @@ impl eframe::App for ConchApp {
 
         // Poll events.
         self.poll_events();
-        self.handle_file_changes();
+        self.handle_file_changes(ctx);
         self.handle_ipc();
 
         // Open initial tab on first frame, close app when all sessions have exited.
