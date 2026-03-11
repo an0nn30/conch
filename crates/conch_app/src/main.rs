@@ -2,7 +2,6 @@
 
 mod app;
 mod extra_window;
-mod icons;
 mod input;
 mod ipc;
 mod mouse;

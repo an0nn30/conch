@@ -6,8 +6,6 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true }
 toml = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
-uuid = { workspace = true }
 dirs = { workspace = true }
 log = { workspace = true }

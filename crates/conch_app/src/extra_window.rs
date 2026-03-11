@@ -7,7 +7,6 @@ use conch_core::config;
 use egui::ViewportBuilder;
 use uuid::Uuid;
 
-use crate::icons::IconCache;
 use crate::input::ResolvedShortcuts;
 use crate::mouse::Selection;
 use crate::sessions::create_local_session;
@@ -88,7 +87,6 @@ impl ExtraWindow {
         &mut self,
         _colors: &ResolvedColors,
         _shortcuts: &ResolvedShortcuts,
-        _icon_cache: &Option<IconCache>,
         _user_config: &config::UserConfig,
         _font_size: f32,
     ) {

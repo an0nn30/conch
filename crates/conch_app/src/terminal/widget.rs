@@ -2,7 +2,6 @@
 //!
 //! The core rendering loop iterates over `Term::renderable_content().display_iter`,
 //! painting cell backgrounds and characters with `rect_filled` and `galley`.
-//! This replaces the wgpu shader pipeline from the old `conch_terminal` crate.
 
 use std::sync::Arc;
 

@@ -7,7 +7,6 @@ use conch_core::config;
 use egui::{Color32, RichText, ViewportCommand};
 
 use crate::extra_window::ExtraWindow;
-use crate::icons::IconCache;
 use crate::input::ResolvedShortcuts;
 use crate::ipc::{IpcListener, IpcMessage};
 use crate::mouse::Selection;
@@ -35,7 +34,6 @@ pub struct ConchApp {
     pub(crate) cursor_visible: bool,
     pub(crate) last_blink: Instant,
     pub(crate) terminal_frame_cache: TerminalFrameCache,
-    pub(crate) icon_cache: Option<IconCache>,
 
     // Multi-window.
     pub(crate) extra_windows: Vec<ExtraWindow>,
@@ -77,7 +75,6 @@ impl ConchApp {
             cursor_visible: true,
             last_blink: Instant::now(),
             terminal_frame_cache: TerminalFrameCache::default(),
-            icon_cache: None,
             extra_windows: Vec::new(),
             next_viewport_num: 1,
             ipc_listener,
@@ -224,11 +221,6 @@ impl eframe::App for ConchApp {
         // Request continuous repainting for terminal output and cursor blink.
         ctx.request_repaint();
 
-        // Load icon cache on first frame.
-        if self.icon_cache.is_none() {
-            self.icon_cache = Some(IconCache::load(ctx));
-        }
-
         // Measure font cell size (and re-measure on DPI changes).
         let ppp = ctx.pixels_per_point();
         if !self.cell_size_measured || (ppp - self.last_pixels_per_point).abs() > 0.001 {
@@ -287,7 +279,7 @@ impl eframe::App for ConchApp {
         let mut windows_to_close: Vec<usize> = Vec::new();
 
         for (i, window) in self.extra_windows.iter_mut().enumerate() {
-            window.update(&self.state.colors, &self.shortcuts, &self.icon_cache, &self.state.user_config, self.state.user_config.font.size);
+            window.update(&self.state.colors, &self.shortcuts, &self.state.user_config, self.state.user_config.font.size);
 
             if window.should_close {
                 windows_to_close.push(i);
