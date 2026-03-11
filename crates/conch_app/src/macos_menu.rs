@@ -330,10 +330,11 @@ pub fn add_window_to_tab_group() {
         return;
     }
 
-    // Ensure all visible windows have the right tabbing config.
+    // Ensure all visible windows have the right tabbing config + transparent titlebar.
     for w in &visible {
         w.setTabbingIdentifier(&ns_id);
         w.setTabbingMode(NSWindowTabbingMode::Preferred);
+        w.setTitlebarAppearsTransparent(true);
     }
 
     // Find a host: a window that already has tabbedWindows.

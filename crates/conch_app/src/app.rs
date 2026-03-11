@@ -2712,7 +2712,7 @@ impl ConchApp {
         }
 
         #[cfg(target_os = "macos")]
-        if !self.use_native_menu {
+        if !self.use_native_menu || self.use_native_tabs {
             crate::macos_menu::set_titlebar_transparent();
         }
 
