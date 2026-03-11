@@ -14,6 +14,15 @@ use crate::connector::EventProxy;
 use crate::sftp::SftpFileProvider;
 use super::client::{ConnectParams, ClientHandler, HostKeyTx, ShellConnectResult, SshConnection, connect_shell};
 
+/// SSH connection metadata needed for rsync transport.
+#[derive(Debug, Clone)]
+pub struct SshConnectInfo {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub identity_file: Option<std::path::PathBuf>,
+}
+
 /// SSH terminal session — bridges an async SSH channel to alacritty_terminal's Term.
 pub struct SshSession {
     /// The terminal state (same as LocalSession).
@@ -24,6 +33,8 @@ pub struct SshSession {
     event_rx: Option<mpsc::UnboundedReceiver<alacritty_terminal::event::Event>>,
     /// SSH handle for opening additional channels (SFTP, tunnels).
     ssh_handle: Arc<Handle<ClientHandler>>,
+    /// Connection metadata for rsync transport.
+    connect_info: SshConnectInfo,
 }
 
 enum SshInput {
@@ -63,6 +74,7 @@ pub enum SshConnectResult {
         event_proxy: EventProxy,
         event_rx: mpsc::UnboundedReceiver<alacritty_terminal::event::Event>,
         term_config: term::Config,
+        connect_info: SshConnectInfo,
     },
 }
 
@@ -90,10 +102,17 @@ impl SshSession {
             .await
             .context("Failed to establish SSH shell session")?;
 
+        let connect_info = SshConnectInfo {
+            host: params.host.clone(),
+            port: params.port,
+            user: params.user.clone(),
+            identity_file: params.identity_file.clone(),
+        };
+
         match result {
             ShellConnectResult::Connected(ssh_conn) => {
                 Ok(SshConnectResult::Connected(
-                    Self::finish_setup(ssh_conn, term, event_proxy, event_rx),
+                    Self::finish_setup(ssh_conn, term, event_proxy, event_rx, connect_info),
                 ))
             }
             ShellConnectResult::NeedsPassword(pending_auth) => {
@@ -103,6 +122,7 @@ impl SshSession {
                     event_proxy,
                     event_rx,
                     term_config,
+                    connect_info,
                 })
             }
         }
@@ -118,12 +138,13 @@ impl SshSession {
         event_proxy: EventProxy,
         event_rx: mpsc::UnboundedReceiver<alacritty_terminal::event::Event>,
         term_config: term::Config,
+        connect_info: SshConnectInfo,
     ) -> Result<SshPasswordResult> {
         match pending_auth.try_password(password).await? {
             true => {
                 let ssh_conn = pending_auth.open_shell().await?;
                 Ok(SshPasswordResult::Connected(
-                    Self::finish_setup(ssh_conn, term, event_proxy, event_rx),
+                    Self::finish_setup(ssh_conn, term, event_proxy, event_rx, connect_info),
                 ))
             }
             false => {
@@ -133,6 +154,7 @@ impl SshSession {
                     event_proxy,
                     event_rx,
                     term_config,
+                    connect_info,
                 }))
             }
         }
@@ -144,6 +166,7 @@ impl SshSession {
         term: Arc<FairMutex<Term<EventProxy>>>,
         event_proxy: EventProxy,
         event_rx: mpsc::UnboundedReceiver<alacritty_terminal::event::Event>,
+        connect_info: SshConnectInfo,
     ) -> Self {
         let ssh_handle = Arc::new(ssh_conn.handle);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -161,6 +184,7 @@ impl SshSession {
             input_tx,
             event_rx: Some(event_rx),
             ssh_handle,
+            connect_info,
         }
     }
 
@@ -190,6 +214,11 @@ impl SshSession {
     /// Get a reference to the underlying SSH handle (for spawning SFTP workers, etc.).
     pub fn ssh_handle(&self) -> &Arc<Handle<ClientHandler>> {
         &self.ssh_handle
+    }
+
+    /// Get the SSH connection metadata (for rsync transport).
+    pub fn connect_info(&self) -> &SshConnectInfo {
+        &self.connect_info
     }
 
     /// Open an SFTP session over this SSH connection.

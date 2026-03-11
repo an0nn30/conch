@@ -246,6 +246,7 @@ impl ConchApp {
                     bytes_transferred: 0,
                     total_bytes: 0,
                     cancel: cancel.clone(),
+                    use_rsync: self.use_rsync,
                 });
                 if let Some(tx) = &self.sftp_cmd_tx {
                     let _ = tx.send(SftpCmd::Upload { local_path, remote_dir, cancel });
@@ -265,6 +266,7 @@ impl ConchApp {
                     bytes_transferred: 0,
                     total_bytes: 0,
                     cancel: cancel.clone(),
+                    use_rsync: self.use_rsync,
                 });
                 if let Some(tx) = &self.sftp_cmd_tx {
                     let _ = tx.send(SftpCmd::Download { remote_path, local_dir, cancel });

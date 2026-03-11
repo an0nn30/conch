@@ -6,6 +6,10 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+/// I/O buffer size for SFTP transfers (2 MB).
+/// Larger buffers reduce per-packet SFTP protocol overhead.
+const TRANSFER_BUF_SIZE: usize = 2 * 1024 * 1024;
+
 /// A file entry returned by listing a directory.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -184,7 +188,7 @@ impl SftpFileProvider {
             .with_context(|| format!("Failed to create {}", local_path.display()))?;
 
         let mut transferred: u64 = 0;
-        let mut buf = vec![0u8; 256 * 1024]; // 256 KB chunks
+        let mut buf = vec![0u8; TRANSFER_BUF_SIZE];
         loop {
             if cancel.load(Ordering::Relaxed) {
                 anyhow::bail!("cancelled");
@@ -242,7 +246,7 @@ impl SftpFileProvider {
             .with_context(|| format!("SFTP: failed to create {}", remote_path.display()))?;
 
         let mut transferred: u64 = 0;
-        let mut buf = vec![0u8; 256 * 1024]; // 256 KB chunks
+        let mut buf = vec![0u8; TRANSFER_BUF_SIZE];
         loop {
             if cancel.load(Ordering::Relaxed) {
                 anyhow::bail!("cancelled");
@@ -355,14 +359,19 @@ pub enum SftpEvent {
         success: bool,
         error: Option<String>,
     },
+    /// Indicates whether rsync is being used for transfers.
+    RsyncAvailable(bool),
 }
 
 /// Long-running async task that owns an `SftpFileProvider` and serves listing
-/// and transfer requests over channels.
+/// and transfer requests over channels. When `connect_info` is provided and
+/// rsync is available on both sides, file transfers use rsync over SSH instead
+/// of SFTP for better performance.
 pub async fn run_sftp_worker(
     ssh_handle: Arc<russh::client::Handle<crate::ssh::client::ClientHandler>>,
     mut cmd_rx: mpsc::UnboundedReceiver<SftpCmd>,
     result_tx: std::sync::mpsc::Sender<SftpEvent>,
+    connect_info: Option<crate::ssh::session::SshConnectInfo>,
 ) {
     // Open an SFTP channel.
     let channel = match ssh_handle.channel_open_session().await {
@@ -402,6 +411,32 @@ pub async fn run_sftp_worker(
             home: home.clone(),
         }));
     }
+
+    // Check rsync availability and compression support once at worker startup.
+    let (use_rsync, use_zstd) = if connect_info.is_some() {
+        let (local_check, remote_check) = tokio::join!(
+            crate::rsync::check_local_rsync(),
+            crate::rsync::check_remote_rsync(&ssh_handle),
+        );
+        if local_check.available && remote_check.available {
+            let zstd = local_check.has_zstd && remote_check.has_zstd;
+            let compress = if zstd { "zstd" } else { "zlib" };
+            log::info!("rsync available on both sides (compression: {compress})");
+            (true, zstd)
+        } else {
+            log::info!(
+                "rsync not available (local={}, remote={}) — using SFTP",
+                local_check.available,
+                remote_check.available,
+            );
+            (false, false)
+        }
+    } else {
+        (false, false)
+    };
+
+    // Notify the UI about the transfer method.
+    let _ = result_tx.send(SftpEvent::RsyncAvailable(use_rsync));
 
     // Command loop.
     while let Some(cmd) = cmd_rx.recv().await {
@@ -451,7 +486,36 @@ pub async fn run_sftp_worker(
                     }
                 });
 
-                match provider.upload(&local_path, &remote_path, Some(prog_tx), &cancel).await {
+                let result = if use_rsync {
+                    let info = connect_info.as_ref().unwrap();
+                    match crate::rsync::rsync_upload(
+                        info, &local_path, &remote_path, &cancel, Some(prog_tx), use_zstd,
+                    ).await {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            log::warn!("rsync upload failed, falling back to SFTP: {e}");
+                            let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<TransferProgress>();
+                            let fb_result_tx = result_tx.clone();
+                            let fb_filename = filename.clone();
+                            let fb_handle = tokio::spawn(async move {
+                                while let Some(p) = fallback_rx.recv().await {
+                                    let _ = fb_result_tx.send(SftpEvent::TransferProgress {
+                                        filename: fb_filename.clone(),
+                                        bytes_transferred: p.bytes_transferred,
+                                        total_bytes: p.total_bytes,
+                                    });
+                                }
+                            });
+                            let r = provider.upload(&local_path, &remote_path, Some(fallback_tx), &cancel).await;
+                            let _ = fb_handle.await;
+                            r
+                        }
+                    }
+                } else {
+                    provider.upload(&local_path, &remote_path, Some(prog_tx), &cancel).await
+                };
+
+                match result {
                     Ok(()) => {
                         let _ = result_tx.send(SftpEvent::TransferComplete {
                             filename,
@@ -490,7 +554,36 @@ pub async fn run_sftp_worker(
                     }
                 });
 
-                match provider.download(&remote_path, &local_path, Some(prog_tx), &cancel).await {
+                let result = if use_rsync {
+                    let info = connect_info.as_ref().unwrap();
+                    match crate::rsync::rsync_download(
+                        info, &remote_path, &local_path, &cancel, Some(prog_tx), use_zstd,
+                    ).await {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            log::warn!("rsync download failed, falling back to SFTP: {e}");
+                            let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<TransferProgress>();
+                            let fb_result_tx = result_tx.clone();
+                            let fb_filename = filename.clone();
+                            let fb_handle = tokio::spawn(async move {
+                                while let Some(p) = fallback_rx.recv().await {
+                                    let _ = fb_result_tx.send(SftpEvent::TransferProgress {
+                                        filename: fb_filename.clone(),
+                                        bytes_transferred: p.bytes_transferred,
+                                        total_bytes: p.total_bytes,
+                                    });
+                                }
+                            });
+                            let r = provider.download(&remote_path, &local_path, Some(fallback_tx), &cancel).await;
+                            let _ = fb_handle.await;
+                            r
+                        }
+                    }
+                } else {
+                    provider.download(&remote_path, &local_path, Some(prog_tx), &cancel).await
+                };
+
+                match result {
                     Ok(()) => {
                         let _ = result_tx.send(SftpEvent::TransferComplete {
                             filename,

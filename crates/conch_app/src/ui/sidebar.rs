@@ -76,6 +76,8 @@ pub struct TransferStatus {
     pub total_bytes: u64,
     /// Set to true to cancel this transfer.
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether this transfer is using rsync (true) or SFTP (false).
+    pub use_rsync: bool,
 }
 
 /// Width of the vertical tab strip in pixels.
@@ -661,12 +663,13 @@ fn show_files_panel(
             .show(ui, |ui| {
                 for ts in transfers {
                     let arrow = if ts.upload { "\u{2191}" } else { "\u{2193}" };
+                    let method = if ts.use_rsync { "rsync" } else { "sftp" };
                     if ts.done {
                         let (label, color) = if let Some(e) = &ts.error {
-                            (format!("{arrow} {} — {e}", ts.filename), Color32::from_rgb(255, 100, 100))
+                            (format!("{arrow} {} [{method}] — {e}", ts.filename), Color32::from_rgb(255, 100, 100))
                         } else {
                             (
-                                format!("{arrow} {} — {} done", ts.filename, display_size(ts.total_bytes)),
+                                format!("{arrow} {} [{method}] — {} done", ts.filename, display_size(ts.total_bytes)),
                                 Color32::from_rgb(100, 200, 100),
                             )
                         };
@@ -677,17 +680,25 @@ fn show_files_panel(
                         // In-progress: filename row with cancel button.
                         ui.horizontal(|ui| {
                             ui.add(egui::Label::new(
-                                egui::RichText::new(format!("{arrow} {}", ts.filename))
+                                egui::RichText::new(format!("{arrow} {} [{method}]", ts.filename))
                                     .size(10.0),
                             ).truncate());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .add(egui::Button::new(
+                                let cancel_clicked = if let Some(close_img) = icons.and_then(|ic| ic.image(Icon::TabClose)) {
+                                    ui.add(
+                                        egui::ImageButton::new(close_img.fit_to_exact_size(Vec2::splat(10.0)))
+                                            .frame(false),
+                                    )
+                                    .on_hover_text("Cancel transfer")
+                                    .clicked()
+                                } else {
+                                    ui.add(egui::Button::new(
                                         egui::RichText::new("\u{2715}").size(9.0),
                                     ).small().frame(false))
                                     .on_hover_text("Cancel transfer")
                                     .clicked()
-                                {
+                                };
+                                if cancel_clicked {
                                     action = SidebarAction::CancelTransfer(ts.filename.clone());
                                 }
                             });

@@ -37,7 +37,7 @@ Think MobaXterm, but open source, cross-platform, and extensible.
 
 **SSH Sessions** — Save connections with proxy jump support, organized in folders. Password and key authentication. Quick-connect from the sidebar.
 
-**File Browser** — Side-by-side local and remote file browsing. Drag-and-drop SFTP uploads and downloads with progress tracking.
+**File Browser** — Side-by-side local and remote file browsing with progress tracking. Transfers use **rsync** when available on both sides (with zstd or zlib compression), falling back to **SFTP** with 2 MB buffered I/O automatically.
 
 **SSH Tunnels** — Persistent local port forwarding you can activate and deactivate without closing your session.
 
@@ -189,7 +189,7 @@ An example config is included in releases as `config.example.toml`.
 ```
 crates/
   conch_core/      Core data models, config, color schemes
-  conch_session/   SSH/local session management, PTY, SFTP, tunnels
+  conch_session/   SSH/local session management, PTY, SFTP, rsync, tunnels
   conch_plugin/    Lua plugin runtime and API bindings
   conch_app/       GUI application (eframe/egui)
 editors/

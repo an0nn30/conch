@@ -146,6 +146,8 @@ pub struct ConchApp {
     pub(crate) remote_home: Option<PathBuf>,
     pub(crate) last_active_tab: Option<Uuid>,
     pub(crate) transfers: Vec<sidebar::TransferStatus>,
+    /// Whether the current SFTP worker is using rsync for transfers.
+    pub(crate) use_rsync: bool,
 
     // Icons
     pub(crate) icon_cache: Option<IconCache>,
@@ -370,6 +372,7 @@ impl ConchApp {
             remote_home: None,
             last_active_tab: None,
             transfers: Vec::new(),
+            use_rsync: false,
             icon_cache: None,
             session_panel_state: SessionPanelState::default(),
             terminal_frame_cache: TerminalFrameCache::default(),
@@ -516,9 +519,10 @@ impl ConchApp {
 
                 // Spawn SFTP worker for the new SSH session.
                 let handle = Arc::clone(ssh_session.ssh_handle());
+                let info = ssh_session.connect_info().clone();
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (result_tx, result_rx) = std::sync::mpsc::channel();
-                self.rt.spawn(run_sftp_worker(handle, cmd_rx, result_tx));
+                self.rt.spawn(run_sftp_worker(handle, cmd_rx, result_tx, Some(info)));
 
                 // Request initial listing of the remote home directory.
                 let _ = cmd_tx.send(SftpCmd::List(PathBuf::from(".")));
@@ -531,6 +535,7 @@ impl ConchApp {
                 self.sftp_result_rx = Some(result_rx);
                 self.sftp_session_id = Some(id);
                 self.remote_home = None;
+                self.use_rsync = false;
 
                 let session = Session {
                     id,
@@ -583,14 +588,16 @@ impl ConchApp {
                                     let _ = old_tx.send(SftpCmd::Shutdown);
                                 }
                                 let handle = Arc::clone(ssh.ssh_handle());
+                                let info = ssh.connect_info().clone();
                                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
                                 let (result_tx, result_rx) = std::sync::mpsc::channel();
-                                self.rt.spawn(run_sftp_worker(handle, cmd_rx, result_tx));
+                                self.rt.spawn(run_sftp_worker(handle, cmd_rx, result_tx, Some(info)));
                                 let _ = cmd_tx.send(SftpCmd::List(PathBuf::from(".")));
                                 self.sftp_cmd_tx = Some(cmd_tx);
                                 self.sftp_result_rx = Some(result_rx);
                                 self.sftp_session_id = Some(id);
                                 self.remote_home = None;
+                                self.use_rsync = false;
                                 self.state.file_browser.remote_entries.clear();
                                 self.state.file_browser.remote_path = None;
                                 self.transfers.clear();
@@ -673,6 +680,7 @@ impl ConchApp {
                                 bytes_transferred: 0,
                                 total_bytes: 0,
                                 cancel: Arc::new(AtomicBool::new(false)),
+                                use_rsync: self.use_rsync,
                             });
                         }
 
@@ -719,6 +727,9 @@ impl ConchApp {
                         }
                         let local = self.state.file_browser.local_path.clone();
                         self.state.file_browser.local_entries = load_local_entries(&local);
+                    }
+                    SftpEvent::RsyncAvailable(available) => {
+                        self.use_rsync = available;
                     }
                 }
             }
@@ -2161,10 +2172,10 @@ impl eframe::App for ConchApp {
                                         self.rt.spawn(async move {
                                             match pending_result {
                                                 conch_session::SshConnectResult::NeedsPassword {
-                                                    pending_auth, term, event_proxy, event_rx, term_config,
+                                                    pending_auth, term, event_proxy, event_rx, term_config, connect_info,
                                                 } => {
                                                     match SshSession::try_password(
-                                                        pending_auth, &password, term, event_proxy, event_rx, term_config,
+                                                        pending_auth, &password, term, event_proxy, event_rx, term_config, connect_info,
                                                     ).await {
                                                         Ok(conch_session::SshPasswordResult::Connected(session)) => {
                                                             let _ = tx.send(SshConnectOutcome::Connected(session));
