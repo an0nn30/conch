@@ -183,6 +183,15 @@ pub fn setup_menu_bar(plugins: &[(usize, String)]) {
         view_item.setSubmenu(Some(&view_menu));
         main_menu.addItem(&view_item);
 
+        // ── Window ──
+        // macOS automatically adds tab management items (Show Tab Bar,
+        // Merge All Windows, etc.) to a menu registered as the windowsMenu.
+        let window_menu = make_menu(mtm, "Window");
+        let window_item = NSMenuItem::new(mtm);
+        window_item.setSubmenu(Some(&window_menu));
+        main_menu.addItem(&window_item);
+        app.setWindowsMenu(Some(&window_menu));
+
         // ── Help ──
         let help_menu = make_menu(mtm, "Help");
         help_menu.addItem(&make_item(mtm, "About Conch", sel!(aboutConch:), "", &responder));
@@ -265,4 +274,48 @@ pub fn set_tabbing_identifier(identifier: &str) {
     for window in windows.iter() {
         window.setTabbingIdentifier(&ns_id);
     }
+}
+
+/// Configure all windows for native macOS tab grouping.
+/// Sets tabbingMode to Preferred and assigns a shared tabbingIdentifier
+/// so macOS renders the native tab bar and groups windows together.
+pub fn configure_native_tabs(identifier: &str) {
+    use objc2_app_kit::NSWindowTabbingMode;
+    let mtm = MainThreadMarker::new()
+        .expect("configure_native_tabs must be called from the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    let windows = app.windows();
+    let ns_id = NSString::from_str(identifier);
+    for window in windows.iter() {
+        window.setTabbingIdentifier(&ns_id);
+        window.setTabbingMode(NSWindowTabbingMode::Preferred);
+    }
+}
+
+/// Select the native macOS tab at the given index (0-based).
+pub fn select_native_tab_at_index(index: usize) {
+    let mtm = MainThreadMarker::new()
+        .expect("select_native_tab_at_index must be called from the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    if let Some(key_window) = app.keyWindow() {
+        if let Some(tabs) = key_window.tabbedWindows() {
+            if index < tabs.len() {
+                let target = &tabs.objectAtIndex(index);
+                target.makeKeyAndOrderFront(None);
+            }
+        }
+    }
+}
+
+/// Returns the number of native tabs in the currently focused window's tab group.
+#[allow(dead_code)]
+pub fn native_tab_count() -> usize {
+    let Some(mtm) = MainThreadMarker::new() else { return 0 };
+    let app = NSApplication::sharedApplication(mtm);
+    if let Some(key_window) = app.keyWindow() {
+        if let Some(tabs) = key_window.tabbedWindows() {
+            return tabs.len();
+        }
+    }
+    1
 }

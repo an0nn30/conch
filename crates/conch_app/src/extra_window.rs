@@ -46,6 +46,7 @@ pub(crate) struct SharedState<'a> {
     pub panel_names: &'a HashMap<usize, String>,
     pub plugin_icons: &'a HashMap<usize, egui::TextureHandle>,
     pub use_native_menu: bool,
+    pub use_native_tabs: bool,
     pub bottom_panel_tabs: &'a [usize],
     pub transfers: &'a [sidebar::TransferStatus],
 }
@@ -766,8 +767,9 @@ impl ExtraWindow {
 
         // ---------------------------------------------------------------
         // 14. Tab bar (only when multiple tabs)
+        // On macOS with native tabs, the OS renders the tab bar.
         // ---------------------------------------------------------------
-        if self.tab_order.len() > 1 {
+        if self.tab_order.len() > 1 && !shared.use_native_tabs {
             self.render_tab_bar(ctx, shared.user_config, shared.icon_cache);
         }
 
@@ -1103,7 +1105,11 @@ impl ExtraWindow {
                                     )
                                     .clicked()
                                 {
-                                    self.open_local_tab(shared.user_config);
+                                    if shared.use_native_tabs {
+                                        self.pending_actions.push(ExtraWindowAction::SpawnNewWindow);
+                                    } else {
+                                        self.open_local_tab(shared.user_config);
+                                    }
                                     ui.close_menu();
                                 }
                                 if ui
@@ -1585,7 +1591,10 @@ impl ExtraWindow {
         for action in actions {
             match action {
                 KbAction::SwitchTab(idx) => {
-                    if let Some(&id) = self.tab_order.get(idx) {
+                    if shared.use_native_tabs {
+                        #[cfg(target_os = "macos")]
+                        crate::macos_menu::select_native_tab_at_index(idx);
+                    } else if let Some(&id) = self.tab_order.get(idx) {
                         self.active_tab = Some(id);
                     }
                 }
@@ -1593,13 +1602,23 @@ impl ExtraWindow {
                     self.pending_actions.push(ExtraWindowAction::SpawnNewWindow);
                 }
                 KbAction::NewTab => {
-                    self.open_local_tab(user_config);
+                    if shared.use_native_tabs {
+                        self.pending_actions.push(ExtraWindowAction::SpawnNewWindow);
+                    } else {
+                        self.open_local_tab(user_config);
+                    }
                 }
                 KbAction::CloseTab => {
                     if let Some(id) = self.active_tab {
                         self.remove_session(id);
                         if self.sessions.is_empty() {
-                            self.open_local_tab(user_config);
+                            if shared.use_native_tabs {
+                                // Native tabs: close this window; macOS switches
+                                // to the next tab automatically.
+                                self.should_close = true;
+                            } else {
+                                self.open_local_tab(user_config);
+                            }
                         }
                     }
                 }

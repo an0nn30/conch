@@ -55,6 +55,11 @@ impl ConchApp {
                                 _ => None,
                             };
                             if let Some(idx) = tab_num {
+                                if self.use_native_tabs {
+                                    #[cfg(target_os = "macos")]
+                                    crate::macos_menu::select_native_tab_at_index(idx);
+                                    return;
+                                }
                                 if let Some(&id) = self.state.tab_order.get(idx) {
                                     self.state.active_tab = Some(id);
                                     return;
@@ -79,9 +84,17 @@ impl ConchApp {
                                     self.remove_session(id);
                                     log::debug!("close_tab: session removed, {} remaining", self.state.sessions.len());
                                     if self.state.sessions.is_empty() {
-                                        log::debug!("close_tab: opening new local tab");
-                                        self.open_local_tab();
-                                        log::debug!("close_tab: new tab opened");
+                                        if self.use_native_tabs {
+                                            // With native tabs, closing the last session
+                                            // closes this window; macOS switches to the
+                                            // next native tab automatically.
+                                            log::debug!("close_tab: native tabs, requesting window close");
+                                            self.quit_requested = true;
+                                        } else {
+                                            log::debug!("close_tab: opening new local tab");
+                                            self.open_local_tab();
+                                            log::debug!("close_tab: new tab opened");
+                                        }
                                     }
                                 }
                                 return;

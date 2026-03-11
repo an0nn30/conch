@@ -161,6 +161,8 @@ pub struct ConchApp {
 
     // Transient UI state
     pub(crate) use_native_menu: bool,
+    /// On macOS, use native OS tab bar instead of custom egui tab bar.
+    pub(crate) use_native_tabs: bool,
     /// The right sidebar was opened temporarily for quick connect (Cmd+/).
     pub(crate) quick_connect_opened_sidebar: bool,
     /// The left sidebar was opened temporarily for plugin search (Cmd+Shift+P).
@@ -375,6 +377,7 @@ impl ConchApp {
             terminal_frame_cache: TerminalFrameCache::default(),
             last_window_title: String::new(),
             use_native_menu,
+            use_native_tabs: cfg!(target_os = "macos"),
             quick_connect_opened_sidebar: false,
             plugin_search_opened_sidebar: false,
             plugin_search_query: String::new(),
@@ -1182,7 +1185,16 @@ impl eframe::App for ConchApp {
                     }
                     crate::ipc::IpcMessage::CreateTab { working_directory } => {
                         let cwd = working_directory.map(std::path::PathBuf::from);
-                        if let Some((id, session)) = create_local_session(&self.state.user_config, cwd) {
+                        if self.use_native_tabs {
+                            // With native tabs, each tab is its own viewport.
+                            if let Some((_, session)) = create_local_session(&self.state.user_config, cwd) {
+                                let num = self.next_viewport_num;
+                                self.next_viewport_num += 1;
+                                let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
+                                let builder = self.build_extra_viewport();
+                                self.extra_windows.push(ExtraWindow::new(viewport_id, builder, session));
+                            }
+                        } else if let Some((id, session)) = create_local_session(&self.state.user_config, cwd) {
                             self.state.sessions.insert(id, session);
                             self.state.tab_order.push(id);
                             self.state.active_tab = Some(id);
@@ -1800,7 +1812,8 @@ impl eframe::App for ConchApp {
         self.handle_session_panel_action(panel_action);
 
         // Tab bar — only shown when multiple tabs are open.
-        if self.state.tab_order.len() > 1 {
+        // On macOS with native tabs, the OS renders the tab bar, so skip this.
+        if self.state.tab_order.len() > 1 && !self.use_native_tabs {
         egui::TopBottomPanel::top("tab_bar")
             .exact_height(28.0)
             .frame(egui::Frame::NONE)
@@ -2407,6 +2420,7 @@ impl ConchApp {
                 panel_names: &self.panel_names,
                 plugin_icons: &self.plugin_icons,
                 use_native_menu: self.use_native_menu,
+                use_native_tabs: self.use_native_tabs,
                 bottom_panel_tabs: &self.bottom_panel_tabs,
                 transfers: &self.transfers,
             };
@@ -2427,6 +2441,12 @@ impl ConchApp {
             }
         }
         self.focused_extra_window = focused_extra;
+
+        // Ensure any newly created viewports get native tab configuration.
+        #[cfg(target_os = "macos")]
+        if self.use_native_tabs {
+            crate::macos_menu::configure_native_tabs("com.conch.terminal");
+        }
 
         for win in &mut extra {
             for action in win.pending_actions.drain(..) {
@@ -2685,7 +2705,11 @@ impl ConchApp {
         }
 
         #[cfg(target_os = "macos")]
-        crate::macos_menu::set_tabbing_identifier("com.conch.terminal");
+        if self.use_native_tabs {
+            crate::macos_menu::configure_native_tabs("com.conch.terminal");
+        } else {
+            crate::macos_menu::set_tabbing_identifier("com.conch.terminal");
+        }
 
         self.style_applied = true;
     }

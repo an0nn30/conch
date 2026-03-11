@@ -38,14 +38,21 @@ impl ConchApp {
     }
 
     /// Open a new local terminal tab.
+    /// On macOS with native tabs, this spawns a new OS window (macOS groups
+    /// them into the native tab bar). On other platforms, adds to the current
+    /// window's tab list.
     pub(crate) fn open_local_tab(&mut self) {
-        let _ = open_local_terminal(
-            &mut self.state,
-            self.last_cols,
-            self.last_rows,
-            self.cell_width,
-            self.cell_height,
-        );
+        if self.use_native_tabs {
+            self.spawn_extra_window();
+        } else {
+            let _ = open_local_terminal(
+                &mut self.state,
+                self.last_cols,
+                self.last_rows,
+                self.cell_width,
+                self.cell_height,
+            );
+        }
     }
 
     /// Build a `ViewportBuilder` for extra windows that matches the main window's
