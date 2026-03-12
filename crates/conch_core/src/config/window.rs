@@ -56,3 +56,64 @@ impl Default for WindowConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct DecWrapper {
+        decorations: WindowDecorations,
+    }
+
+    fn parse_dec(toml_str: &str) -> Result<WindowDecorations, toml::de::Error> {
+        let w: DecWrapper = toml::from_str(toml_str)?;
+        Ok(w.decorations)
+    }
+
+    #[test]
+    fn decorations_default_is_full() {
+        assert_eq!(WindowDecorations::default(), WindowDecorations::Full);
+    }
+
+    #[test]
+    fn decorations_deserialize_full() {
+        assert_eq!(parse_dec(r#"decorations = "Full""#).unwrap(), WindowDecorations::Full);
+    }
+
+    #[test]
+    fn decorations_deserialize_case_insensitive() {
+        assert_eq!(parse_dec(r#"decorations = "transparent""#).unwrap(), WindowDecorations::Transparent);
+        assert_eq!(parse_dec(r#"decorations = "BUTTONLESS""#).unwrap(), WindowDecorations::Buttonless);
+    }
+
+    #[test]
+    fn decorations_deserialize_none() {
+        assert_eq!(parse_dec(r#"decorations = "none""#).unwrap(), WindowDecorations::None);
+    }
+
+    #[test]
+    fn decorations_deserialize_buttonless() {
+        assert_eq!(parse_dec(r#"decorations = "buttonless""#).unwrap(), WindowDecorations::Buttonless);
+    }
+
+    #[test]
+    fn decorations_invalid_value_errors() {
+        assert!(parse_dec(r#"decorations = "fancy""#).is_err());
+    }
+
+    #[test]
+    fn dimensions_default() {
+        let d = WindowDimensions::default();
+        assert_eq!(d.columns, 150);
+        assert_eq!(d.lines, 50);
+    }
+
+    #[test]
+    fn window_config_roundtrip() {
+        let cfg = WindowConfig::default();
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let parsed: WindowConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.dimensions, cfg.dimensions);
+    }
+}

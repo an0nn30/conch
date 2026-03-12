@@ -48,3 +48,82 @@ impl SizeInfo {
         (x, y)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Standard 8x16 monospace cell, 800x600 viewport.
+    fn standard() -> SizeInfo {
+        SizeInfo::new(800.0, 600.0, 8.0, 16.0)
+    }
+
+    #[test]
+    fn new_computes_padding() {
+        let s = SizeInfo::new(805.0, 610.0, 8.0, 16.0);
+        // 805 % 8 = 5, padding_x = floor(5/2) = 2.
+        assert_eq!(s.padding_x, 2.0);
+        // 610 % 16 = 2, padding_y = floor(2/2) = 1.
+        assert_eq!(s.padding_y, 1.0);
+    }
+
+    #[test]
+    fn new_zero_padding_when_exact_fit() {
+        let s = SizeInfo::new(800.0, 640.0, 8.0, 16.0);
+        // 800 % 8 = 0, 640 % 16 = 0.
+        assert_eq!(s.padding_x, 0.0);
+        assert_eq!(s.padding_y, 0.0);
+    }
+
+    #[test]
+    fn columns_exact() {
+        let s = standard();
+        // 800 / 8 = 100 columns (no padding when exact).
+        assert_eq!(s.columns(), 100);
+    }
+
+    #[test]
+    fn rows_exact() {
+        let s = SizeInfo::new(800.0, 640.0, 8.0, 16.0);
+        assert_eq!(s.rows(), 40);
+    }
+
+    #[test]
+    fn columns_with_padding() {
+        let s = SizeInfo::new(805.0, 600.0, 8.0, 16.0);
+        // padding_x = 2, usable = 805 - 4 = 801, cols = floor(801/8) = 100.
+        assert_eq!(s.columns(), 100);
+    }
+
+    #[test]
+    fn cell_position_origin() {
+        let s = SizeInfo::new(800.0, 640.0, 8.0, 16.0);
+        // No padding, so (0,0) is at origin.
+        assert_eq!(s.cell_position(0, 0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn cell_position_with_padding() {
+        let s = SizeInfo::new(805.0, 610.0, 8.0, 16.0);
+        // padding = (2.0, 1.0), cell (0,0) starts at padding.
+        assert_eq!(s.cell_position(0, 0), (2.0, 1.0));
+    }
+
+    #[test]
+    fn cell_position_offset() {
+        let s = SizeInfo::new(800.0, 640.0, 8.0, 16.0);
+        // Cell (5, 3): x = 0 + 5*8 = 40, y = 0 + 3*16 = 48.
+        assert_eq!(s.cell_position(5, 3), (40.0, 48.0));
+    }
+
+    #[test]
+    fn cell_position_last_cell() {
+        let s = SizeInfo::new(800.0, 640.0, 8.0, 16.0);
+        let cols = s.columns();
+        let rows = s.rows();
+        let (x, y) = s.cell_position(cols - 1, rows - 1);
+        // Should be within viewport.
+        assert!(x + s.cell_width <= s.width);
+        assert!(y + s.cell_height <= s.height);
+    }
+}

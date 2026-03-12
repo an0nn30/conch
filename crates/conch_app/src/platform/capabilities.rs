@@ -47,3 +47,68 @@ impl PlatformCapabilities {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_capable() -> PlatformCapabilities {
+        PlatformCapabilities {
+            fullsize_content_view: true,
+            transparent_windows: true,
+            buttonless_decorations: true,
+            native_global_menu: true,
+        }
+    }
+
+    fn no_capabilities() -> PlatformCapabilities {
+        PlatformCapabilities {
+            fullsize_content_view: false,
+            transparent_windows: false,
+            buttonless_decorations: false,
+            native_global_menu: false,
+        }
+    }
+
+    #[test]
+    fn effective_full_always_allowed() {
+        let p = no_capabilities();
+        assert_eq!(p.effective_decorations(WindowDecorations::Full), WindowDecorations::Full);
+    }
+
+    #[test]
+    fn effective_none_always_allowed() {
+        let p = no_capabilities();
+        assert_eq!(p.effective_decorations(WindowDecorations::None), WindowDecorations::None);
+    }
+
+    #[test]
+    fn effective_buttonless_falls_back_when_unsupported() {
+        let p = no_capabilities();
+        assert_eq!(p.effective_decorations(WindowDecorations::Buttonless), WindowDecorations::Full);
+    }
+
+    #[test]
+    fn effective_buttonless_allowed_when_supported() {
+        let p = all_capable();
+        assert_eq!(p.effective_decorations(WindowDecorations::Buttonless), WindowDecorations::Buttonless);
+    }
+
+    #[test]
+    fn effective_transparent_falls_back_when_unsupported() {
+        let p = no_capabilities();
+        assert_eq!(p.effective_decorations(WindowDecorations::Transparent), WindowDecorations::Full);
+    }
+
+    #[test]
+    fn effective_transparent_allowed_when_supported() {
+        let p = all_capable();
+        assert_eq!(p.effective_decorations(WindowDecorations::Transparent), WindowDecorations::Transparent);
+    }
+
+    #[test]
+    fn current_returns_valid_struct() {
+        // Smoke test — just ensure it doesn't panic.
+        let _ = PlatformCapabilities::current();
+    }
+}

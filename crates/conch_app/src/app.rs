@@ -1,12 +1,20 @@
 //! Main application struct and egui update loop.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use conch_core::config;
+use conch_plugin::bus::PluginBus;
+use conch_plugin::native::manager::NativePluginManager;
+use conch_plugin_sdk::PanelLocation;
 use egui::ViewportCommand;
+use parking_lot::Mutex;
+use tokio::sync::oneshot;
 
 use crate::extra_window::ExtraWindow;
+use crate::host::bridge::{self, PanelRegistry};
+use crate::host::plugin_manager_ui::PluginManagerState;
 use crate::input::ResolvedShortcuts;
 use crate::ipc::{IpcListener, IpcMessage};
 use crate::menu_bar::MenuBarState;
@@ -43,6 +51,25 @@ pub struct ConchApp {
     pub(crate) context_menu_state: crate::context_menu::ContextMenuState,
     pub(crate) platform: PlatformCapabilities,
 
+    // Plugin system.
+    pub(crate) show_plugin_manager: bool,
+    pub(crate) plugin_manager: PluginManagerState,
+    pub(crate) plugin_bus: Arc<PluginBus>,
+    pub(crate) panel_registry: Arc<Mutex<PanelRegistry>>,
+    pub(crate) native_plugin_mgr: NativePluginManager,
+    /// Pending render responses from plugin threads (plugin_name → receiver).
+    pub(crate) render_pending: HashMap<String, oneshot::Receiver<String>>,
+    /// Cached widget JSON per plugin name (for rendering between polls).
+    pub(crate) render_cache: HashMap<String, String>,
+    /// Mutable text input state for plugin panels (keyed by widget id).
+    pub(crate) plugin_text_state: HashMap<String, String>,
+    /// Panel visibility toggles.
+    pub(crate) left_panel_visible: bool,
+    pub(crate) right_panel_visible: bool,
+    pub(crate) bottom_panel_visible: bool,
+    /// Active panel tab per location (handle of the selected panel).
+    pub(crate) active_panel_tab: HashMap<PanelLocation, u64>,
+
     // Multi-window.
     pub(crate) extra_windows: Vec<ExtraWindow>,
     pub(crate) next_viewport_num: u32,
@@ -71,7 +98,14 @@ impl ConchApp {
         let ipc_listener = IpcListener::start();
         let file_watcher = FileWatcher::start();
 
-        Self {
+        // Plugin infrastructure.
+        let plugin_bus = Arc::new(PluginBus::new());
+        let panel_registry = Arc::new(Mutex::new(PanelRegistry::new()));
+        bridge::init_bridge(Arc::clone(&plugin_bus), Arc::clone(&panel_registry));
+        let host_api = bridge::build_host_api();
+        let native_plugin_mgr = NativePluginManager::new(Arc::clone(&plugin_bus), host_api);
+
+        let mut app = Self {
             state,
             shortcuts,
             selection: Selection::default(),
@@ -88,6 +122,18 @@ impl ConchApp {
             menu_bar_state,
             context_menu_state: crate::context_menu::ContextMenuState::default(),
             platform,
+            show_plugin_manager: false,
+            plugin_manager: PluginManagerState::default(),
+            plugin_bus,
+            panel_registry,
+            native_plugin_mgr,
+            render_pending: HashMap::new(),
+            render_cache: HashMap::new(),
+            plugin_text_state: HashMap::new(),
+            left_panel_visible: true,
+            right_panel_visible: true,
+            bottom_panel_visible: true,
+            active_panel_tab: HashMap::new(),
             extra_windows: Vec::new(),
             next_viewport_num: 1,
             ipc_listener,
@@ -95,7 +141,13 @@ impl ConchApp {
             has_ever_had_session: false,
             quit_requested: false,
             rt,
-        }
+        };
+
+        // Discover plugins and auto-load previously enabled ones.
+        app.discover_plugins();
+        app.auto_load_plugins();
+
+        app
     }
 
     /// Build a `ViewportBuilder` for extra windows matching main window decorations.
@@ -181,6 +233,10 @@ impl ConchApp {
         }
     }
 
+    /// Scan for native and Lua plugins and populate the plugin manager UI.
+    ///
+    /// Uses `[conch.plugins].search_paths` from config.toml. When empty, falls
+    /// back to built-in defaults for development and the user plugin directory.
     /// Handle IPC messages from external processes.
     fn handle_ipc(&mut self) {
         let Some(listener) = &self.ipc_listener else { return };
@@ -235,6 +291,7 @@ impl eframe::App for ConchApp {
         self.poll_events();
         self.handle_file_changes(ctx);
         self.handle_ipc();
+        self.poll_plugin_renders();
 
         // Open initial tab on first frame, close app when all sessions have exited.
         if self.state.sessions.is_empty() {
@@ -347,6 +404,57 @@ impl eframe::App for ConchApp {
             crate::menu_bar::handle_action(action, ctx, self);
         }
 
+        // Plugin manager window (floating, toggled via View menu).
+        if self.show_plugin_manager {
+            let theme = self.state.theme.clone();
+            let pm_actions = crate::host::plugin_manager_ui::show_plugin_manager_window(
+                ctx,
+                &mut self.show_plugin_manager,
+                &mut self.plugin_manager,
+                &theme,
+            );
+            for pm_action in pm_actions {
+                match pm_action {
+                    crate::host::plugin_manager_ui::PluginManagerAction::Refresh => {
+                        self.discover_plugins();
+                    }
+                    crate::host::plugin_manager_ui::PluginManagerAction::Load(name) => {
+                        if let Some(entry) = self.plugin_manager.find_plugin(&name) {
+                            let path = entry.path.clone();
+                            match self.native_plugin_mgr.load_plugin(&path) {
+                                Ok(meta) => {
+                                    log::info!("Loaded plugin '{}' v{}", meta.name, meta.version);
+                                    self.plugin_manager.set_loaded(&name, true);
+                                    self.save_loaded_plugins();
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to load plugin '{name}': {e}");
+                                }
+                            }
+                        }
+                    }
+                    crate::host::plugin_manager_ui::PluginManagerAction::Unload(name) => {
+                        match self.native_plugin_mgr.unload_plugin(&name) {
+                            Ok(()) => {
+                                log::info!("Unloaded plugin '{name}'");
+                                self.panel_registry.lock().remove_by_plugin(&name);
+                                self.render_pending.remove(&name);
+                                self.render_cache.remove(&name);
+                                self.plugin_manager.set_loaded(&name, false);
+                                self.save_loaded_plugins();
+                            }
+                            Err(e) => {
+                                log::error!("Failed to unload plugin '{name}': {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Render plugin panels (side panels, bottom panels).
+        self.render_plugin_panels(ctx);
+
         // Central panel: terminal.
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut context_action: Option<crate::menu_bar::MenuAction> = None;
@@ -433,6 +541,8 @@ impl eframe::App for ConchApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_loaded_plugins();
+        self.native_plugin_mgr.shutdown_all();
         let _ = config::save_persistent_state(&self.state.persistent);
     }
 }

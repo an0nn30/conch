@@ -53,6 +53,11 @@ pub fn show(ctx: &egui::Context) -> Option<MenuAction> {
 
                 ui.menu_button("View", |ui| {
                     ui.set_min_width(menu_width);
+                    if ui.button("Plugin Manager").clicked() {
+                        action = Some(MenuAction::PluginManager);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Zen Mode").clicked() {
                         action = Some(MenuAction::ZenMode);
                         ui.close_menu();

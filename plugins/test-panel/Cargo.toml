@@ -1,0 +1,12 @@
+[package]
+name = "test-panel"
+version.workspace = true
+edition.workspace = true
+description = "Trivial test panel plugin for validation"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+conch_plugin_sdk = { workspace = true }
+serde_json = { workspace = true }

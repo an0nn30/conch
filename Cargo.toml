@@ -3,7 +3,13 @@ resolver = "3"
 members = [
     "crates/conch_core",
     "crates/conch_pty",
+    "crates/conch_plugin_sdk",
+    "crates/conch_plugin",
     "crates/conch_app",
+    "plugins/conch-ssh",
+    "plugins/test-panel",
+    "plugins/test-panel-2",
+    "plugins/test-echo-session",
 ]
 
 [workspace.package]
@@ -15,6 +21,11 @@ license = "Apache-2.0"
 # Workspace crates
 conch_core = { path = "crates/conch_core" }
 conch_pty = { path = "crates/conch_pty" }
+conch_plugin_sdk = { path = "crates/conch_plugin_sdk" }
+conch_plugin = { path = "crates/conch_plugin" }
+
+# Serialization (shared)
+serde_json = "1"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -32,3 +43,4 @@ dirs = "6.0"
 parking_lot = "0.12"
 log = "0.4"
 env_logger = "0.11"
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }

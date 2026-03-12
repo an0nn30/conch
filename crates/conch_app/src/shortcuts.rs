@@ -71,6 +71,24 @@ impl ConchApp {
                                 return;
                             }
                         }
+                        if let Some(ref kb) = self.shortcuts.toggle_left_panel {
+                            if kb.matches(key, modifiers) {
+                                self.left_panel_visible = !self.left_panel_visible;
+                                return;
+                            }
+                        }
+                        if let Some(ref kb) = self.shortcuts.toggle_right_panel {
+                            if kb.matches(key, modifiers) {
+                                self.right_panel_visible = !self.right_panel_visible;
+                                return;
+                            }
+                        }
+                        if let Some(ref kb) = self.shortcuts.toggle_bottom_panel {
+                            if kb.matches(key, modifiers) {
+                                self.bottom_panel_visible = !self.bottom_panel_visible;
+                                return;
+                            }
+                        }
 
                         // Ctrl+Shift+C for copy on non-macOS.
                         #[cfg(not(target_os = "macos"))]

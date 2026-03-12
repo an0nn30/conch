@@ -1,0 +1,9 @@
+[package]
+name = "conch_plugin_sdk"
+version.workspace = true
+edition.workspace = true
+description = "C ABI SDK for Conch native plugins"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"

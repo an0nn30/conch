@@ -156,3 +156,245 @@ pub fn hex_to_rgba(hex: &str) -> [f32; 4] {
     let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f32 / 255.0;
     [r, g, b, 1.0]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: approximate float comparison for RGBA values.
+    fn approx_eq(a: [f32; 4], b: [f32; 4]) -> bool {
+        a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 0.005)
+    }
+
+    // -- hex_to_rgba --
+
+    #[test]
+    fn hex_to_rgba_basic_white() {
+        assert!(approx_eq(hex_to_rgba("#FFFFFF"), [1.0, 1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_basic_black() {
+        assert!(approx_eq(hex_to_rgba("#000000"), [0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_red() {
+        assert!(approx_eq(hex_to_rgba("#FF0000"), [1.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_green() {
+        assert!(approx_eq(hex_to_rgba("#00FF00"), [0.0, 1.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_blue() {
+        assert!(approx_eq(hex_to_rgba("#0000FF"), [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_dracula_background() {
+        // Dracula background: #282a36
+        let c = hex_to_rgba("#282a36");
+        assert!(approx_eq(c, [0x28 as f32 / 255.0, 0x2a as f32 / 255.0, 0x36 as f32 / 255.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_0x_prefix() {
+        assert!(approx_eq(hex_to_rgba("0xFF0000"), [1.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_no_prefix() {
+        assert!(approx_eq(hex_to_rgba("FF0000"), [1.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_lowercase() {
+        assert!(approx_eq(hex_to_rgba("#ff00ff"), [1.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn hex_to_rgba_short_string_returns_black() {
+        assert_eq!(hex_to_rgba("#FFF"), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn hex_to_rgba_empty_returns_black() {
+        assert_eq!(hex_to_rgba(""), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn hex_to_rgba_invalid_hex_digits() {
+        // "ZZZZZZ" — from_str_radix returns 0 for each component.
+        assert_eq!(hex_to_rgba("#ZZZZZZ"), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn hex_to_rgba_alpha_is_always_1() {
+        let c = hex_to_rgba("#808080");
+        assert_eq!(c[3], 1.0);
+    }
+
+    // -- indexed_color_to_rgba --
+
+    fn test_colors() -> ResolvedColors {
+        let normal = [
+            [0.0, 0.0, 0.0, 1.0], // 0 black
+            [1.0, 0.0, 0.0, 1.0], // 1 red
+            [0.0, 1.0, 0.0, 1.0], // 2 green
+            [1.0, 1.0, 0.0, 1.0], // 3 yellow
+            [0.0, 0.0, 1.0, 1.0], // 4 blue
+            [1.0, 0.0, 1.0, 1.0], // 5 magenta
+            [0.0, 1.0, 1.0, 1.0], // 6 cyan
+            [1.0, 1.0, 1.0, 1.0], // 7 white
+        ];
+        let bright = [
+            [0.5, 0.5, 0.5, 1.0], // 8
+            [1.0, 0.5, 0.5, 1.0], // 9
+            [0.5, 1.0, 0.5, 1.0], // 10
+            [1.0, 1.0, 0.5, 1.0], // 11
+            [0.5, 0.5, 1.0, 1.0], // 12
+            [1.0, 0.5, 1.0, 1.0], // 13
+            [0.5, 1.0, 1.0, 1.0], // 14
+            [1.0, 1.0, 1.0, 1.0], // 15
+        ];
+        ResolvedColors {
+            background: [0.0, 0.0, 0.0, 1.0],
+            foreground: [1.0, 1.0, 1.0, 1.0],
+            normal,
+            bright,
+            dim: normal, // Reuse for simplicity.
+            cursor_color: None,
+            selection_text: None,
+            selection_bg: None,
+            bright_foreground: None,
+            dim_foreground: None,
+        }
+    }
+
+    #[test]
+    fn indexed_normal_range() {
+        let colors = test_colors();
+        assert_eq!(indexed_color_to_rgba(0, &colors), colors.normal[0]);
+        assert_eq!(indexed_color_to_rgba(7, &colors), colors.normal[7]);
+    }
+
+    #[test]
+    fn indexed_bright_range() {
+        let colors = test_colors();
+        assert_eq!(indexed_color_to_rgba(8, &colors), colors.bright[0]);
+        assert_eq!(indexed_color_to_rgba(15, &colors), colors.bright[7]);
+    }
+
+    #[test]
+    fn indexed_color_cube_origin() {
+        let colors = test_colors();
+        // Index 16 = (0, 0, 0) in the 6x6x6 cube.
+        assert!(approx_eq(indexed_color_to_rgba(16, &colors), [0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn indexed_color_cube_max() {
+        let colors = test_colors();
+        // Index 231 = (5, 5, 5) → all 1.0.
+        assert!(approx_eq(indexed_color_to_rgba(231, &colors), [1.0, 1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn indexed_color_cube_pure_red() {
+        let colors = test_colors();
+        // Index 196 = (5, 0, 0): i = 196-16 = 180; r=180/36=5, g=0, b=0.
+        assert!(approx_eq(indexed_color_to_rgba(196, &colors), [1.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn indexed_grayscale_darkest() {
+        let colors = test_colors();
+        // Index 232 = first grayscale step = 0/23 ≈ 0.0.
+        let c = indexed_color_to_rgba(232, &colors);
+        assert!(c[0] < 0.01);
+    }
+
+    #[test]
+    fn indexed_grayscale_lightest() {
+        let colors = test_colors();
+        // Index 255 = last grayscale = 23/23 = 1.0.
+        assert!(approx_eq(indexed_color_to_rgba(255, &colors), [1.0, 1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn indexed_grayscale_midpoint() {
+        let colors = test_colors();
+        // Index 244 = 12/23 ≈ 0.522.
+        let c = indexed_color_to_rgba(244, &colors);
+        assert!((c[0] - 12.0 / 23.0).abs() < 0.005);
+        assert_eq!(c[0], c[1]); // Gray: all channels equal.
+        assert_eq!(c[1], c[2]);
+    }
+
+    // -- named_color_to_rgba --
+
+    #[test]
+    fn named_foreground() {
+        let colors = test_colors();
+        assert_eq!(named_color_to_rgba(NamedColor::Foreground, &colors), colors.foreground);
+    }
+
+    #[test]
+    fn named_background() {
+        let colors = test_colors();
+        assert_eq!(named_color_to_rgba(NamedColor::Background, &colors), colors.background);
+    }
+
+    #[test]
+    fn named_cursor_falls_back_to_foreground() {
+        let colors = test_colors(); // cursor_color is None.
+        assert_eq!(named_color_to_rgba(NamedColor::Cursor, &colors), colors.foreground);
+    }
+
+    #[test]
+    fn named_cursor_uses_explicit_color() {
+        let mut colors = test_colors();
+        colors.cursor_color = Some([0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(named_color_to_rgba(NamedColor::Cursor, &colors), [0.5, 0.5, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn named_normal_colors_map_correctly() {
+        let colors = test_colors();
+        assert_eq!(named_color_to_rgba(NamedColor::Red, &colors), colors.normal[1]);
+        assert_eq!(named_color_to_rgba(NamedColor::Blue, &colors), colors.normal[4]);
+    }
+
+    #[test]
+    fn named_bright_colors_map_correctly() {
+        let colors = test_colors();
+        assert_eq!(named_color_to_rgba(NamedColor::BrightRed, &colors), colors.bright[1]);
+    }
+
+    // -- convert_color (integration of above) --
+
+    #[test]
+    fn convert_spec_color() {
+        use alacritty_terminal::vte::ansi::Rgb;
+        let colors = test_colors();
+        let c = convert_color(TermColor::Spec(Rgb { r: 128, g: 64, b: 255 }), &colors);
+        assert!(approx_eq(c, [128.0 / 255.0, 64.0 / 255.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn convert_indexed_color() {
+        let colors = test_colors();
+        let c = convert_color(TermColor::Indexed(0), &colors);
+        assert_eq!(c, colors.normal[0]);
+    }
+
+    #[test]
+    fn convert_named_color() {
+        let colors = test_colors();
+        let c = convert_color(TermColor::Named(NamedColor::Green), &colors);
+        assert_eq!(c, colors.normal[2]);
+    }
+}

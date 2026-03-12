@@ -35,6 +35,8 @@ pub enum MenuAction {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    // Tools
+    PluginManager,
 }
 
 /// Resolved rendering strategy for the menu bar.
@@ -176,6 +178,9 @@ pub fn handle_action(
         }
         MenuAction::ZoomReset => {
             ctx.set_pixels_per_point(1.0);
+        }
+        MenuAction::PluginManager => {
+            app.show_plugin_manager = !app.show_plugin_manager;
         }
     }
 }

@@ -256,3 +256,244 @@ fn to_color32(c: [f32; 4]) -> Color32 {
         (c[2] * 255.0) as u8,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::color::ResolvedColors;
+
+    fn dark_colors() -> ResolvedColors {
+        // Dracula-like dark scheme.
+        ResolvedColors {
+            background: [0x28 as f32 / 255.0, 0x2a as f32 / 255.0, 0x36 as f32 / 255.0, 1.0],
+            foreground: [0xf8 as f32 / 255.0, 0xf8 as f32 / 255.0, 0xf2 as f32 / 255.0, 1.0],
+            normal: [
+                [0.0, 0.0, 0.0, 1.0],
+                [1.0, 0.33, 0.33, 1.0], // red
+                [0.31, 0.98, 0.48, 1.0], // green
+                [0.95, 0.98, 0.48, 1.0], // yellow
+                [0.39, 0.58, 0.93, 1.0], // blue
+                [0.74, 0.58, 0.98, 1.0], // magenta
+                [0.54, 0.98, 0.98, 1.0], // cyan
+                [1.0, 1.0, 1.0, 1.0],
+            ],
+            bright: [[0.5; 4]; 8],
+            dim: [[0.2; 4]; 8],
+            cursor_color: None,
+            selection_text: None,
+            selection_bg: None,
+            bright_foreground: None,
+            dim_foreground: None,
+        }
+    }
+
+    fn light_colors() -> ResolvedColors {
+        ResolvedColors {
+            background: [0.95, 0.95, 0.95, 1.0], // Very light gray.
+            foreground: [0.1, 0.1, 0.1, 1.0],
+            normal: [
+                [0.0, 0.0, 0.0, 1.0],
+                [0.8, 0.0, 0.0, 1.0],
+                [0.0, 0.6, 0.0, 1.0],
+                [0.8, 0.6, 0.0, 1.0],
+                [0.0, 0.0, 0.8, 1.0],
+                [0.6, 0.0, 0.6, 1.0],
+                [0.0, 0.6, 0.6, 1.0],
+                [0.9, 0.9, 0.9, 1.0],
+            ],
+            bright: [[0.5; 4]; 8],
+            dim: [[0.2; 4]; 8],
+            cursor_color: None,
+            selection_text: None,
+            selection_bg: None,
+            bright_foreground: None,
+            dim_foreground: None,
+        }
+    }
+
+    // -- to_color32 --
+
+    #[test]
+    fn to_color32_black() {
+        assert_eq!(to_color32([0.0, 0.0, 0.0, 1.0]), Color32::from_rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn to_color32_white() {
+        assert_eq!(to_color32([1.0, 1.0, 1.0, 1.0]), Color32::from_rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn to_color32_midpoint() {
+        let c = to_color32([0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(c.r(), 127);
+        assert_eq!(c.g(), 127);
+        assert_eq!(c.b(), 127);
+    }
+
+    // -- offset_color --
+
+    #[test]
+    fn offset_color_dark_mode_lightens() {
+        let base = Color32::from_rgb(100, 100, 100);
+        let result = offset_color(base, true, 30);
+        assert_eq!(result.r(), 130);
+        assert_eq!(result.g(), 130);
+        assert_eq!(result.b(), 130);
+    }
+
+    #[test]
+    fn offset_color_light_mode_darkens() {
+        let base = Color32::from_rgb(200, 200, 200);
+        let result = offset_color(base, false, 30);
+        assert_eq!(result.r(), 170);
+        assert_eq!(result.g(), 170);
+        assert_eq!(result.b(), 170);
+    }
+
+    #[test]
+    fn offset_color_saturates_at_255() {
+        let base = Color32::from_rgb(250, 250, 250);
+        let result = offset_color(base, true, 30);
+        assert_eq!(result.r(), 255);
+    }
+
+    #[test]
+    fn offset_color_saturates_at_0() {
+        let base = Color32::from_rgb(10, 10, 10);
+        let result = offset_color(base, false, 30);
+        assert_eq!(result.r(), 0);
+    }
+
+    // -- UiTheme::from_colors --
+
+    #[test]
+    fn from_colors_dark_mode_explicit() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        assert!(theme.dark_mode);
+    }
+
+    #[test]
+    fn from_colors_light_mode_explicit() {
+        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::Light);
+        assert!(!theme.dark_mode);
+    }
+
+    #[test]
+    fn from_colors_system_infers_dark() {
+        // Dracula background is dark → luminance < 128.
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::System);
+        assert!(theme.dark_mode);
+    }
+
+    #[test]
+    fn from_colors_system_infers_light() {
+        // Light background → luminance > 128.
+        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::System);
+        assert!(!theme.dark_mode);
+    }
+
+    #[test]
+    fn from_colors_surfaces_lighter_in_dark_mode() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        // Surface should be brighter than bg.
+        assert!(theme.surface.r() > theme.bg.r());
+        // surface_raised brighter than surface.
+        assert!(theme.surface_raised.r() > theme.surface.r());
+        // surface_top brighter than surface_raised.
+        assert!(theme.surface_top.r() > theme.surface_raised.r());
+    }
+
+    #[test]
+    fn from_colors_surfaces_darker_in_light_mode() {
+        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::Light);
+        // Surface should be darker than bg.
+        assert!(theme.surface.r() < theme.bg.r());
+    }
+
+    #[test]
+    fn from_colors_accent_is_blue() {
+        let colors = dark_colors();
+        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark);
+        assert_eq!(theme.accent, to_color32(colors.normal[4]));
+    }
+
+    #[test]
+    fn from_colors_warn_is_yellow() {
+        let colors = dark_colors();
+        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark);
+        assert_eq!(theme.warn, to_color32(colors.normal[3]));
+    }
+
+    #[test]
+    fn from_colors_error_is_red() {
+        let colors = dark_colors();
+        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark);
+        assert_eq!(theme.error, to_color32(colors.normal[1]));
+    }
+
+    #[test]
+    fn from_colors_default_metrics() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        assert_eq!(theme.rounding, 0);
+        assert_eq!(theme.font_small, 11.0);
+        assert_eq!(theme.font_normal, 13.0);
+        assert_eq!(theme.menu_width, 120.0);
+    }
+
+    // -- UiTheme::bg_with_alpha --
+
+    #[test]
+    fn bg_with_alpha_sets_alpha() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let c = theme.bg_with_alpha(128);
+        assert_eq!(c.a(), 128);
+        // Full alpha should match bg exactly.
+        let full = theme.bg_with_alpha(255);
+        assert_eq!(full.r(), theme.bg.r());
+        assert_eq!(full.g(), theme.bg.g());
+        assert_eq!(full.b(), theme.bg.b());
+    }
+
+    #[test]
+    fn bg_with_alpha_zero() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let c = theme.bg_with_alpha(0);
+        assert_eq!(c.a(), 0);
+    }
+
+    // -- UiTheme::to_visuals --
+
+    #[test]
+    fn to_visuals_dark_mode_flag() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let v = theme.to_visuals();
+        assert!(v.dark_mode);
+    }
+
+    #[test]
+    fn to_visuals_all_corners_zero() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let v = theme.to_visuals();
+        assert_eq!(v.window_corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.menu_corner_radius, CornerRadius::ZERO);
+    }
+
+    #[test]
+    fn to_visuals_all_expansion_zero() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let v = theme.to_visuals();
+        assert_eq!(v.widgets.noninteractive.expansion, 0.0);
+        assert_eq!(v.widgets.inactive.expansion, 0.0);
+        assert_eq!(v.widgets.hovered.expansion, 0.0);
+        assert_eq!(v.widgets.active.expansion, 0.0);
+        assert_eq!(v.widgets.open.expansion, 0.0);
+    }
+
+    #[test]
+    fn to_visuals_panel_fill_matches_surface() {
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let v = theme.to_visuals();
+        assert_eq!(v.panel_fill, theme.surface);
+    }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "test-panel-2"
+version.workspace = true
+edition.workspace = true
+description = "Second test panel plugin for multi-panel validation"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+conch_plugin_sdk = { workspace = true }
+serde_json = { workspace = true }

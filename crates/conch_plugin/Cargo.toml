@@ -1,0 +1,14 @@
+[package]
+name = "conch_plugin"
+version.workspace = true
+edition.workspace = true
+description = "Host-side plugin infrastructure: message bus, native loader, lifecycle management"
+
+[dependencies]
+conch_plugin_sdk = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true }
+libloading = "0.8"
+mlua = { workspace = true }
