@@ -136,6 +136,49 @@ impl ConchApp {
         let _ = config::save_persistent_state(&self.state.persistent);
     }
 
+    /// Handle a single plugin manager action (load/unload/refresh).
+    pub(crate) fn handle_plugin_manager_action(
+        &mut self,
+        action: crate::host::plugin_manager_ui::PluginManagerAction,
+    ) {
+        use crate::host::plugin_manager_ui::PluginManagerAction;
+        match action {
+            PluginManagerAction::Refresh => {
+                self.discover_plugins();
+            }
+            PluginManagerAction::Load(name) => {
+                if let Some(entry) = self.plugin_manager.find_plugin(&name) {
+                    let path = entry.path.clone();
+                    match self.native_plugin_mgr.load_plugin(&path) {
+                        Ok(meta) => {
+                            log::info!("Loaded plugin '{}' v{}", meta.name, meta.version);
+                            self.plugin_manager.set_loaded(&name, true);
+                            self.save_loaded_plugins();
+                        }
+                        Err(e) => {
+                            log::error!("Failed to load plugin '{name}': {e}");
+                        }
+                    }
+                }
+            }
+            PluginManagerAction::Unload(name) => {
+                match self.native_plugin_mgr.unload_plugin(&name) {
+                    Ok(()) => {
+                        log::info!("Unloaded plugin '{name}'");
+                        self.panel_registry.lock().remove_by_plugin(&name);
+                        self.render_pending.remove(&name);
+                        self.render_cache.remove(&name);
+                        self.plugin_manager.set_loaded(&name, false);
+                        self.save_loaded_plugins();
+                    }
+                    Err(e) => {
+                        log::error!("Failed to unload plugin '{name}': {e}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Poll pending render requests and fire new ones for panel plugins.
     pub(crate) fn poll_plugin_renders(&mut self) {
         // Check pending render responses.

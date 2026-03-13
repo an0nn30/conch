@@ -23,7 +23,7 @@ const CURSOR_BLINK_MS: u128 = 500;
 pub enum ExtraWindowAction {
     SpawnNewWindow,
     QuitApp,
-    TogglePluginManager,
+    PluginAction(crate::host::plugin_manager_ui::PluginManagerAction),
 }
 
 /// Read-only state borrowed from the main app for extra window rendering.
@@ -59,6 +59,7 @@ pub struct ExtraWindow {
     pub pending_actions: Vec<ExtraWindowAction>,
     pub tab_bar_state: TabBarState,
     pub style_applied: bool,
+    pub show_plugin_manager: bool,
 }
 
 impl ExtraWindow {
@@ -89,6 +90,7 @@ impl ExtraWindow {
             pending_actions: Vec::new(),
             tab_bar_state: TabBarState::default(),
             style_applied: false,
+            show_plugin_manager: false,
         }
     }
 
@@ -130,7 +132,12 @@ impl ExtraWindow {
     }
 
     /// Render the extra window's UI inside a viewport closure.
-    pub fn update(&mut self, ctx: &egui::Context, shared: &SharedState) {
+    pub fn update(
+        &mut self,
+        ctx: &egui::Context,
+        shared: &SharedState,
+        plugin_manager: &mut crate::host::plugin_manager_ui::PluginManagerState,
+    ) {
         // Clear pending actions from previous frame.
         self.pending_actions.clear();
 
@@ -251,6 +258,19 @@ impl ExtraWindow {
             }
         }
 
+        // Plugin manager window (floating, toggled via View menu).
+        if self.show_plugin_manager {
+            let pm_actions = crate::host::plugin_manager_ui::show_plugin_manager_window(
+                ctx,
+                &mut self.show_plugin_manager,
+                plugin_manager,
+                shared.theme,
+            );
+            for pm_action in pm_actions {
+                self.pending_actions.push(ExtraWindowAction::PluginAction(pm_action));
+            }
+        }
+
         // Tab bar.
         let tabs: Vec<(Uuid, String)> = self.tab_order.iter().map(|&id| {
             let title = self.sessions.get(&id)
@@ -367,7 +387,7 @@ impl ExtraWindow {
                 ctx.set_pixels_per_point(1.0);
             }
             MenuAction::PluginManager => {
-                self.pending_actions.push(ExtraWindowAction::TogglePluginManager);
+                self.show_plugin_manager = !self.show_plugin_manager;
             }
             // Actions not yet implemented.
             MenuAction::SelectAll | MenuAction::ZenMode => {}
