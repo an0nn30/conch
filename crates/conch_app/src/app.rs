@@ -468,6 +468,7 @@ impl eframe::App for ConchApp {
         // ── Apply centralized UI theme (only when changed) ──
         if self.state.theme_dirty {
             self.state.theme.apply(ctx);
+            crate::host::bridge::update_theme_json(&self.state.theme);
             self.state.theme_dirty = false;
         }
         let bg_color = self.state.theme.bg;

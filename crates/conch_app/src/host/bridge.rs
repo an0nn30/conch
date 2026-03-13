@@ -138,6 +138,34 @@ impl SessionRegistry {
 
 static BRIDGE: OnceLock<BridgeInner> = OnceLock::new();
 
+/// Shared theme JSON, updated whenever the app theme changes.
+static THEME_JSON: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
+/// Update the theme JSON that plugins receive via `get_theme()`.
+///
+/// Called by the app whenever `theme_dirty` is set.
+pub fn update_theme_json(theme: &crate::ui_theme::UiTheme) {
+    fn c32(c: egui::Color32) -> String {
+        format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+    }
+    let json = serde_json::json!({
+        "bg": c32(theme.bg),
+        "surface": c32(theme.surface),
+        "surface_raised": c32(theme.surface_raised),
+        "text": c32(theme.text),
+        "text_secondary": c32(theme.text_secondary),
+        "text_muted": c32(theme.text_muted),
+        "accent": c32(theme.accent),
+        "border": c32(theme.border),
+        "warn": c32(theme.warn),
+        "error": c32(theme.error),
+        "font_small": theme.font_small,
+        "font_normal": theme.font_normal,
+        "dark_mode": theme.dark_mode,
+    });
+    *THEME_JSON.lock() = json.to_string();
+}
+
 /// Initialise the global bridge state.
 ///
 /// Must be called exactly once before any plugin invokes a `HostApi` function.
@@ -582,13 +610,34 @@ extern "C" fn host_register_menu_item(
 // Clipboard (stub)
 // ---------------------------------------------------------------------------
 
-extern "C" fn host_clipboard_set(_text: *const c_char) {
-    log::debug!("host_clipboard_set: stub — no-op");
+extern "C" fn host_clipboard_set(text: *const c_char) {
+    let text_str = unsafe { cstr_to_str(text) };
+    match arboard::Clipboard::new() {
+        Ok(mut clipboard) => {
+            if let Err(e) = clipboard.set_text(text_str) {
+                log::warn!("host_clipboard_set: failed to set clipboard: {e}");
+            }
+        }
+        Err(e) => {
+            log::warn!("host_clipboard_set: failed to open clipboard: {e}");
+        }
+    }
 }
 
 extern "C" fn host_clipboard_get() -> *mut c_char {
-    log::debug!("host_clipboard_get: stub — returning null");
-    std::ptr::null_mut()
+    match arboard::Clipboard::new() {
+        Ok(mut clipboard) => match clipboard.get_text() {
+            Ok(text) => alloc_cstring(&text),
+            Err(e) => {
+                log::debug!("host_clipboard_get: no text in clipboard: {e}");
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            log::warn!("host_clipboard_get: failed to open clipboard: {e}");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -596,8 +645,12 @@ extern "C" fn host_clipboard_get() -> *mut c_char {
 // ---------------------------------------------------------------------------
 
 extern "C" fn host_get_theme() -> *mut c_char {
-    log::debug!("host_get_theme: stub — returning null");
-    std::ptr::null_mut()
+    // Read the theme from the shared theme store.
+    let json = THEME_JSON.lock().clone();
+    if json.is_empty() {
+        return std::ptr::null_mut();
+    }
+    alloc_cstring(&json)
 }
 
 // ---------------------------------------------------------------------------
