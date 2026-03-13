@@ -84,6 +84,9 @@ pub struct ConchApp {
     // Icons.
     pub(crate) icon_cache: Option<crate::icons::IconCache>,
 
+    // Tab change tracking (for plugin bus events).
+    pub(crate) prev_active_tab: Option<uuid::Uuid>,
+
     // System.
     pub(crate) ipc_listener: Option<IpcListener>,
     pub(crate) file_watcher: Option<FileWatcher>,
@@ -156,6 +159,7 @@ impl ConchApp {
             dialog_state,
             session_registry,
             icon_cache: None,
+            prev_active_tab: None,
             ipc_listener,
             file_watcher,
             has_ever_had_session: false,
@@ -461,6 +465,28 @@ impl ConchApp {
             }
         }
     }
+
+    /// Publish an `app.tab_changed` bus event so plugins (e.g. conch-files)
+    /// can react to the active session changing.
+    fn publish_tab_changed(&self) {
+        let (is_ssh, session_id) = if let Some(session) = self.state.active_session() {
+            match &session.backend {
+                crate::state::SessionBackend::Plugin { bridge, .. } => {
+                    (true, Some(bridge.handle.0))
+                }
+                crate::state::SessionBackend::Local(_) => (false, None),
+            }
+        } else {
+            (false, None)
+        };
+
+        let mut data = serde_json::json!({ "is_ssh": is_ssh });
+        if let Some(sid) = session_id {
+            data["session_id"] = serde_json::json!(sid);
+        }
+
+        self.plugin_bus.publish("app", "app.tab_changed", data);
+    }
 }
 
 impl eframe::App for ConchApp {
@@ -483,6 +509,12 @@ impl eframe::App for ConchApp {
         if self.last_blink.elapsed().as_millis() > CURSOR_BLINK_MS {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = Instant::now();
+        }
+
+        // Detect tab changes and notify plugins via the bus.
+        if self.state.active_tab != self.prev_active_tab {
+            self.prev_active_tab = self.state.active_tab;
+            self.publish_tab_changed();
         }
 
         // Poll events.

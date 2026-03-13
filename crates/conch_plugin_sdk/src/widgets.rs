@@ -329,6 +329,9 @@ pub struct TableColumn {
     pub sortable: Option<bool>,
     /// Column width in points. None = auto.
     pub width: Option<f32>,
+    /// Whether this column is visible. None or Some(true) = visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,6 +424,12 @@ pub enum WidgetEvent {
         id: String,
         row_id: String,
         action: String,
+    },
+
+    /// A right-click on a table column header (for column visibility toggles, etc.).
+    TableHeaderContextMenu {
+        id: String,
+        column: String,
     },
 
     /// A tab was switched.
@@ -744,8 +753,8 @@ mod tests {
         let w = Widget::Table {
             id: "files".into(),
             columns: vec![
-                TableColumn { id: "name".into(), label: "Name".into(), sortable: Some(true), width: None },
-                TableColumn { id: "size".into(), label: "Size".into(), sortable: Some(true), width: Some(80.0) },
+                TableColumn { id: "name".into(), label: "Name".into(), sortable: Some(true), width: None, visible: None },
+                TableColumn { id: "size".into(), label: "Size".into(), sortable: Some(true), width: Some(80.0), visible: None },
             ],
             rows: vec![
                 TableRow {
@@ -995,6 +1004,17 @@ mod tests {
         let e = WidgetEvent::TextInputSubmit { id: "search".into(), value: "query".into() };
         if let WidgetEvent::TextInputSubmit { value, .. } = roundtrip_event(&e) {
             assert_eq!(value, "query");
+        } else {
+            panic!("Wrong variant");
+        }
+    }
+
+    #[test]
+    fn event_table_header_context_menu() {
+        let e = WidgetEvent::TableHeaderContextMenu { id: "files".into(), column: "ext".into() };
+        if let WidgetEvent::TableHeaderContextMenu { id, column } = roundtrip_event(&e) {
+            assert_eq!(id, "files");
+            assert_eq!(column, "ext");
         } else {
             panic!("Wrong variant");
         }

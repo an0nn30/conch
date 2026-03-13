@@ -10,6 +10,7 @@ members = [
     "plugins/test-panel",
     "plugins/test-panel-2",
     "plugins/test-echo-session",
+    "plugins/conch-files",
 ]
 
 [workspace.package]
@@ -40,6 +41,7 @@ anyhow = "1"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "6.0"
+hostname = "0.4"
 parking_lot = "0.12"
 log = "0.4"
 env_logger = "0.11"

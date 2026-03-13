@@ -43,6 +43,7 @@ pub async fn list_dir(
                 "size": meta.size.unwrap_or(0),
                 "is_dir": meta.is_dir(),
                 "permissions": meta.permissions.map(|p| format!("{:o}", p)),
+                "mtime": meta.mtime.unwrap_or(0),
             })
         })
         .collect();

@@ -1,0 +1,16 @@
+[package]
+name = "conch-files"
+version.workspace = true
+edition.workspace = true
+description = "File explorer plugin for Conch terminal emulator"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+conch_plugin_sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+dirs = { workspace = true }
+hostname = { workspace = true }

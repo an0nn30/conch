@@ -46,11 +46,13 @@ pub fn render_widgets(
 
     // Render footer first so egui reserves bottom space before the main content.
     if let Some(footer_widgets) = footer {
+        let footer_frame = egui::Frame::NONE
+            .fill(theme.surface)
+            .inner_margin(egui::Margin::symmetric(4, 2));
         egui::TopBottomPanel::bottom(ui.id().with("__footer"))
-            .frame(egui::Frame::NONE)
-            .show_separator_line(false)
+            .frame(footer_frame)
+            .show_separator_line(true)
             .show_inside(ui, |ui| {
-                ui.separator();
                 for widget in footer_widgets {
                     render_footer_widget(ui, widget, theme, &mut events, icon_cache);
                 }
@@ -65,11 +67,15 @@ pub fn render_widgets(
     events
 }
 
-/// Render a panel header row with the panel name and, if the first widget is a
-/// Toolbar, merge its items into the same row. Returns the remaining widgets
-/// (skipping the toolbar if it was consumed).
+/// Render a panel header with the panel name and, if the first widget(s)
+/// include a Heading and/or Toolbar, consume them and render them as part of
+/// the header. Returns the remaining widgets.
 ///
-/// Renders: `[ PanelName ...spacer... toolbar items ]` then a separator.
+/// Layout:
+/// - If the first widget is a `Heading`, its text is used as the title
+///   (on its own row) instead of the static `panel_name`.
+/// - If a `Toolbar` follows (or is first), it gets its own row below the title.
+/// - A separator is drawn after the header.
 pub fn render_panel_header<'a>(
     ui: &mut egui::Ui,
     panel_name: &str,
@@ -79,44 +85,48 @@ pub fn render_panel_header<'a>(
     events: &mut Vec<WidgetEvent>,
     icon_cache: Option<&IconCache>,
 ) -> &'a [Widget] {
-    // Check if the first widget is a Toolbar.
-    let (toolbar_items, rest) = match widgets.first() {
-        Some(Widget::Toolbar { items, .. }) => (Some(items.as_slice()), &widgets[1..]),
-        _ => (None, widgets),
+    let mut rest = widgets;
+
+    // Check for a leading Heading widget → use as the title.
+    let title = if let Some(Widget::Heading { text }) = rest.first() {
+        rest = &rest[1..];
+        text.as_str()
+    } else {
+        panel_name
     };
 
-    ui.horizontal(|ui| {
-        // Panel name on the left.
-        ui.label(
-            egui::RichText::new(panel_name)
-                .size(theme.font_normal + 1.0)
-                .strong()
-                .color(theme.text),
-        );
+    // Title row.
+    ui.label(
+        egui::RichText::new(title)
+            .size(theme.font_normal + 1.0)
+            .strong()
+            .color(theme.text),
+    );
 
-        // If there are toolbar items, render them right-aligned.
-        if let Some(items) = toolbar_items {
-            // Filter out leading spacers — we handle alignment ourselves.
-            let items: Vec<_> = items
-                .iter()
-                .filter(|i| !matches!(i, conch_plugin_sdk::widgets::ToolbarItem::Spacer))
-                .collect();
-            if !items.is_empty() {
+    // Check for a Toolbar widget → render on its own row.
+    if let Some(Widget::Toolbar { items, .. }) = rest.first() {
+        rest = &rest[1..];
+        let items: Vec<_> = items
+            .iter()
+            .filter(|i| !matches!(i, conch_plugin_sdk::widgets::ToolbarItem::Spacer))
+            .collect();
+        if !items.is_empty() {
+            ui.horizontal(|ui| {
                 let available = ui.available_width();
                 ui.allocate_ui_with_layout(
                     egui::vec2(available, ui.spacing().interact_size.y),
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        for item in &items {
+                        for item in items.iter().rev() {
                             render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
                         }
                     },
                 );
-            }
+            });
         }
-    });
-    ui.separator();
+    }
 
+    ui.separator();
     rest
 }
 
@@ -317,11 +327,13 @@ fn render_widget(
             hint,
             submit_on_enter,
         } => {
-            // Initialize local edit buffer from the plugin's canonical value
-            // if we haven't seen this widget before.
+            // Sync from plugin's canonical value when it changes externally.
             let buf = text_input_state
                 .entry(id.clone())
                 .or_insert_with(|| value.clone());
+            if buf != value && !ui.memory(|m| m.has_focus(ui.id().with(id))) {
+                *buf = value.clone();
+            }
 
             let mut te = egui::TextEdit::singleline(buf)
                 .font(egui::TextStyle::Body)
@@ -839,9 +851,13 @@ fn render_toolbar_item(
             ui.add_space(8.0);
         }
         conch_plugin_sdk::widgets::ToolbarItem::TextInput { id, value, hint } => {
+            // Sync from plugin's canonical value when it changes externally.
             let buf = text_input_state
                 .entry(id.clone())
                 .or_insert_with(|| value.clone());
+            if buf != value && !ui.memory(|m| m.has_focus(ui.id().with(id))) {
+                *buf = value.clone();
+            }
             let mut te = egui::TextEdit::singleline(buf)
                 .font(egui::TextStyle::Body)
                 .margin(theme.text_edit_margin())
@@ -867,6 +883,10 @@ fn render_toolbar_item(
 }
 
 /// Render a Table widget with sortable columns, selectable rows, and context menus.
+///
+/// Uses proportional column widths based on the available panel width.
+/// Columns with `width: Some(w)` use that as a *proportion weight*;
+/// columns with `width: None` get weight 1.0 (flex fill).
 fn render_table(
     ui: &mut egui::Ui,
     table_id: &str,
@@ -878,29 +898,69 @@ fn render_table(
     theme: &UiTheme,
     events: &mut Vec<WidgetEvent>,
 ) {
+    // Build list of visible column indices.
+    let visible_cols: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.visible.unwrap_or(true))
+        .map(|(i, _)| i)
+        .collect();
+
+    if visible_cols.is_empty() {
+        return;
+    }
+
+    // Compute proportional column widths from the available width.
+    let available = ui.available_width();
+    let spacing = ui.spacing().item_spacing.x;
+    let total_spacing = spacing * (visible_cols.len().saturating_sub(1)) as f32;
+    let usable = (available - total_spacing).max(0.0);
+
+    // Use column.width as a proportional weight. None = flex (weight 1.0 relative to total).
+    // Fixed columns get their pixel width capped to the proportion of usable space.
+    let total_weight: f32 = visible_cols
+        .iter()
+        .map(|&i| columns[i].width.unwrap_or(100.0))
+        .sum();
+
+    let col_widths: Vec<f32> = visible_cols
+        .iter()
+        .map(|&i| {
+            let w = columns[i].width.unwrap_or(100.0);
+            (w / total_weight * usable).max(20.0)
+        })
+        .collect();
+
     // Header row.
     ui.horizontal(|ui| {
-        for col in columns {
+        for (vi, &col_idx) in visible_cols.iter().enumerate() {
+            let col = &columns[col_idx];
             let is_sorted = sort_column == Some(col.id.as_str());
             let asc = sort_ascending.unwrap_or(true);
             let label = if is_sorted {
-                let arrow = if asc { " ▲" } else { " ▼" };
+                let arrow = if asc { " \u{25B2}" } else { " \u{25BC}" };
                 format!("{}{arrow}", col.label)
             } else {
                 col.label.clone()
             };
 
             let sortable = col.sortable.unwrap_or(false);
-            let width = col.width.unwrap_or(100.0);
-            let response = ui.add_sized(
-                [width, ui.spacing().interact_size.y],
-                egui::Label::new(
-                    RichText::new(label)
-                        .size(theme.font_small)
-                        .strong()
-                        .color(theme.text),
-                )
-                .sense(if sortable { egui::Sense::click() } else { egui::Sense::hover() }),
+            let width = col_widths[vi];
+            let sense = if sortable { egui::Sense::click() } else { egui::Sense::hover() };
+
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(width, ui.spacing().interact_size.y),
+                sense,
+            );
+
+            // Draw left-aligned header text.
+            let text_pos = rect.left_center() + egui::vec2(4.0, 0.0);
+            ui.painter().text(
+                text_pos,
+                egui::Align2::LEFT_CENTER,
+                &label,
+                egui::FontId::proportional(theme.font_small),
+                theme.text,
             );
 
             if sortable && response.clicked() {
@@ -911,59 +971,106 @@ fn render_table(
                     ascending: new_asc,
                 });
             }
+
+            // Right-click on header -> TableHeaderContextMenu event.
+            response.context_menu(|ui| {
+                events.push(WidgetEvent::TableHeaderContextMenu {
+                    id: table_id.to_string(),
+                    column: col.id.clone(),
+                });
+                ui.close_menu();
+            });
         }
     });
 
     ui.separator();
 
-    // Data rows.
-    for row in rows {
-        let is_selected = selected_row == Some(row.id.as_str());
+    // Data rows in a scroll area.
+    let row_height = 22.0;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
 
-        let response = ui.horizontal(|ui| {
-            for (i, cell) in row.cells.iter().enumerate() {
-                let width = columns.get(i).and_then(|c| c.width).unwrap_or(100.0);
-                let text = match cell {
-                    TableCell::Text(t) => t.as_str(),
-                    TableCell::Rich { text, .. } => text.as_str(),
-                };
-                ui.add_sized(
-                    [width, ui.spacing().interact_size.y],
-                    egui::SelectableLabel::new(is_selected, text),
+            for row in rows {
+                let is_selected = selected_row == Some(row.id.as_str());
+                let row_width = ui.available_width();
+
+                // Allocate a single clickable rect for the whole row.
+                let (row_rect, row_resp) = ui.allocate_exact_size(
+                    egui::vec2(row_width, row_height),
+                    egui::Sense::click(),
                 );
-            }
-        });
 
-        if response.response.clicked() {
-            events.push(WidgetEvent::TableSelect {
-                id: table_id.to_string(),
-                row_id: row.id.clone(),
-            });
-        }
-        if response.response.double_clicked() {
-            events.push(WidgetEvent::TableActivate {
-                id: table_id.to_string(),
-                row_id: row.id.clone(),
-            });
-        }
+                // Selection background.
+                if is_selected {
+                    ui.painter().rect_filled(
+                        row_rect,
+                        0.0,
+                        ui.visuals().selection.bg_fill,
+                    );
+                }
 
-        if let Some(menu_items) = &row.context_menu {
-            response.response.context_menu(|ui| {
-                for item in menu_items {
-                    let enabled = item.enabled.unwrap_or(true);
-                    let btn = egui::Button::new(&item.label);
-                    if ui.add_enabled(enabled, btn).clicked() {
-                        events.push(WidgetEvent::TableContextMenu {
-                            id: table_id.to_string(),
-                            row_id: row.id.clone(),
-                            action: item.id.clone(),
-                        });
-                        ui.close_menu();
+                // Draw cells within the row rect.
+                let mut x = row_rect.left();
+                for (vi, &col_idx) in visible_cols.iter().enumerate() {
+                    let width = col_widths[vi];
+                    if let Some(cell) = row.cells.get(col_idx) {
+                        let text = match cell {
+                            TableCell::Text(t) => t.as_str(),
+                            TableCell::Rich { text, .. } => text.as_str(),
+                        };
+
+                        let cell_rect = egui::Rect::from_min_size(
+                            egui::pos2(x, row_rect.top()),
+                            egui::vec2(width, row_height),
+                        );
+
+                        let text_pos = cell_rect.left_center() + egui::vec2(4.0, 0.0);
+                        ui.painter().with_clip_rect(cell_rect).text(
+                            text_pos,
+                            egui::Align2::LEFT_CENTER,
+                            text,
+                            egui::FontId::proportional(theme.font_normal),
+                            theme.text,
+                        );
+
+                        x += width + ui.spacing().item_spacing.x;
                     }
                 }
-            });
-        }
-    }
+
+                // Row-level click/double-click detection.
+                if row_resp.clicked() {
+                    events.push(WidgetEvent::TableSelect {
+                        id: table_id.to_string(),
+                        row_id: row.id.clone(),
+                    });
+                }
+                if row_resp.double_clicked() {
+                    events.push(WidgetEvent::TableActivate {
+                        id: table_id.to_string(),
+                        row_id: row.id.clone(),
+                    });
+                }
+
+                if let Some(menu_items) = &row.context_menu {
+                    row_resp.context_menu(|ui| {
+                        for item in menu_items {
+                            let enabled = item.enabled.unwrap_or(true);
+                            let btn = egui::Button::new(&item.label);
+                            if ui.add_enabled(enabled, btn).clicked() {
+                                events.push(WidgetEvent::TableContextMenu {
+                                    id: table_id.to_string(),
+                                    row_id: row.id.clone(),
+                                    action: item.id.clone(),
+                                });
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
+            }
+        });
 }
 
 /// Map an optional `TextStyle` to a theme color.
