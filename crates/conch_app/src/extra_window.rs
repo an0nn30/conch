@@ -242,8 +242,10 @@ impl ExtraWindow {
         }
 
         // In-window menu bar (when not using native OS menu).
+        // Use a viewport-unique ID to prevent menu state leaking between windows.
         if shared.show_in_window_menu {
-            if let Some(action) = crate::menu_bar::egui_menu::show(ctx) {
+            let menu_id = egui::Id::new("menu_bar").with(self.viewport_id);
+            if let Some(action) = crate::menu_bar::egui_menu::show_with_id(ctx, menu_id) {
                 self.handle_menu_action(action, ctx, shared.user_config);
             }
         }

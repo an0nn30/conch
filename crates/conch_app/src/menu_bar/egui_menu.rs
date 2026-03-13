@@ -4,11 +4,14 @@
 use super::MenuAction;
 
 /// Render the egui in-window menu bar. Returns any triggered action.
-pub fn show(ctx: &egui::Context) -> Option<MenuAction> {
+///
+/// `panel_id` must be unique per viewport to prevent menu state leaking
+/// between windows (e.g. opening a menu in one window opens it in all).
+pub fn show_with_id(ctx: &egui::Context, panel_id: egui::Id) -> Option<MenuAction> {
     let mut action = None;
     let menu_width = ctx.style().spacing.menu_width;
 
-    egui::TopBottomPanel::top("menu_bar")
+    egui::TopBottomPanel::top(panel_id)
         .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
         .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -88,4 +91,9 @@ pub fn show(ctx: &egui::Context) -> Option<MenuAction> {
         });
 
     action
+}
+
+/// Render the egui in-window menu bar for the main window.
+pub fn show(ctx: &egui::Context) -> Option<MenuAction> {
+    show_with_id(ctx, egui::Id::new("menu_bar"))
 }
