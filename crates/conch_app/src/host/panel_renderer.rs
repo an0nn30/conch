@@ -95,25 +95,30 @@ pub fn render_panel_header<'a>(
         panel_name
     };
 
-    // Title row (skip if empty — plugin opted out of the header title).
-    if !title.is_empty() {
-        ui.label(
-            egui::RichText::new(title)
-                .size(theme.font_normal + 1.0)
-                .strong()
-                .color(theme.text),
-        );
-    }
-
-    // Check for a Toolbar widget → render on its own row.
-    if let Some(Widget::Toolbar { items, .. }) = rest.first() {
-        rest = &rest[1..];
-        let items: Vec<_> = items
+    // Check for a Toolbar widget following the title.
+    let toolbar_items: Option<Vec<_>> = if let Some(Widget::Toolbar { items, .. }) = rest.first() {
+        let filtered: Vec<_> = items
             .iter()
             .filter(|i| !matches!(i, conch_plugin_sdk::widgets::ToolbarItem::Spacer))
             .collect();
-        if !items.is_empty() {
-            ui.horizontal(|ui| {
+        rest = &rest[1..];
+        if filtered.is_empty() { None } else { Some(filtered) }
+    } else {
+        None
+    };
+
+    // Title row with toolbar buttons right-aligned on the same line.
+    if !title.is_empty() || toolbar_items.is_some() {
+        ui.horizontal(|ui| {
+            if !title.is_empty() {
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(theme.font_normal + 1.0)
+                        .strong()
+                        .color(theme.text),
+                );
+            }
+            if let Some(ref items) = toolbar_items {
                 let available = ui.available_width();
                 ui.allocate_ui_with_layout(
                     egui::vec2(available, ui.spacing().interact_size.y),
@@ -124,8 +129,8 @@ pub fn render_panel_header<'a>(
                         }
                     },
                 );
-            });
-        }
+            }
+        });
     }
 
     ui.separator();
