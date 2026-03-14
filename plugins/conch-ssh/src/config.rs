@@ -4,6 +4,9 @@
 //! managed via the HostApi config persistence API.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::tunnel::SavedTunnel;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
@@ -36,6 +39,9 @@ pub struct SshConfig {
     pub folders: Vec<ServerFolder>,
     /// Standalone servers not in any folder.
     pub ungrouped: Vec<ServerEntry>,
+    /// Saved SSH tunnels (local port forwards).
+    #[serde(default)]
+    pub tunnels: Vec<SavedTunnel>,
 }
 
 impl SshConfig {
@@ -103,6 +109,31 @@ impl SshConfig {
         if let Some(f) = self.folders.iter_mut().find(|f| f.id == folder_id) {
             f.expanded = expanded;
         }
+    }
+
+    // -- Tunnel operations --------------------------------------------------
+
+    pub fn find_tunnel(&self, id: &Uuid) -> Option<&SavedTunnel> {
+        self.tunnels.iter().find(|t| t.id == *id)
+    }
+
+    pub fn add_tunnel(&mut self, tunnel: SavedTunnel) {
+        self.tunnels.push(tunnel);
+    }
+
+    pub fn remove_tunnel(&mut self, id: &Uuid) {
+        self.tunnels.retain(|t| t.id != *id);
+    }
+
+    pub fn update_tunnel(&mut self, tunnel: SavedTunnel) {
+        if let Some(existing) = self.tunnels.iter_mut().find(|t| t.id == tunnel.id) {
+            *existing = tunnel;
+        }
+    }
+
+    /// Return all tunnels associated with a given session key.
+    pub fn tunnels_for_server(&self, session_key: &str) -> Vec<&SavedTunnel> {
+        self.tunnels.iter().filter(|t| t.session_key == session_key).collect()
     }
 }
 

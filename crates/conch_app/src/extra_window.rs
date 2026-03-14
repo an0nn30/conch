@@ -39,6 +39,7 @@ pub(crate) struct SharedState<'a> {
     pub user_config: &'a config::UserConfig,
     pub colors: &'a ResolvedColors,
     pub shortcuts: &'a ResolvedShortcuts,
+    pub plugin_keybindings: &'a [crate::input::ResolvedPluginKeybind],
     pub theme: &'a UiTheme,
     pub effective_decorations: config::WindowDecorations,
     pub show_in_window_menu: bool,
@@ -584,8 +585,28 @@ impl ExtraWindow {
                         }
                     }
 
+                    // Plugin-registered global keybindings.
+                    let mut plugin_handled = false;
+                    for pkb in shared.plugin_keybindings {
+                        if pkb.binding.matches(key, modifiers) {
+                            let event = conch_plugin_sdk::PluginEvent::MenuAction {
+                                action: pkb.action.clone(),
+                            };
+                            if let Ok(json) = serde_json::to_string(&event) {
+                                if let Some(sender) = shared.plugin_bus.sender_for(&pkb.plugin_name) {
+                                    let _ = sender.try_send(conch_plugin::bus::PluginMail::WidgetEvent { json });
+                                }
+                            }
+                            plugin_handled = true;
+                            break;
+                        }
+                    }
+                    if plugin_handled {
+                        continue;
+                    }
+
                     // Forward to PTY.
-                    if let Some(bytes) = input::key_to_bytes(key, modifiers, None, shared.shortcuts, app_cursor) {
+                    if let Some(bytes) = input::key_to_bytes(key, modifiers, None, shared.shortcuts, app_cursor, shared.plugin_keybindings) {
                         if let Some(session) = self.active_session() {
                             if let Some(mut term) = session.term().try_lock_unfair() {
                                 term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
@@ -635,6 +656,7 @@ impl ConchApp {
             user_config: &self.state.user_config,
             colors: &self.state.colors,
             shortcuts: &self.shortcuts,
+            plugin_keybindings: &self.plugin_keybindings,
             theme: &self.state.theme,
             effective_decorations,
             show_in_window_menu: self.menu_bar_state.is_in_window(),

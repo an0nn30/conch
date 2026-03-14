@@ -53,6 +53,14 @@ impl KeyBinding {
     }
 }
 
+/// A resolved plugin keybinding — maps a key combo to a plugin action.
+#[derive(Debug, Clone)]
+pub struct ResolvedPluginKeybind {
+    pub binding: KeyBinding,
+    pub plugin_name: String,
+    pub action: String,
+}
+
 /// Resolved set of app-level keyboard shortcuts.
 #[derive(Debug, Clone)]
 pub struct ResolvedShortcuts {
@@ -114,8 +122,14 @@ pub fn key_to_bytes(
     text: Option<&str>,
     shortcuts: &ResolvedShortcuts,
     app_cursor: bool,
+    plugin_keybindings: &[ResolvedPluginKeybind],
 ) -> Option<Vec<u8>> {
     if shortcuts.is_app_shortcut(key, modifiers) {
+        return None;
+    }
+
+    // Plugin keybindings should not be forwarded to PTY.
+    if plugin_keybindings.iter().any(|pkb| pkb.binding.matches(key, modifiers)) {
         return None;
     }
 
@@ -568,141 +582,141 @@ mod tests {
     #[test]
     fn key_to_bytes_enter() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Enter, &no_mods(), None, &s, false), Some(b"\r".to_vec()));
+        assert_eq!(key_to_bytes(&Key::Enter, &no_mods(), None, &s, false, &[]), Some(b"\r".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_backspace() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Backspace, &no_mods(), None, &s, false), Some(vec![0x7f]));
+        assert_eq!(key_to_bytes(&Key::Backspace, &no_mods(), None, &s, false, &[]), Some(vec![0x7f]));
     }
 
     #[test]
     fn key_to_bytes_tab() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Tab, &no_mods(), None, &s, false), Some(b"\t".to_vec()));
+        assert_eq!(key_to_bytes(&Key::Tab, &no_mods(), None, &s, false, &[]), Some(b"\t".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_shift_tab() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Tab, &shift(), None, &s, false), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(key_to_bytes(&Key::Tab, &shift(), None, &s, false, &[]), Some(b"\x1b[Z".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_escape() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Escape, &no_mods(), None, &s, false), Some(vec![0x1b]));
+        assert_eq!(key_to_bytes(&Key::Escape, &no_mods(), None, &s, false, &[]), Some(vec![0x1b]));
     }
 
     #[test]
     fn key_to_bytes_ctrl_c() {
         let s = default_shortcuts();
         // Ctrl+C = ASCII 3 (ETX).
-        assert_eq!(key_to_bytes(&Key::C, &ctrl(), None, &s, false), Some(vec![3]));
+        assert_eq!(key_to_bytes(&Key::C, &ctrl(), None, &s, false, &[]), Some(vec![3]));
     }
 
     #[test]
     fn key_to_bytes_ctrl_a() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::A, &ctrl(), None, &s, false), Some(vec![1]));
+        assert_eq!(key_to_bytes(&Key::A, &ctrl(), None, &s, false, &[]), Some(vec![1]));
     }
 
     #[test]
     fn key_to_bytes_ctrl_z() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Z, &ctrl(), None, &s, false), Some(vec![26]));
+        assert_eq!(key_to_bytes(&Key::Z, &ctrl(), None, &s, false, &[]), Some(vec![26]));
     }
 
     #[test]
     fn key_to_bytes_ctrl_bracket_escape() {
         let s = default_shortcuts();
         // Ctrl+[ = ESC (0x1b).
-        assert_eq!(key_to_bytes(&Key::OpenBracket, &ctrl(), None, &s, false), Some(vec![0x1b]));
+        assert_eq!(key_to_bytes(&Key::OpenBracket, &ctrl(), None, &s, false, &[]), Some(vec![0x1b]));
     }
 
     #[test]
     fn key_to_bytes_ctrl_backslash() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Backslash, &ctrl(), None, &s, false), Some(vec![0x1c]));
+        assert_eq!(key_to_bytes(&Key::Backslash, &ctrl(), None, &s, false, &[]), Some(vec![0x1c]));
     }
 
     #[test]
     fn key_to_bytes_delete() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Delete, &no_mods(), None, &s, false), Some(b"\x1b[3~".to_vec()));
+        assert_eq!(key_to_bytes(&Key::Delete, &no_mods(), None, &s, false, &[]), Some(b"\x1b[3~".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_home_normal() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Home, &no_mods(), None, &s, false), Some(b"\x1b[H".to_vec()));
+        assert_eq!(key_to_bytes(&Key::Home, &no_mods(), None, &s, false, &[]), Some(b"\x1b[H".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_home_app_cursor() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Home, &no_mods(), None, &s, true), Some(b"\x1bOH".to_vec()));
+        assert_eq!(key_to_bytes(&Key::Home, &no_mods(), None, &s, true, &[]), Some(b"\x1bOH".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_home_ctrl() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::Home, &ctrl(), None, &s, false), Some(b"\x1b[1;5H".to_vec()));
+        assert_eq!(key_to_bytes(&Key::Home, &ctrl(), None, &s, false, &[]), Some(b"\x1b[1;5H".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_end_normal() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::End, &no_mods(), None, &s, false), Some(b"\x1b[F".to_vec()));
+        assert_eq!(key_to_bytes(&Key::End, &no_mods(), None, &s, false, &[]), Some(b"\x1b[F".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_page_up_down() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::PageUp, &no_mods(), None, &s, false), Some(b"\x1b[5~".to_vec()));
-        assert_eq!(key_to_bytes(&Key::PageDown, &no_mods(), None, &s, false), Some(b"\x1b[6~".to_vec()));
+        assert_eq!(key_to_bytes(&Key::PageUp, &no_mods(), None, &s, false, &[]), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(key_to_bytes(&Key::PageDown, &no_mods(), None, &s, false, &[]), Some(b"\x1b[6~".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_function_keys() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::F1, &no_mods(), None, &s, false), Some(b"\x1bOP".to_vec()));
-        assert_eq!(key_to_bytes(&Key::F5, &no_mods(), None, &s, false), Some(b"\x1b[15~".to_vec()));
-        assert_eq!(key_to_bytes(&Key::F12, &no_mods(), None, &s, false), Some(b"\x1b[24~".to_vec()));
+        assert_eq!(key_to_bytes(&Key::F1, &no_mods(), None, &s, false, &[]), Some(b"\x1bOP".to_vec()));
+        assert_eq!(key_to_bytes(&Key::F5, &no_mods(), None, &s, false, &[]), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(key_to_bytes(&Key::F12, &no_mods(), None, &s, false, &[]), Some(b"\x1b[24~".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_arrow_keys() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::ArrowUp, &no_mods(), None, &s, false), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_to_bytes(&Key::ArrowDown, &no_mods(), None, &s, false), Some(b"\x1b[B".to_vec()));
+        assert_eq!(key_to_bytes(&Key::ArrowUp, &no_mods(), None, &s, false, &[]), Some(b"\x1b[A".to_vec()));
+        assert_eq!(key_to_bytes(&Key::ArrowDown, &no_mods(), None, &s, false, &[]), Some(b"\x1b[B".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_printable_text() {
         let s = default_shortcuts();
-        assert_eq!(key_to_bytes(&Key::A, &no_mods(), Some("a"), &s, false), Some(b"a".to_vec()));
+        assert_eq!(key_to_bytes(&Key::A, &no_mods(), Some("a"), &s, false, &[]), Some(b"a".to_vec()));
     }
 
     #[test]
     fn key_to_bytes_alt_text() {
         let s = default_shortcuts();
         // Alt+a = ESC + "a".
-        assert_eq!(key_to_bytes(&Key::A, &alt(), Some("a"), &s, false), Some(vec![0x1b, b'a']));
+        assert_eq!(key_to_bytes(&Key::A, &alt(), Some("a"), &s, false, &[]), Some(vec![0x1b, b'a']));
     }
 
     #[test]
     fn key_to_bytes_app_shortcut_returns_none() {
         let s = default_shortcuts();
         // Cmd+T is new_tab shortcut — should not produce bytes.
-        assert_eq!(key_to_bytes(&Key::T, &cmd(), Some("t"), &s, false), None);
+        assert_eq!(key_to_bytes(&Key::T, &cmd(), Some("t"), &s, false, &[]), None);
     }
 
     #[test]
     fn key_to_bytes_cmd_number_returns_none() {
         let s = default_shortcuts();
         // Cmd+1 is tab switch — should not produce bytes.
-        assert_eq!(key_to_bytes(&Key::Num1, &cmd(), None, &s, false), None);
+        assert_eq!(key_to_bytes(&Key::Num1, &cmd(), None, &s, false, &[]), None);
     }
 }

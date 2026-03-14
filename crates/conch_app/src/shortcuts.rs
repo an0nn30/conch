@@ -96,6 +96,18 @@ impl ConchApp {
                             }
                         }
 
+                        // Plugin-registered global keybindings.
+                        for pkb in &self.plugin_keybindings {
+                            if pkb.binding.matches(key, modifiers) {
+                                let action = crate::menu_bar::MenuAction::PluginAction {
+                                    plugin_name: pkb.plugin_name.clone(),
+                                    action: pkb.action.clone(),
+                                };
+                                crate::menu_bar::handle_action(action, ctx, self);
+                                return;
+                            }
+                        }
+
                         // Ctrl+Shift+C for copy on non-macOS.
                         #[cfg(not(target_os = "macos"))]
                         if forward_to_pty && modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
@@ -112,7 +124,7 @@ impl ConchApp {
 
                         // Forward to active terminal.
                         if forward_to_pty {
-                            if let Some(bytes) = input::key_to_bytes(key, modifiers, None, &self.shortcuts, app_cursor) {
+                            if let Some(bytes) = input::key_to_bytes(key, modifiers, None, &self.shortcuts, app_cursor, &self.plugin_keybindings) {
                                 if let Some(session) = self.state.active_session() {
                                     if let Some(mut term) = session.term().try_lock_unfair() {
                                         term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);

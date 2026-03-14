@@ -12,6 +12,18 @@ pub fn show_with_id(ctx: &egui::Context, panel_id: egui::Id) -> Option<MenuActio
     let mut action = None;
     let menu_width = ctx.style().spacing.menu_width;
 
+    // Group plugin items by menu name for merging into standard menus.
+    let plugin_items = bridge::plugin_menu_items();
+    let mut plugin_menus = std::collections::BTreeMap::<String, Vec<&bridge::PluginMenuItem>>::new();
+    for item in &plugin_items {
+        plugin_menus
+            .entry(item.menu.clone())
+            .or_default()
+            .push(item);
+    }
+
+    let standard_menus = ["File", "Edit", "View", "Help"];
+
     egui::TopBottomPanel::top(panel_id)
         .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
         .show(ctx, |ui| {
@@ -31,6 +43,8 @@ pub fn show_with_id(ctx: &egui::Context, panel_id: egui::Id) -> Option<MenuActio
                         action = Some(MenuAction::CloseTab);
                         ui.close_menu();
                     }
+                    // Append plugin items registered under "File".
+                    render_plugin_items(ui, plugin_menus.get("File"), &mut action);
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         action = Some(MenuAction::Quit);
@@ -53,6 +67,8 @@ pub fn show_with_id(ctx: &egui::Context, panel_id: egui::Id) -> Option<MenuActio
                         action = Some(MenuAction::SelectAll);
                         ui.close_menu();
                     }
+                    // Append plugin items registered under "Edit".
+                    render_plugin_items(ui, plugin_menus.get("Edit"), &mut action);
                 });
 
                 ui.menu_button("View", |ui| {
@@ -79,34 +95,29 @@ pub fn show_with_id(ctx: &egui::Context, panel_id: egui::Id) -> Option<MenuActio
                         action = Some(MenuAction::ZoomReset);
                         ui.close_menu();
                     }
+                    // Append plugin items registered under "View".
+                    render_plugin_items(ui, plugin_menus.get("View"), &mut action);
                 });
 
-                // Plugin-registered menu items grouped by menu name.
-                let plugin_items = bridge::plugin_menu_items();
-                if !plugin_items.is_empty() {
-                    // Collect unique menu names that aren't standard menus.
-                    let mut plugin_menus = std::collections::BTreeMap::<String, Vec<&bridge::PluginMenuItem>>::new();
-                    for item in &plugin_items {
-                        plugin_menus
-                            .entry(item.menu.clone())
-                            .or_default()
-                            .push(item);
+                // Custom plugin menus (not File/Edit/View/Help) get their own buttons.
+                for (menu_name, items) in &plugin_menus {
+                    if standard_menus.contains(&menu_name.as_str())
+                        || menu_name.starts_with('_')
+                    {
+                        continue;
                     }
-
-                    for (menu_name, items) in &plugin_menus {
-                        ui.menu_button(menu_name.as_str(), |ui| {
-                            ui.set_min_width(menu_width);
-                            for item in items {
-                                if ui.button(&item.label).clicked() {
-                                    action = Some(MenuAction::PluginAction {
-                                        plugin_name: item.plugin_name.clone(),
-                                        action: item.action.clone(),
-                                    });
-                                    ui.close_menu();
-                                }
+                    ui.menu_button(menu_name.as_str(), |ui| {
+                        ui.set_min_width(menu_width);
+                        for item in items {
+                            if ui.button(&item.label).clicked() {
+                                action = Some(MenuAction::PluginAction {
+                                    plugin_name: item.plugin_name.clone(),
+                                    action: item.action.clone(),
+                                });
+                                ui.close_menu();
                             }
-                        });
-                    }
+                        }
+                    });
                 }
 
                 ui.menu_button("Help", |ui| {
@@ -115,11 +126,35 @@ pub fn show_with_id(ctx: &egui::Context, panel_id: egui::Id) -> Option<MenuActio
                         // TODO: show about dialog
                         ui.close_menu();
                     }
+                    // Append plugin items registered under "Help".
+                    render_plugin_items(ui, plugin_menus.get("Help"), &mut action);
                 });
             });
         });
 
     action
+}
+
+/// Render plugin-registered items inside a standard menu, preceded by a separator.
+fn render_plugin_items(
+    ui: &mut egui::Ui,
+    items: Option<&Vec<&bridge::PluginMenuItem>>,
+    action: &mut Option<MenuAction>,
+) {
+    if let Some(items) = items {
+        if !items.is_empty() {
+            ui.separator();
+            for item in items {
+                if ui.button(&item.label).clicked() {
+                    *action = Some(MenuAction::PluginAction {
+                        plugin_name: item.plugin_name.clone(),
+                        action: item.action.clone(),
+                    });
+                    ui.close_menu();
+                }
+            }
+        }
+    }
 }
 
 /// Render the egui in-window menu bar for the main window.

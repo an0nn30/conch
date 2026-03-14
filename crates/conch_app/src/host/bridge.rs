@@ -231,14 +231,23 @@ pub struct PluginMenuItem {
 /// Global registry of plugin-registered menu items.
 static MENU_ITEMS: parking_lot::Mutex<Vec<PluginMenuItem>> = parking_lot::Mutex::new(Vec::new());
 
+/// Version counter incremented whenever plugin menu items change.
+static MENU_ITEMS_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Get a snapshot of all registered plugin menu items.
 pub fn plugin_menu_items() -> Vec<PluginMenuItem> {
     MENU_ITEMS.lock().clone()
 }
 
+/// Get the current version of the plugin menu items registry.
+pub fn plugin_menu_items_version() -> u64 {
+    MENU_ITEMS_VERSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Remove all menu items registered by a specific plugin.
 pub fn remove_menu_items_for_plugin(plugin_name: &str) {
     MENU_ITEMS.lock().retain(|item| item.plugin_name != plugin_name);
+    MENU_ITEMS_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -838,6 +847,7 @@ extern "C" fn host_register_menu_item(
         keybind: keybind_str,
         plugin_name,
     });
+    MENU_ITEMS_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------

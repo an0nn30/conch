@@ -162,6 +162,9 @@ pub enum Widget {
         hint: Option<String>,
         /// Submit on Enter (generates `text_input_submit` event).
         submit_on_enter: Option<bool>,
+        /// If true, request keyboard focus on this input this frame.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_focus: Option<bool>,
     },
 
     /// Multi-line text editor.
@@ -535,6 +538,7 @@ impl Widget {
             value: value.into(),
             hint: None,
             submit_on_enter: Some(true),
+            request_focus: None,
         }
     }
 
@@ -646,8 +650,9 @@ mod tests {
             value: "foo".into(),
             hint: Some("Search...".into()),
             submit_on_enter: Some(true),
+            request_focus: None,
         };
-        if let Widget::TextInput { id, value, hint, submit_on_enter } = roundtrip(&w) {
+        if let Widget::TextInput { id, value, hint, submit_on_enter, .. } = roundtrip(&w) {
             assert_eq!(id, "search");
             assert_eq!(value, "foo");
             assert_eq!(hint.as_deref(), Some("Search..."));

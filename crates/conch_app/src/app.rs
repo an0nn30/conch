@@ -33,6 +33,10 @@ const CURSOR_BLINK_MS: u128 = 500;
 pub struct ConchApp {
     pub(crate) state: AppState,
     pub(crate) shortcuts: ResolvedShortcuts,
+    /// Plugin-registered global keybindings (resolved from menu items).
+    pub(crate) plugin_keybindings: Vec<crate::input::ResolvedPluginKeybind>,
+    /// Tracks which version of plugin menu items we last resolved keybindings from.
+    pub(crate) plugin_keybindings_version: u64,
     pub(crate) selection: Selection,
 
     // Terminal rendering state.
@@ -129,6 +133,8 @@ impl ConchApp {
         let mut app = Self {
             state,
             shortcuts,
+            plugin_keybindings: Vec::new(),
+            plugin_keybindings_version: 0,
             selection: Selection::default(),
             cell_width: 0.0,
             cell_height: 0.0,
@@ -174,6 +180,31 @@ impl ConchApp {
         app.auto_load_plugins();
 
         app
+    }
+
+    /// Re-resolve plugin keybindings when menu items change.
+    fn refresh_plugin_keybindings(&mut self) {
+        use crate::host::bridge;
+        use crate::input::{KeyBinding, ResolvedPluginKeybind};
+
+        let version = bridge::plugin_menu_items_version();
+        if version == self.plugin_keybindings_version {
+            return;
+        }
+        self.plugin_keybindings_version = version;
+
+        self.plugin_keybindings = bridge::plugin_menu_items()
+            .into_iter()
+            .filter_map(|item| {
+                let kb_str = item.keybind.as_deref()?;
+                let binding = KeyBinding::parse(kb_str)?;
+                Some(ResolvedPluginKeybind {
+                    binding,
+                    plugin_name: item.plugin_name,
+                    action: item.action,
+                })
+            })
+            .collect();
     }
 
     /// Build a `ViewportBuilder` for extra windows matching main window decorations.
@@ -558,6 +589,9 @@ impl eframe::App for ConchApp {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = Instant::now();
         }
+
+        // Refresh plugin keybindings when menu items change.
+        self.refresh_plugin_keybindings();
 
         // Detect tab changes and notify plugins via the bus.
         if self.state.active_tab != self.prev_active_tab {

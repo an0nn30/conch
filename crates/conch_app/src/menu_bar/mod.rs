@@ -193,9 +193,13 @@ pub fn handle_action(
             app.show_plugin_manager = !app.show_plugin_manager;
         }
         MenuAction::PluginAction { plugin_name, action } => {
-            // Dispatch as a plugin event via the IPC bus.
-            let data = serde_json::json!({ "action": action });
-            app.plugin_bus.publish(&plugin_name, "menu_action", data);
+            // Send MenuAction event directly to the target plugin.
+            let event = conch_plugin_sdk::PluginEvent::MenuAction { action };
+            if let Ok(json) = serde_json::to_string(&event) {
+                if let Some(sender) = app.plugin_bus.sender_for(&plugin_name) {
+                    let _ = sender.try_send(conch_plugin::bus::PluginMail::WidgetEvent { json });
+                }
+            }
         }
     }
 }

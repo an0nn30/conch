@@ -258,6 +258,7 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                     value,
                     hint,
                     submit_on_enter: Some(true),
+                    request_focus: None,
                 })
             });
             Ok(())

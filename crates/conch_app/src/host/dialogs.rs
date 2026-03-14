@@ -62,6 +62,11 @@ pub struct FormDescriptor {
     /// Label column width in logical pixels (default 120).
     #[serde(default)]
     pub label_width: f32,
+    /// If set, the dialog auto-closes with `_action: "_refresh"` after this
+    /// many milliseconds, allowing the plugin to rebuild the form with fresh
+    /// data and re-show it.
+    #[serde(default)]
+    pub auto_refresh_ms: u64,
 }
 
 /// A button in the form's action row.
@@ -148,6 +153,26 @@ pub enum FormField {
     Label {
         text: String,
     },
+    /// A read-only table with selectable rows. The selected row ID is stored
+    /// in the form values under `id`. Each row has an `id` field that is
+    /// returned when selected.
+    SelectableTable {
+        id: String,
+        columns: Vec<String>,
+        rows: Vec<SelectableTableRow>,
+        #[serde(default)]
+        value: String,
+    },
+}
+
+/// A row in a `SelectableTable` form field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectableTableRow {
+    pub id: String,
+    pub cells: Vec<String>,
+    /// Optional color for the first cell (e.g. "green" for active status).
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 fn default_port() -> String {
@@ -201,6 +226,8 @@ enum ActiveDialog {
         /// The button ID that was clicked (None = cancelled).
         action: Option<String>,
         reply: oneshot::Sender<Option<String>>,
+        /// When the dialog was activated (for auto_refresh_ms).
+        created_at: std::time::Instant,
     },
     Confirm {
         msg: String,
@@ -289,9 +316,10 @@ impl DialogState {
                 descriptor,
                 values,
                 action,
+                created_at,
                 ..
             } => {
-                should_close = show_form_dialog(ctx, descriptor, values, action);
+                should_close = show_form_dialog(ctx, descriptor, values, action, *created_at);
             }
             ActiveDialog::Confirm { msg, confirmed, .. } => {
                 should_close = show_confirm_dialog(ctx, msg, confirmed);
@@ -308,6 +336,11 @@ impl DialogState {
             ActiveDialog::ContextMenu { items, selected, .. } => {
                 should_close = show_context_menu_dialog(ctx, items, selected);
             }
+        }
+
+        // ESC dismisses any active dialog (cancel result).
+        if !should_close && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            should_close = true;
         }
 
         if should_close {
@@ -334,6 +367,7 @@ fn activate_request(request: DialogRequest) -> ActiveDialog {
                 values,
                 action: None,
                 reply,
+                created_at: std::time::Instant::now(),
             }
         }
         DialogRequest::Confirm { msg, reply } => ActiveDialog::Confirm { msg, confirmed: false, reply },
@@ -401,6 +435,9 @@ fn collect_field_values(fields: &[FormField], values: &mut HashMap<String, FormV
                     FormValue::Bool(*expanded),
                 );
                 collect_field_values(fields, values);
+            }
+            FormField::SelectableTable { id, value, .. } => {
+                values.insert(id.clone(), FormValue::Text(value.clone()));
             }
             FormField::Separator | FormField::Label { .. } => {}
         }
@@ -508,7 +545,20 @@ fn show_form_dialog(
     descriptor: &FormDescriptor,
     values: &mut HashMap<String, FormValue>,
     action: &mut Option<String>,
+    created_at: std::time::Instant,
 ) -> bool {
+    // Auto-refresh: if enough time has elapsed, close with "_refresh" action.
+    if descriptor.auto_refresh_ms > 0 {
+        let elapsed = created_at.elapsed().as_millis() as u64;
+        if elapsed >= descriptor.auto_refresh_ms {
+            *action = Some("_refresh".to_string());
+            return true;
+        }
+        // Request a repaint so we check again soon.
+        ctx.request_repaint_after(std::time::Duration::from_millis(
+            descriptor.auto_refresh_ms.saturating_sub(elapsed).max(50),
+        ));
+    }
     let mut close = false;
     let label_width = if descriptor.label_width > 0.0 {
         descriptor.label_width
@@ -604,21 +654,136 @@ fn show_form_dialog(
 }
 
 /// Render form fields into an egui Grid.
+///
+/// Full-width fields (SelectableTable, Label with label_width=0) break out
+/// of the grid and render at the full dialog width.
 fn render_form_fields(
     ui: &mut egui::Ui,
     fields: &[FormField],
     values: &mut HashMap<String, FormValue>,
     label_width: f32,
 ) {
-    egui::Grid::new("form_grid")
-        .num_columns(2)
-        .spacing([8.0, 6.0])
-        .min_col_width(label_width)
-        .show(ui, |ui| {
-            for field in fields {
-                render_form_field(ui, field, values);
-            }
-        });
+    // Split fields into segments: grid fields vs full-width fields.
+    let mut i = 0;
+    let mut grid_idx = 0;
+    while i < fields.len() {
+        // Collect consecutive grid-compatible fields.
+        let start = i;
+        while i < fields.len() && !is_full_width_field(&fields[i]) {
+            i += 1;
+        }
+        if start < i {
+            egui::Grid::new(format!("form_grid_{grid_idx}"))
+                .num_columns(2)
+                .spacing([8.0, 6.0])
+                .min_col_width(label_width)
+                .show(ui, |ui| {
+                    for field in &fields[start..i] {
+                        render_form_field(ui, field, values);
+                    }
+                });
+            grid_idx += 1;
+        }
+        // Render full-width field(s).
+        while i < fields.len() && is_full_width_field(&fields[i]) {
+            render_full_width_field(ui, &fields[i], values);
+            i += 1;
+        }
+    }
+}
+
+/// Whether a field should render at full dialog width outside the label/value grid.
+fn is_full_width_field(field: &FormField) -> bool {
+    matches!(field, FormField::SelectableTable { .. } | FormField::Label { .. })
+}
+
+/// Render a full-width field outside the form grid.
+fn render_full_width_field(
+    ui: &mut egui::Ui,
+    field: &FormField,
+    values: &mut HashMap<String, FormValue>,
+) {
+    match field {
+        FormField::Label { text } => {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(text).weak());
+            ui.add_space(2.0);
+        }
+        FormField::SelectableTable { id, columns, rows, .. } => {
+            let selected = if let Some(FormValue::Text(val)) = values.get(id) {
+                val.clone()
+            } else {
+                String::new()
+            };
+
+            // Table frame with background.
+            let available_width = ui.available_width();
+            egui::Frame::NONE
+                .fill(ui.visuals().extreme_bg_color)
+                .inner_margin(4.0)
+                .corner_radius(4.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(available_width - 8.0);
+                    ui.set_min_height(120.0);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(250.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new(format!("selectable_table_{id}"))
+                                .num_columns(columns.len())
+                                .spacing([16.0, 2.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    // Header row.
+                                    for col_name in columns {
+                                        ui.strong(col_name);
+                                    }
+                                    ui.end_row();
+
+                                    // Soften the selection highlight so text stays
+                                    // readable against a dark background.
+                                    ui.style_mut().visuals.selection.bg_fill =
+                                        ui.visuals().selection.bg_fill.linear_multiply(0.25);
+
+                                    // Data rows.
+                                    for row_data in rows {
+                                        let is_selected = row_data.id == selected;
+                                        for (ci, cell) in row_data.cells.iter().enumerate() {
+                                            let text = if ci == 0 {
+                                                if let Some(color) = &row_data.color {
+                                                    match color.as_str() {
+                                                        "green" => egui::RichText::new(cell)
+                                                            .color(egui::Color32::from_rgb(100, 200, 100)),
+                                                        "red" => egui::RichText::new(cell)
+                                                            .color(egui::Color32::from_rgb(200, 100, 100)),
+                                                        "yellow" => egui::RichText::new(cell)
+                                                            .color(egui::Color32::from_rgb(220, 200, 80)),
+                                                        _ => egui::RichText::new(cell),
+                                                    }
+                                                } else {
+                                                    egui::RichText::new(cell)
+                                                }
+                                            } else {
+                                                egui::RichText::new(cell)
+                                            };
+                                            let resp = ui.selectable_label(is_selected, text);
+                                            if resp.clicked() {
+                                                if let Some(FormValue::Text(val)) =
+                                                    values.get_mut(id)
+                                                {
+                                                    *val = row_data.id.clone();
+                                                }
+                                            }
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
+            ui.add_space(4.0);
+        }
+        _ => {}
+    }
 }
 
 /// Render a single form field row.
@@ -789,10 +954,9 @@ fn render_form_field(
             ui.separator();
             ui.end_row();
         }
-        FormField::Label { text } => {
-            ui.label("");
-            ui.label(text);
-            ui.end_row();
+        // Label and SelectableTable are full-width fields rendered outside the grid.
+        FormField::Label { .. } | FormField::SelectableTable { .. } => {
+            unreachable!("full-width fields are handled by render_full_width_field");
         }
     }
 }
@@ -971,6 +1135,7 @@ mod tests {
                 },
                 FormField::Number {
                     id: "port".into(),
+
                     label: "Port".into(),
                     value: 22.0,
                 },
@@ -984,6 +1149,7 @@ mod tests {
             buttons: Vec::new(),
             min_width: 0.0,
             label_width: 0.0,
+            auto_refresh_ms: 0,
         };
 
         let values = initial_form_values(&desc);

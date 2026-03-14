@@ -54,6 +54,7 @@ pub fn build_server_tree(
     sessions: &HashMap<u64, Box<SshBackendState>>,
     selected: Option<&str>,
     quick_connect_value: &str,
+    focus_quick_connect: bool,
 ) -> Vec<Widget> {
     let mut widgets = Vec::new();
 
@@ -78,6 +79,7 @@ pub fn build_server_tree(
         value: quick_connect_value.to_string(),
         hint: Some("Quick connect...".to_string()),
         submit_on_enter: Some(true),
+        request_focus: if focus_quick_connect { Some(true) } else { None },
     });
 
     // -- Server Tree --
@@ -261,6 +263,7 @@ mod tests {
                 entries: vec![make_entry("srv1", "prod.example.com", "deploy")],
             }],
             ungrouped: vec![make_entry("srv2", "10.0.0.1", "root")],
+            tunnels: Vec::new(),
         }
     }
 
@@ -274,7 +277,7 @@ mod tests {
     #[test]
     fn empty_config_produces_toolbar_input_tree_and_footer() {
         let cfg = SshConfig::default();
-        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "");
+        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "", false);
         // Toolbar + TextInput + TreeView + Separator + Button
         assert_eq!(widgets.len(), 5);
         assert!(matches!(&widgets[0], Widget::Toolbar { .. }));
@@ -287,7 +290,7 @@ mod tests {
     #[test]
     fn quick_connect_input_has_correct_props() {
         let cfg = SshConfig::default();
-        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "");
+        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "", false);
         match &widgets[1] {
             Widget::TextInput { id, hint, submit_on_enter, .. } => {
                 assert_eq!(id, "quick_connect");
@@ -301,7 +304,7 @@ mod tests {
     #[test]
     fn tree_contains_folder_and_ungrouped() {
         let cfg = make_config_with_folder();
-        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "");
+        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "", false);
         match &widgets[2] {
             Widget::TreeView { nodes, .. } => {
                 assert_eq!(nodes.len(), 2); // 1 folder + 1 ungrouped
@@ -318,7 +321,7 @@ mod tests {
     fn ssh_config_entries_appear_as_muted_folder() {
         let cfg = SshConfig::default();
         let ssh_entries = make_ssh_config_entries();
-        let widgets = build_server_tree(&cfg, &ssh_entries, &empty_sessions(), None, "");
+        let widgets = build_server_tree(&cfg, &ssh_entries, &empty_sessions(), None, "", false);
         match &widgets[2] {
             Widget::TreeView { nodes, .. } => {
                 assert_eq!(nodes.len(), 1); // just the ssh config folder
@@ -340,7 +343,7 @@ mod tests {
         let mut sessions = HashMap::new();
         sessions.insert(1, backend);
 
-        let widgets = build_server_tree(&cfg, &[], &sessions, None, "");
+        let widgets = build_server_tree(&cfg, &[], &sessions, None, "", false);
         match &widgets[2] {
             Widget::TreeView { nodes, .. } => {
                 let server = &nodes[1]; // srv2 at 10.0.0.1
@@ -359,7 +362,7 @@ mod tests {
         let mut sessions = HashMap::new();
         sessions.insert(42, backend);
 
-        let widgets = build_server_tree(&cfg, &[], &sessions, None, "");
+        let widgets = build_server_tree(&cfg, &[], &sessions, None, "", false);
         // Toolbar + TextInput + TreeView + Separator + Button, no extra Active Sessions widgets.
         assert_eq!(widgets.len(), 5);
     }
@@ -367,7 +370,7 @@ mod tests {
     #[test]
     fn selected_passed_to_tree() {
         let cfg = make_config_with_folder();
-        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), Some("srv2"), "");
+        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), Some("srv2"), "", false);
         match &widgets[2] {
             Widget::TreeView { selected, .. } => {
                 assert_eq!(selected.as_deref(), Some("srv2"));
@@ -380,7 +383,7 @@ mod tests {
     fn user_folders_and_ssh_config_coexist() {
         let cfg = make_config_with_folder();
         let ssh_entries = make_ssh_config_entries();
-        let widgets = build_server_tree(&cfg, &ssh_entries, &empty_sessions(), None, "");
+        let widgets = build_server_tree(&cfg, &ssh_entries, &empty_sessions(), None, "", false);
         match &widgets[2] {
             Widget::TreeView { nodes, .. } => {
                 // folder_0, srv2 (ungrouped), sshconfig_folder
@@ -400,7 +403,7 @@ mod tests {
         let cfg = make_config_with_folder();
         let ssh_entries = make_ssh_config_entries();
         // Filter by "prod" — should match only the folder entry "prod.example.com"
-        let widgets = build_server_tree(&cfg, &ssh_entries, &empty_sessions(), None, "prod");
+        let widgets = build_server_tree(&cfg, &ssh_entries, &empty_sessions(), None, "prod", false);
         match &widgets[2] {
             Widget::TreeView { nodes, .. } => {
                 // Only the Production folder (with its matching entry) should remain.
@@ -416,7 +419,7 @@ mod tests {
     #[test]
     fn filter_empty_string_shows_all() {
         let cfg = make_config_with_folder();
-        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "");
+        let widgets = build_server_tree(&cfg, &[], &empty_sessions(), None, "", false);
         match &widgets[2] {
             Widget::TreeView { nodes, .. } => {
                 assert_eq!(nodes.len(), 2); // folder + ungrouped

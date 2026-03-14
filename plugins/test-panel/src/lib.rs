@@ -92,6 +92,7 @@ impl TestPanel {
                 value: self.text_value.clone(),
                 hint: Some("Type something...".into()),
                 submit_on_enter: Some(true),
+                request_focus: None,
             },
         ]
     }

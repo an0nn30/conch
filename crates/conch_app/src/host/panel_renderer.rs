@@ -417,6 +417,7 @@ fn render_widget(
             value,
             hint,
             submit_on_enter,
+            request_focus,
         } => {
             let buf = text_input_state
                 .entry(id.clone())
@@ -430,6 +431,10 @@ fn render_widget(
             }
 
             let response = ui.add(te);
+
+            if request_focus.unwrap_or(false) {
+                response.request_focus();
+            }
 
             // Sync from plugin's canonical value only when the widget is NOT
             // focused — otherwise the plugin's stale value overwrites typing.
