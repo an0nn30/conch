@@ -8,6 +8,7 @@
       <ui:WixUI Id="WixUI_Minimal" />
       <Feature Id="ProductFeature" Title="ConsoleApp" Level="1">
          <ComponentRef Id="ConchExe" />
+         <ComponentRef Id="ConchPlugins" />
          <ComponentRef Id="ConchShortcut" />
          <ComponentRef Id="ModifyPathEnv" />
          <ComponentRef Id="ContextMenu" />
@@ -16,6 +17,10 @@
       <DirectoryRef Id="ConchProgramFiles">
          <Component Id="ConchExe">
             <File Id="ConchExeFile" Source=".\target\release\conch.exe" Name="conch.exe" KeyPath="yes" />
+         </Component>
+         <Component Id="ConchPlugins" Guid="d7f4a1e2-3b8c-4d6e-9a5f-1c0e2b7d4f8a">
+            <File Id="PluginSsh" Source=".\target\release\conch_ssh.dll" Name="conch_ssh.dll" />
+            <File Id="PluginFiles" Source=".\target\release\conch_files.dll" Name="conch_files.dll" />
          </Component>
       </DirectoryRef>
       <DirectoryRef Id="ConchProgramMenu">

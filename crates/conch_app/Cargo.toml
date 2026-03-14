@@ -61,16 +61,23 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMen
 maintainer = "an0nn30"
 section = "utils"
 depends = "$auto"
+maintainer-scripts = "../../packaging/linux"
 assets = [
-    ["target/release/conch", "usr/bin/", "755"],
+    ["target/release/conch", "opt/conch/bin/", "755"],
+    ["target/release/libconch_ssh.so", "opt/conch/lib/", "755"],
+    ["target/release/libconch_files.so", "opt/conch/lib/", "755"],
     ["../../packaging/linux/conch.desktop", "usr/share/applications/", "644"],
     ["icons/app-icon.png", "usr/share/icons/hicolor/256x256/apps/conch.png", "644"],
     ["icons/app-icon-512.png", "usr/share/icons/hicolor/512x512/apps/conch.png", "644"],
 ]
 
 [package.metadata.generate-rpm]
+post_install_script = "ln -sf /opt/conch/bin/conch /usr/bin/conch"
+pre_uninstall_script = "rm -f /usr/bin/conch"
 assets = [
-    { source = "target/release/conch", dest = "/usr/bin/conch", mode = "755" },
+    { source = "target/release/conch", dest = "/opt/conch/bin/conch", mode = "755" },
+    { source = "target/release/libconch_ssh.so", dest = "/opt/conch/lib/libconch_ssh.so", mode = "755" },
+    { source = "target/release/libconch_files.so", dest = "/opt/conch/lib/libconch_files.so", mode = "755" },
     { source = "../../packaging/linux/conch.desktop", dest = "/usr/share/applications/conch.desktop", mode = "644" },
     { source = "icons/app-icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/conch.png", mode = "644" },
     { source = "icons/app-icon-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/conch.png", mode = "644" },

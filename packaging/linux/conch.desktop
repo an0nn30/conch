@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Conch
 Comment=Terminal Emulator with SSH session management
-Exec=conch
+Exec=/opt/conch/bin/conch
 Icon=conch
 Terminal=false
 Type=Application

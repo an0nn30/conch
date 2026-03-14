@@ -67,10 +67,10 @@ jobs:
         run: cargo test --release --target=x86_64-apple-darwin
 
       - name: Build ARM64
-        run: cargo build --release --target=aarch64-apple-darwin -p conch_app
+        run: cargo build --release --target=aarch64-apple-darwin
 
       - name: Build x86_64
-        run: cargo build --release --target=x86_64-apple-darwin -p conch_app
+        run: cargo build --release --target=x86_64-apple-darwin
 
       - name: Extract version
         id: version
@@ -81,13 +81,21 @@ jobs:
       - name: Create universal .app bundle & DMG
         run: |
           APP="Conch.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Plugins"
 
           # Create universal binary
           lipo -create \
             target/aarch64-apple-darwin/release/conch \
             target/x86_64-apple-darwin/release/conch \
             -output "$APP/Contents/MacOS/conch"
+
+          # Create universal plugin libraries
+          for plugin in libconch_ssh.dylib libconch_files.dylib; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/$plugin" \
+              "target/x86_64-apple-darwin/release/$plugin" \
+              -output "$APP/Contents/Plugins/$plugin"
+          done
 
           cp packaging/macos/Info.plist "$APP/Contents/"
           cp crates/conch_app/icons/conch.icns "$APP/Contents/Resources/"
@@ -128,7 +136,7 @@ jobs:
         run: cargo test --release
 
       - name: Build
-        run: cargo build --release -p conch_app
+        run: cargo build --release
 
       - name: Extract version
         id: version
@@ -138,7 +146,11 @@ jobs:
 
       - name: Upload portable executable
         run: |
-          cp ./target/release/conch.exe ./Conch-v${{ steps.version.outputs.version }}-portable.exe
+          mkdir -p portable
+          cp ./target/release/conch.exe portable/
+          cp ./target/release/conch_ssh.dll portable/ 2>/dev/null || true
+          cp ./target/release/conch_files.dll portable/ 2>/dev/null || true
+          cp portable/conch.exe ./Conch-v${{ steps.version.outputs.version }}-portable.exe
           ./.github/workflows/upload_asset.sh \
             ./Conch-v${{ steps.version.outputs.version }}-portable.exe $GITHUB_TOKEN
 
@@ -184,7 +196,7 @@ jobs:
         run: cargo test --release
 
       - name: Build
-        run: cargo build --release -p conch_app
+        run: cargo build --release
 
       - name: Extract version
         id: version
@@ -221,7 +233,7 @@ jobs:
         run: cargo clean
 
       - name: Build ARM64 with cross
-        run: cross build --release -p conch_app --target aarch64-unknown-linux-gnu
+        run: cross build --release --target aarch64-unknown-linux-gnu
 
       - name: Build ARM64 .deb
         run: |

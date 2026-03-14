@@ -17,39 +17,58 @@ impl ConchApp {
         let mut entries = Vec::new();
         let configured = &self.state.user_config.conch.plugins.search_paths;
 
-        // Resolve search directories.
-        let search_dirs: Vec<PathBuf> = if configured.is_empty() {
-            // Default paths for development + user plugins.
-            let mut dirs = vec![
-                PathBuf::from("target/debug"),
-                PathBuf::from("target/release"),
-                PathBuf::from("examples/plugins"),
-            ];
-            // Exe directory (handles installed builds).
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(exe_dir) = exe.parent() {
-                    dirs.push(exe_dir.to_path_buf());
+        // Build search directories. Default platform paths are always included;
+        // user-configured paths are appended so they can override or supplement.
+        let mut dirs = Vec::new();
+
+        // Development paths (only useful when running from the repo).
+        dirs.push(PathBuf::from("target/debug"));
+        dirs.push(PathBuf::from("target/release"));
+        dirs.push(PathBuf::from("examples/plugins"));
+
+        // Exe directory and sibling paths (handles installed builds).
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                // Same directory as the binary (Windows, portable builds).
+                dirs.push(exe_dir.to_path_buf());
+                // plugins/ subdirectory next to the binary.
+                dirs.push(exe_dir.join("plugins"));
+                // macOS app bundle: Conch.app/Contents/Plugins/
+                if let Some(contents_dir) = exe_dir.parent() {
+                    dirs.push(contents_dir.join("Plugins"));
+                }
+                // Linux: /opt/conch/lib/ when binary is in /opt/conch/bin/
+                if let Some(install_root) = exe_dir.parent() {
+                    dirs.push(install_root.join("lib"));
                 }
             }
-            // User plugin directory.
-            if let Some(config_dir) = dirs::config_dir() {
-                dirs.push(config_dir.join("conch").join("plugins"));
-            }
-            dirs
-        } else {
-            // Expand ~ in configured paths.
-            configured
-                .iter()
-                .map(|p| {
-                    if p.starts_with("~/") {
-                        if let Some(home) = dirs::home_dir() {
-                            return home.join(&p[2..]);
-                        }
-                    }
-                    PathBuf::from(p)
-                })
-                .collect()
-        };
+        }
+
+        // Standard Linux install path.
+        #[cfg(target_os = "linux")]
+        {
+            dirs.push(PathBuf::from("/opt/conch/lib"));
+            dirs.push(PathBuf::from("/usr/lib/conch/plugins"));
+        }
+
+        // User plugin directory (~/.config/conch/plugins/ or platform equivalent).
+        if let Some(config_dir) = dirs::config_dir() {
+            dirs.push(config_dir.join("conch").join("plugins"));
+        }
+
+        // Append user-configured search paths (these supplement the defaults).
+        for p in configured {
+            let expanded = if p.starts_with("~/") {
+                dirs::home_dir()
+                    .map(|home| home.join(&p[2..]))
+                    .unwrap_or_else(|| PathBuf::from(p))
+            } else {
+                PathBuf::from(p)
+            };
+            dirs.push(expanded);
+        }
+
+        let search_dirs = dirs;
 
         for dir in &search_dirs {
             if !dir.is_dir() {
