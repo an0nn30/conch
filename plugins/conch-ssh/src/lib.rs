@@ -39,7 +39,7 @@ use tokio::process::Command;
 use tokio::runtime::Runtime;
 
 use crate::config::{ServerEntry, SshConfig};
-use crate::server_tree::build_server_tree;
+use crate::server_tree::{build_server_tree, first_matching_server_id};
 use crate::session_backend::{SshBackendState, ssh_vtable};
 
 /// The SSH plugin's runtime state.
@@ -160,7 +160,14 @@ impl SshPlugin {
                 self.quick_connect_value = value;
             }
             WidgetEvent::TextInputSubmit { id, value } if id == "quick_connect" => {
-                self.quick_connect(&value);
+                // If the filter matches an existing server, connect to it.
+                // Otherwise, treat the input as a user@host:port connection string.
+                if let Some(server_id) = first_matching_server_id(&self.config, &self.ssh_config_entries, &value) {
+                    self.connect_to_server(&server_id);
+                } else {
+                    self.quick_connect(&value);
+                }
+                self.quick_connect_value.clear();
             }
             WidgetEvent::TreeSelect { id: _, node_id } => {
                 self.selected_node = Some(node_id);
@@ -538,7 +545,7 @@ impl SshPlugin {
     // -----------------------------------------------------------------------
 
     fn render(&self) -> Vec<Widget> {
-        build_server_tree(&self.config, &self.ssh_config_entries, &self.sessions, self.selected_node.as_deref())
+        build_server_tree(&self.config, &self.ssh_config_entries, &self.sessions, self.selected_node.as_deref(), &self.quick_connect_value)
     }
 
     // -----------------------------------------------------------------------

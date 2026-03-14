@@ -24,6 +24,115 @@ use app::ConchApp;
 use clap::{Parser, Subcommand};
 use conch_core::config;
 
+/// Load the platform's preferred UI font and set it as egui's default proportional font.
+fn setup_system_ui_font(ctx: &egui::Context) {
+    #[cfg(target_os = "linux")]
+    {
+        log::info!("Using egui built-in proportional font (Linux)");
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    let font_data = load_macos_system_font();
+
+    #[cfg(target_os = "windows")]
+    let font_data = load_system_font_by_name(&["Segoe UI Variable", "Segoe UI"]);
+
+    #[cfg(not(target_os = "linux"))]
+    match font_data {
+        Some((name, data)) => {
+            log::info!("Font data loaded: {} bytes from '{name}'", data.len());
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "system-ui".to_owned(),
+                egui::FontData::from_owned(data).into(),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "system-ui".to_owned());
+            ctx.set_fonts(fonts);
+            log::info!("UI font set to '{name}'");
+        }
+        None => {
+            log::warn!("Could not load system UI font, using egui default");
+        }
+    }
+}
+
+/// On macOS, load SF Pro (San Francisco) by scanning the system font directory.
+#[cfg(target_os = "macos")]
+fn load_macos_system_font() -> Option<(String, Vec<u8>)> {
+    // SF Pro is stored in /System/Library/Fonts/ but isn't queryable by
+    // normal family name via Core Text. Read the font file directly.
+    let sf_paths = [
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/SFNSText.ttf",
+        "/System/Library/Fonts/SF-Pro.ttf",
+        "/System/Library/Fonts/SF-Pro-Text-Regular.otf",
+        "/Library/Fonts/SF-Pro.ttf",
+        "/Library/Fonts/SF-Pro-Text-Regular.otf",
+    ];
+
+    for path in &sf_paths {
+        log::info!("Trying SF font path: {path}");
+        if let Ok(data) = std::fs::read(path) {
+            log::info!("Loaded system font from {path} ({} bytes)", data.len());
+            return Some(("San Francisco".to_string(), data));
+        }
+    }
+
+    // Fallback: use font-kit to find SF Pro or Helvetica Neue
+    log::info!("SF font files not found at known paths, trying font-kit fallback");
+    load_system_font_by_name(&["SF Pro", "SF Pro Text", "Helvetica Neue"])
+}
+
+/// Use font-kit to load a font by trying a list of family names in order.
+#[cfg(not(target_os = "linux"))]
+fn load_system_font_by_name(names: &[&str]) -> Option<(String, Vec<u8>)> {
+    use font_kit::family_name::FamilyName;
+    use font_kit::properties::Properties;
+    use font_kit::source::SystemSource;
+
+    let source = SystemSource::new();
+    for name in names {
+        log::info!("Trying system font: '{name}'");
+        let result = std::panic::catch_unwind(|| {
+            source.select_best_match(
+                &[FamilyName::Title(name.to_string())],
+                &Properties::new(),
+            )
+        });
+        let handle = match result {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
+                log::info!("Font '{name}' not found: {e}");
+                continue;
+            }
+            Err(_) => {
+                log::warn!("Font '{name}' caused a panic in font-kit, skipping");
+                continue;
+            }
+        };
+
+        let load_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.load()));
+        match load_result {
+            Ok(Ok(font)) => {
+                let full_name = font.full_name();
+                log::info!("Matched font: full_name='{full_name}' (from query '{name}')");
+                if let Some(data) = font.copy_font_data() {
+                    return Some((full_name, (*data).to_vec()));
+                }
+                log::warn!("Could not copy font data for '{full_name}'");
+            }
+            Ok(Err(e)) => log::warn!("Could not load font '{name}': {e}"),
+            Err(_) => log::warn!("Font '{name}' load panicked in font-kit, skipping"),
+        }
+    }
+    None
+}
+
 /// Apply the configured appearance mode to egui and the native window chrome.
 pub(crate) fn apply_appearance_mode(ctx: &egui::Context, mode: config::AppearanceMode) {
     let (theme_pref, sys_theme) = match mode {
@@ -224,6 +333,7 @@ fn main() -> eframe::Result<()> {
         "Conch",
         options,
         Box::new(move |cc| {
+            setup_system_ui_font(&cc.egui_ctx);
             apply_appearance_mode(&cc.egui_ctx, appearance_mode);
             Ok(Box::new(ConchApp::new(rt)))
         }),

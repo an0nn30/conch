@@ -382,13 +382,9 @@ fn render_widget(
             hint,
             submit_on_enter,
         } => {
-            // Sync from plugin's canonical value when it changes externally.
             let buf = text_input_state
                 .entry(id.clone())
                 .or_insert_with(|| value.clone());
-            if buf != value && !ui.memory(|m| m.has_focus(ui.id().with(id))) {
-                *buf = value.clone();
-            }
 
             let mut te = egui::TextEdit::singleline(buf)
                 .font(egui::TextStyle::Body)
@@ -398,6 +394,12 @@ fn render_widget(
             }
 
             let response = ui.add(te);
+
+            // Sync from plugin's canonical value only when the widget is NOT
+            // focused — otherwise the plugin's stale value overwrites typing.
+            if buf != value && !response.has_focus() {
+                *buf = value.clone();
+            }
 
             // Detect value change.
             if response.changed() {
