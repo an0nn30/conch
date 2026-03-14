@@ -4,7 +4,6 @@
 //! connect, send a JSON message, and disconnect. The app polls for messages
 //! each frame via `drain_ipc_messages()`.
 
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -128,6 +127,7 @@ pub fn ipc_socket_path() -> PathBuf {
 /// Background loop: accept connections and parse JSON messages.
 #[cfg(unix)]
 fn ipc_listen_loop(listener: std::os::unix::net::UnixListener, messages: MessageQueue) {
+    use std::io::{BufRead, BufReader};
     loop {
         match listener.accept() {
             Ok((stream, _)) => {

@@ -98,12 +98,12 @@ fn load_system_font_by_name(names: &[&str]) -> Option<(String, Vec<u8>)> {
     let source = SystemSource::new();
     for name in names {
         log::info!("Trying system font: '{name}'");
-        let result = std::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             source.select_best_match(
                 &[FamilyName::Title(name.to_string())],
                 &Properties::new(),
             )
-        });
+        }));
         let handle = match result {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => {
