@@ -768,7 +768,13 @@ impl eframe::App for ConchApp {
 
         // Menu bar.
         if let Some(action) = crate::menu_bar::show(ctx, &mut self.menu_bar_state) {
-            crate::menu_bar::handle_action(action, ctx, self);
+            // If an extra window has focus, route the action there instead.
+            let focused_extra = self.extra_windows.iter_mut().find(|w| w.has_focus);
+            if let Some(window) = focused_extra {
+                window.pending_menu_actions.push(action);
+            } else {
+                crate::menu_bar::handle_action(action, ctx, self);
+            }
         }
 
         // Plugin manager window (floating, toggled via View menu).

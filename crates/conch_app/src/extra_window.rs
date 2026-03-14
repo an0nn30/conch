@@ -77,6 +77,10 @@ pub struct ExtraWindow {
     pub tab_bar_state: TabBarState,
     pub style_applied: bool,
     pub show_plugin_manager: bool,
+    /// Whether this window had OS focus during the last frame.
+    pub has_focus: bool,
+    /// Menu actions pushed by the main window for this extra window to handle.
+    pub pending_menu_actions: Vec<crate::menu_bar::MenuAction>,
     /// Per-window panel visibility (independent from main window).
     pub left_panel_visible: bool,
     pub right_panel_visible: bool,
@@ -112,6 +116,8 @@ impl ExtraWindow {
             tab_bar_state: TabBarState::default(),
             style_applied: false,
             show_plugin_manager: false,
+            has_focus: false,
+            pending_menu_actions: Vec::new(),
             left_panel_visible: true,
             right_panel_visible: true,
             bottom_panel_visible: true,
@@ -167,6 +173,14 @@ impl ExtraWindow {
     ) {
         // Clear pending actions from previous frame.
         self.pending_actions.clear();
+
+        // Track OS-level focus for this window.
+        self.has_focus = ctx.input(|i| i.focused);
+
+        // Process any menu actions routed from the main window.
+        for action in std::mem::take(&mut self.pending_menu_actions) {
+            self.handle_menu_action(action, ctx, shared.user_config);
+        }
 
         // Apply theme on first frame and when it changes.
         if !self.style_applied || shared.theme_dirty {
