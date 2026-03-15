@@ -193,7 +193,8 @@ impl ConchApp {
         };
         let size = if self.windows.is_empty() { self.initial_window_size } else { [800.0, 600.0] };
         let builder = self.build_window_viewport(size);
-        let win = WindowState::with_session(viewport_id, builder, session);
+        let layout = self.shared.config.lock().persistent.layout.clone();
+        let win = WindowState::with_session(viewport_id, builder, session, &layout);
         self.windows.push(Arc::new(Mutex::new(win)));
         Some(viewport_id)
     }
@@ -457,11 +458,26 @@ impl eframe::App for ConchApp {
                     WindowAction::Quit => self.quit_requested = true,
                     WindowAction::PluginAction(a) => pm_actions.push(a),
                     WindowAction::WindowClosed(_) => {}
-                    WindowAction::SavePanelSizes { left, right, bottom } => {
+                    WindowAction::SaveLayoutState {
+                        window_width, window_height, zoom_factor,
+                        left_panel_width, right_panel_width, bottom_panel_height,
+                        left_panel_visible, right_panel_visible,
+                        bottom_panel_visible, status_bar_visible,
+                    } => {
                         let mut cfg = self.shared.config.lock();
-                        if let Some(w) = left { cfg.persistent.layout.left_panel_width = w; }
-                        if let Some(w) = right { cfg.persistent.layout.right_panel_width = w; }
-                        if let Some(h) = bottom { cfg.persistent.layout.bottom_panel_height = h; }
+                        let layout = &mut cfg.persistent.layout;
+                        if window_width > 100.0 && window_height > 100.0 {
+                            layout.window_width = window_width;
+                            layout.window_height = window_height;
+                        }
+                        layout.zoom_factor = zoom_factor;
+                        if let Some(w) = left_panel_width { layout.left_panel_width = w; }
+                        if let Some(w) = right_panel_width { layout.right_panel_width = w; }
+                        if let Some(h) = bottom_panel_height { layout.bottom_panel_height = h; }
+                        layout.left_panel_visible = left_panel_visible;
+                        layout.right_panel_visible = right_panel_visible;
+                        layout.bottom_panel_visible = bottom_panel_visible;
+                        layout.status_bar_visible = status_bar_visible;
                     }
                     WindowAction::PublishTabChanged { is_ssh, session_id } => {
                         let mut data = serde_json::json!({ "is_ssh": is_ssh });

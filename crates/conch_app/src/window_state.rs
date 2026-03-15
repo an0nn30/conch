@@ -97,10 +97,19 @@ pub(crate) enum WindowAction {
     Quit,
     PluginAction(crate::host::plugin_manager_ui::PluginManagerAction),
     WindowClosed(egui::ViewportId),
-    SavePanelSizes {
-        left: Option<f32>,
-        right: Option<f32>,
-        bottom: Option<f32>,
+    /// Snapshot the full layout state from the focused window so it persists
+    /// across sessions.  Sent every frame from whichever window has focus.
+    SaveLayoutState {
+        window_width: f32,
+        window_height: f32,
+        zoom_factor: f32,
+        left_panel_width: Option<f32>,
+        right_panel_width: Option<f32>,
+        bottom_panel_height: Option<f32>,
+        left_panel_visible: bool,
+        right_panel_visible: bool,
+        bottom_panel_visible: bool,
+        status_bar_visible: bool,
     },
     PublishTabChanged {
         is_ssh: bool,
@@ -158,8 +167,9 @@ pub(crate) struct WindowState {
 }
 
 impl WindowState {
-    /// Create a new window state for a given viewport.
-    pub fn new(viewport_id: egui::ViewportId) -> Self {
+    /// Create a new window state for a given viewport, restoring panel
+    /// visibility from the persisted layout.
+    pub fn new(viewport_id: egui::ViewportId, layout: &config::LayoutConfig) -> Self {
         Self {
             sessions: HashMap::new(),
             tab_order: Vec::new(),
@@ -177,10 +187,10 @@ impl WindowState {
             tab_bar_state: TabBarState::default(),
             context_menu_state: ContextMenuState::default(),
             show_plugin_manager: false,
-            left_panel_visible: true,
-            right_panel_visible: true,
-            bottom_panel_visible: true,
-            show_status_bar: true,
+            left_panel_visible: layout.left_panel_visible,
+            right_panel_visible: layout.right_panel_visible,
+            bottom_panel_visible: layout.bottom_panel_visible,
+            show_status_bar: layout.status_bar_visible,
             plugin_text_state: HashMap::new(),
             active_panel_tab: HashMap::new(),
             viewport_id,
@@ -199,8 +209,9 @@ impl WindowState {
         viewport_id: egui::ViewportId,
         viewport_builder: egui::ViewportBuilder,
         session: Session,
+        layout: &config::LayoutConfig,
     ) -> Self {
-        let mut state = Self::new(viewport_id);
+        let mut state = Self::new(viewport_id, layout);
         let id = session.id;
         state.title = session.display_title().to_string();
         state.viewport_builder = Some(viewport_builder);
@@ -341,11 +352,18 @@ pub(crate) fn render_window(
         }
     }
 
-    // 5. Apply theme if version changed.
+    // 5. Apply theme if version changed, and restore persisted zoom on first frame.
     if win.last_theme_version != cfg.theme_version {
         cfg.theme.apply(ctx);
         crate::apply_appearance_mode(ctx, cfg.user_config.colors.appearance_mode);
         crate::host::bridge::update_theme_json(&cfg.theme);
+        // On first frame (version 0 → N), restore persisted zoom factor.
+        if win.last_theme_version == 0 {
+            let zoom = cfg.persistent.layout.zoom_factor;
+            if zoom > 0.0 && (zoom - ctx.pixels_per_point()).abs() > 0.01 {
+                ctx.set_pixels_per_point(zoom);
+            }
+        }
         win.last_theme_version = cfg.theme_version;
     }
 
@@ -552,12 +570,20 @@ pub(crate) fn render_window(
         )
     };
 
-    // If window has focus, save panel sizes via WindowAction.
+    // If window has focus, snapshot the full layout state so it persists.
     if win.has_focus {
-        win.pending_actions.push(WindowAction::SavePanelSizes {
-            left: panel_sizes.left_width,
-            right: panel_sizes.right_width,
-            bottom: panel_sizes.bottom_height,
+        let rect = ctx.input(|i| i.screen_rect());
+        win.pending_actions.push(WindowAction::SaveLayoutState {
+            window_width: rect.width(),
+            window_height: rect.height(),
+            zoom_factor: ctx.pixels_per_point(),
+            left_panel_width: panel_sizes.left_width,
+            right_panel_width: panel_sizes.right_width,
+            bottom_panel_height: panel_sizes.bottom_height,
+            left_panel_visible: win.left_panel_visible,
+            right_panel_visible: win.right_panel_visible,
+            bottom_panel_visible: win.bottom_panel_visible,
+            status_bar_visible: win.show_status_bar,
         });
     }
 
@@ -963,7 +989,8 @@ mod tests {
     use super::*;
 
     fn make_test_state() -> WindowState {
-        WindowState::new(egui::ViewportId::from_hash_of("test"))
+        let layout = config::LayoutConfig::default();
+        WindowState::new(egui::ViewportId::from_hash_of("test"), &layout)
     }
 
     #[test]
@@ -1020,6 +1047,20 @@ mod tests {
         ws.toggle_zen_mode();
         assert!(!ws.left_panel_visible);
         assert!(!ws.right_panel_visible);
+        assert!(!ws.show_status_bar);
+    }
+
+    #[test]
+    fn restores_panel_visibility_from_layout() {
+        let mut layout = config::LayoutConfig::default();
+        layout.left_panel_visible = false;
+        layout.right_panel_visible = false;
+        layout.bottom_panel_visible = true;
+        layout.status_bar_visible = false;
+        let ws = WindowState::new(egui::ViewportId::from_hash_of("test"), &layout);
+        assert!(!ws.left_panel_visible);
+        assert!(!ws.right_panel_visible);
+        assert!(ws.bottom_panel_visible);
         assert!(!ws.show_status_bar);
     }
 
