@@ -412,16 +412,21 @@ pub(crate) fn render_window(
         }
     }
 
-    // 9. Close window if no sessions remain.
+    // 9. Mark window for closing if no sessions remain.
+    // Do NOT send ViewportCommand::Close here — the coordinator decides
+    // whether to actually close, hide, or exit based on how many windows
+    // are still open.  This keeps all windows equal.
     if win.sessions.is_empty() {
         win.should_close = true;
-        ctx.send_viewport_cmd(ViewportCommand::Close);
         drop(cfg);
         return;
     }
 
-    // 10. Handle window close request (shut down all sessions).
+    // 10. Handle OS close request (user clicked X).
+    // Cancel the OS-level close and just mark ourselves for closing.
+    // The coordinator will handle removal / app exit.
     if ctx.input(|i| i.viewport().close_requested()) {
+        ctx.send_viewport_cmd(ViewportCommand::CancelClose);
         for (_, session) in &win.sessions {
             session.shutdown();
         }

@@ -409,27 +409,22 @@ impl eframe::App for ConchApp {
             self.spawn_window(None);
         }
 
-        // ── Render windows[0] directly on the root viewport ──
-        // The root viewport IS the first user window — no hidden daemon.
-        // This avoids the performance problems of deferred viewports on macOS
-        // while still using the exact same render_window() for all windows.
-        let root_visible;
-        {
+        // ── Render windows ──
+        // windows[0] maps to the ROOT viewport and is rendered directly.
+        // windows[1..] use show_viewport_immediate.  All call render_window().
+        let root_visible = {
+            let win = self.windows[0].lock();
+            !win.should_close
+        };
+        if root_visible {
             let mut win = self.windows[0].lock();
-            root_visible = !win.should_close && !win.sessions.is_empty();
-            if root_visible {
-                render_window(ctx, &mut win, &self.shared);
-            }
-        }
-
-        // If root window's sessions are all gone but other windows remain,
-        // hide the root and keep it alive.
-        if !root_visible && self.windows.len() > 1 {
+            render_window(ctx, &mut win, &self.shared);
+        } else {
+            // Root has no sessions — hide it but keep it alive so
+            // show_viewport_immediate windows can still render.
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
-        // ── Render extra windows via show_viewport_immediate ──
-        // All windows use the exact same render_window() — no privileged behavior.
         for i in 1..self.windows.len() {
             let win = self.windows[i].lock();
             if win.should_close { continue; }
@@ -489,39 +484,35 @@ impl eframe::App for ConchApp {
         }
         for a in pm_actions { self.handle_plugin_manager_action(a); }
 
-        // ── Remove closed windows ──
-        // Never remove windows[0] (the root viewport) while other windows exist.
-        // The root viewport can't be destroyed — eframe owns it.
+        // ── Window lifecycle ──
+        // Remove closed non-root windows.  The root viewport can't be
+        // destroyed (eframe owns it), so it stays in the list but hidden.
         if self.windows.len() > 1 {
-            // Remove closed non-root windows.
-            let root_id = self.windows[0].lock().viewport_id;
+            let root_vp = self.windows[0].lock().viewport_id;
             self.windows.retain(|w| {
                 let win = w.lock();
-                win.viewport_id == root_id || !win.should_close
+                win.viewport_id == root_vp || !win.should_close
             });
         }
 
         if spawn_new { self.spawn_window(None); }
 
-        // ── Exit conditions ──
-        // All windows gone (root included): close.
-        let all_closed = self.windows.iter().all(|w| {
-            let win = w.lock();
-            win.should_close || win.sessions.is_empty()
-        });
-        if all_closed {
+        // ── Exit when ALL windows are closed ──
+        let all_closed = self.windows.iter().all(|w| w.lock().should_close);
+        if all_closed || self.quit_requested {
+            if self.quit_requested {
+                for w in &self.windows {
+                    let mut win = w.lock();
+                    for (_, session) in &win.sessions { session.shutdown(); }
+                }
+            }
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
 
-        if self.quit_requested {
-            for w in &self.windows {
-                let mut win = w.lock();
-                for (_, session) in &win.sessions { session.shutdown(); }
-                win.should_close = true;
-            }
-            ctx.send_viewport_cmd(ViewportCommand::Close);
-        }
+        // If the root closed but other windows remain, make the root
+        // visible again if a new window was promoted into it (future),
+        // or just keep it hidden.  The app stays alive.
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
