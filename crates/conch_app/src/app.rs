@@ -182,9 +182,15 @@ impl ConchApp {
         });
         let user_config = self.shared.config.lock().user_config.clone();
         let (_, session) = create_local_session(&user_config, cwd)?;
-        let num = self.next_viewport_num;
-        self.next_viewport_num += 1;
-        let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
+        // First window uses ROOT viewport (rendered directly by update()).
+        // Extra windows get their own viewport IDs (rendered via show_viewport_immediate).
+        let viewport_id = if self.windows.is_empty() {
+            egui::ViewportId::ROOT
+        } else {
+            let num = self.next_viewport_num;
+            self.next_viewport_num += 1;
+            egui::ViewportId::from_hash_of(format!("conch_window_{num}"))
+        };
         let size = if self.windows.is_empty() { self.initial_window_size } else { [800.0, 600.0] };
         let builder = self.build_window_viewport(size);
         let win = WindowState::with_session(viewport_id, builder, session);
@@ -322,15 +328,32 @@ impl ConchApp {
 }
 
 impl eframe::App for ConchApp {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {
-        // No-op — root viewport is hidden.  Tab stripping happens in
-        // render_window() via ctx.input_mut() for each deferred viewport.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Strip Tab key from the root viewport (windows[0]).  render_window()
+        // also strips via ctx.input_mut(), but raw_input_hook catches it
+        // earlier before egui's focus system ever sees it.
+        if let Some(win_arc) = self.windows.first() {
+            let win = win_arc.lock();
+            if self.shared.dialog_state.lock().is_active_for(win.viewport_id) {
+                return;
+            }
+            let mut tab_bytes: Option<Vec<u8>> = None;
+            raw_input.events.retain(|e| match e {
+                egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } => {
+                    tab_bytes = Some(if modifiers.shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() });
+                    false
+                }
+                _ => true,
+            });
+            if let Some(bytes) = tab_bytes {
+                if let Some(session) = win.active_session() {
+                    session.write(&bytes);
+                }
+            }
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── Hide root viewport ──
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-
         // ── Coordinator background work ──
         self.refresh_plugin_keybindings();
         if let Some(watcher) = &mut self.file_watcher {
@@ -380,22 +403,44 @@ impl eframe::App for ConchApp {
         self.drain_pending_sessions();
         self.check_tab_changes();
 
-        // ── Spawn first window on startup ──
+        // ── Ensure at least one window exists ──
         if self.windows.is_empty() {
             self.spawn_window(None);
         }
 
-        // ── Register all windows as deferred viewports ──
-        for window_arc in &self.windows {
-            let win = window_arc.lock();
+        // ── Render windows[0] directly on the root viewport ──
+        // The root viewport IS the first user window — no hidden daemon.
+        // This avoids the performance problems of deferred viewports on macOS
+        // while still using the exact same render_window() for all windows.
+        let root_visible;
+        {
+            let mut win = self.windows[0].lock();
+            root_visible = !win.should_close && !win.sessions.is_empty();
+            if root_visible {
+                render_window(ctx, &mut win, &self.shared);
+            }
+        }
+
+        // If root window's sessions are all gone but other windows remain,
+        // hide the root and keep it alive.
+        if !root_visible && self.windows.len() > 1 {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
+
+        // ── Render extra windows via show_viewport_immediate ──
+        // All windows use the exact same render_window() — no privileged behavior.
+        for i in 1..self.windows.len() {
+            let win = self.windows[i].lock();
             if win.should_close { continue; }
             let viewport_id = win.viewport_id;
-            let builder = win.viewport_builder.clone().unwrap_or_default().with_title(&win.title);
+            let builder = win.viewport_builder.clone()
+                .unwrap_or_default()
+                .with_title(&win.title);
             drop(win);
 
-            let w = Arc::clone(window_arc);
+            let w = Arc::clone(&self.windows[i]);
             let s = Arc::clone(&self.shared);
-            ctx.show_viewport_deferred(viewport_id, builder, move |vp_ctx, _class| {
+            ctx.show_viewport_immediate(viewport_id, builder, move |vp_ctx, _class| {
                 let mut win = w.lock();
                 render_window(vp_ctx, &mut win, &s);
             });
@@ -429,12 +474,26 @@ impl eframe::App for ConchApp {
         for a in pm_actions { self.handle_plugin_manager_action(a); }
 
         // ── Remove closed windows ──
-        self.windows.retain(|w| !w.lock().should_close);
+        // Never remove windows[0] (the root viewport) while other windows exist.
+        // The root viewport can't be destroyed — eframe owns it.
+        if self.windows.len() > 1 {
+            // Remove closed non-root windows.
+            let root_id = self.windows[0].lock().viewport_id;
+            self.windows.retain(|w| {
+                let win = w.lock();
+                win.viewport_id == root_id || !win.should_close
+            });
+        }
 
         if spawn_new { self.spawn_window(None); }
 
-        // ── Exit when zero windows remain ──
-        if self.windows.is_empty() {
+        // ── Exit conditions ──
+        // All windows gone (root included): close.
+        let all_closed = self.windows.iter().all(|w| {
+            let win = w.lock();
+            win.should_close || win.sessions.is_empty()
+        });
+        if all_closed {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
@@ -447,11 +506,6 @@ impl eframe::App for ConchApp {
             }
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
-
-        // The root must repaint frequently because deferred viewports are
-        // rendered as part of the root frame.  Use a short interval rather
-        // than continuous to avoid burning CPU when idle.
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

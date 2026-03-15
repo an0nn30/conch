@@ -327,17 +327,20 @@ fn main() -> eframe::Result<()> {
             .expect("Failed to create tokio runtime"),
     );
 
-    // The root viewport is the hidden coordinator — all visible windows are
-    // deferred viewports.  Keep it minimal to avoid a window flash on startup.
+    // The root viewport IS the first user window.  Extra windows use
+    // show_viewport_immediate and the same render_window() function —
+    // no hidden daemon, no deferred viewport coordination overhead.
     let icon = Arc::new(load_app_icon());
-    let root_viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1.0, 1.0])
-        .with_decorations(false)
-        .with_transparent(true)
+    let platform = platform::PlatformCapabilities::current();
+    let decorations = platform.effective_decorations(user_config.window.decorations);
+
+    let base_viewport = egui::ViewportBuilder::default()
+        .with_inner_size(window_size)
         .with_icon(Arc::clone(&icon));
+    let viewport = build_viewport(base_viewport, decorations, &platform);
 
     let options = eframe::NativeOptions {
-        viewport: root_viewport,
+        viewport,
         ..Default::default()
     };
 
