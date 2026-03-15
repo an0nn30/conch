@@ -316,6 +316,12 @@ pub(crate) fn render_window(
     win.has_focus = ctx.input(|i| i.focused);
 
     // 3. Strip Tab key events unless a dialog is open for this viewport.
+    //
+    // For the root viewport, raw_input_hook already stripped Tab before
+    // egui processed it.  For immediate viewports, egui's begin_pass()
+    // has already consumed the Tab event and set focus_direction in Memory.
+    // We must ALSO clear any focus that Tab triggered, so the menu bar
+    // doesn't steal focus from the terminal.
     if !shared.dialog_state.lock().is_active_for(win.viewport_id) {
         let mut tab_bytes: Option<Vec<u8>> = None;
         ctx.input_mut(|input| {
@@ -337,6 +343,13 @@ pub(crate) fn render_window(
             });
         });
         if let Some(bytes) = tab_bytes {
+            // Undo the focus navigation that egui's begin_pass() already
+            // applied from this Tab event.  Without this, the menu bar in
+            // extra windows (show_viewport_immediate) gains focus because
+            // raw_input_hook only fires for the root viewport.
+            if let Some(focused_id) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(focused_id));
+            }
             if let Some(session) = win.active_session() {
                 session.write(&bytes);
             }
