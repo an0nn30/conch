@@ -27,6 +27,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Java SDK JAR (embedded in binary)
+        run: make -C java-sdk build
+
       - name: Test
         run: cargo test --workspace
 
@@ -40,15 +43,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build Java SDK JAR (embedded in binary)
+        run: make -C java-sdk build
+
       - name: Test
         run: cargo test --workspace
 
   windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      - name: Build Java SDK JAR (embedded in binary)
+        run: |
+          mkdir -p java-sdk/build/classes
+          javac -d java-sdk/build/classes java-sdk/src/conch/plugin/*.java
+          jar cf java-sdk/build/conch-plugin-sdk.jar -C java-sdk/build/classes .
 
       - name: Test
         run: cargo test --workspace

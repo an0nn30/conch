@@ -39,7 +39,7 @@ Think MobaXterm, but open source, cross-platform, and extensible.
 
 **File Explorer** (plugin) — Dual-pane local and remote file browsing. Upload and download with real-time progress tracking. Direct SFTP transfers via a zero-overhead C ABI vtable — no JSON serialization or base64 encoding for file data.
 
-**Lightweight** — ~80 MB memory, ~2% idle CPU. No Electron. Native GPU-accelerated rendering via OpenGL.
+**Lightweight** — No Electron. Native GPU-accelerated rendering via OpenGL. Near-zero idle CPU usage.
 
 **Zen Mode** — `Cmd+Shift+Z` hides all panels and the status bar for a distraction-free terminal.
 
@@ -65,6 +65,12 @@ This means plugins can be written in any language that can produce a C-compatibl
 |--------|----------|--------------|
 | **[conch-ssh](plugins/conch-ssh/)** | Right panel | SSH session manager with server tree, quick connect, SFTP, host key verification |
 | **[conch-files](plugins/conch-files/)** | Left panel | Dual-pane file explorer with local/remote browsing and direct SFTP transfer |
+
+### Java plugins
+
+Conch supports **Java plugins** via an embedded JVM. Any JVM language works (Java, Kotlin, Scala, Groovy). The SDK JAR is embedded in the binary — no external files needed. Java plugins currently support logging and menu item registration; additional host APIs are planned.
+
+See the [Java Plugin SDK section](docs/plugin-sdk.md#java-plugins) in the SDK reference.
 
 ### Lua plugins
 
@@ -177,6 +183,10 @@ native_menu_bar = false    # Use native macOS menu bar (macOS only)
 font_size = 13.0
 
 [conch.plugins]
+enabled = true                     # Master switch — false disables all plugins
+native = true                      # Native (.dylib/.so/.dll) plugins
+lua = true                         # Lua (.lua) plugins
+java = true                        # Java (.jar) plugins (disabling skips JVM startup)
 search_paths = ["/extra/plugins"]  # Additional plugin discovery directories
 ```
 

@@ -202,7 +202,7 @@ Panel locations: `"left"`, `"right"`, `"bottom"`, `"none"`.
 
 ### Java HostApi
 
-Static methods on `conch.plugin.HostApi`:
+Static methods on `conch.plugin.HostApi`. The Java tier currently supports logging and menu registration. Additional host APIs (panels, dialogs, notifications, clipboard, etc.) are planned — see the [Native HostApi](#hostapi-reference) for the full set that will eventually be exposed to Java.
 
 | Method | Description |
 |--------|-------------|
