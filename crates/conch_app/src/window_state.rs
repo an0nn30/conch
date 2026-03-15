@@ -853,6 +853,21 @@ pub(crate) fn handle_menu_action(
             win.show_plugin_manager = !win.show_plugin_manager;
         }
         MenuAction::PluginAction { plugin_name, action } => {
+            // Auto-show the panel that this plugin owns.
+            {
+                let reg = shared.panel_registry.lock();
+                for (_, info) in reg.panels() {
+                    if info.plugin_name == plugin_name {
+                        match info.location {
+                            PanelLocation::Left => win.left_panel_visible = true,
+                            PanelLocation::Right => win.right_panel_visible = true,
+                            PanelLocation::Bottom => win.bottom_panel_visible = true,
+                            _ => {}
+                        }
+                        break;
+                    }
+                }
+            }
             crate::host::bridge::set_event_viewport(&plugin_name, win.viewport_id);
             let event = conch_plugin_sdk::PluginEvent::MenuAction { action: action.clone() };
             if let Ok(json) = serde_json::to_string(&event) {
@@ -986,6 +1001,22 @@ pub(crate) fn handle_keyboard(
                 let mut plugin_handled = false;
                 for pkb in plugin_keybindings {
                     if pkb.binding.matches(key, modifiers) {
+                        // Auto-show the panel that this plugin owns so the
+                        // shortcut works even when the panel is hidden.
+                        {
+                            let reg = shared.panel_registry.lock();
+                            for (_, info) in reg.panels() {
+                                if info.plugin_name == pkb.plugin_name {
+                                    match info.location {
+                                        PanelLocation::Left => win.left_panel_visible = true,
+                                        PanelLocation::Right => win.right_panel_visible = true,
+                                        PanelLocation::Bottom => win.bottom_panel_visible = true,
+                                        _ => {}
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         crate::host::bridge::set_event_viewport(
                             &pkb.plugin_name,
                             win.viewport_id,
