@@ -172,8 +172,11 @@ impl NotificationManager {
         }
 
         let screen = ctx.screen_rect();
+        // Use available_rect().min.y to start below any top panels (titlebar
+        // spacer, menu bar, tab bar) so notifications don't hide behind them.
+        let top_y = ctx.available_rect().min.y;
         let card_x = screen.max.x - CARD_WIDTH - MARGIN_RIGHT;
-        let mut y_offset = MARGIN_TOP;
+        let mut y_offset = top_y + MARGIN_TOP;
 
         for notif in &mut self.notifications {
             let area_id = egui::Id::new("toast").with(notif.id);
