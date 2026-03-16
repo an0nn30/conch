@@ -384,6 +384,8 @@ mod tests {
         extern "C" fn stub_acquire_sftp(_: u64) -> SftpHandle {
             SftpHandle { vtable: std::ptr::null(), ctx: std::ptr::null_mut() }
         }
+        extern "C" fn stub_write_to_pty(_: *const u8, _: usize) {}
+        extern "C" fn stub_new_tab(_: *const c_char, _: bool) {}
 
         HostApi {
             register_panel: stub_register_panel,
@@ -414,6 +416,8 @@ mod tests {
             set_status: stub_set_status,
             register_sftp: stub_register_sftp,
             acquire_sftp: stub_acquire_sftp,
+            write_to_pty: stub_write_to_pty,
+            new_tab: stub_new_tab,
         }
     }
 

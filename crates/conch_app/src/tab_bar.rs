@@ -268,9 +268,9 @@ impl TabBarColors {
             bar_bg: theme.surface,
             active_bg: theme.surface_raised,
             hover_bg: Color32::from_rgb(
-                (theme.surface.r() + theme.surface_raised.r()) / 2,
-                (theme.surface.g() + theme.surface_raised.g()) / 2,
-                (theme.surface.b() + theme.surface_raised.b()) / 2,
+                ((theme.surface.r() as u16 + theme.surface_raised.r() as u16) / 2) as u8,
+                ((theme.surface.g() as u16 + theme.surface_raised.g() as u16) / 2) as u8,
+                ((theme.surface.b() as u16 + theme.surface_raised.b() as u16) / 2) as u8,
             ),
             text: theme.text,
             text_dim: theme.text_secondary,

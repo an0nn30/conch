@@ -171,6 +171,52 @@ pub struct StatusBarEntry {
 
 static STATUS_BAR: parking_lot::Mutex<Option<StatusBarEntry>> = parking_lot::Mutex::new(None);
 
+// ---------------------------------------------------------------------------
+// PTY Write Queue
+// ---------------------------------------------------------------------------
+
+/// Pending writes to the focused window's active terminal session.
+/// Plugins call `write_to_pty` from background threads; the render loop
+/// drains this queue and writes to the actual PTY.
+static PENDING_PTY_WRITES: parking_lot::Mutex<Vec<Vec<u8>>> = parking_lot::Mutex::new(Vec::new());
+
+/// Queue bytes to be written to the active session's PTY on the next frame.
+pub fn queue_pty_write(data: Vec<u8>) {
+    PENDING_PTY_WRITES.lock().push(data);
+}
+
+/// Drain all pending PTY writes. Called by the render loop.
+pub fn drain_pty_writes() -> Vec<Vec<u8>> {
+    let mut queue = PENDING_PTY_WRITES.lock();
+    std::mem::take(&mut *queue)
+}
+
+// ---------------------------------------------------------------------------
+// New Tab Queue
+// ---------------------------------------------------------------------------
+
+/// A pending request to open a new local tab.
+pub struct PendingNewTab {
+    /// Optional command to write to the PTY after the tab opens.
+    pub command: Option<String>,
+    /// If true, open a plain default shell ignoring terminal.shell config.
+    pub plain: bool,
+}
+
+static PENDING_NEW_TABS: parking_lot::Mutex<Vec<PendingNewTab>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// Queue a new tab request. Called from plugin threads.
+pub fn queue_new_tab(command: Option<String>, plain: bool) {
+    PENDING_NEW_TABS.lock().push(PendingNewTab { command, plain });
+}
+
+/// Drain all pending new-tab requests. Called by the render loop.
+pub fn drain_new_tabs() -> Vec<PendingNewTab> {
+    let mut queue = PENDING_NEW_TABS.lock();
+    std::mem::take(&mut *queue)
+}
+
 /// Monotonically increasing version bumped on every `set_status_bar` call.
 /// The render loop compares this against its last-seen value to detect changes
 /// and request a repaint (needed because status updates come from background
@@ -360,6 +406,8 @@ pub fn build_host_api() -> HostApi {
         set_status: host_set_status,
         register_sftp: host_register_sftp,
         acquire_sftp: host_acquire_sftp,
+        write_to_pty: host_write_to_pty,
+        new_tab: host_new_tab,
     }
 }
 
@@ -1059,6 +1107,32 @@ extern "C" fn host_free_string(ptr: *mut c_char) {
             drop(CString::from_raw(ptr));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// PTY Write
+// ---------------------------------------------------------------------------
+
+extern "C" fn host_write_to_pty(data: *const u8, len: usize) {
+    if data.is_null() || len == 0 {
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+    queue_pty_write(bytes);
+}
+
+// ---------------------------------------------------------------------------
+// New Tab
+// ---------------------------------------------------------------------------
+
+extern "C" fn host_new_tab(command: *const c_char, plain: bool) {
+    let cmd = if command.is_null() {
+        None
+    } else {
+        let s = unsafe { cstr_to_str(command) }.to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+    queue_new_tab(cmd, plain);
 }
 
 // ---------------------------------------------------------------------------

@@ -255,6 +255,24 @@ pub struct HostApi {
     /// found. Caller must call `vtable->release(ctx)` when done (or use
     /// `SftpAccess` wrapper which does this automatically via `Drop`).
     pub acquire_sftp: extern "C" fn(session_id: u64) -> SftpHandle,
+
+    // -- PTY Write -----------------------------------------------------------
+
+    /// Write raw bytes to the focused window's active terminal session.
+    ///
+    /// `data`/`len` contain the bytes to send (e.g., a command string).
+    /// The write is queued and delivered on the next frame.
+    pub write_to_pty: extern "C" fn(data: *const u8, len: usize),
+
+    // -- Tab Management ------------------------------------------------------
+
+    /// Open a new local shell tab in the focused window.
+    ///
+    /// `command` is an optional null-terminated string to write to the new
+    /// tab's PTY after it opens (e.g., "tmux attach -t foo\n"). Pass null
+    /// to just open a plain shell tab.
+    /// `plain`: if true, use the OS default shell instead of terminal.shell config.
+    pub new_tab: extern "C" fn(command: *const c_char, plain: bool),
 }
 
 // SAFETY: HostApi is a table of function pointers, all of which are thread-safe

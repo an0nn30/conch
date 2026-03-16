@@ -343,6 +343,63 @@ impl ConchApp {
         }
     }
 
+    fn drain_new_tabs(&mut self) {
+        let tabs = crate::host::bridge::drain_new_tabs();
+        if tabs.is_empty() {
+            return;
+        }
+        let user_config = self.shared.config.lock().user_config.clone();
+        for pending in tabs {
+            let session_result = if pending.plain {
+                crate::sessions::create_plain_session(&user_config, None)
+            } else {
+                create_local_session(&user_config, None)
+            };
+            if let Some((id, session)) = session_result {
+                let target = self.windows.iter().find(|w| w.lock().has_focus)
+                    .or_else(|| self.windows.first());
+                if let Some(window_arc) = target {
+                    let mut win = window_arc.lock();
+                    if win.last_cols > 0 && win.last_rows > 0 {
+                        session.resize(
+                            win.last_cols, win.last_rows,
+                            win.cell_width as u16, win.cell_height as u16,
+                        );
+                    }
+                    // Write command to the new session after a brief delay
+                    // to let the shell initialize.
+                    if let Some(cmd) = pending.command {
+                        let cmd_bytes = cmd.into_bytes();
+                        // Write directly — the shell should be ready for input
+                        // within the first frame since PTY setup is synchronous.
+                        session.write(&cmd_bytes);
+                    }
+                    win.sessions.insert(id, session);
+                    win.tab_order.push(id);
+                    win.active_tab = Some(id);
+                }
+            }
+        }
+    }
+
+    fn drain_pty_writes(&mut self) {
+        let writes = crate::host::bridge::drain_pty_writes();
+        if writes.is_empty() {
+            return;
+        }
+        // Write to the focused window's active session.
+        let target = self.windows.iter().find(|w| w.lock().has_focus)
+            .or_else(|| self.windows.first());
+        if let Some(window_arc) = target {
+            let win = window_arc.lock();
+            if let Some(session) = win.active_session() {
+                for data in writes {
+                    session.write(&data);
+                }
+            }
+        }
+    }
+
     fn check_tab_changes(&mut self) {
         for window_arc in &self.windows {
             let win = window_arc.lock();
@@ -437,6 +494,8 @@ impl eframe::App for ConchApp {
         self.handle_ipc();
         self.poll_plugin_renders();
         self.drain_pending_sessions();
+        self.drain_pty_writes();
+        self.drain_new_tabs();
         self.check_tab_changes();
 
         // ── Ensure at least one window exists ──

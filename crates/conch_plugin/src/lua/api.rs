@@ -769,6 +769,37 @@ fn register_session_table(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    // Write bytes to the focused window's active terminal session (PTY).
+    // The write is queued and delivered on the next frame.
+    session.set(
+        "write",
+        lua.create_function(|lua, text: String| {
+            with_host_api(lua, |api| {
+                (api.write_to_pty)(text.as_ptr(), text.len());
+            });
+            Ok(())
+        })?,
+    )?;
+
+    // Open a new local shell tab in the focused window.
+    // Args: (command?, plain?)
+    //   command: optional string to write to the new tab's PTY
+    //   plain: if true, use OS default shell ignoring terminal.shell config
+    session.set(
+        "new_tab",
+        lua.create_function(|lua, (command, plain): (Option<String>, Option<bool>)| {
+            with_host_api(lua, |api| {
+                let c_cmd = command.as_deref()
+                    .map(|s| std::ffi::CString::new(s).unwrap_or_default());
+                let ptr = c_cmd.as_ref()
+                    .map(|c| c.as_ptr())
+                    .unwrap_or(std::ptr::null());
+                (api.new_tab)(ptr, plain.unwrap_or(false));
+            });
+            Ok(())
+        })?,
+    )?;
+
     lua.globals().set("session", session)?;
     Ok(())
 }

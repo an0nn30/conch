@@ -33,15 +33,37 @@ pub(crate) fn create_local_session(
     user_config: &config::UserConfig,
     working_directory: Option<std::path::PathBuf>,
 ) -> Option<(Uuid, Session)> {
+    create_session_inner(user_config, working_directory, false)
+}
+
+/// Create a local terminal session with a plain default shell,
+/// ignoring the `terminal.shell` config. Used by plugins that need
+/// a clean shell (e.g., to attach to tmux without nesting).
+pub(crate) fn create_plain_session(
+    user_config: &config::UserConfig,
+    working_directory: Option<std::path::PathBuf>,
+) -> Option<(Uuid, Session)> {
+    create_session_inner(user_config, working_directory, true)
+}
+
+fn create_session_inner(
+    user_config: &config::UserConfig,
+    working_directory: Option<std::path::PathBuf>,
+    plain_shell: bool,
+) -> Option<(Uuid, Session)> {
     let id = Uuid::new_v4();
-    let shell_cfg = &user_config.terminal.shell;
-    let shell = if shell_cfg.program.is_empty() {
-        None
+    let shell = if plain_shell {
+        None // Use OS default shell
     } else {
-        Some(alacritty_terminal::tty::Shell::new(
-            shell_cfg.program.clone(),
-            shell_cfg.args.clone(),
-        ))
+        let shell_cfg = &user_config.terminal.shell;
+        if shell_cfg.program.is_empty() {
+            None
+        } else {
+            Some(alacritty_terminal::tty::Shell::new(
+                shell_cfg.program.clone(),
+                shell_cfg.args.clone(),
+            ))
+        }
     };
     let term_config = build_term_config(&user_config.terminal.cursor);
     match conch_pty::LocalSession::new(
