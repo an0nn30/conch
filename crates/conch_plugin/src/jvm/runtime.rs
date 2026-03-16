@@ -371,8 +371,7 @@ fn call_render(env: &mut JNIEnv, plugin: &GlobalRef, plugin_name: &str) -> Strin
         },
         Err(e) => {
             log::warn!("jvm [{plugin_name}]: render failed: {e}");
-            // Clear any pending Java exception so subsequent calls work.
-            let _ = env.exception_clear();
+            describe_java_exception(env);
             "[]".to_string()
         }
     }
@@ -388,7 +387,7 @@ fn call_on_event(env: &mut JNIEnv, plugin: &GlobalRef, json: &str, plugin_name: 
     };
     if let Err(e) = env.call_method(plugin, "onEvent", "(Ljava/lang/String;)V", &[JValue::Object(&jstr)]) {
         log::warn!("jvm [{plugin_name}]: onEvent failed: {e}");
-        let _ = env.exception_clear();
+        describe_java_exception(env);
     }
 }
 
@@ -805,18 +804,44 @@ extern "system" fn native_host_prompt(
     mut env: JNIEnv, _class: JClass, message: JString, default_value: JString,
 ) -> jobject {
     let host_api = HOST_API_PTR.load(Ordering::Acquire);
-    if host_api.is_null() { return std::ptr::null_mut(); }
-    let msg = match env.get_string(&message) { Ok(s) => s.to_string_lossy().into_owned(), Err(_) => return std::ptr::null_mut() };
-    let default = env.get_string(&default_value).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    if host_api.is_null() {
+        log::error!("jvm: HostApi.prompt called but HOST_API_PTR is null");
+        return std::ptr::null_mut();
+    }
+    let msg = match env.get_string(&message) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(e) => {
+            log::error!("jvm: HostApi.prompt: failed to read message arg: {e}");
+            describe_java_exception(&mut env);
+            return std::ptr::null_mut();
+        }
+    };
+    let default = match env.get_string(&default_value) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(e) => {
+            log::error!("jvm: HostApi.prompt: failed to read defaultValue arg: {e}");
+            describe_java_exception(&mut env);
+            String::new()
+        }
+    };
+    log::debug!("jvm: HostApi.prompt: msg={msg:?} default={default:?}");
     let c_msg = CString::new(msg).unwrap_or_default();
     let c_default = CString::new(default).unwrap_or_default();
     let ptr = unsafe { ((*host_api).show_prompt)(c_msg.as_ptr(), c_default.as_ptr()) };
-    if ptr.is_null() { return std::ptr::null_mut(); }
+    if ptr.is_null() {
+        log::debug!("jvm: HostApi.prompt: user cancelled (null result)");
+        return std::ptr::null_mut();
+    }
     let s = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
     unsafe { ((*host_api).free_string)(ptr); }
+    log::debug!("jvm: HostApi.prompt: result={s:?}");
     match env.new_string(&s) {
         Ok(js) => js.into_raw(),
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            log::error!("jvm: HostApi.prompt: failed to create result string: {e}");
+            describe_java_exception(&mut env);
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -825,8 +850,18 @@ extern "system" fn native_host_confirm(
     mut env: JNIEnv, _class: JClass, message: JString,
 ) -> jboolean {
     let host_api = HOST_API_PTR.load(Ordering::Acquire);
-    if host_api.is_null() { return 0; }
-    let msg = match env.get_string(&message) { Ok(s) => s.to_string_lossy().into_owned(), Err(_) => return 0 };
+    if host_api.is_null() {
+        log::error!("jvm: HostApi.confirm called but HOST_API_PTR is null");
+        return 0;
+    }
+    let msg = match env.get_string(&message) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(e) => {
+            log::error!("jvm: HostApi.confirm: failed to read message arg: {e}");
+            describe_java_exception(&mut env);
+            return 0;
+        }
+    };
     let c_msg = CString::new(msg).unwrap_or_default();
     let result = unsafe { ((*host_api).show_confirm)(c_msg.as_ptr()) };
     if result { 1 } else { 0 }
@@ -838,8 +873,8 @@ extern "system" fn native_host_alert(
 ) {
     let host_api = HOST_API_PTR.load(Ordering::Acquire);
     if host_api.is_null() { return; }
-    let title_str = match env.get_string(&title) { Ok(s) => s.to_string_lossy().into_owned(), Err(_) => return };
-    let msg_str = match env.get_string(&message) { Ok(s) => s.to_string_lossy().into_owned(), Err(_) => return };
+    let title_str = match env.get_string(&title) { Ok(s) => s.to_string_lossy().into_owned(), Err(e) => { log::error!("jvm: HostApi.alert: {e}"); describe_java_exception(&mut env); return; } };
+    let msg_str = match env.get_string(&message) { Ok(s) => s.to_string_lossy().into_owned(), Err(e) => { log::error!("jvm: HostApi.alert: {e}"); describe_java_exception(&mut env); return; } };
     let c_title = CString::new(title_str).unwrap_or_default();
     let c_msg = CString::new(msg_str).unwrap_or_default();
     unsafe { ((*host_api).show_alert)(c_title.as_ptr(), c_msg.as_ptr()); }
@@ -851,8 +886,8 @@ extern "system" fn native_host_show_error(
 ) {
     let host_api = HOST_API_PTR.load(Ordering::Acquire);
     if host_api.is_null() { return; }
-    let title_str = match env.get_string(&title) { Ok(s) => s.to_string_lossy().into_owned(), Err(_) => return };
-    let msg_str = match env.get_string(&message) { Ok(s) => s.to_string_lossy().into_owned(), Err(_) => return };
+    let title_str = match env.get_string(&title) { Ok(s) => s.to_string_lossy().into_owned(), Err(e) => { log::error!("jvm: HostApi.showError: {e}"); describe_java_exception(&mut env); return; } };
+    let msg_str = match env.get_string(&message) { Ok(s) => s.to_string_lossy().into_owned(), Err(e) => { log::error!("jvm: HostApi.showError: {e}"); describe_java_exception(&mut env); return; } };
     let c_title = CString::new(title_str).unwrap_or_default();
     let c_msg = CString::new(msg_str).unwrap_or_default();
     unsafe { ((*host_api).show_error)(c_title.as_ptr(), c_msg.as_ptr()); }
@@ -920,9 +955,32 @@ extern "system" fn native_host_new_tab(
 // Error conversion
 // ---------------------------------------------------------------------------
 
-/// Print any pending Java exception to stderr, then clear it.
+/// Log any pending Java exception as an error, then clear it.
 fn describe_java_exception(env: &mut JNIEnv) {
-    if env.exception_check().unwrap_or(false) {
+    if !env.exception_check().unwrap_or(false) {
+        return;
+    }
+
+    // Try to extract the exception message for structured logging.
+    if let Ok(throwable) = env.exception_occurred() {
+        env.exception_clear().ok();
+        // Call throwable.toString() to get the exception class + message.
+        match env.call_method(&throwable, "toString", "()Ljava/lang/String;", &[]) {
+            Ok(val) => {
+                if let Ok(obj) = val.l() {
+                    let jstr = JString::from(obj);
+                    if let Ok(s) = env.get_string(&jstr) {
+                        log::error!("jvm: Java exception: {}", s.to_string_lossy());
+                        return;
+                    }
+                }
+            }
+            Err(_) => {
+                env.exception_clear().ok();
+            }
+        }
+        log::error!("jvm: Java exception occurred (could not extract message)");
+    } else {
         env.exception_describe().ok();
         env.exception_clear().ok();
     }
