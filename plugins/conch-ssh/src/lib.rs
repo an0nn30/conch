@@ -55,6 +55,8 @@ struct SshPlugin {
     sessions: HashMap<u64, Box<SshBackendState>>,
     selected_node: Option<String>,
     quick_connect_value: String,
+    /// Index of the selected item in the filtered search results.
+    search_selected_index: Option<usize>,
     /// Request focus on the quick connect text input next frame.
     focus_quick_connect: std::cell::Cell<bool>,
     dirty: bool,
@@ -131,6 +133,7 @@ impl SshPlugin {
             sessions: HashMap::new(),
             selected_node: None,
             quick_connect_value: String::new(),
+            search_selected_index: None,
             focus_quick_connect: std::cell::Cell::new(false),
             dirty: true,
             rt,
@@ -186,16 +189,43 @@ impl SshPlugin {
         match event {
             WidgetEvent::TextInputChanged { id, value } if id == "quick_connect" => {
                 self.quick_connect_value = value;
+                self.search_selected_index = if self.quick_connect_value.is_empty() { None } else { Some(0) };
+                self.dirty = true;
             }
             WidgetEvent::TextInputSubmit { id, value } if id == "quick_connect" => {
-                // If the filter matches an existing server, connect to it.
-                // Otherwise, treat the input as a user@host:port connection string.
-                if let Some(server_id) = first_matching_server_id(&self.config, &self.ssh_config_entries, &value) {
-                    self.connect_to_server(&server_id);
+                // Connect to the selected search result, or first match,
+                // or treat as a user@host:port quick-connect string.
+                let matches = server_tree::matching_servers(
+                    &self.config, &self.ssh_config_entries, &value,
+                );
+                let idx = self.search_selected_index.unwrap_or(0);
+                if let Some(entry) = matches.get(idx) {
+                    let id = entry.id.clone();
+                    self.connect_to_server(&id);
+                } else if let Some(entry) = matches.first() {
+                    let id = entry.id.clone();
+                    self.connect_to_server(&id);
                 } else {
                     self.quick_connect(&value);
                 }
                 self.quick_connect_value.clear();
+                self.search_selected_index = None;
+            }
+            WidgetEvent::TextInputArrowDown { id } if id == "quick_connect" => {
+                let count = server_tree::matching_servers(
+                    &self.config, &self.ssh_config_entries, &self.quick_connect_value,
+                ).len();
+                if count > 0 {
+                    let idx = self.search_selected_index.unwrap_or(0);
+                    self.search_selected_index = Some((idx + 1).min(count - 1));
+                    self.dirty = true;
+                }
+            }
+            WidgetEvent::TextInputArrowUp { id } if id == "quick_connect" => {
+                if let Some(idx) = self.search_selected_index {
+                    self.search_selected_index = Some(idx.saturating_sub(1));
+                    self.dirty = true;
+                }
             }
             WidgetEvent::TreeSelect { id: _, node_id } => {
                 self.selected_node = Some(node_id);
@@ -922,7 +952,7 @@ impl SshPlugin {
 
     fn render(&self) -> Vec<Widget> {
         let focus = self.focus_quick_connect.replace(false);
-        build_server_tree(&self.config, &self.ssh_config_entries, &self.sessions, self.selected_node.as_deref(), &self.quick_connect_value, focus)
+        build_server_tree(&self.config, &self.ssh_config_entries, &self.sessions, self.selected_node.as_deref(), &self.quick_connect_value, focus, self.search_selected_index)
     }
 
     // -----------------------------------------------------------------------

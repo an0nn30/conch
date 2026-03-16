@@ -435,6 +435,13 @@ fn render_widget(
             if request_focus.unwrap_or(false) {
                 response.request_focus();
             }
+            // Keep focus on the text input while the user is actively typing.
+            // Without this, layout changes (e.g. toolbar hiding when filter
+            // becomes non-empty) can cause egui to drop focus for a frame,
+            // leaking keystrokes to the terminal.
+            if !buf.is_empty() && !response.has_focus() {
+                response.request_focus();
+            }
 
             // Sync from plugin's canonical value only when the widget is NOT
             // focused — otherwise the plugin's stale value overwrites typing.
@@ -461,6 +468,16 @@ fn render_widget(
                     id: id.clone(),
                     value: submitted,
                 });
+            }
+
+            // Arrow keys while text input has focus (for list navigation).
+            if response.has_focus() {
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    events.push(WidgetEvent::TextInputArrowDown { id: id.clone() });
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    events.push(WidgetEvent::TextInputArrowUp { id: id.clone() });
+                }
             }
         }
 

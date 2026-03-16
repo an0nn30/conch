@@ -409,6 +409,12 @@ pub enum WidgetEvent {
     /// Text input submitted (Enter pressed).
     TextInputSubmit { id: String, value: String },
 
+    /// Arrow down pressed while text input has focus.
+    TextInputArrowDown { id: String },
+
+    /// Arrow up pressed while text input has focus.
+    TextInputArrowUp { id: String },
+
     /// Text edit value changed.
     TextEditChanged { id: String, value: String },
 
