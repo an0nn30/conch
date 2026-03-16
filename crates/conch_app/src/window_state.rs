@@ -168,6 +168,8 @@ pub(crate) struct WindowState {
     pub should_close: bool,
     /// Theme version that was last applied to this window's egui context.
     pub last_theme_version: u64,
+    /// Status bar version last seen, for detecting background updates.
+    pub last_status_bar_version: u64,
     /// Whether this window had OS focus during the last frame.
     pub has_focus: bool,
     /// Pending actions to send to the coordinator.
@@ -209,6 +211,7 @@ impl WindowState {
             title: String::new(),
             should_close: false,
             last_theme_version: 0,
+            last_status_bar_version: 0,
             has_focus: false,
             pending_actions: Vec::new(),
             pending_menu_actions: Vec::new(),
@@ -839,7 +842,14 @@ pub(crate) fn render_window(ctx: &egui::Context, win: &mut WindowState, shared: 
         notifs.show(ctx);
     }
 
-    // 29. Schedule next repaint only when needed.
+    // 29. Check for status bar updates from background threads (e.g. uploads).
+    let sb_version = crate::host::bridge::status_bar_version();
+    if sb_version != win.last_status_bar_version {
+        win.last_status_bar_version = sb_version;
+        needs_repaint = true;
+    }
+
+    // 30. Schedule next repaint only when needed.
     if needs_repaint {
         ctx.request_repaint();
     } else if win.has_focus {

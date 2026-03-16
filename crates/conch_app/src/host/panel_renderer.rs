@@ -510,6 +510,12 @@ fn render_widget(
                 && output.response.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
             {
+                // Mark activity so the Enter key isn't also forwarded to the PTY.
+                // The widget just lost focus, so has_focus() is false — without
+                // this, handle_keyboard() would see no focused widget and send
+                // '\r' to the terminal.
+                mark_text_input_activity(ui);
+
                 let submitted = buf.clone();
                 // Clear local state so it re-syncs from the plugin next frame.
                 text_input_state.remove(id);

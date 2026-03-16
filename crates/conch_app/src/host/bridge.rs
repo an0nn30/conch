@@ -171,14 +171,26 @@ pub struct StatusBarEntry {
 
 static STATUS_BAR: parking_lot::Mutex<Option<StatusBarEntry>> = parking_lot::Mutex::new(None);
 
+/// Monotonically increasing version bumped on every `set_status_bar` call.
+/// The render loop compares this against its last-seen value to detect changes
+/// and request a repaint (needed because status updates come from background
+/// threads that can't call `ctx.request_repaint()`).
+static STATUS_BAR_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Set the global status bar entry. Pass `None` to clear.
 pub fn set_status_bar(entry: Option<StatusBarEntry>) {
     *STATUS_BAR.lock() = entry;
+    STATUS_BAR_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Get the current status bar entry (if any).
 pub fn get_status_bar() -> Option<StatusBarEntry> {
     STATUS_BAR.lock().clone()
+}
+
+/// Get the current status bar version counter.
+pub fn status_bar_version() -> u64 {
+    STATUS_BAR_VERSION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Shared theme JSON, updated whenever the app theme changes.
