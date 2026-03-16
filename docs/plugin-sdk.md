@@ -592,6 +592,28 @@ The top-level event envelope delivered to plugins:
 { "kind": "theme_changed", "theme_json": "{...}" }
 ```
 
+**Native/Java** plugins receive these as JSON strings and must parse them.
+
+**Lua** plugins receive a **native Lua table** — the host automatically parses the JSON before calling `on_event()`. Access fields directly:
+
+```lua
+function on_event(event)
+    -- event is a Lua table, NOT a JSON string.
+    if event.kind == "menu_action" then
+        local action = event.action
+        app.log(2, "Menu action: " .. action)
+    elseif event.kind == "widget" then
+        if event.type == "button_click" then
+            app.log(2, "Button clicked: " .. event.id)
+        end
+    elseif event.kind == "bus_event" then
+        app.log(2, "Bus event: " .. event.event_type)
+    end
+end
+```
+
+> **Tip:** Use `type(event) == "table"` as a guard if you want to be defensive.
+
 ---
 
 ## Inter-Plugin Communication
