@@ -502,6 +502,9 @@ pub(crate) fn render_window(ctx: &egui::Context, win: &mut WindowState, shared: 
     }
 
     // 11. Copy/Paste handling.
+    // On Linux/Windows, egui maps Ctrl+C to Event::Copy. When there's a
+    // selection we honor it as clipboard copy.  When there's NO selection,
+    // the user intended Ctrl+C as SIGINT (^C) for the terminal.
     let copy_requested = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
     if copy_requested {
         if let Some((start, end)) = win.selection.normalized() {
@@ -510,6 +513,12 @@ pub(crate) fn render_window(ctx: &egui::Context, win: &mut WindowState, shared: 
                 if !text.is_empty() {
                     ctx.copy_text(text);
                 }
+            }
+        } else {
+            // No selection — on non-macOS, forward as ^C (ETX, 0x03) to PTY.
+            #[cfg(not(target_os = "macos"))]
+            if let Some(session) = win.active_session() {
+                session.write(&[0x03]);
             }
         }
     }
