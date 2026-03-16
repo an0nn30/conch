@@ -209,13 +209,13 @@ fn render_card(ui: &mut egui::Ui, notif: &mut Notification) {
 
     let frame = egui::Frame::new()
         .fill(bg)
-        .corner_radius(egui::CornerRadius::same(6))
+        .corner_radius(egui::CornerRadius::ZERO)
         .stroke(egui::Stroke::new(1.0, border_color))
         .shadow(egui::epaint::Shadow {
-            offset: [0, 1],
-            blur: 6,
+            offset: [1, 1],
+            blur: 0,
             spread: 0,
-            color: egui::Color32::from_black_alpha(if dark { 60 } else { 20 }),
+            color: egui::Color32::from_black_alpha(if dark { 80 } else { 30 }),
         })
         .inner_margin(egui::Margin::symmetric(10, 8));
 
@@ -227,7 +227,7 @@ fn render_card(ui: &mut egui::Ui, notif: &mut Notification) {
             let (r, painter) = ui.allocate_painter(egui::vec2(3.0, 16.0), egui::Sense::hover());
             painter.rect_filled(
                 r.rect,
-                egui::CornerRadius::same(1),
+                egui::CornerRadius::ZERO,
                 accent,
             );
 

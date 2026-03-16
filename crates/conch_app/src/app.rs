@@ -622,7 +622,7 @@ pub(crate) fn show_connecting_screen(
                     let field_width = 340.0; let field_height = 34.0; let btn_zone = 32.0;
                     let (outer_rect, _) = ui.allocate_exact_size(egui::Vec2::new(field_width, field_height), egui::Sense::hover());
                     let visuals = ui.visuals();
-                    ui.painter().rect(outer_rect, egui::CornerRadius::same(6), visuals.widgets.inactive.bg_fill, visuals.widgets.active.bg_stroke, egui::StrokeKind::Outside);
+                    ui.painter().rect(outer_rect, egui::CornerRadius::ZERO, visuals.widgets.inactive.bg_fill, visuals.widgets.active.bg_stroke, egui::StrokeKind::Outside);
                     let text_rect = egui::Rect::from_min_max(outer_rect.min, egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.max.y));
                     let mut text_child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect.shrink2(egui::vec2(8.0, 0.0))));
                     let pw_resp = text_child.add(egui::TextEdit::singleline(&mut prompt.password_buf).password(!prompt.show_password).frame(false).margin(egui::Margin { left: 0, right: 0, top: 8, bottom: 4 }).font(egui::TextStyle::Body).desired_width(text_rect.width() - 16.0).hint_text("Password"));

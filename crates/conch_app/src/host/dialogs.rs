@@ -721,7 +721,7 @@ fn render_full_width_field(
             egui::Frame::NONE
                 .fill(ui.visuals().extreme_bg_color)
                 .inner_margin(4.0)
-                .corner_radius(4.0)
+                .corner_radius(0.0)
                 .show(ui, |ui| {
                     ui.set_min_width(available_width - 8.0);
                     ui.set_min_height(120.0);

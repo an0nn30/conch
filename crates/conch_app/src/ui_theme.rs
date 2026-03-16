@@ -133,7 +133,7 @@ impl UiTheme {
             border,
             warn: to_color32(colors.normal[3]),  // yellow
             error: to_color32(colors.normal[1]), // red
-            rounding: 6,
+            rounding: 0,
             font_small: 11.0,
             font_normal: 14.0,
             menu_width: 120.0,
@@ -167,19 +167,19 @@ impl UiTheme {
         let hovered = WidgetVisuals {
             bg_fill: self.surface_raised,
             weak_bg_fill: self.surface_raised,
-            bg_stroke: Stroke::new(1.5, self.focus_glow),
+            bg_stroke: Stroke::new(1.0, self.focus_glow),
             corner_radius: rounding,
-            fg_stroke: Stroke::new(1.5, self.text),
-            expansion: 1.0,
+            fg_stroke: Stroke::new(1.0, self.text),
+            expansion: 0.0,
         };
 
         let active = WidgetVisuals {
             bg_fill: self.surface_top,
             weak_bg_fill: self.surface_top,
-            bg_stroke: Stroke::new(2.0, self.focus_glow),
+            bg_stroke: Stroke::new(1.0, self.focus_glow),
             corner_radius: rounding,
-            fg_stroke: Stroke::new(2.0, self.text),
-            expansion: 2.0,
+            fg_stroke: Stroke::new(1.0, self.text),
+            expansion: 0.0,
         };
 
         let open = WidgetVisuals {
@@ -211,23 +211,23 @@ impl UiTheme {
             code_bg_color: self.surface,
             warn_fg_color: self.warn,
             error_fg_color: self.error,
-            window_corner_radius: CornerRadius::same(8),
+            window_corner_radius: CornerRadius::ZERO,
             window_shadow: Shadow {
-                offset: [0, 2],
-                blur: 12,
+                offset: [1, 1],
+                blur: 0,
                 spread: 0,
-                color: Color32::from_black_alpha(40),
+                color: Color32::from_black_alpha(80),
             },
             window_fill: self.surface,
             window_stroke: Stroke::new(1.0, self.border),
             window_highlight_topmost: true,
-            menu_corner_radius: CornerRadius::same(8),
+            menu_corner_radius: CornerRadius::ZERO,
             panel_fill: self.bg,
             popup_shadow: Shadow {
-                offset: [0, 2],
-                blur: 8,
+                offset: [1, 1],
+                blur: 0,
                 spread: 0,
-                color: Color32::from_black_alpha(60),
+                color: Color32::from_black_alpha(80),
             },
             resize_corner_size: 12.0,
             clip_rect_margin: 3.0,
@@ -268,9 +268,9 @@ impl UiTheme {
         style.visuals = self.to_visuals();
         style.spacing.menu_width = self.menu_width;
 
-        // Generous padding for a macOS-like feel.
-        style.spacing.button_padding = egui::vec2(8.0, 6.0);
-        style.spacing.interact_size.y = 30.0;
+        // Compact padding for a flat, utilitarian feel.
+        style.spacing.button_padding = egui::vec2(6.0, 4.0);
+        style.spacing.interact_size.y = 26.0;
 
         // Override the default body font size.
         use egui::{FontId, TextStyle};
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn from_colors_default_metrics() {
         let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
-        assert_eq!(theme.rounding, 6);
+        assert_eq!(theme.rounding, 0);
         assert_eq!(theme.font_small, 11.0);
         assert_eq!(theme.font_normal, 14.0);
         assert_eq!(theme.menu_width, 120.0);
@@ -529,8 +529,8 @@ mod tests {
     fn to_visuals_all_corners_zero() {
         let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
         let v = theme.to_visuals();
-        assert_eq!(v.window_corner_radius, CornerRadius::same(8));
-        assert_eq!(v.menu_corner_radius, CornerRadius::same(8));
+        assert_eq!(v.window_corner_radius, CornerRadius::ZERO);
+        assert_eq!(v.menu_corner_radius, CornerRadius::ZERO);
     }
 
     #[test]
@@ -539,9 +539,9 @@ mod tests {
         let v = theme.to_visuals();
         assert_eq!(v.widgets.noninteractive.expansion, 0.0);
         assert_eq!(v.widgets.inactive.expansion, 0.0);
-        // Hovered and active have expansion for focus glow effect.
-        assert_eq!(v.widgets.hovered.expansion, 1.0);
-        assert_eq!(v.widgets.active.expansion, 2.0);
+        // Flat style — no expansion on hover/active.
+        assert_eq!(v.widgets.hovered.expansion, 0.0);
+        assert_eq!(v.widgets.active.expansion, 0.0);
         assert_eq!(v.widgets.open.expansion, 0.0);
     }
 
