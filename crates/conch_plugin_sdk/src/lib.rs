@@ -84,7 +84,7 @@ macro_rules! declare_plugin {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn conch_plugin_setup(
+        pub unsafe extern "C" fn conch_plugin_setup(
             api: *const $crate::HostApi,
         ) -> *mut ::std::ffi::c_void {
             let $api: &'static $crate::HostApi = unsafe { &*api };
@@ -94,7 +94,7 @@ macro_rules! declare_plugin {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn conch_plugin_event(
+        pub unsafe extern "C" fn conch_plugin_event(
             handle: *mut ::std::ffi::c_void,
             json: *const ::std::ffi::c_char,
             len: usize,
@@ -112,7 +112,7 @@ macro_rules! declare_plugin {
         /// this pointer — the plugin owns the memory and overwrites it on the
         /// next `conch_plugin_render` call.
         #[unsafe(no_mangle)]
-        pub extern "C" fn conch_plugin_render(
+        pub unsafe extern "C" fn conch_plugin_render(
             handle: *mut ::std::ffi::c_void,
         ) -> *const ::std::ffi::c_char {
             use std::sync::OnceLock;
@@ -136,14 +136,14 @@ macro_rules! declare_plugin {
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn conch_plugin_teardown(handle: *mut ::std::ffi::c_void) {
+        pub unsafe extern "C" fn conch_plugin_teardown(handle: *mut ::std::ffi::c_void) {
             if !handle.is_null() {
                 unsafe { drop(Box::from_raw(handle as *mut $state_ty)); }
             }
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn conch_plugin_query(
+        pub unsafe extern "C" fn conch_plugin_query(
             handle: *mut ::std::ffi::c_void,
             method_ptr: *const ::std::ffi::c_char,
             args_json: *const ::std::ffi::c_char,

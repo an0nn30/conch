@@ -1618,8 +1618,8 @@ mod tests {
             serde_json::json!(42)
         );
         assert_eq!(
-            lua_value_to_json(LuaValue::Number(3.14)).unwrap(),
-            serde_json::json!(3.14)
+            lua_value_to_json(LuaValue::Number(1.5)).unwrap(),
+            serde_json::json!(1.5)
         );
     }
 
