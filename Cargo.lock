@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "conch-files"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "conch_plugin_sdk",
@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "conch-ssh"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "conch_app"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "conch_core"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "conch_plugin"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "conch_plugin_sdk",
  "jni",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "conch_plugin_sdk"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "conch_pty"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4789,7 +4789,7 @@ dependencies = [
 
 [[package]]
 name = "test-echo-session"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "conch_plugin_sdk",
  "serde_json",
@@ -4797,7 +4797,7 @@ dependencies = [
 
 [[package]]
 name = "test-panel"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "conch_plugin_sdk",
  "serde_json",
@@ -4805,7 +4805,7 @@ dependencies = [
 
 [[package]]
 name = "test-panel-2"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "conch_plugin_sdk",
  "serde_json",
