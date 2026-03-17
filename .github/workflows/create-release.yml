@@ -1,0 +1,96 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.1)"
+        required: true
+        type: string
+      ref:
+        description: "Branch or commit to release from (default: main)"
+        required: false
+        default: "main"
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Verify actor
+        run: |
+          if [ "${{ github.actor }}" != "an0nn30" ]; then
+            echo "::error::Only an0nn30 can create releases. Actor: ${{ github.actor }}"
+            exit 1
+          fi
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::Invalid version format: $VERSION (expected x.y.z or x.y.z-pre)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - name: Check tag does not already exist
+        run: |
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ inputs.version }} already exists"
+            exit 1
+          fi
+
+      - name: Bump version in project files
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          # Cargo.toml (workspace root)
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+
+          # Info.plist
+          if [ -f packaging/macos/Info.plist ]; then
+            sed -i "s/<string>[0-9]*\.[0-9]*\.[0-9]*<\/string>/<string>$VERSION<\/string>/" \
+              packaging/macos/Info.plist
+          fi
+
+          # WiX installer
+          if [ -f packaging/windows/conch.wxs ]; then
+            sed -i "s/Version=\"[0-9]*\.[0-9]*\.[0-9]*\"/Version=\"$VERSION\"/" \
+              packaging/windows/conch.wxs
+          fi
+
+          # Update Cargo.lock
+          cargo update -w 2>/dev/null || true
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit, tag, and push
+        run: |
+          VERSION="${{ inputs.version }}"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "release: v$VERSION"
+          fi
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "${{ inputs.ref }}"
+          git push origin "v$VERSION"
+
+      - name: Summary
+        run: |
+          echo "### Release v${{ inputs.version }} created" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`v${{ inputs.version }}\` pushed to \`${{ inputs.ref }}\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "The [Release workflow](../actions/workflows/release.yml) will now build and publish artifacts." >> "$GITHUB_STEP_SUMMARY"
