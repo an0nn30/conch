@@ -29,14 +29,34 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// User preferences (portable, version-controlled).
+///
+/// Terminal font can live at `[font]` (legacy) or `[terminal.font]` (preferred).
+/// If `[terminal.font]` is at its default and `[font]` has been customized,
+/// the legacy value is used.  Call [`UserConfig::resolved_terminal_font`] to
+/// get the effective font config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserConfig {
     pub window: WindowConfig,
+    /// Legacy top-level `[font]` section.  Prefer `[terminal.font]` instead.
+    #[serde(default)]
     pub font: FontConfig,
     pub colors: ColorsConfig,
     pub terminal: TerminalConfig,
     pub conch: ConchConfig,
+}
+
+impl UserConfig {
+    /// Return the effective terminal font config.
+    ///
+    /// Prefers `[terminal.font]` when set; falls back to legacy `[font]`.
+    pub fn resolved_terminal_font(&self) -> &FontConfig {
+        if self.terminal.font != FontConfig::default() {
+            &self.terminal.font
+        } else {
+            &self.font
+        }
+    }
 }
 
 impl Default for UserConfig {
@@ -126,4 +146,52 @@ pub fn save_persistent_state(state: &PersistentState) -> Result<()> {
     let contents = toml::to_string_pretty(state).context("Failed to serialize state")?;
     fs::write(state_path(), contents)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_font_preferred_over_legacy() {
+        let toml_str = r#"
+            [font]
+            size = 16.0
+
+            [terminal.font]
+            size = 18.0
+        "#;
+        let cfg: UserConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.resolved_terminal_font().size, 18.0);
+    }
+
+    #[test]
+    fn legacy_font_used_when_terminal_font_default() {
+        let toml_str = r#"
+            [font]
+            size = 16.0
+        "#;
+        let cfg: UserConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.resolved_terminal_font().size, 16.0);
+    }
+
+    #[test]
+    fn default_font_when_neither_set() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.resolved_terminal_font().size, FontConfig::default().size);
+    }
+
+    #[test]
+    fn ui_font_from_full_config() {
+        let toml_str = r#"
+            [conch.ui.font]
+            small = 10.0
+            list = 12.0
+            normal = 13.0
+        "#;
+        let cfg: UserConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.conch.ui.font.small, 10.0);
+        assert_eq!(cfg.conch.ui.font.list, 12.0);
+        assert_eq!(cfg.conch.ui.font.normal, 13.0);
+    }
 }

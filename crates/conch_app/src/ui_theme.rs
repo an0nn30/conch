@@ -7,7 +7,7 @@
 //! Designed for plugin SDK access: plugins will be able to query the
 //! theme to render UI that matches the host application.
 
-use conch_core::config::AppearanceMode;
+use conch_core::config::{AppearanceMode, UiFontConfig};
 use egui::{
     Color32, CornerRadius, Shadow, Stroke, Visuals,
     style::{WidgetVisuals, Widgets},
@@ -65,8 +65,8 @@ pub struct UiTheme {
 }
 
 impl UiTheme {
-    /// Build a theme from the terminal color scheme and appearance mode.
-    pub fn from_colors(colors: &ResolvedColors, appearance: AppearanceMode) -> Self {
+    /// Build a theme from the terminal color scheme, appearance mode, and UI font config.
+    pub fn from_colors(colors: &ResolvedColors, appearance: AppearanceMode, ui_font: &UiFontConfig) -> Self {
         let bg = to_color32(colors.background);
         let fg = to_color32(colors.foreground);
 
@@ -126,9 +126,9 @@ impl UiTheme {
             warn: to_color32(colors.normal[3]),  // yellow
             error: to_color32(colors.normal[1]), // red
             rounding: 0,
-            font_small: 12.0,
-            font_list: 14.0,
-            font_normal: 14.0,
+            font_small: ui_font.small,
+            font_list: ui_font.list,
+            font_normal: ui_font.normal,
             menu_width: 120.0,
             dark_mode,
         }
@@ -420,33 +420,33 @@ mod tests {
 
     #[test]
     fn from_colors_dark_mode_explicit() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         assert!(theme.dark_mode);
     }
 
     #[test]
     fn from_colors_light_mode_explicit() {
-        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::Light);
+        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::Light, &UiFontConfig::default());
         assert!(!theme.dark_mode);
     }
 
     #[test]
     fn from_colors_system_infers_dark() {
         // Dracula background is dark → luminance < 128.
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::System);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::System, &UiFontConfig::default());
         assert!(theme.dark_mode);
     }
 
     #[test]
     fn from_colors_system_infers_light() {
         // Light background → luminance > 128.
-        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::System);
+        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::System, &UiFontConfig::default());
         assert!(!theme.dark_mode);
     }
 
     #[test]
     fn from_colors_surfaces_lighter_in_dark_mode() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         // Surface should be brighter than bg.
         assert!(theme.surface.r() > theme.bg.r());
         // surface_raised brighter than surface.
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn from_colors_light_mode_has_light_surfaces() {
-        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::Light);
+        let theme = UiTheme::from_colors(&light_colors(), AppearanceMode::Light, &UiFontConfig::default());
         // Light mode uses explicit light colors regardless of terminal scheme.
         assert!(theme.bg.r() > 200);
         assert!(theme.surface.r() > 200);
@@ -467,27 +467,27 @@ mod tests {
     #[test]
     fn from_colors_accent_is_blue() {
         let colors = dark_colors();
-        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark, &UiFontConfig::default());
         assert_eq!(theme.accent, to_color32(colors.normal[4]));
     }
 
     #[test]
     fn from_colors_warn_is_yellow() {
         let colors = dark_colors();
-        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark, &UiFontConfig::default());
         assert_eq!(theme.warn, to_color32(colors.normal[3]));
     }
 
     #[test]
     fn from_colors_error_is_red() {
         let colors = dark_colors();
-        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&colors, AppearanceMode::Dark, &UiFontConfig::default());
         assert_eq!(theme.error, to_color32(colors.normal[1]));
     }
 
     #[test]
     fn from_colors_default_metrics() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         assert_eq!(theme.rounding, 0);
         assert_eq!(theme.font_small, 12.0);
         assert_eq!(theme.font_list, 14.0);
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn bg_with_alpha_sets_alpha() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         let c = theme.bg_with_alpha(128);
         assert_eq!(c.a(), 128);
         // Full alpha should match bg exactly.
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn bg_with_alpha_zero() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         let c = theme.bg_with_alpha(0);
         assert_eq!(c.a(), 0);
     }
@@ -520,14 +520,14 @@ mod tests {
 
     #[test]
     fn to_visuals_dark_mode_flag() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         let v = theme.to_visuals();
         assert!(v.dark_mode);
     }
 
     #[test]
     fn to_visuals_all_corners_zero() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         let v = theme.to_visuals();
         assert_eq!(v.window_corner_radius, CornerRadius::ZERO);
         assert_eq!(v.menu_corner_radius, CornerRadius::ZERO);
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn to_visuals_expansion_values() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         let v = theme.to_visuals();
         assert_eq!(v.widgets.noninteractive.expansion, 0.0);
         assert_eq!(v.widgets.inactive.expansion, 0.0);
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn to_visuals_panel_fill_matches_bg() {
-        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
+        let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark, &UiFontConfig::default());
         let v = theme.to_visuals();
         assert_eq!(v.panel_fill, theme.bg);
     }

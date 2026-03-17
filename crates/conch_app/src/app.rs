@@ -76,7 +76,7 @@ impl ConchApp {
 
         let scheme = conch_core::color_scheme::resolve_theme(&user_config.colors.theme);
         let colors = ResolvedColors::from_scheme(&scheme);
-        let theme = crate::ui_theme::UiTheme::from_colors(&colors, user_config.colors.appearance_mode);
+        let theme = crate::ui_theme::UiTheme::from_colors(&colors, user_config.colors.appearance_mode, &user_config.conch.ui.font);
 
         let ipc_listener = IpcListener::start();
         let file_watcher = FileWatcher::start();
@@ -458,7 +458,7 @@ impl eframe::App for ConchApp {
                             Ok(new_config) => {
                                 let scheme = conch_core::color_scheme::resolve_theme(&new_config.colors.theme);
                                 let colors = ResolvedColors::from_scheme(&scheme);
-                                let theme = crate::ui_theme::UiTheme::from_colors(&colors, new_config.colors.appearance_mode);
+                                let theme = crate::ui_theme::UiTheme::from_colors(&colors, new_config.colors.appearance_mode, &new_config.conch.ui.font);
                                 let shortcuts = ResolvedShortcuts::from_config(&new_config.conch.keyboard);
                                 self.shared.menu_bar_state.lock().update_mode(new_config.conch.ui.native_menu_bar, &self.shared.platform);
                                 let mut cfg = self.shared.config.lock();
@@ -481,7 +481,7 @@ impl eframe::App for ConchApp {
                         let mut cfg = self.shared.config.lock();
                         let scheme = conch_core::color_scheme::resolve_theme(&cfg.user_config.colors.theme);
                         cfg.colors = ResolvedColors::from_scheme(&scheme);
-                        cfg.theme = crate::ui_theme::UiTheme::from_colors(&cfg.colors, cfg.user_config.colors.appearance_mode);
+                        cfg.theme = crate::ui_theme::UiTheme::from_colors(&cfg.colors, cfg.user_config.colors.appearance_mode, &cfg.user_config.conch.ui.font);
                         cfg.theme_dirty = true; cfg.theme_version += 1;
                         drop(cfg);
                         crate::notifications::push(crate::notifications::Notification::new(

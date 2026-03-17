@@ -357,7 +357,7 @@ fn main() -> eframe::Result<()> {
     };
 
     let appearance_mode = user_config.colors.appearance_mode;
-    let terminal_font_family = user_config.font.normal.family.clone();
+    let terminal_font_family = user_config.resolved_terminal_font().normal.family.clone();
 
     eframe::run_native(
         "Conch",

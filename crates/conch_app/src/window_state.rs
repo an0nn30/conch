@@ -437,7 +437,7 @@ pub(crate) fn render_window(ctx: &egui::Context, win: &mut WindowState, shared: 
     // 6. Measure cell size (re-measure on DPI change).
     let ppp = ctx.pixels_per_point();
     if !win.cell_size_measured || (ppp - win.last_pixels_per_point).abs() > 0.001 {
-        let font_size = cfg.user_config.font.size;
+        let font_size = cfg.user_config.resolved_terminal_font().size;
         let (cw, ch) = widget::measure_cell_size(ctx, font_size);
         win.cell_width = cw;
         win.cell_height = ch;
@@ -583,7 +583,7 @@ pub(crate) fn render_window(ctx: &egui::Context, win: &mut WindowState, shared: 
     let bg_color = cfg.theme.bg;
     let theme_clone = cfg.theme.clone();
     let colors_clone = cfg.colors.clone();
-    let font_size = cfg.user_config.font.size;
+    let font_size = cfg.user_config.resolved_terminal_font().size;
     let scroll_sensitivity = cfg.user_config.terminal.scroll_sensitivity;
     let shortcuts = cfg.shortcuts.clone();
     let plugin_keybindings = cfg.plugin_keybindings.clone();
@@ -1407,7 +1407,7 @@ mod tests {
         let persistent = config::PersistentState::default();
         let scheme = conch_core::color_scheme::resolve_theme(&user_config.colors.theme);
         let colors = ResolvedColors::from_scheme(&scheme);
-        let theme = UiTheme::from_colors(&colors, user_config.colors.appearance_mode);
+        let theme = UiTheme::from_colors(&colors, user_config.colors.appearance_mode, &user_config.conch.ui.font);
         let shortcuts = ResolvedShortcuts::from_config(&user_config.conch.keyboard);
 
         let cfg = SharedConfig {
@@ -1452,7 +1452,7 @@ mod tests {
         let persistent = config::PersistentState::default();
         let scheme = conch_core::color_scheme::resolve_theme(&user_config.colors.theme);
         let colors = ResolvedColors::from_scheme(&scheme);
-        let theme = UiTheme::from_colors(&colors, user_config.colors.appearance_mode);
+        let theme = UiTheme::from_colors(&colors, user_config.colors.appearance_mode, &user_config.conch.ui.font);
         let shortcuts = ResolvedShortcuts::from_config(&user_config.conch.keyboard);
 
         let mut cfg = SharedConfig {

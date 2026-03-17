@@ -104,11 +104,38 @@ impl Default for KeyboardConfig {
     }
 }
 
+/// Font sizes for the UI chrome (panels, trees, tables, buttons).
+///
+/// ```toml
+/// [conch.ui.font]
+/// small = 12.0    # labels, tab titles, badges
+/// list = 14.0     # tree nodes, table rows/headers
+/// normal = 14.0   # body text, buttons, text inputs
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiFontConfig {
+    pub small: f32,
+    pub list: f32,
+    pub normal: f32,
+}
+
+impl Default for UiFontConfig {
+    fn default() -> Self {
+        Self {
+            small: 12.0,
+            list: 14.0,
+            normal: 14.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub font_family: String,
     pub font_size: f32,
+    pub font: UiFontConfig,
     pub native_menu_bar: bool,
 }
 
@@ -117,6 +144,7 @@ impl Default for UiConfig {
         Self {
             font_family: String::new(),
             font_size: 13.0,
+            font: UiFontConfig::default(),
             native_menu_bar: true,
         }
     }
@@ -192,5 +220,58 @@ mod tests {
         assert!(cfg.native);
         assert!(cfg.lua);
         assert!(cfg.java);
+    }
+
+    #[test]
+    fn ui_font_config_defaults() {
+        let f = UiFontConfig::default();
+        assert_eq!(f.small, 12.0);
+        assert_eq!(f.list, 14.0);
+        assert_eq!(f.normal, 14.0);
+    }
+
+    #[test]
+    fn ui_font_config_from_toml() {
+        let toml_str = r#"
+            small = 10.0
+            list = 12.0
+            normal = 13.0
+        "#;
+        let f: UiFontConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(f.small, 10.0);
+        assert_eq!(f.list, 12.0);
+        assert_eq!(f.normal, 13.0);
+    }
+
+    #[test]
+    fn ui_font_config_serde_default_fills_missing() {
+        let toml_str = r#"small = 10.0"#;
+        let f: UiFontConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(f.small, 10.0);
+        assert_eq!(f.list, 14.0);  // default
+        assert_eq!(f.normal, 14.0); // default
+    }
+
+    #[test]
+    fn ui_config_with_font_section() {
+        let toml_str = r#"
+            native_menu_bar = false
+            [font]
+            small = 11.0
+            list = 13.0
+            normal = 15.0
+        "#;
+        let cfg: UiConfig = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.native_menu_bar);
+        assert_eq!(cfg.font.small, 11.0);
+        assert_eq!(cfg.font.list, 13.0);
+        assert_eq!(cfg.font.normal, 15.0);
+    }
+
+    #[test]
+    fn ui_config_without_font_gets_defaults() {
+        let toml_str = r#"native_menu_bar = true"#;
+        let cfg: UiConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.font, UiFontConfig::default());
     }
 }

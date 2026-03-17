@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::FontConfig;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
@@ -11,6 +13,7 @@ pub struct TerminalConfig {
     pub env: HashMap<String, String>,
     pub cursor: CursorConfig,
     pub scroll_sensitivity: f32,
+    pub font: FontConfig,
 }
 
 impl Default for TerminalConfig {
@@ -20,6 +23,7 @@ impl Default for TerminalConfig {
             env: HashMap::new(),
             cursor: CursorConfig::default(),
             scroll_sensitivity: 0.15,
+            font: FontConfig::default(),
         }
     }
 }
