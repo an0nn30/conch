@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime": {
+    "version": "Lua 5.4"
+  },
+  "workspace": {
+    "library": ["../../editors/neovim/lua/conch"],
+    "checkThirdParty": false
+  },
+  "diagnostics": {
+    "globals": ["ui", "app", "session", "net", "setup", "render", "on_event", "on_query"]
+  }
+}
