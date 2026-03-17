@@ -68,9 +68,9 @@ appearance_mode = "dark"
 # Terminal
 # ---------------------------------------------------------------------------
 
-# Scroll sensitivity multiplier (0.0–1.0). Lower = slower scrolling.
-# Default 0.15, tuned for macOS trackpads. Increase for external mice.
-scroll_sensitivity = 0.15
+# Scroll sensitivity multiplier. Lower = slower scrolling.
+# Default: 0.15 on macOS (trackpads produce large deltas), 1.0 on Windows/Linux.
+# scroll_sensitivity = 1.0
 
 [terminal.shell]
 

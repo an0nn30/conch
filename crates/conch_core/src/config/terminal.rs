@@ -19,8 +19,22 @@ impl Default for TerminalConfig {
             shell: TerminalShell::default(),
             env: HashMap::new(),
             cursor: CursorConfig::default(),
-            scroll_sensitivity: 0.15,
+            scroll_sensitivity: default_scroll_sensitivity(),
         }
+    }
+}
+
+/// Platform-aware default scroll sensitivity.
+///
+/// macOS trackpads produce very large pixel deltas (200+), so we dampen heavily.
+/// Windows/Linux mouse wheels produce ~50 pixels per notch (egui converts
+/// `LineDelta` × 50), so we need a higher multiplier to get the expected ~3
+/// lines per scroll notch.
+fn default_scroll_sensitivity() -> f32 {
+    if cfg!(target_os = "macos") {
+        0.15
+    } else {
+        1.0
     }
 }
 
@@ -114,7 +128,8 @@ mod tests {
 
     #[test]
     fn terminal_config_default_scroll() {
-        assert_eq!(TerminalConfig::default().scroll_sensitivity, 0.15);
+        let expected = if cfg!(target_os = "macos") { 0.15 } else { 1.0 };
+        assert_eq!(TerminalConfig::default().scroll_sensitivity, expected);
     }
 
     #[test]

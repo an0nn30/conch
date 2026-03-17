@@ -143,17 +143,30 @@ pub fn handle_terminal_mouse(
     // prevent scroll events from bleeding through to the terminal.
     let pointer_over_terminal = response.contains_pointer();
 
-    // raw_scroll_delta is non-zero only on actual physical scroll input (wheel
-    // ticks, trackpad touch), not during momentum. Use it to decide whether
-    // this is a new gesture that started over the terminal.
-    if raw_scroll.y.abs() > 0.1 {
-        // Physical scroll input — engage/disengage based on pointer position.
-        selection.scroll_engaged = pointer_over_terminal;
-    } else if scroll_delta.y.abs() < 0.1 {
-        // No scroll at all (raw + smooth both idle) — reset for next gesture.
-        selection.scroll_engaged = false;
+    // On Windows/Linux, discrete mouse wheels have no momentum — raw and smooth
+    // deltas are identical (or raw may not be populated at all). In that case,
+    // skip the engagement tracking and just check pointer position directly.
+    // On macOS, use the raw/smooth distinction to prevent trackpad momentum
+    // from leaking into the terminal when the pointer drifts away.
+    let has_momentum_scrolling = cfg!(target_os = "macos");
+
+    if has_momentum_scrolling {
+        // raw_scroll_delta is non-zero only on actual physical scroll input (wheel
+        // ticks, trackpad touch), not during momentum. Use it to decide whether
+        // this is a new gesture that started over the terminal.
+        if raw_scroll.y.abs() > 0.1 {
+            // Physical scroll input — engage/disengage based on pointer position.
+            selection.scroll_engaged = pointer_over_terminal;
+        } else if scroll_delta.y.abs() < 0.1 {
+            // No scroll at all (raw + smooth both idle) — reset for next gesture.
+            selection.scroll_engaged = false;
+        }
+        // else: smooth momentum only (raw is zero) — keep scroll_engaged as-is.
+    } else {
+        // No momentum on this platform — engage whenever the pointer is over
+        // the terminal and there is scroll input.
+        selection.scroll_engaged = pointer_over_terminal && scroll_delta.y.abs() > 0.1;
     }
-    // else: smooth momentum only (raw is zero) — keep scroll_engaged as-is.
 
     // Dampen trackpad scroll — macOS trackpads produce very large pixel deltas
     // which translate to too many lines per frame. Scale down to feel natural.
