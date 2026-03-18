@@ -169,7 +169,41 @@
     }
     .fp-col-menu-item:hover { background: #44475a; }
     .fp-col-check { display: inline-block; width: 16px; text-align: center; }
-    /* Toast */
+    /* Progress toast */
+    .fp-progress-toast {
+      position: fixed; right: 16px; bottom: 16px; width: 320px;
+      background: #21222c; border: 1px solid #4f5368; border-radius: 8px;
+      padding: 10px 12px; z-index: 5000;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #f8f8f2; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      opacity: 0; transform: translateY(10px);
+      transition: opacity 200ms, transform 200ms;
+    }
+    .fp-progress-toast.visible { opacity: 1; transform: translateY(0); }
+    .fp-pt-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .fp-pt-kind { font-size: 14px; flex-shrink: 0; }
+    .fp-pt-filename {
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-weight: 500;
+    }
+    .fp-pt-cancel {
+      background: none; border: none; color: #6272a4; cursor: pointer;
+      font-size: 14px; padding: 0 2px; line-height: 1;
+    }
+    .fp-pt-cancel:hover { color: #ff5555; }
+    .fp-pt-bar-wrap {
+      height: 4px; background: #3a3d4f; border-radius: 2px; overflow: hidden;
+      margin-bottom: 4px;
+    }
+    .fp-pt-bar {
+      height: 100%; background: #50fa7b; border-radius: 2px; width: 0%;
+      transition: width 150ms ease;
+    }
+    .fp-pt-details {
+      display: flex; justify-content: space-between;
+      font-size: 10px; color: #8b8fa3;
+    }
+    /* Completion toast */
     .fp-toast {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px);
       padding: 8px 20px; background: #2b2e3a; border: 1px solid #50fa7b; border-radius: 6px;

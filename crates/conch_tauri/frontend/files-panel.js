@@ -481,71 +481,122 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Transfer progress toasts
+  // ---------------------------------------------------------------------------
+
+  // Active progress toasts keyed by transfer_id.
+  const activeTransferToasts = new Map();
+
   function handleTransferProgress(event) {
     const p = event.payload;
-    if (!p || !p.file_name) return;
+    if (!p || !p.transfer_id) return;
 
     const pct = p.total_bytes > 0 ? Math.round((p.bytes_transferred / p.total_bytes) * 100) : 0;
     const pane = p.kind === 'download' ? localPane : remotePane;
-    const el = panelEl.querySelector(`#fp-${pane.prefix}`);
 
     if (p.status === 'completed') {
+      removeTransferToast(p.transfer_id);
+      showCompletionToast(p.file_name, p.kind);
       pane.transferStatus[p.file_name] = { status: 'completed', percent: 100 };
-      updateRowTransferState(el, p.file_name, 'completed', 100);
-      // Refresh to show the newly transferred file in the list
       loadEntries(pane);
-      showToast(`Transfer complete: ${p.file_name}`);
     } else if (p.status === 'failed' || p.status === 'cancelled') {
+      removeTransferToast(p.transfer_id);
       delete pane.transferStatus[p.file_name];
-      updateRowTransferState(el, p.file_name, null, 0);
       if (p.status === 'failed') {
-        showToast(`Transfer failed: ${p.file_name}${p.error ? ' — ' + p.error : ''}`, true);
+        showCompletionToast(p.file_name, p.kind, p.error);
       }
     } else {
       pane.transferStatus[p.file_name] = { status: 'in_progress', percent: pct };
-      updateRowTransferState(el, p.file_name, 'in_progress', pct);
+      updateOrCreateTransferToast(p);
     }
   }
 
-  /// Update a single row's transfer visual state without re-rendering the whole pane.
-  function updateRowTransferState(paneEl, fileName, status, pct) {
-    if (!paneEl) return;
-    const row = paneEl.querySelector(`tr[data-name="${CSS.escape(fileName)}"]`);
-    if (!row) return;
+  function updateOrCreateTransferToast(p) {
+    let toast = activeTransferToasts.get(p.transfer_id);
 
-    row.classList.remove('fp-transferring', 'fp-transferred');
-    // Remove existing percent badge
-    const existingPct = row.querySelector('.fp-transfer-pct');
-    if (existingPct) existingPct.remove();
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'fp-progress-toast';
+      toast.innerHTML = `
+        <div class="fp-pt-header">
+          <span class="fp-pt-kind">${p.kind === 'download' ? '\u2193' : '\u2191'}</span>
+          <span class="fp-pt-filename"></span>
+          <button class="fp-pt-cancel" title="Cancel transfer">\u2715</button>
+        </div>
+        <div class="fp-pt-bar-wrap"><div class="fp-pt-bar"></div></div>
+        <div class="fp-pt-details">
+          <span class="fp-pt-bytes"></span>
+          <span class="fp-pt-speed"></span>
+        </div>
+      `;
+      toast.querySelector('.fp-pt-cancel').addEventListener('click', () => {
+        invoke('transfer_cancel', { transferId: p.transfer_id }).catch(() => {});
+        removeTransferToast(p.transfer_id);
+      });
+      toast._startTime = Date.now();
+      toast._startBytes = 0;
+      toast._lastBytes = 0;
+      toast._lastTime = Date.now();
 
-    if (status === 'in_progress') {
-      row.classList.add('fp-transferring');
-      const nameCell = row.querySelector('.fp-cell-name');
-      if (nameCell) {
-        const badge = document.createElement('span');
-        badge.className = 'fp-transfer-pct';
-        badge.textContent = pct + '%';
-        nameCell.appendChild(badge);
-      }
-    } else if (status === 'completed') {
-      row.classList.add('fp-transferred');
+      document.body.appendChild(toast);
+      requestAnimationFrame(() => toast.classList.add('visible'));
+      activeTransferToasts.set(p.transfer_id, toast);
+      repositionToasts();
+    }
+
+    // Update content
+    toast.querySelector('.fp-pt-filename').textContent = p.file_name;
+    const pct = p.total_bytes > 0 ? Math.round((p.bytes_transferred / p.total_bytes) * 100) : 0;
+    toast.querySelector('.fp-pt-bar').style.width = pct + '%';
+
+    const bytesStr = formatSize(p.bytes_transferred) + ' / ' + formatSize(p.total_bytes);
+    toast.querySelector('.fp-pt-bytes').textContent = bytesStr;
+
+    // Calculate speed (smoothed over last interval)
+    const now = Date.now();
+    const elapsed = (now - toast._lastTime) / 1000;
+    if (elapsed > 0.05) {
+      const bytesDelta = p.bytes_transferred - toast._lastBytes;
+      const speed = bytesDelta / elapsed;
+      toast.querySelector('.fp-pt-speed').textContent = formatSize(Math.round(speed)) + '/s';
+      toast._lastBytes = p.bytes_transferred;
+      toast._lastTime = now;
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Toast notifications
-  // ---------------------------------------------------------------------------
+  function removeTransferToast(transferId) {
+    const toast = activeTransferToasts.get(transferId);
+    if (!toast) return;
+    toast.classList.remove('visible');
+    activeTransferToasts.delete(transferId);
+    setTimeout(() => toast.remove(), 300);
+    repositionToasts();
+  }
 
-  function showToast(message, isError) {
+  function repositionToasts() {
+    let bottom = 16;
+    for (const toast of activeTransferToasts.values()) {
+      toast.style.bottom = bottom + 'px';
+      bottom += toast.offsetHeight + 8;
+    }
+  }
+
+  function showCompletionToast(fileName, kind, error) {
     const toast = document.createElement('div');
+    const isError = !!error;
+    const icon = kind === 'download' ? '\u2193' : '\u2191';
+    const msg = isError
+      ? `${icon} Failed: ${fileName}` + (error ? ' \u2014 ' + error : '')
+      : `${icon} Complete: ${fileName}`;
     toast.className = 'fp-toast' + (isError ? ' error' : '');
-    toast.textContent = message;
+    toast.textContent = msg;
     document.body.appendChild(toast);
     requestAnimationFrame(() => toast.classList.add('visible'));
     setTimeout(() => {
       toast.classList.remove('visible');
       setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    }, 4000);
   }
 
   // ---------------------------------------------------------------------------
