@@ -84,10 +84,24 @@
       min-height: 0;
       background: #282a36;
     }
+    #ssh-panel-wrap {
+      display: flex;
+      flex-shrink: 0;
+    }
+    #ssh-panel-wrap.hidden { display: none; }
+    #ssh-panel-resize {
+      width: 4px;
+      cursor: col-resize;
+      background: transparent;
+      flex-shrink: 0;
+      transition: background 150ms;
+    }
+    #ssh-panel-resize:hover,
+    #ssh-panel-resize.dragging { background: #6272a4; }
     #ssh-panel {
       width: 260px;
       min-width: 180px;
-      max-width: 400px;
+      max-width: 500px;
       background: #21222c;
       border-left: 1px solid #3a3d4f;
       display: flex;
@@ -96,7 +110,6 @@
       font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       color: #c5c8d5;
     }
-    #ssh-panel.hidden { display: none; }
     .ssh-panel-header {
       display: flex;
       align-items: center;
@@ -334,7 +347,10 @@
     <div id="tabbar"></div>
     <div id="main-area">
       <div id="terminal-host"></div>
-      <div id="ssh-panel"></div>
+      <div id="ssh-panel-wrap">
+        <div id="ssh-panel-resize"></div>
+        <div id="ssh-panel"></div>
+      </div>
     </div>
   </div>
   <div id="status"></div>
@@ -808,15 +824,33 @@
 
       // ---- SSH panel init ----
       const sshPanelEl = document.getElementById('ssh-panel');
+      const sshPanelWrapEl = document.getElementById('ssh-panel-wrap');
+      const sshResizeEl = document.getElementById('ssh-panel-resize');
       if (window.sshPanel) {
         window.sshPanel.init({
           invoke,
           listen: listenOnCurrentWindow,
           createSshTab,
           panelEl: sshPanelEl,
+          panelWrapEl: sshPanelWrapEl,
+          resizeHandleEl: sshResizeEl,
           fitActiveTab: () => fitAndResizeTab(currentTab()),
         });
       }
+
+      // Save window layout on resize (debounced).
+      let windowResaveSaveTimer = null;
+      window.addEventListener('resize', () => {
+        if (windowResaveSaveTimer) clearTimeout(windowResaveSaveTimer);
+        windowResaveSaveTimer = setTimeout(() => {
+          invoke('save_window_layout', {
+            layout: {
+              ssh_panel_width: sshPanelEl.offsetWidth,
+              ssh_panel_visible: window.sshPanel ? !window.sshPanel.isHidden() : true,
+            },
+          }).catch(() => {});
+        }, 500);
+      });
 
       // ---- Tunnel manager init ----
       if (window.tunnelManager) {

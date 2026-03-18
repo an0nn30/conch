@@ -7,6 +7,8 @@
   let listen = null;
   let createSshTabFn = null;
   let panelEl = null;
+  let panelWrapEl = null;
+  let resizeHandleEl = null;
   let serverListEl = null;
   let quickConnectEl = null;
   let sessionListEl = null;
@@ -25,6 +27,8 @@
     createSshTabFn = opts.createSshTab;
     fitActiveTabFn = opts.fitActiveTab;
     panelEl = opts.panelEl;
+    panelWrapEl = opts.panelWrapEl;
+    resizeHandleEl = opts.resizeHandleEl;
 
     panelEl.innerHTML = `
       <div class="ssh-panel-header">
@@ -124,6 +128,10 @@
     // Global shortcuts
     document.addEventListener('keydown', handleGlobalKeydown);
 
+    // Resize drag + state restore
+    initResize();
+    restoreLayout();
+
     refreshAll();
   }
 
@@ -132,17 +140,19 @@
   // ---------------------------------------------------------------------------
 
   function isHidden() {
-    return panelEl.classList.contains('hidden');
+    return panelWrapEl.classList.contains('hidden');
   }
 
   function showPanel() {
-    panelEl.classList.remove('hidden');
+    panelWrapEl.classList.remove('hidden');
     if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50);
+    saveLayoutState();
   }
 
   function hidePanel() {
-    panelEl.classList.add('hidden');
+    panelWrapEl.classList.add('hidden');
     if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50);
+    saveLayoutState();
   }
 
   function togglePanel() {
@@ -168,6 +178,83 @@
       e.preventDefault();
       togglePanel();
       return;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Resize drag
+  // ---------------------------------------------------------------------------
+
+  function initResize() {
+    if (!resizeHandleEl) return;
+
+    let dragging = false;
+    let startX = 0;
+    let startWidth = 0;
+
+    resizeHandleEl.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragging = true;
+      startX = e.clientX;
+      startWidth = panelEl.offsetWidth;
+      resizeHandleEl.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      // Panel is on the right, so dragging left = bigger panel
+      const delta = startX - e.clientX;
+      const newWidth = Math.max(180, Math.min(500, startWidth + delta));
+      panelEl.style.width = newWidth + 'px';
+      if (fitActiveTabFn) fitActiveTabFn();
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      resizeHandleEl.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      saveLayoutState();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // State persistence
+  // ---------------------------------------------------------------------------
+
+  let saveTimeout = null;
+
+  function saveLayoutState() {
+    // Debounce saves
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => {
+      if (!invoke) return;
+      invoke('save_window_layout', {
+        layout: {
+          ssh_panel_width: panelEl.offsetWidth,
+          ssh_panel_visible: !isHidden(),
+        },
+      }).catch(() => {});
+    }, 300);
+  }
+
+  async function restoreLayout() {
+    try {
+      const saved = await invoke('get_saved_layout');
+      if (saved.ssh_panel_width > 100) {
+        panelEl.style.width = saved.ssh_panel_width + 'px';
+      }
+      if (saved.ssh_panel_visible === false) {
+        panelWrapEl.classList.add('hidden');
+      } else {
+        panelWrapEl.classList.remove('hidden');
+      }
+      if (fitActiveTabFn) setTimeout(fitActiveTabFn, 100);
+    } catch (e) {
+      console.error('Failed to restore layout:', e);
     }
   }
 

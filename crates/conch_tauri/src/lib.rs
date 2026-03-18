@@ -11,10 +11,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use conch_core::config::UserConfig;
+use conch_core::config::{self, UserConfig};
 use parking_lot::Mutex;
 use pty_backend::PtyBackend;
 use remote::RemoteState;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -145,6 +146,56 @@ fn current_window_label(window: tauri::WebviewWindow) -> String {
     window.label().to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Window state persistence
+// ---------------------------------------------------------------------------
+
+/// Layout state sent from the frontend to persist.
+#[derive(Deserialize)]
+struct WindowLayout {
+    ssh_panel_width: Option<f64>,
+    ssh_panel_visible: Option<bool>,
+}
+
+/// Layout state sent to the frontend on load.
+#[derive(Serialize)]
+struct SavedLayout {
+    window_width: f64,
+    window_height: f64,
+    ssh_panel_width: f64,
+    ssh_panel_visible: bool,
+}
+
+#[tauri::command]
+fn get_saved_layout() -> SavedLayout {
+    let state = config::load_persistent_state().unwrap_or_default();
+    SavedLayout {
+        window_width: state.layout.window_width as f64,
+        window_height: state.layout.window_height as f64,
+        ssh_panel_width: state.layout.right_panel_width as f64,
+        ssh_panel_visible: state.layout.right_panel_visible,
+    }
+}
+
+#[tauri::command]
+fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLayout) {
+    let size = window.inner_size().unwrap_or_default();
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let logical_w = size.width as f64 / scale;
+    let logical_h = size.height as f64 / scale;
+
+    let mut state = config::load_persistent_state().unwrap_or_default();
+    state.layout.window_width = logical_w as f32;
+    state.layout.window_height = logical_h as f32;
+    if let Some(w) = layout.ssh_panel_width {
+        state.layout.right_panel_width = w as f32;
+    }
+    if let Some(v) = layout.ssh_panel_visible {
+        state.layout.right_panel_visible = v;
+    }
+    let _ = config::save_persistent_state(&state);
+}
+
 fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
     let close_tab = MenuItem::with_id(
@@ -266,9 +317,21 @@ fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Res
         }
     };
 
+    let persisted = config::load_persistent_state().unwrap_or_default();
+    let w = if persisted.layout.window_width > 100.0 {
+        persisted.layout.window_width as f64
+    } else {
+        1200.0
+    };
+    let h = if persisted.layout.window_height > 100.0 {
+        persisted.layout.window_height as f64
+    } else {
+        800.0
+    };
+
     WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Conch")
-        .inner_size(1200.0, 800.0)
+        .inner_size(w, h)
         .resizable(true)
         .decorations(true)
         .build()?;
@@ -280,6 +343,19 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     let (transfer_tx, mut transfer_rx) =
         tokio::sync::mpsc::unbounded_channel::<remote::transfer::TransferProgress>();
     let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
+
+    // Load persisted window size.
+    let persisted = config::load_persistent_state().unwrap_or_default();
+    let initial_width = if persisted.layout.window_width > 100.0 {
+        persisted.layout.window_width as f64
+    } else {
+        1200.0
+    };
+    let initial_height = if persisted.layout.window_height > 100.0 {
+        persisted.layout.window_height as f64
+    } else {
+        800.0
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -294,6 +370,11 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             app.handle()
                 .set_menu(menu)
                 .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
+
+            // Apply persisted window size.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_size(tauri::LogicalSize::new(initial_width, initial_height));
+            }
 
             // Forward transfer progress events to the frontend.
             // Use a std::thread since we're not inside a tokio runtime here.
@@ -328,6 +409,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             resize_pty,
             close_pty,
             current_window_label,
+            get_saved_layout,
+            save_window_layout,
             remote::ssh_connect,
             remote::ssh_quick_connect,
             remote::ssh_write,
