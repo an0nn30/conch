@@ -232,6 +232,48 @@
     .ssh-form-btn:hover { background: #3a3d4f; color: #f8f8f2; }
     .ssh-form-btn.primary { background: #6272a4; color: #f8f8f2; border-color: #6272a4; }
     .ssh-form-btn.primary:hover { background: #7283b5; }
+    /* -- Tunnel manager -- */
+    .tunnel-manager-dialog { width: 680px; max-width: 95vw; }
+    .tunnel-manager-body { padding: 0; max-height: 50vh; overflow-y: auto; }
+    .tunnel-table-wrap { min-height: 60px; }
+    .tunnel-table {
+      width: 100%; border-collapse: collapse;
+      font-size: 12px; color: #c5c8d5;
+    }
+    .tunnel-table thead { position: sticky; top: 0; z-index: 1; }
+    .tunnel-table th {
+      padding: 6px 10px; text-align: left; font-weight: 500;
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+      color: #6272a4; background: #21222c; border-bottom: 1px solid #3a3d4f;
+    }
+    .tunnel-table td {
+      padding: 6px 10px; border-bottom: 1px solid #2b2e3a;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 160px;
+    }
+    .tunnel-row:hover td { background: #2b2e3a; }
+    .tunnel-col-status { width: 100px; }
+    .tunnel-mono { font-family: "JetBrains Mono", monospace; font-size: 11px; }
+    .tunnel-dot {
+      display: inline-block; width: 7px; height: 7px;
+      border-radius: 50%; margin-right: 4px; vertical-align: middle;
+    }
+    .tunnel-dot.active { background: #50fa7b; }
+    .tunnel-dot.connecting { background: #f1fa8c; }
+    .tunnel-dot.error { background: #ff5555; }
+    .tunnel-dot.inactive { background: #6272a4; }
+    .tunnel-actions { white-space: nowrap; text-align: right; width: 1%; }
+    .tunnel-action-btn {
+      padding: 3px 10px; margin-left: 4px; border: 1px solid #3a3d4f;
+      border-radius: 4px; background: #2b2e3a; color: #c5c8d5;
+      cursor: pointer; font-size: 11px;
+    }
+    .tunnel-action-btn:hover { background: #3a3d4f; color: #f8f8f2; }
+    .tunnel-action-btn.danger { color: #ff5555; }
+    .tunnel-action-btn.danger:hover { background: #ff5555; color: #f8f8f2; }
+    .tunnel-empty {
+      padding: 24px; text-align: center; color: #6272a4; font-size: 13px;
+    }
     .terminal-pane {
       position: absolute;
       inset: 0;
@@ -275,6 +317,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
   <script src="ssh-panel.js"></script>
+  <script src="tunnel-manager.js"></script>
   <script>
     const statusEl = document.getElementById('status');
     function showStatus(message) {
@@ -749,6 +792,15 @@
         });
       }
 
+      // ---- Tunnel manager init ----
+      if (window.tunnelManager) {
+        window.tunnelManager.init({
+          invoke,
+          listen: listenOnCurrentWindow,
+          getServerData: () => window.sshPanel ? window.sshPanel.getServerData() : { folders: [], ungrouped: [], ssh_config: [] },
+        });
+      }
+
       await listenOnCurrentWindow('pty-output', (event) => {
         const payload = event.payload || {};
         const windowLabel = payload.window_label;
@@ -796,6 +848,10 @@
         }
         if (action === 'close-tab' && activeTabId !== null) {
           closeTab(activeTabId).catch((e) => showStatus('Failed to close tab: ' + String(e)));
+          return;
+        }
+        if (action === 'manage-tunnels' && window.tunnelManager) {
+          window.tunnelManager.show();
         }
       });
 

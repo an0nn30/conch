@@ -21,9 +21,11 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 const MENU_NEW_TAB_ID: &str = "file.new_tab";
 const MENU_CLOSE_TAB_ID: &str = "file.close_tab";
 const MENU_NEW_WINDOW_ID: &str = "file.new_window";
+const MENU_MANAGE_TUNNELS_ID: &str = "tools.manage_tunnels";
 const MENU_ACTION_EVENT: &str = "menu-action";
 const MENU_ACTION_NEW_TAB: &str = "new-tab";
 const MENU_ACTION_CLOSE_TAB: &str = "close-tab";
+const MENU_ACTION_MANAGE_TUNNELS: &str = "manage-tunnels";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -182,6 +184,15 @@ fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result
             &PredefinedMenuItem::select_all(app, None)?,
         ],
     )?;
+    let manage_tunnels = MenuItem::with_id(
+        app,
+        MENU_MANAGE_TUNNELS_ID,
+        "Manage SSH Tunnels\u{2026}",
+        true,
+        Some("CmdOrCtrl+Shift+T"),
+    )?;
+    let tools_menu = Submenu::with_items(app, "Tools", true, &[&manage_tunnels])?;
+
     let window_menu = Submenu::with_items(
         app,
         "Window",
@@ -210,12 +221,15 @@ fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result
                 &PredefinedMenuItem::quit(app, None)?,
             ],
         )?;
-        return Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &window_menu]);
+        return Menu::with_items(
+            app,
+            &[&app_menu, &file_menu, &edit_menu, &tools_menu, &window_menu],
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        Menu::with_items(app, &[&file_menu, &edit_menu, &window_menu])
+        Menu::with_items(app, &[&file_menu, &edit_menu, &tools_menu, &window_menu])
     }
 }
 
@@ -298,6 +312,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_NEW_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_NEW_TAB),
             MENU_CLOSE_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_CLOSE_TAB),
+            MENU_MANAGE_TUNNELS_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_MANAGE_TUNNELS)
+            }
             MENU_NEW_WINDOW_ID => {
                 if let Err(e) = create_new_window(app) {
                     log::error!("Failed to create window from menu: {e}");
