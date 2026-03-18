@@ -14,6 +14,14 @@ tokio = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+
+# SSH
+russh = "0.48"
+russh-keys = "0.48"
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256"] }
+async-trait = "0.1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

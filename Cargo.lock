@@ -1220,16 +1220,22 @@ name = "conch_tauri"
 version = "1.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "conch_core",
+ "dirs",
  "log",
  "parking_lot",
  "portable-pty",
+ "russh",
+ "russh-keys",
  "serde",
  "serde_json",
+ "ssh-key",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

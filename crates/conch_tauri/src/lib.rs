@@ -5,6 +5,7 @@
 //! handles all terminal emulation.
 
 mod pty_backend;
+pub(crate) mod remote;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use conch_core::config::UserConfig;
 use parking_lot::Mutex;
 use pty_backend::PtyBackend;
+use remote::RemoteState;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -261,12 +263,15 @@ fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Res
 
 /// Launch the Tauri-based UI.
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
+    let remote_state = Arc::new(Mutex::new(RemoteState::new()));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             config,
         })
+        .manage(Arc::clone(&remote_state))
         .setup(move |app| {
             let menu = build_app_menu(&app.handle())
                 .map_err(|e| anyhow::anyhow!("Failed to build app menu: {e}"))?;
@@ -291,6 +296,17 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             resize_pty,
             close_pty,
             current_window_label,
+            remote::ssh_connect,
+            remote::ssh_quick_connect,
+            remote::ssh_write,
+            remote::ssh_resize,
+            remote::ssh_disconnect,
+            remote::remote_get_servers,
+            remote::remote_save_server,
+            remote::remote_delete_server,
+            remote::remote_add_folder,
+            remote::remote_delete_folder,
+            remote::remote_import_ssh_config,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
