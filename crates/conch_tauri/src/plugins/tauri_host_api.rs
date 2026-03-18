@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::Emitter;
 
-use super::PanelInfo;
+use super::{PanelInfo, PluginMenuItem};
 
 static NEXT_PANEL_HANDLE: AtomicU64 = AtomicU64::new(1);
 
@@ -24,6 +24,7 @@ pub(crate) struct TauriHostApi {
     pub app_handle: tauri::AppHandle,
     pub bus: std::sync::Arc<PluginBus>,
     pub panels: std::sync::Arc<Mutex<HashMap<u64, PanelInfo>>>,
+    pub menu_items: std::sync::Arc<Mutex<Vec<PluginMenuItem>>>,
 }
 
 // -- Tauri events emitted by TauriHostApi --
@@ -226,14 +227,17 @@ impl HostApi for TauriHostApi {
         action: &str,
         keybind: Option<&str>,
     ) {
-        // Emit to frontend — dynamic menu items handled in JS.
-        let _ = self.app_handle.emit("plugin-menu-item", serde_json::json!({
-            "plugin": self.name,
-            "menu": menu,
-            "label": label,
-            "action": action,
-            "keybind": keybind,
-        }));
+        let item = PluginMenuItem {
+            plugin: self.name.clone(),
+            menu: menu.to_string(),
+            label: label.to_string(),
+            action: action.to_string(),
+            keybind: keybind.map(String::from),
+        };
+        self.menu_items.lock().push(item.clone());
+
+        // Also emit to frontend for immediate update.
+        let _ = self.app_handle.emit("plugin-menu-item", &item);
     }
 
     fn show_form(&self, json: &str) -> Option<String> {

@@ -96,6 +96,7 @@
         btn.disabled = true;
         try {
           await invoke('disable_plugin', { name: plugin.name, source: plugin.source });
+          await invoke('rebuild_menu').catch(() => {});
           if (window.toast) window.toast.info('Plugin Disabled', plugin.name);
         } catch (err) {
           if (window.toast) window.toast.error('Disable Failed', String(err));
@@ -112,6 +113,8 @@
         btn.disabled = true;
         try {
           await invoke('enable_plugin', { name: plugin.name, source: plugin.source, path: plugin.path });
+          // Rebuild the native menu to include any menu items the plugin registered.
+          await invoke('rebuild_menu').catch(() => {});
           if (window.toast) window.toast.success('Plugin Enabled', plugin.name);
         } catch (err) {
           if (window.toast) window.toast.error('Enable Failed', String(err));

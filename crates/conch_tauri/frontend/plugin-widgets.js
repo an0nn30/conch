@@ -6,6 +6,9 @@
 
   let invoke = null;
   let listen = null;
+  const pluginMenuItems = [];
+
+  function log(msg) { console.log('[plugin-widgets] ' + msg); }
 
   function init(opts) {
     invoke = opts.invoke;
@@ -18,6 +21,15 @@
       if (container) {
         renderWidgets(container, widgets_json, plugin);
       }
+    });
+
+    // Listen for plugin menu item registrations → store and add to Tools menu area.
+    listen('plugin-menu-item', (event) => {
+      const item = event.payload;
+      if (!item || !item.plugin || !item.action) return;
+      pluginMenuItems.push(item);
+      // Emit a custom DOM event so the menu-action handler can pick it up.
+      log('Plugin registered menu item: ' + item.label + ' (' + item.plugin + ')');
     });
 
     // Listen for plugin notifications → route to toast system.
@@ -511,5 +523,14 @@
     return el.innerHTML;
   }
 
-  exports.pluginWidgets = { init, renderWidgets };
+  function getMenuItems() { return pluginMenuItems.slice(); }
+
+  function triggerMenuAction(pluginName, action) {
+    if (!invoke) return;
+    invoke('trigger_plugin_menu_action', { pluginName, action }).catch((e) => {
+      console.error('trigger_plugin_menu_action error:', e);
+    });
+  }
+
+  exports.pluginWidgets = { init, renderWidgets, getMenuItems, triggerMenuAction };
 })(window);

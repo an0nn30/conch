@@ -28,9 +28,20 @@ pub(crate) struct PanelInfo {
 }
 
 /// Shared plugin state accessible from Tauri commands.
+/// A menu item registered by a plugin.
+#[derive(Clone, Serialize)]
+pub(crate) struct PluginMenuItem {
+    pub plugin: String,
+    pub menu: String,
+    pub label: String,
+    pub action: String,
+    pub keybind: Option<String>,
+}
+
 pub(crate) struct PluginState {
     pub bus: Arc<PluginBus>,
     pub panels: Arc<Mutex<HashMap<u64, PanelInfo>>>,
+    pub menu_items: Arc<Mutex<Vec<PluginMenuItem>>>,
     pub running_lua: Vec<runner::RunningLuaPlugin>,
     pub java_mgr: Option<JavaPluginManager>,
     pub plugins_config: conch_core::config::PluginsConfig,
@@ -41,6 +52,7 @@ impl PluginState {
         Self {
             bus: Arc::new(PluginBus::new()),
             panels: Arc::new(Mutex::new(HashMap::new())),
+            menu_items: Arc::new(Mutex::new(Vec::new())),
             running_lua: Vec::new(),
             java_mgr: None,
             plugins_config,
@@ -51,95 +63,19 @@ impl PluginState {
         plugin_search_paths(&self.plugins_config.search_paths)
     }
 
-    /// Discover and start Lua plugins.
-    pub fn start_lua_plugins(&mut self, app_handle: &tauri::AppHandle) {
-        let search_paths = self.search_paths();
-
-        for dir in &search_paths {
-            if !dir.exists() {
-                continue;
-            }
-            log::info!("Scanning for Lua plugins in {}", dir.display());
-
-            let discovered = runner::discover(dir);
-            for plugin in &discovered {
-                log::info!(
-                    "Found Lua plugin: {} ({})",
-                    plugin.meta.name,
-                    plugin.path.display()
-                );
-
-                let name = plugin.meta.name.clone();
-
-                // Create a per-plugin HostApi instance.
-                let host_api: Arc<dyn conch_plugin::HostApi> = Arc::new(TauriHostApi {
-                    name: name.clone(),
-                    app_handle: app_handle.clone(),
-                    bus: Arc::clone(&self.bus),
-                    panels: Arc::clone(&self.panels),
-                });
-
-                // Register on the bus and get the mailbox.
-                let mailbox_rx = self.bus.register_plugin(&name);
-                let mailbox_tx = match self.bus.sender_for(&name) {
-                    Some(tx) => tx,
-                    None => {
-                        log::error!("Failed to get mailbox sender for plugin '{name}'");
-                        continue;
-                    }
-                };
-
-                match runner::spawn_lua_plugin(plugin, host_api, mailbox_tx, mailbox_rx) {
-                    Ok(running) => {
-                        log::info!("Lua plugin '{}' started", name);
-                        self.running_lua.push(running);
-                    }
-                    Err(e) => {
-                        log::error!("Failed to start Lua plugin '{}': {e}", name);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Start the Java plugin manager and discover/load JAR plugins.
-    pub fn start_java_plugins(&mut self, app_handle: &tauri::AppHandle) {
+    /// Initialize the Java plugin manager (JVM) without loading any plugins.
+    /// Plugins are loaded on demand via the Plugin Manager UI.
+    pub fn init_java_manager(&mut self, app_handle: &tauri::AppHandle) {
         let host_api: Arc<dyn conch_plugin::HostApi> = Arc::new(TauriHostApi {
             name: "java".to_string(),
             app_handle: app_handle.clone(),
             bus: Arc::clone(&self.bus),
             panels: Arc::clone(&self.panels),
+            menu_items: Arc::clone(&self.menu_items),
         });
 
-        let mut mgr = JavaPluginManager::new(Arc::clone(&self.bus), host_api);
-        let search_paths = self.search_paths();
-
-        for dir in &search_paths {
-            if !dir.exists() {
-                continue;
-            }
-
-            // Look for .jar files.
-            let jar_files: Vec<_> = std::fs::read_dir(dir)
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path().extension().map_or(false, |ext| ext == "jar")
-                })
-                .map(|e| e.path())
-                .collect();
-
-            for jar_path in &jar_files {
-                log::info!("Found JAR plugin: {}", jar_path.display());
-                match mgr.load_plugin(jar_path) {
-                    Ok(meta) => log::info!("Java plugin loaded: {} v{}", meta.name, meta.version),
-                    Err(e) => log::error!("Failed to load JAR {}: {e}", jar_path.display()),
-                }
-            }
-        }
-
-        self.java_mgr = Some(mgr);
+        self.java_mgr = Some(JavaPluginManager::new(Arc::clone(&self.bus), host_api));
+        log::info!("Java plugin manager initialized (JVM ready, no plugins loaded)");
     }
 
     /// Shut down all running plugins.
@@ -296,6 +232,7 @@ pub(crate) fn enable_plugin(
             app_handle: app.clone(),
             bus: Arc::clone(&ps.bus),
             panels: Arc::clone(&ps.panels),
+            menu_items: Arc::clone(&ps.menu_items),
         });
 
         let mailbox_rx = ps.bus.register_plugin(&name);
@@ -346,6 +283,29 @@ pub(crate) fn disable_plugin(
         }
     } else {
         Err(format!("Unknown plugin source: {source}"))
+    }
+}
+
+/// Get all menu items registered by plugins.
+#[tauri::command]
+pub(crate) fn get_plugin_menu_items(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+) -> Vec<PluginMenuItem> {
+    state.lock().menu_items.lock().clone()
+}
+
+/// Trigger a plugin menu action (sends menu_action event to the plugin).
+#[tauri::command]
+pub(crate) fn trigger_plugin_menu_action(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    plugin_name: String,
+    action: String,
+) {
+    let bus = Arc::clone(&state.lock().bus);
+    if let Some(sender) = bus.sender_for(&plugin_name) {
+        let event = conch_plugin_sdk::PluginEvent::MenuAction { action };
+        let json = serde_json::to_string(&event).unwrap_or_default();
+        let _ = sender.blocking_send(conch_plugin::bus::PluginMail::WidgetEvent { json });
     }
 }
 

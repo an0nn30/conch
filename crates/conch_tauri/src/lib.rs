@@ -155,6 +155,134 @@ fn current_window_label(window: tauri::WebviewWindow) -> String {
     window.label().to_string()
 }
 
+/// Rebuild the app menu including dynamically registered plugin menu items.
+#[tauri::command]
+fn rebuild_menu(
+    app: tauri::AppHandle,
+    plugin_state: tauri::State<'_, Arc<Mutex<plugins::PluginState>>>,
+) -> Result<(), String> {
+    let kb = config::load_user_config()
+        .map(|c| c.conch.keyboard)
+        .unwrap_or_default();
+
+    let plugin_items = plugin_state.lock().menu_items.lock().clone();
+
+    let menu = build_app_menu_with_plugins(&app, &kb, &plugin_items)
+        .map_err(|e| format!("Menu build failed: {e}"))?;
+    app.set_menu(menu)
+        .map_err(|e| format!("Set menu failed: {e}"))?;
+    Ok(())
+}
+
+fn build_app_menu_with_plugins<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    keyboard: &conch_core::config::KeyboardConfig,
+    plugin_items: &[plugins::PluginMenuItem],
+) -> tauri::Result<Menu<R>> {
+    // Build the base menu.
+    let base = build_app_menu(app, keyboard)?;
+
+    // If there are plugin menu items, rebuild the Tools menu to include them.
+    if !plugin_items.is_empty() {
+        // We can't easily modify an existing menu, so rebuild it fully.
+        // For now, the plugin items are added to the Tools menu via
+        // the on_menu_event handler. The menu IDs use "plugin.{plugin}.{action}".
+        let mut tools_items: Vec<Box<dyn tauri::menu::IsMenuItem<R>>> = Vec::new();
+
+        let plugin_manager = MenuItem::with_id(
+            app,
+            MENU_PLUGIN_MANAGER_ID,
+            "Plugin Manager\u{2026}",
+            true,
+            None::<&str>,
+        )?;
+        tools_items.push(Box::new(plugin_manager));
+        tools_items.push(Box::new(PredefinedMenuItem::separator(app)?));
+
+        let manage_tunnels = MenuItem::with_id(
+            app,
+            MENU_MANAGE_TUNNELS_ID,
+            "Manage SSH Tunnels\u{2026}",
+            true,
+            Some("CmdOrCtrl+Shift+T"),
+        )?;
+        tools_items.push(Box::new(manage_tunnels));
+
+        // Add plugin items.
+        if !plugin_items.is_empty() {
+            tools_items.push(Box::new(PredefinedMenuItem::separator(app)?));
+        }
+        for item in plugin_items {
+            let menu_id = format!("plugin.{}.{}", item.plugin, item.action);
+            let accel = item.keybind.as_deref().map(|k| config_key_to_accelerator(k));
+            let mi = MenuItem::with_id(
+                app,
+                &menu_id,
+                &item.label,
+                true,
+                accel.as_deref(),
+            )?;
+            tools_items.push(Box::new(mi));
+        }
+
+        // Rebuild the tools submenu.
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = tools_items.iter().map(|b| &**b).collect();
+        let new_tools = Submenu::with_items(app, "Tools", true, &refs)?;
+
+        // Rebuild full menu bar with new tools menu.
+        let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
+        let close_tab = MenuItem::with_id(app, MENU_CLOSE_TAB_ID, "Close Tab", true, Some("CmdOrCtrl+W"))?;
+        let new_window = MenuItem::with_id(app, MENU_NEW_WINDOW_ID, "New Window", true, Some("CmdOrCtrl+Shift+N"))?;
+        let separator = PredefinedMenuItem::separator(app)?;
+        let close_window = PredefinedMenuItem::close_window(app, None)?;
+        let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &close_tab, &close_window])?;
+        let edit_menu = Submenu::with_items(app, "Edit", true, &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ])?;
+
+        let toggle_left_accel = config_key_to_accelerator(&keyboard.toggle_left_panel);
+        let toggle_left = MenuItem::with_id(app, MENU_TOGGLE_LEFT_PANEL_ID, "Toggle File Explorer", true, Some(&toggle_left_accel))?;
+        let toggle_right_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
+        let toggle_right = MenuItem::with_id(app, MENU_TOGGLE_RIGHT_PANEL_ID, "Toggle Sessions Panel", true, Some(&toggle_right_accel))?;
+        let focus_sessions = MenuItem::with_id(app, MENU_FOCUS_SESSIONS_ID, "Toggle & Focus Sessions", true, Some("CmdOrCtrl+/"))?;
+        let view_menu = Submenu::with_items(app, "View", true, &[&toggle_left, &toggle_right, &PredefinedMenuItem::separator(app)?, &focus_sessions])?;
+
+        let window_menu = Submenu::with_items(app, "Window", true, &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+        ])?;
+
+        #[cfg(target_os = "macos")]
+        {
+            let app_name = app.package_info().name.clone();
+            let app_menu = Submenu::with_items(app, app_name, true, &[
+                &PredefinedMenuItem::about(app, None, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::hide(app, None)?,
+                &PredefinedMenuItem::hide_others(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::quit(app, None)?,
+            ])?;
+            return Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &new_tools, &window_menu]);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &new_tools, &window_menu]);
+        }
+    }
+
+    Ok(base)
+}
+
 #[tauri::command]
 fn get_home_dir() -> String {
     dirs::home_dir()
@@ -514,16 +642,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 let _ = win.set_size(tauri::LogicalSize::new(initial_width, initial_height));
             }
 
-            // Start plugins.
-            if plugins_config.enabled {
+            // Initialize the Java plugin manager (JVM) if Java plugins are enabled.
+            // Plugins are NOT auto-loaded — use the Plugin Manager to enable them.
+            if plugins_config.enabled && plugins_config.java {
                 let handle = app.handle().clone();
                 let mut ps = plugin_state.lock();
-                if plugins_config.lua {
-                    ps.start_lua_plugins(&handle);
-                }
-                if plugins_config.java {
-                    ps.start_java_plugins(&handle);
-                }
+                ps.init_java_manager(&handle);
             }
 
             // Forward transfer progress events to the frontend.
@@ -563,7 +687,26 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                     log::error!("Failed to create window from menu: {e}");
                 }
             }
-            _ => {}
+            other => {
+                // Check if it's a plugin menu item: "plugin.{name}.{action}"
+                let id_str = other;
+                if id_str.starts_with("plugin.") {
+                    let parts: Vec<&str> = id_str.splitn(3, '.').collect();
+                    if parts.len() == 3 {
+                        let plugin_name = parts[1].to_string();
+                        let action = parts[2].to_string();
+                        // Send the menu action event to the plugin.
+                        if let Some(ps) = app.try_state::<Arc<Mutex<plugins::PluginState>>>() {
+                            let bus = Arc::clone(&ps.lock().bus);
+                            if let Some(sender) = bus.sender_for(&plugin_name) {
+                                let event = conch_plugin_sdk::PluginEvent::MenuAction { action };
+                                let json = serde_json::to_string(&event).unwrap_or_default();
+                                let _ = sender.blocking_send(conch_plugin::bus::PluginMail::WidgetEvent { json });
+                            }
+                        }
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             spawn_shell,
@@ -576,6 +719,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             get_keyboard_shortcuts,
             get_terminal_font,
             get_home_dir,
+            rebuild_menu,
             remote::ssh_connect,
             remote::ssh_quick_connect,
             remote::ssh_write,
@@ -618,6 +762,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             plugins::scan_plugins,
             plugins::enable_plugin,
             plugins::disable_plugin,
+            plugins::get_plugin_menu_items,
+            plugins::trigger_plugin_menu_action,
             plugins::get_plugin_panels,
             plugins::get_panel_widgets,
             plugins::plugin_widget_event,
