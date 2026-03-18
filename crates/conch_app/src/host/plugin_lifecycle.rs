@@ -316,10 +316,15 @@ impl ConchApp {
         // Register on the bus and get the mailbox.
         let mailbox_rx = self.shared.plugin_bus.register_plugin(name);
         let mailbox_tx = self.shared.plugin_bus.sender_for(name).unwrap();
-        let host_api: *const conch_plugin_sdk::HostApi = self.lua_host_api.as_ref()
+        let host_api_ptr: *const conch_plugin_sdk::HostApi = self.lua_host_api.as_ref()
             .map(|b| &**b as *const _)
             .or_else(|| self.native_plugin_mgr.as_ref().map(|m| m.host_api_ptr()))
             .ok_or_else(|| "No HostApi available for Lua plugins".to_string())?;
+
+        // Wrap the C vtable in the safe trait adapter for the Lua runner.
+        let host_api: std::sync::Arc<dyn conch_plugin::HostApi> = std::sync::Arc::new(
+            unsafe { conch_plugin::CHostApiAdapter::new(name.to_string(), &*host_api_ptr) }
+        );
 
         let running = conch_plugin::lua::runner::spawn_lua_plugin(
             &discovered,

@@ -5,11 +5,12 @@
 //! is drained after `render()` to produce the JSON widget tree.
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString};
+use std::sync::Arc;
 
 use conch_plugin_sdk::widgets::*;
-use conch_plugin_sdk::HostApi;
 use mlua::prelude::*;
+
+use crate::HostApi;
 
 // ---------------------------------------------------------------------------
 // Widget accumulator — thread-local stack of widget lists
@@ -58,23 +59,18 @@ impl WidgetAccumulator {
 // Host API bridge — wraps the raw HostApi pointer for Lua access
 // ---------------------------------------------------------------------------
 
-/// Wraps a `*const HostApi` so it can be stored as Lua app data.
+/// Wraps an `Arc<dyn HostApi>` so it can be stored as Lua app data.
 pub struct HostApiBridge {
-    api: *const HostApi,
+    api: Arc<dyn HostApi>,
 }
 
-// SAFETY: HostApi function pointers are thread-safe (they dispatch to the
-// host's event loop). The pointer is valid for the plugin's lifetime.
-unsafe impl Send for HostApiBridge {}
-unsafe impl Sync for HostApiBridge {}
-
 impl HostApiBridge {
-    pub fn new(api: *const HostApi) -> Self {
+    pub fn new(api: Arc<dyn HostApi>) -> Self {
         Self { api }
     }
 
-    fn api(&self) -> &HostApi {
-        unsafe { &*self.api }
+    fn api(&self) -> &dyn HostApi {
+        &*self.api
     }
 }
 
@@ -85,7 +81,7 @@ impl HostApiBridge {
 /// Register all API tables on the Lua VM.
 ///
 /// Stores a `WidgetAccumulator` and `HostApiBridge` as app data.
-pub fn register_all(lua: &Lua, host_api: *const HostApi) -> LuaResult<()> {
+pub fn register_all(lua: &Lua, host_api: Arc<dyn HostApi>) -> LuaResult<()> {
     lua.set_app_data(RefCell::new(WidgetAccumulator::new()));
     lua.set_app_data(HostApiBridge::new(host_api));
 
@@ -507,10 +503,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
                 "error" => 4,
                 _ => 2,
             };
-            with_host_api(lua, |api| {
-                let c_msg = CString::new(msg).unwrap_or_default();
-                (api.log)(level_num, c_msg.as_ptr());
-            });
+            with_host_api(lua, |api| api.log(level_num, &msg));
             Ok(())
         })?,
     )?;
@@ -518,10 +511,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "clipboard",
         lua.create_function(|lua, text: String| {
-            with_host_api(lua, |api| {
-                let c_text = CString::new(text).unwrap_or_default();
-                (api.clipboard_set)(c_text.as_ptr());
-            });
+            with_host_api(lua, |api| api.clipboard_set(&text));
             Ok(())
         })?,
     )?;
@@ -529,18 +519,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "clipboard_get",
         lua.create_function(|lua, ()| {
-            let result = with_host_api(lua, |api| {
-                let ptr = (api.clipboard_get)();
-                if ptr.is_null() {
-                    return None;
-                }
-                let s = unsafe { CStr::from_ptr(ptr) }
-                    .to_str()
-                    .unwrap_or("")
-                    .to_string();
-                (api.free_string)(ptr);
-                Some(s)
-            });
+            let result = with_host_api(lua, |api| api.clipboard_get());
             Ok(result)
         })?,
     )?;
@@ -550,11 +529,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, (event_type, data): (String, LuaValue)| {
             let data_json = serde_json::to_string(&lua_value_to_json(data)?)
                 .unwrap_or_else(|_| "{}".to_string());
-            with_host_api(lua, |api| {
-                let c_type = CString::new(event_type).unwrap_or_default();
-                let c_data = CString::new(data_json.clone()).unwrap_or_default();
-                (api.publish_event)(c_type.as_ptr(), c_data.as_ptr(), data_json.len());
-            });
+            with_host_api(lua, |api| api.publish_event(&event_type, &data_json));
             Ok(())
         })?,
     )?;
@@ -562,10 +537,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "subscribe",
         lua.create_function(|lua, event_type: String| {
-            with_host_api(lua, |api| {
-                let c_type = CString::new(event_type).unwrap_or_default();
-                (api.subscribe)(c_type.as_ptr());
-            });
+            with_host_api(lua, |api| api.subscribe(&event_type));
             Ok(())
         })?,
     )?;
@@ -581,10 +553,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
                     "duration_ms": duration_ms.unwrap_or(3000),
                 });
                 let json = notif.to_string();
-                with_host_api(lua, |api| {
-                    let c_json = CString::new(json.clone()).unwrap_or_default();
-                    (api.notify)(c_json.as_ptr(), json.len());
-                });
+                with_host_api(lua, |api| api.notify(&json));
                 Ok(())
             },
         )?,
@@ -593,10 +562,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "register_service",
         lua.create_function(|lua, name: String| {
-            with_host_api(lua, |api| {
-                let c_name = CString::new(name).unwrap_or_default();
-                (api.register_service)(c_name.as_ptr());
-            });
+            with_host_api(lua, |api| api.register_service(&name));
             Ok(())
         })?,
     )?;
@@ -606,20 +572,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
         lua.create_function(
             |lua, (menu, label, action, keybind): (String, String, String, Option<String>)| {
                 with_host_api(lua, |api| {
-                    let c_menu = CString::new(menu).unwrap_or_default();
-                    let c_label = CString::new(label).unwrap_or_default();
-                    let c_action = CString::new(action).unwrap_or_default();
-                    let c_keybind = keybind.as_deref().map(|s| CString::new(s).unwrap_or_default());
-                    let keybind_ptr = c_keybind
-                        .as_ref()
-                        .map(|c| c.as_ptr())
-                        .unwrap_or(std::ptr::null());
-                    (api.register_menu_item)(
-                        c_menu.as_ptr(),
-                        c_label.as_ptr(),
-                        c_action.as_ptr(),
-                        keybind_ptr,
-                    );
+                    api.register_menu_item(&menu, &label, &action, keybind.as_deref());
                 });
                 Ok(())
             },
@@ -636,24 +589,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
                     None => "null".to_string(),
                 };
                 let result = with_host_api(lua, |api| {
-                    let c_target = CString::new(target).unwrap_or_default();
-                    let c_method = CString::new(method).unwrap_or_default();
-                    let c_args = CString::new(args_json.clone()).unwrap_or_default();
-                    let ptr = (api.query_plugin)(
-                        c_target.as_ptr(),
-                        c_method.as_ptr(),
-                        c_args.as_ptr(),
-                        args_json.len(),
-                    );
-                    if ptr.is_null() {
-                        return None;
-                    }
-                    let s = unsafe { CStr::from_ptr(ptr) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string();
-                    (api.free_string)(ptr);
-                    Some(s)
+                    api.query_plugin(&target, &method, &args_json)
                 });
                 Ok(result)
             },
@@ -663,19 +599,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "get_config",
         lua.create_function(|lua, key: String| {
-            let result = with_host_api(lua, |api| {
-                let c_key = CString::new(key).unwrap_or_default();
-                let ptr = (api.get_config)(c_key.as_ptr());
-                if ptr.is_null() {
-                    return None;
-                }
-                let s = unsafe { CStr::from_ptr(ptr) }
-                    .to_str()
-                    .unwrap_or("")
-                    .to_string();
-                (api.free_string)(ptr);
-                Some(s)
-            });
+            let result = with_host_api(lua, |api| api.get_config(&key));
             Ok(result)
         })?,
     )?;
@@ -683,11 +607,7 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "set_config",
         lua.create_function(|lua, (key, value): (String, String)| {
-            with_host_api(lua, |api| {
-                let c_key = CString::new(key).unwrap_or_default();
-                let c_value = CString::new(value).unwrap_or_default();
-                (api.set_config)(c_key.as_ptr(), c_value.as_ptr());
-            });
+            with_host_api(lua, |api| api.set_config(&key, &value));
             Ok(())
         })?,
     )?;
@@ -774,9 +694,7 @@ fn register_session_table(lua: &Lua) -> LuaResult<()> {
     session.set(
         "write",
         lua.create_function(|lua, text: String| {
-            with_host_api(lua, |api| {
-                (api.write_to_pty)(text.as_ptr(), text.len());
-            });
+            with_host_api(lua, |api| api.write_to_pty(text.as_bytes()));
             Ok(())
         })?,
     )?;
@@ -788,14 +706,7 @@ fn register_session_table(lua: &Lua) -> LuaResult<()> {
     session.set(
         "new_tab",
         lua.create_function(|lua, (command, plain): (Option<String>, Option<bool>)| {
-            with_host_api(lua, |api| {
-                let c_cmd = command.as_deref()
-                    .map(|s| std::ffi::CString::new(s).unwrap_or_default());
-                let ptr = c_cmd.as_ref()
-                    .map(|c| c.as_ptr())
-                    .unwrap_or(std::ptr::null());
-                (api.new_tab)(ptr, plain.unwrap_or(false));
-            });
+            with_host_api(lua, |api| api.new_tab(command.as_deref(), plain.unwrap_or(false)));
             Ok(())
         })?,
     )?;
@@ -905,10 +816,10 @@ where
     f(&mut acc)
 }
 
-/// Borrow the HostApi bridge, call the closure.
+/// Borrow the HostApi trait object, call the closure.
 fn with_host_api<F, R>(lua: &Lua, f: F) -> R
 where
-    F: FnOnce(&HostApi) -> R,
+    F: FnOnce(&dyn HostApi) -> R,
 {
     let bridge = lua
         .app_data_ref::<HostApiBridge>()
@@ -1235,23 +1146,12 @@ fn build_form_json(title: &str, fields: &LuaTable) -> LuaResult<String> {
 }
 
 fn call_show_form(lua: &Lua, json: &str) -> LuaResult<Option<LuaTable>> {
-    let result_ptr = with_host_api(lua, |api| {
-        let c_json = CString::new(json).unwrap_or_default();
-        (api.show_form)(c_json.as_ptr(), json.len())
-    });
+    let result_str = with_host_api(lua, |api| api.show_form(json));
 
-    if result_ptr.is_null() {
+    let Some(result_str) = result_str else {
         return Ok(None);
-    }
+    };
 
-    let result_str = unsafe { CStr::from_ptr(result_ptr) }
-        .to_str()
-        .unwrap_or("{}")
-        .to_string();
-
-    with_host_api(lua, |api| (api.free_string)(result_ptr));
-
-    // Parse JSON result into a Lua table.
     let json_value: serde_json::Value =
         serde_json::from_str(&result_str).unwrap_or(serde_json::Value::Null);
     let tbl = json_to_lua_table(lua, &json_value)?;
@@ -1259,43 +1159,19 @@ fn call_show_form(lua: &Lua, json: &str) -> LuaResult<Option<LuaTable>> {
 }
 
 fn call_show_alert(lua: &Lua, title: &str, msg: &str) {
-    with_host_api(lua, |api| {
-        let c_title = CString::new(title).unwrap_or_default();
-        let c_msg = CString::new(msg).unwrap_or_default();
-        (api.show_alert)(c_title.as_ptr(), c_msg.as_ptr());
-    });
+    with_host_api(lua, |api| api.show_alert(title, msg));
 }
 
 fn call_show_error(lua: &Lua, title: &str, msg: &str) {
-    with_host_api(lua, |api| {
-        let c_title = CString::new(title).unwrap_or_default();
-        let c_msg = CString::new(msg).unwrap_or_default();
-        (api.show_error)(c_title.as_ptr(), c_msg.as_ptr());
-    });
+    with_host_api(lua, |api| api.show_error(title, msg));
 }
 
 fn call_show_confirm(lua: &Lua, msg: &str) -> bool {
-    with_host_api(lua, |api| {
-        let c_msg = CString::new(msg).unwrap_or_default();
-        (api.show_confirm)(c_msg.as_ptr())
-    })
+    with_host_api(lua, |api| api.show_confirm(msg))
 }
 
 fn call_show_prompt(lua: &Lua, msg: &str, default: &str) -> Option<String> {
-    with_host_api(lua, |api| {
-        let c_msg = CString::new(msg).unwrap_or_default();
-        let c_default = CString::new(default).unwrap_or_default();
-        let ptr = (api.show_prompt)(c_msg.as_ptr(), c_default.as_ptr());
-        if ptr.is_null() {
-            return None;
-        }
-        let s = unsafe { CStr::from_ptr(ptr) }
-            .to_str()
-            .unwrap_or("")
-            .to_string();
-        (api.free_string)(ptr);
-        Some(s)
-    })
+    with_host_api(lua, |api| api.show_prompt(msg, default))
 }
 
 /// Convert a serde_json::Value to a Lua table.

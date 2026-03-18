@@ -5,15 +5,16 @@
 //! source, and enters a mailbox loop dispatching events and render requests.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use conch_plugin_sdk::widgets::{PluginEvent, Widget};
-use conch_plugin_sdk::HostApi;
 use mlua::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::bus::PluginMail;
 use crate::lua::api;
 use crate::lua::metadata::{self, LuaPluginMeta};
+use crate::HostApi;
 
 /// A discovered Lua plugin (not yet running).
 #[derive(Debug, Clone)]
@@ -48,7 +49,7 @@ pub fn discover(dir: &Path) -> Vec<DiscoveredLuaPlugin> {
 /// communication.
 pub fn spawn_lua_plugin(
     plugin: &DiscoveredLuaPlugin,
-    host_api: *const HostApi,
+    host_api: Arc<dyn HostApi>,
     mailbox_tx: mpsc::Sender<PluginMail>,
     mailbox_rx: mpsc::Receiver<PluginMail>,
 ) -> Result<RunningLuaPlugin, String> {
@@ -57,15 +58,11 @@ pub fn spawn_lua_plugin(
     let path = plugin.path.clone();
     let plugin_name = meta.name.clone();
 
-    // Cast the host_api pointer to usize for Send across thread boundary.
-    let host_api_addr = host_api as usize;
-
     let thread_meta = meta.clone();
     let thread = std::thread::Builder::new()
         .name(format!("lua-plugin:{}", plugin_name))
         .spawn(move || {
-            let api = host_api_addr as *const HostApi;
-            lua_plugin_thread(api, &source, &path, &thread_meta, mailbox_rx);
+            lua_plugin_thread(host_api, &source, &path, &thread_meta, mailbox_rx);
         })
         .map_err(|e| format!("Failed to spawn Lua plugin thread: {e}"))?;
 
@@ -78,19 +75,16 @@ pub fn spawn_lua_plugin(
 
 /// The main function running on a Lua plugin's dedicated thread.
 fn lua_plugin_thread(
-    host_api: *const HostApi,
+    host_api: Arc<dyn HostApi>,
     source: &str,
     path: &Path,
     meta: &LuaPluginMeta,
     mut mailbox: mpsc::Receiver<PluginMail>,
 ) {
-    // Create Lua VM.
-    let lua = match Lua::new() {
-        lua => lua,
-    };
+    let lua = Lua::new();
 
-    // Register API tables.
-    if let Err(e) = api::register_all(&lua, host_api) {
+    // Register API tables with the safe trait-based HostApi.
+    if let Err(e) = api::register_all(&lua, Arc::clone(&host_api)) {
         log::error!("Failed to register Lua API: {e}");
         return;
     }
@@ -116,9 +110,7 @@ fn lua_plugin_thread(
 
     // If this is a panel plugin, register the panel with the host.
     if matches!(meta.plugin_type, conch_plugin_sdk::PluginType::Panel) {
-        let api = unsafe { &*host_api };
-        let name = std::ffi::CString::new(meta.name.as_str()).unwrap_or_default();
-        (api.register_panel)(meta.panel_location, name.as_ptr(), std::ptr::null());
+        host_api.register_panel(meta.panel_location, &meta.name, None);
     }
 
     log::info!("Lua plugin '{}' started", chunk_name);
