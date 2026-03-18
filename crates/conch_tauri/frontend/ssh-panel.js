@@ -318,22 +318,50 @@
 
     const status = tunnel.status || null;
     let dotClass = 'inactive';
+    let errorMsg = null;
     if (status === 'active') dotClass = 'active';
     else if (status === 'connecting') dotClass = 'connecting';
-    else if (status && status.startsWith('error')) dotClass = 'error';
+    else if (status && status.startsWith('error')) {
+      dotClass = 'error';
+      errorMsg = status.replace(/^error:\s*/, '');
+    }
+
+    if (errorMsg) {
+      el.title = 'Error: ' + errorMsg + ' (click to retry)';
+    }
 
     el.innerHTML =
       `<span class="tunnel-dot ${dotClass}"></span>` +
       `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>`;
 
-    // Click to toggle start/stop
+    // Click to toggle start/stop/retry
     el.addEventListener('click', async () => {
       if (status === 'active' || status === 'connecting') {
         try { await invoke('tunnel_stop', { tunnelId: tunnel.id }); } catch (e) { console.error(e); }
+        setTimeout(refreshTunnels, 300);
+      } else if (errorMsg && window.tunnelManager) {
+        // Show the error in a dialog with retry option
+        window.tunnelManager.showError('Tunnel Error', errorMsg, async () => {
+          try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (e) {
+            window.tunnelManager.showError('Tunnel Error', String(e));
+          }
+          setTimeout(refreshTunnels, 500);
+        });
       } else {
-        try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (e) { alert('Tunnel error: ' + e); }
+        try {
+          await invoke('tunnel_start', { tunnelId: tunnel.id });
+        } catch (e) {
+          if (window.tunnelManager) {
+            window.tunnelManager.showError('Tunnel Error', String(e), async () => {
+              try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (e2) {
+                window.tunnelManager.showError('Tunnel Error', String(e2));
+              }
+              setTimeout(refreshTunnels, 500);
+            });
+          }
+        }
+        setTimeout(refreshTunnels, 500);
       }
-      setTimeout(refreshTunnels, 500);
     });
 
     // Right-click for context menu

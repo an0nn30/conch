@@ -820,6 +820,12 @@ pub(crate) async fn tunnel_start(
     let tunnel_uuid =
         uuid::Uuid::parse_str(&tunnel_id).map_err(|e| format!("Invalid tunnel ID: {e}"))?;
 
+    // Clear any previous error state so this is a fresh attempt.
+    {
+        let mgr = remote.lock().tunnel_manager.clone();
+        mgr.clear_error(&tunnel_uuid).await;
+    }
+
     // Get tunnel definition and matching server.
     let (tunnel_def, server) = {
         let state = remote.lock();

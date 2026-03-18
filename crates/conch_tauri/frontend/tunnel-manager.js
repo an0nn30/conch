@@ -91,6 +91,7 @@
     const status = tunnel.status || 'inactive';
     let statusDot = '';
     let statusLabel = '';
+    let errorMsg = null;
     if (status === 'active') {
       statusDot = '<span class="tunnel-dot active"></span>';
       statusLabel = 'Active';
@@ -99,6 +100,7 @@
       statusLabel = 'Connecting\u2026';
     } else if (status.startsWith('error')) {
       statusDot = '<span class="tunnel-dot error"></span>';
+      errorMsg = status.replace(/^error:\s*/, '');
       statusLabel = 'Error';
     } else {
       statusDot = '<span class="tunnel-dot inactive"></span>';
@@ -120,6 +122,11 @@
 
     if (status === 'active' || status === 'connecting') {
       actionsTd.appendChild(makeActionBtn('Stop', false, () => doStop(tunnel.id)));
+    } else if (errorMsg) {
+      actionsTd.appendChild(makeActionBtn('Error\u2026', true, () => {
+        showErrorDialog('Tunnel Error', errorMsg, () => doStart(tunnel.id));
+      }));
+      actionsTd.appendChild(makeActionBtn('Retry', false, () => doStart(tunnel.id)));
     } else {
       actionsTd.appendChild(makeActionBtn('Start', false, () => doStart(tunnel.id)));
     }
@@ -135,9 +142,9 @@
     try {
       await invoke('tunnel_start', { tunnelId });
     } catch (e) {
-      alert('Tunnel error: ' + e);
+      showErrorDialog('Tunnel Error', String(e), () => doStart(tunnelId));
+      return;
     }
-    // Refresh after a short delay to pick up status change
     setTimeout(() => show(), 500);
   }
 
@@ -405,6 +412,46 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Error dialog
+  // ---------------------------------------------------------------------------
+
+  function showErrorDialog(title, message, onRetry) {
+    // Don't remove the manager overlay — layer this on top
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '3100';
+    overlay.innerHTML = `
+      <div class="ssh-form ssh-form-small">
+        <div class="ssh-form-title">${esc(title)}</div>
+        <div class="ssh-form-body">
+          <div class="ssh-error-text">${esc(message)}</div>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="err-dismiss">Dismiss</button>
+          ${onRetry ? '<button class="ssh-form-btn primary" id="err-retry">Retry</button>' : ''}
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const dismiss = () => overlay.remove();
+    overlay.querySelector('#err-dismiss').addEventListener('click', dismiss);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
+
+    if (onRetry) {
+      overlay.querySelector('#err-retry').addEventListener('click', () => {
+        dismiss();
+        onRetry();
+      });
+    }
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey); }
+    };
+    document.addEventListener('keydown', onKey);
+  }
+
+  // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
@@ -425,5 +472,5 @@
     return String(str || '').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  exports.tunnelManager = { init, show, showEdit: showEditTunnelForm };
+  exports.tunnelManager = { init, show, showEdit: showEditTunnelForm, showError: showErrorDialog };
 })(window);

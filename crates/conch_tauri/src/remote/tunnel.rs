@@ -170,6 +170,16 @@ impl TunnelManager {
         }
     }
 
+    /// Clear an error state so the tunnel can be retried.
+    pub async fn clear_error(&self, id: &Uuid) {
+        let mut tunnels = self.tunnels.lock().await;
+        if let Some(state) = tunnels.get(id) {
+            if matches!(state.status, TunnelStatus::Error(_)) {
+                tunnels.remove(id);
+            }
+        }
+    }
+
     /// Start a tunnel: bind local port, establish SSH, forward via direct-tcpip.
     pub async fn start_tunnel(
         &self,
