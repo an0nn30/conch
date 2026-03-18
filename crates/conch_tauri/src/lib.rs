@@ -500,10 +500,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 let _ = win.set_size(tauri::LogicalSize::new(initial_width, initial_height));
             }
 
-            // Start Lua plugins.
-            if plugins_config.enabled && plugins_config.lua {
+            // Start plugins.
+            if plugins_config.enabled {
                 let handle = app.handle().clone();
-                plugin_state.lock().start_lua_plugins(&handle);
+                let mut ps = plugin_state.lock();
+                if plugins_config.lua {
+                    ps.start_lua_plugins(&handle);
+                }
+                if plugins_config.java {
+                    ps.start_java_plugins(&handle);
+                }
             }
 
             // Forward transfer progress events to the frontend.

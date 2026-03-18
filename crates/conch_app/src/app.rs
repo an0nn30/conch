@@ -111,7 +111,12 @@ impl ConchApp {
             None
         };
         let java_plugin_mgr = if plugins_enabled && plugins_cfg.java {
-            let host_api = bridge::build_host_api();
+            let c_host_api = bridge::build_host_api();
+            // Leak the C vtable so it's 'static, then wrap in the safe trait adapter.
+            let leaked: &'static conch_plugin_sdk::HostApi = Box::leak(Box::new(c_host_api));
+            let host_api: std::sync::Arc<dyn conch_plugin::HostApi> = std::sync::Arc::new(
+                unsafe { conch_plugin::CHostApiAdapter::new("java".to_string(), leaked) }
+            );
             Some(JavaPluginManager::new(Arc::clone(&plugin_bus), host_api))
         } else {
             if !plugins_cfg.java { log::info!("Java plugins disabled by config"); }

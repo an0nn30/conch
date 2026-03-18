@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use conch_plugin::bus::PluginBus;
+use conch_plugin::jvm::runtime::JavaPluginManager;
 use conch_plugin::lua::runner;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -31,6 +32,7 @@ pub(crate) struct PluginState {
     pub bus: Arc<PluginBus>,
     pub panels: Arc<Mutex<HashMap<u64, PanelInfo>>>,
     pub running_lua: Vec<runner::RunningLuaPlugin>,
+    pub java_mgr: Option<JavaPluginManager>,
 }
 
 impl PluginState {
@@ -39,6 +41,7 @@ impl PluginState {
             bus: Arc::new(PluginBus::new()),
             panels: Arc::new(Mutex::new(HashMap::new())),
             running_lua: Vec::new(),
+            java_mgr: None,
         }
     }
 
@@ -91,6 +94,46 @@ impl PluginState {
                 }
             }
         }
+    }
+
+    /// Start the Java plugin manager and discover/load JAR plugins.
+    pub fn start_java_plugins(&mut self, app_handle: &tauri::AppHandle) {
+        let host_api: Arc<dyn conch_plugin::HostApi> = Arc::new(TauriHostApi {
+            name: "java".to_string(),
+            app_handle: app_handle.clone(),
+            bus: Arc::clone(&self.bus),
+            panels: Arc::clone(&self.panels),
+        });
+
+        let mut mgr = JavaPluginManager::new(Arc::clone(&self.bus), host_api);
+        let search_paths = default_plugin_search_paths();
+
+        for dir in &search_paths {
+            if !dir.exists() {
+                continue;
+            }
+
+            // Look for .jar files.
+            let jar_files: Vec<_> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path().extension().map_or(false, |ext| ext == "jar")
+                })
+                .map(|e| e.path())
+                .collect();
+
+            for jar_path in &jar_files {
+                log::info!("Found JAR plugin: {}", jar_path.display());
+                match mgr.load_plugin(jar_path) {
+                    Ok(meta) => log::info!("Java plugin loaded: {} v{}", meta.name, meta.version),
+                    Err(e) => log::error!("Failed to load JAR {}: {e}", jar_path.display()),
+                }
+            }
+        }
+
+        self.java_mgr = Some(mgr);
     }
 
     /// Shut down all running plugins.
