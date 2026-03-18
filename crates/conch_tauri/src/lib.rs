@@ -22,12 +22,14 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 const MENU_NEW_TAB_ID: &str = "file.new_tab";
 const MENU_CLOSE_TAB_ID: &str = "file.close_tab";
 const MENU_NEW_WINDOW_ID: &str = "file.new_window";
+const MENU_TOGGLE_LEFT_PANEL_ID: &str = "view.toggle_left_panel";
 const MENU_TOGGLE_RIGHT_PANEL_ID: &str = "view.toggle_right_panel";
 const MENU_FOCUS_SESSIONS_ID: &str = "view.focus_sessions";
 const MENU_MANAGE_TUNNELS_ID: &str = "tools.manage_tunnels";
 const MENU_ACTION_EVENT: &str = "menu-action";
 const MENU_ACTION_NEW_TAB: &str = "new-tab";
 const MENU_ACTION_CLOSE_TAB: &str = "close-tab";
+const MENU_ACTION_TOGGLE_LEFT_PANEL: &str = "toggle-left-panel";
 const MENU_ACTION_TOGGLE_RIGHT_PANEL: &str = "toggle-right-panel";
 const MENU_ACTION_FOCUS_SESSIONS: &str = "focus-sessions";
 const MENU_ACTION_MANAGE_TUNNELS: &str = "manage-tunnels";
@@ -150,6 +152,13 @@ fn current_window_label(window: tauri::WebviewWindow) -> String {
     window.label().to_string()
 }
 
+#[tauri::command]
+fn get_home_dir() -> String {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Terminal font config
 // ---------------------------------------------------------------------------
@@ -217,6 +226,8 @@ fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> KeyboardShortc
 struct WindowLayout {
     ssh_panel_width: Option<f64>,
     ssh_panel_visible: Option<bool>,
+    files_panel_width: Option<f64>,
+    files_panel_visible: Option<bool>,
 }
 
 /// Layout state sent to the frontend on load.
@@ -226,6 +237,8 @@ struct SavedLayout {
     window_height: f64,
     ssh_panel_width: f64,
     ssh_panel_visible: bool,
+    files_panel_width: f64,
+    files_panel_visible: bool,
 }
 
 #[tauri::command]
@@ -236,6 +249,8 @@ fn get_saved_layout() -> SavedLayout {
         window_height: state.layout.window_height as f64,
         ssh_panel_width: state.layout.right_panel_width as f64,
         ssh_panel_visible: state.layout.right_panel_visible,
+        files_panel_width: state.layout.left_panel_width as f64,
+        files_panel_visible: state.layout.left_panel_visible,
     }
 }
 
@@ -254,6 +269,12 @@ fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLayout) {
     }
     if let Some(v) = layout.ssh_panel_visible {
         state.layout.right_panel_visible = v;
+    }
+    if let Some(w) = layout.files_panel_width {
+        state.layout.left_panel_width = w as f32;
+    }
+    if let Some(v) = layout.files_panel_visible {
+        state.layout.left_panel_visible = v;
     }
     let _ = config::save_persistent_state(&state);
 }
@@ -301,13 +322,21 @@ fn build_app_menu<R: tauri::Runtime>(
         ],
     )?;
     // View menu — panel toggles using configured shortcuts
-    let toggle_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
+    let toggle_left_accel = config_key_to_accelerator(&keyboard.toggle_left_panel);
+    let toggle_left = MenuItem::with_id(
+        app,
+        MENU_TOGGLE_LEFT_PANEL_ID,
+        "Toggle File Explorer",
+        true,
+        Some(&toggle_left_accel),
+    )?;
+    let toggle_right_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
     let toggle_right = MenuItem::with_id(
         app,
         MENU_TOGGLE_RIGHT_PANEL_ID,
-        "Toggle Right Panel",
+        "Toggle Sessions Panel",
         true,
-        Some(&toggle_accel),
+        Some(&toggle_right_accel),
     )?;
     let focus_sessions = MenuItem::with_id(
         app,
@@ -320,7 +349,7 @@ fn build_app_menu<R: tauri::Runtime>(
         app,
         "View",
         true,
-        &[&toggle_right, &focus_sessions],
+        &[&toggle_left, &toggle_right, &PredefinedMenuItem::separator(app)?, &focus_sessions],
     )?;
 
     let manage_tunnels = MenuItem::with_id(
@@ -484,6 +513,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_NEW_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_NEW_TAB),
             MENU_CLOSE_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_CLOSE_TAB),
+            MENU_TOGGLE_LEFT_PANEL_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_TOGGLE_LEFT_PANEL)
+            }
             MENU_TOGGLE_RIGHT_PANEL_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_TOGGLE_RIGHT_PANEL)
             }
@@ -510,6 +542,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             save_window_layout,
             get_keyboard_shortcuts,
             get_terminal_font,
+            get_home_dir,
             remote::ssh_connect,
             remote::ssh_quick_connect,
             remote::ssh_write,

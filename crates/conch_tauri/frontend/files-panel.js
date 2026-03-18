@@ -1,0 +1,560 @@
+// File Explorer Panel — dual-pane local + remote file browser.
+
+(function (exports) {
+  'use strict';
+
+  let invoke = null;
+  let panelEl = null;
+  let panelWrapEl = null;
+  let resizeHandleEl = null;
+  let fitActiveTabFn = null;
+  let getActiveTabFn = null;
+
+  // SVG icons (inline, 14x14)
+  const ICON_FOLDER = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M1.5 3C1.5 2.45 1.95 2 2.5 2H6l1.5 1.5H13.5C14.05 3.5 14.5 3.95 14.5 4.5V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3Z" fill="#f1fa8c"/></svg>';
+  const ICON_FILE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1.5C3.45 1.5 3 1.95 3 2.5V13.5C3 14.05 3.45 14.5 4 14.5H12C12.55 14.5 13 14.05 13 13.5V5.5L9 1.5H4Z" fill="#8be9fd"/><path d="M9 1.5V5.5H13" fill="#6272a4"/></svg>';
+  const ICON_BACK = '\u25C0';
+  const ICON_FWD = '\u25B6';
+  const ICON_HOME = '\u2302';
+  const ICON_REFRESH = '\u21BB';
+
+  // Pane state
+  const localPane = createPaneState('local', true);
+  const remotePane = createPaneState('remote', false);
+  let activeRemoteTabId = null;
+
+  function createPaneState(prefix, isLocal) {
+    return {
+      prefix,
+      isLocal,
+      currentPath: '',
+      pathInput: '',
+      backStack: [],
+      forwardStack: [],
+      entries: [],
+      sortColumn: 'name',
+      sortAscending: true,
+      showHidden: false,
+      colExt: false,
+      colSize: true,
+      colModified: false,
+      error: null,
+      loading: false,
+      // Transfer state per entry: { [name]: { status, percent } }
+      transferStatus: {},
+    };
+  }
+
+  function init(opts) {
+    invoke = opts.invoke;
+    panelEl = opts.panelEl;
+    panelWrapEl = opts.panelWrapEl;
+    resizeHandleEl = opts.resizeHandleEl;
+    fitActiveTabFn = opts.fitActiveTab;
+    getActiveTabFn = opts.getActiveTab;
+
+    panelEl.innerHTML = `
+      <div class="fp-pane-container">
+        <div class="fp-pane" id="fp-remote"></div>
+        <div class="fp-transfer-bar">
+          <button class="fp-transfer-btn" id="fp-download" title="Download selected">&#8595; Download</button>
+          <button class="fp-transfer-btn" id="fp-upload" title="Upload selected">&#8593; Upload</button>
+        </div>
+        <div class="fp-pane" id="fp-local"></div>
+      </div>
+    `;
+
+    panelEl.querySelector('#fp-download').addEventListener('click', doDownload);
+    panelEl.querySelector('#fp-upload').addEventListener('click', doUpload);
+
+    initResize();
+    restoreLayout();
+
+    // Start local pane at home
+    invoke('get_home_dir').then((home) => {
+      localPane.currentPath = home;
+      localPane.pathInput = home;
+      loadEntries(localPane);
+    }).catch(() => {
+      localPane.currentPath = '/';
+      localPane.pathInput = '/';
+      loadEntries(localPane);
+    });
+
+    // Listen for transfer progress
+    if (opts.listen) {
+      opts.listen('transfer-progress', handleTransferProgress);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Panel visibility & resize (mirrors ssh-panel pattern)
+  // ---------------------------------------------------------------------------
+
+  function isHidden() { return panelWrapEl.classList.contains('hidden'); }
+  function showPanel() { panelWrapEl.classList.remove('hidden'); if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50); saveLayoutState(); }
+  function hidePanel() { panelWrapEl.classList.add('hidden'); if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50); saveLayoutState(); }
+  function togglePanel() { if (isHidden()) showPanel(); else hidePanel(); }
+
+  function initResize() {
+    if (!resizeHandleEl) return;
+    let dragging = false, startX = 0, startWidth = 0;
+
+    resizeHandleEl.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragging = true;
+      startX = e.clientX;
+      startWidth = panelEl.offsetWidth;
+      resizeHandleEl.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const delta = e.clientX - startX; // left panel: drag right = wider
+      const newWidth = Math.max(200, Math.min(600, startWidth + delta));
+      panelEl.style.width = newWidth + 'px';
+      if (fitActiveTabFn) fitActiveTabFn();
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      resizeHandleEl.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      saveLayoutState();
+    });
+  }
+
+  let saveTimer = null;
+  function saveLayoutState() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      invoke('save_window_layout', {
+        layout: { files_panel_width: panelEl.offsetWidth, files_panel_visible: !isHidden() },
+      }).catch(() => {});
+    }, 300);
+  }
+
+  async function restoreLayout() {
+    try {
+      const saved = await invoke('get_saved_layout');
+      if (saved.files_panel_width > 100) panelEl.style.width = saved.files_panel_width + 'px';
+      if (saved.files_panel_visible === false) panelWrapEl.classList.add('hidden');
+      else panelWrapEl.classList.remove('hidden');
+      if (fitActiveTabFn) setTimeout(fitActiveTabFn, 100);
+    } catch (e) { console.error('Failed to restore files layout:', e); }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Remote pane — activate on SSH tab switch
+  // ---------------------------------------------------------------------------
+
+  async function onTabChanged(tab) {
+    if (!tab || tab.type !== 'ssh' || !tab.spawned) {
+      activeRemoteTabId = null;
+      remotePane.entries = [];
+      remotePane.currentPath = '';
+      remotePane.error = null;
+      remotePane.loading = false;
+      renderPane(remotePane, panelEl.querySelector('#fp-remote'));
+      return;
+    }
+    if (activeRemoteTabId === tab.id) return;
+    activeRemoteTabId = tab.id;
+
+    try {
+      const path = await invoke('sftp_realpath', { tabId: tab.id, path: '.' });
+      remotePane.currentPath = path;
+      remotePane.pathInput = path;
+      remotePane.backStack = [];
+      remotePane.forwardStack = [];
+      await loadEntries(remotePane);
+    } catch (e) {
+      remotePane.error = String(e);
+      renderPane(remotePane, panelEl.querySelector('#fp-remote'));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------------
+
+  async function loadEntries(pane) {
+    pane.error = null;
+    pane.loading = true;
+    const el = panelEl.querySelector(`#fp-${pane.prefix}`);
+    renderPane(pane, el);
+
+    try {
+      let entries;
+      if (pane.isLocal) {
+        entries = await invoke('local_list_dir', { path: pane.currentPath });
+      } else {
+        if (!activeRemoteTabId) {
+          pane.entries = [];
+          pane.loading = false;
+          renderPane(pane, el);
+          return;
+        }
+        entries = await invoke('sftp_list_dir', { tabId: activeRemoteTabId, path: pane.currentPath });
+      }
+      pane.entries = entries;
+      sortEntries(pane);
+    } catch (e) {
+      pane.error = String(e);
+      pane.entries = [];
+    }
+    pane.loading = false;
+    renderPane(pane, el);
+  }
+
+  function sortEntries(pane) {
+    const col = pane.sortColumn;
+    const asc = pane.sortAscending;
+    pane.entries.sort((a, b) => {
+      // Dirs first always
+      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+      let ord = 0;
+      if (col === 'name') ord = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+      else if (col === 'ext') {
+        const ea = extOf(a.name), eb = extOf(b.name);
+        ord = ea.localeCompare(eb);
+      }
+      else if (col === 'size') ord = (a.size || 0) - (b.size || 0);
+      else if (col === 'modified') ord = (a.modified || 0) - (b.modified || 0);
+      return asc ? ord : -ord;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Navigation
+  // ---------------------------------------------------------------------------
+
+  function navigate(pane, path) {
+    pane.backStack.push(pane.currentPath);
+    pane.forwardStack = [];
+    pane.currentPath = path;
+    pane.pathInput = path;
+    loadEntries(pane);
+  }
+
+  function goBack(pane) {
+    if (pane.backStack.length === 0) return;
+    pane.forwardStack.push(pane.currentPath);
+    pane.currentPath = pane.backStack.pop();
+    pane.pathInput = pane.currentPath;
+    loadEntries(pane);
+  }
+
+  function goForward(pane) {
+    if (pane.forwardStack.length === 0) return;
+    pane.backStack.push(pane.currentPath);
+    pane.currentPath = pane.forwardStack.pop();
+    pane.pathInput = pane.currentPath;
+    loadEntries(pane);
+  }
+
+  async function goHome(pane) {
+    if (pane.isLocal) {
+      try {
+        const home = await invoke('get_home_dir');
+        navigate(pane, home);
+      } catch (_) {
+        navigate(pane, '/');
+      }
+    } else {
+      navigate(pane, '.');
+    }
+  }
+
+  function activateEntry(pane, entry) {
+    if (!entry.is_dir) return;
+    const sep = '/';
+    let newPath;
+    if (pane.currentPath.endsWith(sep)) {
+      newPath = pane.currentPath + entry.name;
+    } else {
+      newPath = pane.currentPath + sep + entry.name;
+    }
+    navigate(pane, newPath);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+
+  function renderPane(pane, el) {
+    if (!el) return;
+    const isRemote = !pane.isLocal;
+    const noSession = isRemote && !activeRemoteTabId;
+    const label = isRemote
+      ? (noSession ? 'Remote — No SSH session' : 'Remote')
+      : 'Local';
+
+    const visibleEntries = pane.entries.filter((e) => pane.showHidden || !e.name.startsWith('.'));
+    const hiddenCount = pane.entries.length - visibleEntries.length;
+    const footerText = hiddenCount > 0
+      ? `${visibleEntries.length} items (${hiddenCount} hidden)`
+      : `${visibleEntries.length} items`;
+
+    el.innerHTML = `
+      <div class="fp-pane-label">${esc(label)}</div>
+      <div class="fp-toolbar">
+        <button class="fp-tb-btn" data-action="back" ${pane.backStack.length === 0 ? 'disabled' : ''} title="Back">${ICON_BACK}</button>
+        <button class="fp-tb-btn" data-action="forward" ${pane.forwardStack.length === 0 ? 'disabled' : ''} title="Forward">${ICON_FWD}</button>
+        <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
+        <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${ICON_HOME}</button>
+        <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${ICON_REFRESH}</button>
+        <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
+      </div>
+      ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}
+      <div class="fp-table-wrap">
+        <table class="fp-table">
+          <thead><tr>
+            <th class="fp-th-name" data-col="name">Name ${sortArrow(pane, 'name')}</th>
+            ${pane.colExt ? `<th class="fp-th-ext" data-col="ext">Ext ${sortArrow(pane, 'ext')}</th>` : ''}
+            ${pane.colSize ? `<th class="fp-th-size" data-col="size">Size ${sortArrow(pane, 'size')}</th>` : ''}
+            ${pane.colModified ? `<th class="fp-th-mod" data-col="modified">Modified ${sortArrow(pane, 'modified')}</th>` : ''}
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="fp-footer">${noSession ? '' : footerText}</div>
+    `;
+
+    // Populate table body
+    const tbody = el.querySelector('tbody');
+    for (const entry of visibleEntries) {
+      const tr = document.createElement('tr');
+      tr.className = 'fp-row';
+      const ts = pane.transferStatus[entry.name];
+      if (ts) {
+        if (ts.status === 'completed') tr.classList.add('fp-transferred');
+        else if (ts.status === 'in_progress') tr.classList.add('fp-transferring');
+      }
+      tr.dataset.name = entry.name;
+
+      const icon = entry.is_dir ? ICON_FOLDER : ICON_FILE;
+      let cells = `<td class="fp-cell-name">${icon} <span>${esc(entry.name)}</span>`;
+      if (ts && ts.status === 'in_progress') {
+        cells += `<span class="fp-transfer-pct">${ts.percent || 0}%</span>`;
+      }
+      cells += '</td>';
+      if (pane.colExt) cells += `<td class="fp-cell-ext">${esc(extOf(entry.name))}</td>`;
+      if (pane.colSize) cells += `<td class="fp-cell-size">${entry.is_dir ? '' : formatSize(entry.size)}</td>`;
+      if (pane.colModified) cells += `<td class="fp-cell-mod">${entry.modified ? formatDate(entry.modified) : ''}</td>`;
+      tr.innerHTML = cells;
+
+      tr.addEventListener('dblclick', () => activateEntry(pane, entry));
+      tr.addEventListener('click', () => {
+        el.querySelectorAll('.fp-row.selected').forEach((r) => r.classList.remove('selected'));
+        tr.classList.add('selected');
+        pane._selectedName = entry.name;
+      });
+      tbody.appendChild(tr);
+    }
+
+    // Wire toolbar buttons
+    el.querySelectorAll('.fp-tb-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        if (action === 'back') goBack(pane);
+        else if (action === 'forward') goForward(pane);
+        else if (action === 'home') goHome(pane);
+        else if (action === 'refresh') loadEntries(pane);
+        else if (action === 'hidden') { pane.showHidden = !pane.showHidden; renderPane(pane, el); }
+      });
+    });
+
+    // Path input
+    const pathInput = el.querySelector('.fp-path-input');
+    pathInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const val = pathInput.value.trim();
+        if (val) navigate(pane, val);
+      }
+    });
+
+    // Column header click to sort
+    el.querySelectorAll('th[data-col]').forEach((th) => {
+      th.style.cursor = 'pointer';
+      th.addEventListener('click', () => {
+        const col = th.dataset.col;
+        if (pane.sortColumn === col) pane.sortAscending = !pane.sortAscending;
+        else { pane.sortColumn = col; pane.sortAscending = true; }
+        sortEntries(pane);
+        renderPane(pane, el);
+      });
+      // Right-click to toggle column visibility
+      th.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showColumnMenu(e, pane, el);
+      });
+    });
+  }
+
+  function sortArrow(pane, col) {
+    if (pane.sortColumn !== col) return '';
+    return pane.sortAscending ? ' \u25B4' : ' \u25BE';
+  }
+
+  function showColumnMenu(e, pane, el) {
+    // Remove existing
+    document.querySelectorAll('.fp-col-menu').forEach((m) => m.remove());
+
+    const menu = document.createElement('div');
+    menu.className = 'fp-col-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    const cols = [
+      { key: 'colExt', label: 'Extension' },
+      { key: 'colSize', label: 'Size' },
+      { key: 'colModified', label: 'Modified' },
+    ];
+
+    for (const c of cols) {
+      const item = document.createElement('div');
+      item.className = 'fp-col-menu-item';
+      item.innerHTML = `<span class="fp-col-check">${pane[c.key] ? '✓' : ''}</span> ${c.label}`;
+      item.addEventListener('click', () => {
+        pane[c.key] = !pane[c.key];
+        menu.remove();
+        renderPane(pane, el);
+      });
+      menu.appendChild(item);
+    }
+
+    document.body.appendChild(menu);
+    setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Transfers
+  // ---------------------------------------------------------------------------
+
+  function getSelectedEntry(pane) {
+    if (!pane._selectedName) return null;
+    return pane.entries.find((e) => e.name === pane._selectedName) || null;
+  }
+
+  async function doDownload() {
+    const entry = getSelectedEntry(remotePane);
+    if (!entry || !activeRemoteTabId) return;
+    if (entry.is_dir) { alert('Directory download not yet supported.'); return; }
+
+    const remotePath = remotePane.currentPath + '/' + entry.name;
+    const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
+
+    try {
+      const transferId = await invoke('transfer_download', {
+        tabId: activeRemoteTabId,
+        remotePath,
+        localPath,
+      });
+      // Mark as transferring in local pane
+      localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+    } catch (e) {
+      alert('Download failed: ' + e);
+    }
+  }
+
+  async function doUpload() {
+    const entry = getSelectedEntry(localPane);
+    if (!entry || !activeRemoteTabId) return;
+    if (entry.is_dir) { alert('Directory upload not yet supported.'); return; }
+
+    const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
+    const remotePath = remotePane.currentPath + '/' + entry.name;
+
+    try {
+      const transferId = await invoke('transfer_upload', {
+        tabId: activeRemoteTabId,
+        localPath,
+        remotePath,
+      });
+      // Mark as transferring in remote pane
+      remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+    } catch (e) {
+      alert('Upload failed: ' + e);
+    }
+  }
+
+  function handleTransferProgress(event) {
+    const p = event.payload;
+    if (!p || !p.file_name) return;
+
+    const pct = p.total_bytes > 0 ? Math.round((p.bytes_transferred / p.total_bytes) * 100) : 0;
+
+    // Update the relevant pane's transfer status
+    const pane = p.kind === 'download' ? localPane : remotePane;
+    if (p.status === 'completed') {
+      pane.transferStatus[p.file_name] = { status: 'completed', percent: 100 };
+      // Refresh the target pane to show the new file
+      loadEntries(pane);
+      showToast(`Transfer complete: ${p.file_name}`);
+    } else if (p.status === 'failed' || p.status === 'cancelled') {
+      delete pane.transferStatus[p.file_name];
+      if (p.status === 'failed') showToast(`Transfer failed: ${p.file_name}`, true);
+    } else {
+      pane.transferStatus[p.file_name] = { status: 'in_progress', percent: pct };
+    }
+
+    // Re-render the affected pane
+    const el = panelEl.querySelector(`#fp-${pane.prefix}`);
+    renderPane(pane, el);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Toast notifications
+  // ---------------------------------------------------------------------------
+
+  function showToast(message, isError) {
+    const toast = document.createElement('div');
+    toast.className = 'fp-toast' + (isError ? ' error' : '');
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('visible'));
+    setTimeout(() => {
+      toast.classList.remove('visible');
+      setTimeout(() => toast.remove(), 300);
+    }, 3000);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  function formatSize(bytes) {
+    if (bytes == null) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  }
+
+  function formatDate(epoch) {
+    if (!epoch) return '';
+    const d = new Date(epoch * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function extOf(name) {
+    const i = name.lastIndexOf('.');
+    return i > 0 ? name.slice(i + 1).toLowerCase() : '';
+  }
+
+  function esc(str) {
+    const el = document.createElement('span');
+    el.textContent = str;
+    return el.innerHTML;
+  }
+
+  function attr(str) {
+    return String(str || '').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  exports.filesPanel = { init, togglePanel, isHidden, onTabChanged };
+})(window);

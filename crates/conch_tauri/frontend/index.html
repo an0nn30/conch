@@ -88,6 +88,98 @@
       outline: 2px solid #6272a4;
       outline-offset: -2px;
     }
+    /* -- Files panel (left) -- */
+    #files-panel-wrap { display: flex; flex-shrink: 0; }
+    #files-panel-wrap.hidden { display: none; }
+    #files-panel {
+      width: 300px; min-width: 200px; max-width: 600px;
+      background: #21222c; border-right: 1px solid #3a3d4f;
+      display: flex; flex-direction: column; overflow: hidden;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #c5c8d5;
+    }
+    #files-panel-resize {
+      width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0;
+      transition: background 150ms;
+    }
+    #files-panel-resize:hover, #files-panel-resize.dragging { background: #6272a4; }
+    .fp-pane-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+    .fp-pane-label {
+      padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: #8b8fa3;
+      text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0;
+    }
+    .fp-toolbar {
+      display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0;
+    }
+    .fp-tb-btn {
+      background: none; border: 1px solid transparent; border-radius: 3px;
+      color: #8b8fa3; cursor: pointer; padding: 2px 5px; font-size: 11px; line-height: 1;
+    }
+    .fp-tb-btn:hover:not(:disabled) { background: #3a3d4f; color: #f8f8f2; }
+    .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
+    .fp-tb-btn.active { color: #50fa7b; }
+    .fp-path-input {
+      flex: 1; min-width: 0; padding: 3px 6px; background: #2b2e3a; border: 1px solid #3a3d4f;
+      border-radius: 3px; color: #f8f8f2; font: 11px "JetBrains Mono", monospace; outline: none;
+    }
+    .fp-path-input:focus { border-color: #6272a4; }
+    .fp-path-input:disabled { opacity: 0.4; }
+    .fp-error { padding: 4px 8px; font-size: 11px; color: #ff5555; flex-shrink: 0; }
+    .fp-table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; }
+    .fp-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .fp-table th {
+      position: sticky; top: 0; z-index: 1; padding: 3px 6px; text-align: left;
+      font-size: 10px; font-weight: 500; color: #6272a4; background: #21222c;
+      border-bottom: 1px solid #3a3d4f; white-space: nowrap; user-select: none;
+    }
+    .fp-table td { padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fp-row { cursor: default; }
+    .fp-row:hover td { background: #2b2e3a; }
+    .fp-row.selected td { background: #44475a; }
+    .fp-row.fp-transferring td { opacity: 0.6; }
+    .fp-row.fp-transferring { outline: 1px solid #50fa7b; outline-offset: -1px; }
+    .fp-row.fp-transferred td { color: #50fa7b; }
+    .fp-cell-name { max-width: 180px; }
+    .fp-cell-name svg { vertical-align: middle; margin-right: 3px; }
+    .fp-cell-ext { width: 45px; color: #6272a4; }
+    .fp-cell-size { width: 65px; text-align: right; color: #8b8fa3; font-family: "JetBrains Mono", monospace; font-size: 10px; }
+    .fp-cell-mod { width: 110px; color: #8b8fa3; font-size: 10px; }
+    .fp-th-ext { width: 45px; }
+    .fp-th-size { width: 65px; }
+    .fp-th-mod { width: 110px; }
+    .fp-footer { padding: 3px 8px; font-size: 10px; color: #6272a4; flex-shrink: 0; }
+    .fp-transfer-bar {
+      display: flex; justify-content: center; gap: 8px;
+      padding: 4px 8px; border-top: 1px solid #3a3d4f; border-bottom: 1px solid #3a3d4f;
+      flex-shrink: 0;
+    }
+    .fp-transfer-btn {
+      padding: 3px 12px; border: 1px solid #3a3d4f; border-radius: 4px;
+      background: #2b2e3a; color: #c5c8d5; cursor: pointer; font-size: 11px;
+    }
+    .fp-transfer-btn:hover { background: #3a3d4f; color: #f8f8f2; }
+    .fp-transfer-pct { margin-left: 6px; color: #50fa7b; font-weight: 600; font-size: 10px; }
+    .fp-col-menu {
+      position: fixed; z-index: 2000; background: #2b2e3a; border: 1px solid #4f5368;
+      border-radius: 6px; padding: 4px 0; min-width: 130px; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    }
+    .fp-col-menu-item {
+      padding: 4px 12px; cursor: pointer; font-size: 12px; color: #f8f8f2; white-space: nowrap;
+    }
+    .fp-col-menu-item:hover { background: #44475a; }
+    .fp-col-check { display: inline-block; width: 16px; text-align: center; }
+    /* Toast */
+    .fp-toast {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px);
+      padding: 8px 20px; background: #2b2e3a; border: 1px solid #50fa7b; border-radius: 6px;
+      color: #f8f8f2; font: 13px -apple-system, sans-serif; z-index: 5000;
+      opacity: 0; transition: opacity 200ms, transform 200ms;
+      pointer-events: none;
+    }
+    .fp-toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .fp-toast.error { border-color: #ff5555; color: #ff5555; }
+
     #ssh-panel-wrap {
       display: flex;
       flex-shrink: 0;
@@ -350,6 +442,10 @@
   <div id="app">
     <div id="tabbar"></div>
     <div id="main-area">
+      <div id="files-panel-wrap">
+        <div id="files-panel"></div>
+        <div id="files-panel-resize"></div>
+      </div>
       <div id="terminal-host"></div>
       <div id="ssh-panel-wrap">
         <div id="ssh-panel-resize"></div>
@@ -362,6 +458,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+  <script src="files-panel.js"></script>
   <script src="ssh-panel.js"></script>
   <script src="tunnel-manager.js"></script>
   <script>
@@ -631,6 +728,9 @@
         const tab = tabs.get(tabId);
         fitAndResizeTab(tab);
         tab.term.focus();
+
+        // Notify files panel of tab change
+        if (window.filesPanel) window.filesPanel.onTabChanged(tab);
       }
 
       async function closeTab(tabId, options = {}) {
@@ -842,6 +942,22 @@
         }
       }
 
+      // ---- Files panel init ----
+      const filesPanelEl = document.getElementById('files-panel');
+      const filesPanelWrapEl = document.getElementById('files-panel-wrap');
+      const filesResizeEl = document.getElementById('files-panel-resize');
+      if (window.filesPanel) {
+        window.filesPanel.init({
+          invoke,
+          listen: listenOnCurrentWindow,
+          panelEl: filesPanelEl,
+          panelWrapEl: filesPanelWrapEl,
+          resizeHandleEl: filesResizeEl,
+          fitActiveTab: () => fitAndResizeTab(currentTab()),
+          getActiveTab: () => currentTab(),
+        });
+      }
+
       // ---- SSH panel init ----
       const sshPanelEl = document.getElementById('ssh-panel');
       const sshPanelWrapEl = document.getElementById('ssh-panel-wrap');
@@ -868,6 +984,8 @@
             layout: {
               ssh_panel_width: sshPanelEl.offsetWidth,
               ssh_panel_visible: window.sshPanel ? !window.sshPanel.isHidden() : true,
+              files_panel_width: filesPanelEl.offsetWidth,
+              files_panel_visible: window.filesPanel ? !window.filesPanel.isHidden() : true,
             },
           }).catch(() => {});
         }, 500);
@@ -992,6 +1110,10 @@
         }
         if (action === 'close-tab' && activeTabId !== null) {
           closeTab(activeTabId).catch((e) => showStatus('Failed to close tab: ' + String(e)));
+          return;
+        }
+        if (action === 'toggle-left-panel' && window.filesPanel) {
+          window.filesPanel.togglePanel();
           return;
         }
         if (action === 'toggle-right-panel' && window.sshPanel) {
