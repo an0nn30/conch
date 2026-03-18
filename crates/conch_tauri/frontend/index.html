@@ -933,6 +933,8 @@
           fitAndResizeTab(tab);
           // Refresh the SSH panel session list
           if (window.sshPanel) window.sshPanel.refreshSessions();
+          // Notify files panel that this SSH tab is now connected
+          if (window.filesPanel) window.filesPanel.onTabChanged(tab);
         } catch (e) {
           term.writeln('\x1b[31mSSH connection failed: ' + e + '\x1b[0m');
           term.writeln('\x1b[90mPress any key to close this tab.\x1b[0m');
