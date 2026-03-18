@@ -3,8 +3,7 @@
   "productName": "Conch (Tauri)",
   "identifier": "com.conch.tauri",
   "build": {
-    "frontendDist": "frontend",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "frontend"
   },
   "app": {
     "withGlobalTauri": true,

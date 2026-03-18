@@ -8,18 +8,131 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #282a36; }
-    #terminal { width: 100%; height: 100%; }
+    #app { width: 100%; height: 100%; display: flex; flex-direction: column; }
+    #tabbar {
+      height: 0;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      padding: 0;
+      background: #1f212b;
+      border-bottom: 0 solid #3a3d4f;
+      overflow-x: hidden;
+      overflow-y: hidden;
+      flex-shrink: 0;
+      opacity: 0;
+      transition:
+        height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        padding 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        border-bottom-width 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        opacity 160ms ease;
+    }
+    #app.tabs-visible #tabbar {
+      height: 36px;
+      padding: 3px 0 0;
+      border-bottom-width: 1px;
+      opacity: 1;
+    }
+    .tab-btn {
+      flex: 1 1 0;
+      min-width: 0;
+      max-width: none;
+      padding: 0 12px;
+      border: 1px solid #3a3d4f;
+      border-left-width: 0;
+      border-bottom: none;
+      border-radius: 0;
+      background: #2b2e3a;
+      color: #c5c8d5;
+      font: 12px/1.1 "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+      text-align: center;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      opacity: 1;
+      transform: translateY(0) scaleY(1);
+      transform-origin: top center;
+      transition:
+        background 130ms ease,
+        color 130ms ease,
+        border-color 130ms ease,
+        opacity 180ms ease,
+        transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    .tab-btn:first-child {
+      border-left-width: 1px;
+    }
+    .tab-btn.entering {
+      opacity: 0;
+      transform: translateY(-8px) scaleY(0.88);
+    }
+    .tab-btn.active {
+      background: #282a36;
+      color: #f8f8f2;
+      border-color: #4f5368;
+    }
+    #terminal-host {
+      position: relative;
+      width: 100%;
+      flex: 1;
+      min-height: 0;
+      background: #282a36;
+    }
+    .terminal-pane {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+    }
+    .terminal-pane.active {
+      display: block;
+    }
+    #status {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      padding: 10px 12px;
+      border: 1px solid #ff5555;
+      background: rgba(40, 42, 54, 0.95);
+      color: #ffb8b8;
+      font: 13px/1.4 monospace;
+      white-space: pre-wrap;
+      z-index: 1000;
+      display: none;
+    }
+    #app.tabs-visible + #status {
+      top: 50px;
+    }
   </style>
 </head>
 <body>
-  <div id="terminal"></div>
+  <div id="app">
+    <div id="tabbar"></div>
+    <div id="terminal-host"></div>
+  </div>
+  <div id="status"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
   <script>
-    const { invoke } = window.__TAURI__.core;
-    const { listen } = window.__TAURI__.event;
+    const statusEl = document.getElementById('status');
+    function showStatus(message) {
+      statusEl.style.display = 'block';
+      statusEl.textContent = message;
+      console.error(message);
+    }
+
+    window.addEventListener('error', (event) => {
+      showStatus('Frontend error: ' + event.message);
+    });
+
+    window.addEventListener('unhandledrejection', (event) => {
+      showStatus('Unhandled promise rejection: ' + String(event.reason));
+    });
 
     // Dracula-inspired theme
     const theme = {
@@ -47,63 +160,390 @@
       brightWhite: '#ffffff',
     };
 
-    const term = new Terminal({
-      theme,
-      fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
-      fontSize: 14,
-      cursorBlink: true,
-      allowProposedApi: true,
-    });
+    (async function start() {
+      const tauri = window.__TAURI__;
+      if (!tauri || !tauri.core || !tauri.event) {
+        showStatus(
+          'Tauri API is unavailable in this webview.\n' +
+          'The app likely loaded from the wrong URL/context.'
+        );
+        return;
+      }
 
-    const fitAddon = new FitAddon.FitAddon();
-    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-    term.loadAddon(fitAddon);
-    term.loadAddon(webLinksAddon);
+      if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined' || typeof WebLinksAddon === 'undefined') {
+        showStatus(
+          'xterm.js assets failed to load.\n' +
+          'Check internet access or replace CDN assets with local files.'
+        );
+        return;
+      }
 
-    term.open(document.getElementById('terminal'));
-    fitAddon.fit();
+      const { invoke } = tauri.core;
+      const { listen } = tauri.event;
+      const currentWindow = tauri.window && typeof tauri.window.getCurrentWindow === 'function'
+        ? tauri.window.getCurrentWindow()
+        : null;
+      const listenOnCurrentWindow = (eventName, handler) => {
+        if (currentWindow && typeof currentWindow.listen === 'function') {
+          return currentWindow.listen(eventName, handler);
+        }
+        return listen(eventName, handler);
+      };
+      const currentWindowLabel = await invoke('current_window_label');
+      const appEl = document.getElementById('app');
+      const tabBarEl = document.getElementById('tabbar');
+      const terminalHostEl = document.getElementById('terminal-host');
+      const tabs = new Map();
+      let activeTabId = null;
+      let nextTabId = 1;
+      let nextTabLabel = 1;
 
-    // Spawn shell with initial dimensions
-    async function init() {
-      const dims = fitAddon.proposeDimensions();
-      const cols = dims ? dims.cols : 80;
-      const rows = dims ? dims.rows : 24;
+      function terminalMouseModeIsActive(term) {
+        const modes = term.modes;
+        if (!modes || typeof modes.mouseTrackingMode !== 'string') {
+          return false;
+        }
+        return modes.mouseTrackingMode !== 'none';
+      }
+
+      function setupTmuxRightClickBridge(term, terminalRoot) {
+        let rightButtonGestureActive = false;
+        const CORE_MOUSE_BUTTON_RIGHT = 2;
+        const CORE_MOUSE_ACTION_UP = 0;
+        const CORE_MOUSE_ACTION_DOWN = 1;
+        const CORE_MOUSE_ACTION_MOVE = 32;
+
+        function rightButtonIsInUse(event) {
+          if (rightButtonGestureActive) {
+            return true;
+          }
+          if (typeof event.button === 'number' && event.button === CORE_MOUSE_BUTTON_RIGHT) {
+            return true;
+          }
+          if (typeof event.buttons === 'number' && (event.buttons & CORE_MOUSE_BUTTON_RIGHT) !== 0) {
+            return true;
+          }
+          return false;
+        }
+
+        function suppressContextMenuForTerminalApps(event) {
+          if (!terminalMouseModeIsActive(term)) {
+            return;
+          }
+          if (!rightButtonIsInUse(event) && event.type !== 'contextmenu') {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+        }
+
+        function forwardRightMouseToXterm(event, action) {
+          if (!terminalMouseModeIsActive(term)) {
+            return;
+          }
+
+          // Intentionally use xterm internals here:
+          // - WebKit can fail to keep right-button drag state consistent.
+          // - tmux expects full right-button down/move/up reports to hover menus.
+          // This bypasses browser-level gesture quirks and feeds xterm mouse
+          // reports directly to the PTY pipeline.
+          const core = term && term._core;
+          const mouseService = core && core._mouseService;
+          const coreMouseService = core && core.coreMouseService;
+          const screenElement = core && core.screenElement;
+          if (!mouseService || !coreMouseService || !screenElement) {
+            return;
+          }
+          if (typeof mouseService.getMouseReportCoords !== 'function') {
+            return;
+          }
+          if (typeof coreMouseService.triggerMouseEvent !== 'function') {
+            return;
+          }
+
+          const pos = mouseService.getMouseReportCoords(event, screenElement);
+          if (!pos) {
+            return;
+          }
+
+          coreMouseService.triggerMouseEvent({
+            col: pos.col,
+            row: pos.row,
+            x: pos.x,
+            y: pos.y,
+            button: CORE_MOUSE_BUTTON_RIGHT,
+            action,
+            ctrl: event.ctrlKey,
+            alt: event.altKey,
+            shift: event.shiftKey,
+          });
+        }
+
+        const onWindowMouseUp = (event) => {
+          if (event.button === CORE_MOUSE_BUTTON_RIGHT) {
+            if (rightButtonGestureActive) {
+              forwardRightMouseToXterm(event, CORE_MOUSE_ACTION_UP);
+              suppressContextMenuForTerminalApps(event);
+            }
+            rightButtonGestureActive = false;
+          }
+        };
+        const onWindowBlur = () => {
+          rightButtonGestureActive = false;
+        };
+        const onWindowMouseMove = (event) => {
+          if (!rightButtonGestureActive) {
+            return;
+          }
+          forwardRightMouseToXterm(event, CORE_MOUSE_ACTION_MOVE);
+          suppressContextMenuForTerminalApps(event);
+        };
+        const onRootMouseDown = (event) => {
+          if (event.button === CORE_MOUSE_BUTTON_RIGHT) {
+            forwardRightMouseToXterm(event, CORE_MOUSE_ACTION_DOWN);
+            rightButtonGestureActive = true;
+            suppressContextMenuForTerminalApps(event);
+          }
+        };
+
+        window.addEventListener('mouseup', onWindowMouseUp, true);
+        window.addEventListener('blur', onWindowBlur);
+        window.addEventListener('mousemove', onWindowMouseMove, true);
+        terminalRoot.addEventListener('mousedown', onRootMouseDown, true);
+        terminalRoot.addEventListener('contextmenu', suppressContextMenuForTerminalApps, true);
+
+        return () => {
+          window.removeEventListener('mouseup', onWindowMouseUp, true);
+          window.removeEventListener('blur', onWindowBlur);
+          window.removeEventListener('mousemove', onWindowMouseMove, true);
+          terminalRoot.removeEventListener('mousedown', onRootMouseDown, true);
+          terminalRoot.removeEventListener('contextmenu', suppressContextMenuForTerminalApps, true);
+        };
+      }
+
+      function currentTab() {
+        return activeTabId === null ? null : tabs.get(activeTabId) || null;
+      }
+
+      function updateTabBarVisibility() {
+        appEl.classList.toggle('tabs-visible', tabs.size > 1);
+      }
+
+      function fitAndResizeTab(tab) {
+        if (!tab) {
+          return;
+        }
+        tab.fitAddon.fit();
+        if (!tab.spawned) {
+          return;
+        }
+        const dims = tab.fitAddon.proposeDimensions();
+        if (dims) {
+          invoke('resize_pty', { tabId: tab.id, cols: dims.cols, rows: dims.rows }).catch(() => {});
+        }
+      }
+
+      function normalizeTabTitle(rawTitle, fallback) {
+        const cleaned = String(rawTitle || '').replace(/\s+/g, ' ').trim();
+        if (!cleaned) {
+          return fallback;
+        }
+        return cleaned;
+      }
+
+      function activateTab(tabId) {
+        if (!tabs.has(tabId)) {
+          return;
+        }
+        activeTabId = tabId;
+        for (const tab of tabs.values()) {
+          const active = tab.id === tabId;
+          tab.button.classList.toggle('active', active);
+          tab.root.classList.toggle('active', active);
+        }
+
+        const tab = tabs.get(tabId);
+        fitAndResizeTab(tab);
+        tab.term.focus();
+      }
+
+      async function closeTab(tabId, options = {}) {
+        const notifyBackend = options.notifyBackend !== false;
+        const closeWindowWhenLast = options.closeWindowWhenLast !== false;
+        const tab = tabs.get(tabId);
+        if (!tab) {
+          return;
+        }
+
+        tabs.delete(tabId);
+        tab.cleanupMouseBridge();
+        tab.term.dispose();
+        tab.button.remove();
+        tab.root.remove();
+        updateTabBarVisibility();
+
+        if (notifyBackend && tab.spawned) {
+          invoke('close_pty', { tabId }).catch(() => {});
+        }
+
+        if (activeTabId === tabId) {
+          activeTabId = null;
+          const next = tabs.values().next();
+          if (!next.done) {
+            activateTab(next.value.id);
+          }
+        }
+
+        if (tabs.size === 0 && closeWindowWhenLast) {
+          const windowApi = tauri.window;
+          if (windowApi && typeof windowApi.getCurrentWindow === 'function') {
+            windowApi.getCurrentWindow().close().catch((e) => {
+              showStatus('Failed to close window after tab close: ' + String(e));
+            });
+          }
+        }
+      }
+
+      async function createTab() {
+        const tabId = nextTabId++;
+        const label = 'Tab ' + nextTabLabel++;
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'tab-btn';
+        button.textContent = label;
+        button.classList.add('entering');
+
+        const root = document.createElement('div');
+        root.className = 'terminal-pane';
+
+        tabBarEl.appendChild(button);
+        terminalHostEl.appendChild(root);
+
+        const term = new Terminal({
+          theme,
+          fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
+          fontSize: 14,
+          cursorBlink: true,
+          allowProposedApi: true,
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(webLinksAddon);
+        term.open(root);
+
+        const tab = {
+          id: tabId,
+          label,
+          button,
+          root,
+          term,
+          fitAddon,
+          spawned: false,
+          cleanupMouseBridge: setupTmuxRightClickBridge(term, root),
+        };
+        tabs.set(tabId, tab);
+        updateTabBarVisibility();
+
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            button.classList.remove('entering');
+          });
+        });
+
+        button.addEventListener('click', () => activateTab(tabId));
+        term.onTitleChange((title) => {
+          const tabTitle = normalizeTabTitle(title, tab.label);
+          tab.button.textContent = tabTitle;
+          tab.button.title = tabTitle;
+        });
+        term.onData((data) => {
+          if (!tab.spawned) {
+            return;
+          }
+          invoke('write_to_pty', { tabId, data }).catch((e) => {
+            console.error('write_to_pty error:', e);
+          });
+        });
+
+        activateTab(tabId);
+        const dims = fitAddon.proposeDimensions();
+        const cols = dims ? dims.cols : 80;
+        const rows = dims ? dims.rows : 24;
+
+        try {
+          await invoke('spawn_shell', { tabId, cols, rows });
+          tab.spawned = true;
+          fitAndResizeTab(tab);
+        } catch (e) {
+          term.writeln('\x1b[31mFailed to spawn shell: ' + e + '\x1b[0m');
+          await closeTab(tabId, { notifyBackend: false, closeWindowWhenLast: false });
+        }
+      }
+
+      await listenOnCurrentWindow('pty-output', (event) => {
+        const payload = event.payload || {};
+        const windowLabel = payload.window_label;
+        const tabId = payload.tab_id;
+        const data = payload.data;
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
+          return;
+        }
+        if (typeof tabId !== 'number' || typeof data !== 'string') {
+          return;
+        }
+        const tab = tabs.get(tabId);
+        if (tab) {
+          tab.term.write(data);
+        }
+      });
+
+      await listenOnCurrentWindow('pty-exit', (event) => {
+        const payload = event.payload || {};
+        const windowLabel = payload.window_label;
+        const tabId = payload.tab_id;
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
+          return;
+        }
+        if (typeof tabId !== 'number') {
+          return;
+        }
+        closeTab(tabId, { notifyBackend: false }).catch((e) => {
+          console.error('closeTab after pty-exit failed:', e);
+        });
+      });
+
+      await listenOnCurrentWindow('menu-action', (event) => {
+        const payload = event.payload || {};
+        const windowLabel = payload.window_label;
+        const action = payload.action;
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
+          return;
+        }
+        if (action === 'new-tab') {
+          createTab().catch((e) => showStatus('Failed to create tab: ' + String(e)));
+          return;
+        }
+        if (action === 'close-tab' && activeTabId !== null) {
+          closeTab(activeTabId).catch((e) => showStatus('Failed to close tab: ' + String(e)));
+        }
+      });
+
+      const resizeObserver = new ResizeObserver(() => {
+        fitAndResizeTab(currentTab());
+      });
+      resizeObserver.observe(terminalHostEl);
 
       try {
-        await invoke('spawn_shell', { cols, rows });
+        await createTab();
       } catch (e) {
-        term.writeln('\x1b[31mFailed to spawn shell: ' + e + '\x1b[0m');
+        showStatus('Failed to initialize first tab: ' + String(e));
       }
-    }
-
-    // Forward keyboard input to PTY
-    term.onData((data) => {
-      invoke('write_to_pty', { data }).catch((e) => {
-        console.error('write_to_pty error:', e);
-      });
-    });
-
-    // Receive PTY output
-    listen('pty-output', (event) => {
-      term.write(event.payload);
-    });
-
-    // Handle shell exit
-    listen('pty-exit', () => {
-      term.writeln('\r\n\x1b[90m[Process exited]\x1b[0m');
-    });
-
-    // Handle window resize
-    const resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit();
-      const dims = fitAddon.proposeDimensions();
-      if (dims) {
-        invoke('resize_pty', { cols: dims.cols, rows: dims.rows }).catch(() => {});
-      }
-    });
-    resizeObserver.observe(document.getElementById('terminal'));
-
-    init();
+    })();
   </script>
 </body>
 </html>

@@ -1,9 +1,10 @@
 {
   "identifier": "default",
   "description": "Default capabilities for Conch Tauri",
-  "windows": ["main"],
+  "windows": ["*"],
   "permissions": [
     "core:default",
+    "core:window:allow-close",
     "shell:allow-open",
     "core:event:default",
     "core:event:allow-emit",

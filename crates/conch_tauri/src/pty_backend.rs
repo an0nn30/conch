@@ -4,11 +4,12 @@
 //! this module provides raw byte-level PTY I/O — xterm.js handles all terminal
 //! emulation on the frontend side.
 
+use std::collections::HashMap;
 use std::io::Write;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 pub(crate) struct PtyBackend {
     master: Box<dyn MasterPty + Send>,
@@ -16,8 +17,14 @@ pub(crate) struct PtyBackend {
 }
 
 impl PtyBackend {
-    /// Spawn a new PTY with the given dimensions and optional shell override.
-    pub fn new(cols: u16, rows: u16, shell: Option<&str>) -> Result<Self> {
+    /// Spawn a new PTY with the given dimensions and shell/env overrides.
+    pub fn new(
+        cols: u16,
+        rows: u16,
+        shell: Option<&str>,
+        shell_args: &[String],
+        extra_env: &HashMap<String, String>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
 
         let size = PtySize {
@@ -46,8 +53,16 @@ impl PtyBackend {
         };
 
         let mut cmd = CommandBuilder::new(&actual_shell);
+        for arg in shell_args {
+            cmd.arg(arg);
+        }
+
+        // Match conch_pty behavior: defaults first, then user overrides.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
 
         pair.slave
             .spawn_command(cmd)
