@@ -10,6 +10,7 @@
 //!   its own OS thread with a bounded thread pool.
 
 pub mod bus;
+pub mod host_api;
 #[cfg(java_sdk_available)]
 pub mod jvm;
 #[cfg(not(java_sdk_available))]
@@ -18,3 +19,5 @@ pub mod jvm_stub;
 pub use jvm_stub as jvm;
 pub mod lua;
 pub mod native;
+
+pub use host_api::{CHostApiAdapter, HostApi};
