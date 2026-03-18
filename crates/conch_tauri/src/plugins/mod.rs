@@ -33,21 +33,27 @@ pub(crate) struct PluginState {
     pub panels: Arc<Mutex<HashMap<u64, PanelInfo>>>,
     pub running_lua: Vec<runner::RunningLuaPlugin>,
     pub java_mgr: Option<JavaPluginManager>,
+    pub plugins_config: conch_core::config::PluginsConfig,
 }
 
 impl PluginState {
-    pub fn new() -> Self {
+    pub fn new(plugins_config: conch_core::config::PluginsConfig) -> Self {
         Self {
             bus: Arc::new(PluginBus::new()),
             panels: Arc::new(Mutex::new(HashMap::new())),
             running_lua: Vec::new(),
             java_mgr: None,
+            plugins_config,
         }
+    }
+
+    fn search_paths(&self) -> Vec<std::path::PathBuf> {
+        plugin_search_paths(&self.plugins_config.search_paths)
     }
 
     /// Discover and start Lua plugins.
     pub fn start_lua_plugins(&mut self, app_handle: &tauri::AppHandle) {
-        let search_paths = default_plugin_search_paths();
+        let search_paths = self.search_paths();
 
         for dir in &search_paths {
             if !dir.exists() {
@@ -106,7 +112,7 @@ impl PluginState {
         });
 
         let mut mgr = JavaPluginManager::new(Arc::clone(&self.bus), host_api);
-        let search_paths = default_plugin_search_paths();
+        let search_paths = self.search_paths();
 
         for dir in &search_paths {
             if !dir.exists() {
@@ -144,18 +150,43 @@ impl PluginState {
     }
 }
 
-/// Default directories to search for plugins.
-fn default_plugin_search_paths() -> Vec<std::path::PathBuf> {
+/// Build the plugin search paths from config + defaults.
+fn plugin_search_paths(extra: &[String]) -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
 
-    // User plugins dir.
+    // Development paths.
+    paths.push(std::path::PathBuf::from("target/debug"));
+    paths.push(std::path::PathBuf::from("target/release"));
+
+    // Exe directory and sibling paths (installed builds).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            paths.push(exe_dir.to_path_buf());
+            paths.push(exe_dir.join("plugins"));
+            // Linux: /opt/conch/lib/ or ../lib/ relative to bin.
+            if let Some(parent) = exe_dir.parent() {
+                paths.push(parent.join("lib"));
+            }
+        }
+    }
+
+    // User plugins dir (~/.config/conch/plugins/).
     let config_dir = conch_core::config::config_dir();
     paths.push(config_dir.join("plugins"));
 
-    // Development paths.
-    paths.push(std::path::PathBuf::from("examples/plugins"));
-    paths.push(std::path::PathBuf::from("target/debug"));
-    paths.push(std::path::PathBuf::from("target/release"));
+    // User-configured extra search paths from [conch.plugins] search_paths.
+    for p in extra {
+        let expanded = if p.starts_with("~/") {
+            if let Some(home) = dirs::home_dir() {
+                home.join(&p[2..])
+            } else {
+                std::path::PathBuf::from(p)
+            }
+        } else {
+            std::path::PathBuf::from(p)
+        };
+        paths.push(expanded);
+    }
 
     paths
 }
@@ -189,7 +220,7 @@ pub(crate) fn scan_plugins(
     state: tauri::State<'_, Arc<Mutex<PluginState>>>,
 ) -> Vec<DiscoveredPlugin> {
     let ps = state.lock();
-    let search_paths = default_plugin_search_paths();
+    let search_paths = ps.search_paths();
     let loaded_names: std::collections::HashSet<String> = ps
         .running_lua
         .iter()
@@ -383,14 +414,26 @@ mod tests {
 
     #[test]
     fn plugin_state_new_is_empty() {
-        let state = PluginState::new();
+        let state = PluginState::new(conch_core::config::PluginsConfig::default());
         assert!(state.panels.lock().is_empty());
         assert!(state.running_lua.is_empty());
     }
 
     #[test]
-    fn default_search_paths_includes_user_dir() {
-        let paths = default_plugin_search_paths();
+    fn search_paths_includes_user_dir() {
+        let paths = plugin_search_paths(&[]);
         assert!(paths.iter().any(|p| p.to_string_lossy().contains("plugins")));
+    }
+
+    #[test]
+    fn search_paths_includes_custom_paths() {
+        let paths = plugin_search_paths(&["/custom/plugins".to_string()]);
+        assert!(paths.iter().any(|p| p.to_string_lossy() == "/custom/plugins"));
+    }
+
+    #[test]
+    fn search_paths_expands_tilde() {
+        let paths = plugin_search_paths(&["~/my-plugins".to_string()]);
+        assert!(paths.iter().any(|p| !p.to_string_lossy().starts_with('~')));
     }
 }

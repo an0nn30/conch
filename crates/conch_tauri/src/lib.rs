@@ -475,8 +475,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     let (transfer_tx, mut transfer_rx) =
         tokio::sync::mpsc::unbounded_channel::<remote::transfer::TransferProgress>();
     let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
-    let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new()));
     let plugins_config = config.conch.plugins.clone();
+    let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new(plugins_config.clone())));
 
     // Load persisted window size.
     let persisted = config::load_persistent_state().unwrap_or_default();
