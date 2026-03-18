@@ -312,14 +312,102 @@ pub(crate) async fn ssh_quick_connect(
         proxy_jump: None,
     };
 
-    let server_id = entry.id.clone();
+    // Don't persist quick-connect entries to config — they're ephemeral.
+    // Connect directly using the entry instead of going through ssh_connect's
+    // server lookup.
+    let window_label = window.label().to_string();
+    let key = session_key(&window_label, tab_id);
+
     {
-        let mut state = remote.lock();
-        state.config.add_server(entry);
-        config::save_config(&state.config);
+        let state = remote.lock();
+        if state.sessions.contains_key(&key) {
+            return Err(format!("Tab {tab_id} already has an SSH session on window {window_label}"));
+        }
     }
 
-    ssh_connect(window, app, remote, tab_id, server_id, cols, rows, password).await
+    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<AuthPrompt>();
+    let app_handle = app.clone();
+    let entry_clone = entry.clone();
+    let remote_clone = Arc::clone(&*remote);
+
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let result = ssh::connect_and_open_shell(&entry_clone, password, prompt_tx).await;
+        let _ = result_tx.send(result);
+    });
+
+    let prompt_app = app.clone();
+    let prompt_remote = Arc::clone(&*remote);
+    let connection_result: Result<_, String> = tokio::spawn(async move {
+        let mut result_rx = result_rx;
+        loop {
+            tokio::select! {
+                result = &mut result_rx => {
+                    return result.map_err(|_| "Connection task dropped".to_string())?;
+                }
+                prompt = prompt_rx.recv() => {
+                    match prompt {
+                        Some(AuthPrompt::HostKeyConfirm { reply, message, detail }) => {
+                            let prompt_id = uuid::Uuid::new_v4().to_string();
+                            prompt_remote.lock().pending_prompts.host_key.insert(prompt_id.clone(), reply);
+                            let _ = prompt_app.emit("ssh-host-key-prompt", HostKeyPromptEvent { prompt_id, message, detail });
+                        }
+                        Some(AuthPrompt::PasswordPrompt { reply, message }) => {
+                            let prompt_id = uuid::Uuid::new_v4().to_string();
+                            prompt_remote.lock().pending_prompts.password.insert(prompt_id.clone(), reply);
+                            let _ = prompt_app.emit("ssh-password-prompt", PasswordPromptEvent { prompt_id, message });
+                        }
+                        None => { continue; }
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Connection task panicked: {e}"))?;
+
+    let (ssh_handle, channel) = connection_result?;
+
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let _ = input_tx.send(ChannelInput::Resize { cols, rows });
+
+    {
+        let mut state = remote_clone.lock();
+        state.sessions.insert(
+            key.clone(),
+            SshSession {
+                input_tx,
+                ssh_handle: Arc::new(ssh_handle),
+                host: entry.host.clone(),
+                user: entry.user.clone(),
+                port: entry.port,
+            },
+        );
+    }
+
+    let remote_for_loop = Arc::clone(&remote_clone);
+    let key_for_loop = key.clone();
+    let wl = window_label.clone();
+    tokio::spawn(async move {
+        let exited_naturally = ssh::channel_loop(channel, input_rx, output_tx).await;
+        remote_for_loop.lock().sessions.remove(&key_for_loop);
+        if exited_naturally {
+            let _ = app_handle.emit_to(&wl, "pty-exit", PtyExitEvent { window_label: wl.clone(), tab_id });
+        }
+    });
+
+    let wl2 = window_label.clone();
+    let app2 = app.clone();
+    tokio::spawn(async move {
+        while let Some(data) = output_rx.recv().await {
+            let text = String::from_utf8_lossy(&data).into_owned();
+            let _ = app2.emit_to(&wl2, "pty-output", PtyOutputEvent { window_label: wl2.clone(), tab_id, data: text });
+        }
+    });
+
+    Ok(())
 }
 
 /// Write data to an SSH session.
