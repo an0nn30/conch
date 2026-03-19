@@ -236,7 +236,8 @@
   function renderIconLabel(w) {
     const el = document.createElement('span');
     el.className = 'pw-icon-label' + (w.style ? ' pw-style-' + w.style : '');
-    el.textContent = w.text;
+    if (w.icon) el.innerHTML = iconHtml(w.icon, 14) + esc(w.text);
+    else el.textContent = w.text;
     return el;
   }
 
@@ -266,7 +267,8 @@
   function renderButton(w, pn) {
     const el = document.createElement('button');
     el.className = 'pw-button';
-    el.textContent = w.label;
+    if (w.icon) el.innerHTML = iconHtml(w.icon, 14) + esc(w.label);
+    else el.textContent = w.label;
     if (w.enabled === false) el.disabled = true;
     el.addEventListener('click', () => sendEvent(pn, { type: 'button_click', id: w.id }));
     return el;
@@ -411,6 +413,12 @@
       row.appendChild(sp);
     }
 
+    if (node.icon) {
+      const iconEl = document.createElement('span');
+      iconEl.innerHTML = iconHtml(node.icon, 14);
+      row.appendChild(iconEl);
+    }
+
     const label = document.createElement('span');
     label.className = 'pw-tree-label';
     label.textContent = node.label;
@@ -489,7 +497,8 @@
         if (typeof cell === 'string') {
           td.textContent = cell;
         } else if (cell && typeof cell === 'object') {
-          td.textContent = cell.text || '';
+          if (cell.icon) td.innerHTML = iconHtml(cell.icon, 14) + esc(cell.text || '');
+          else td.textContent = cell.text || '';
         }
         tr.appendChild(td);
       }
@@ -650,6 +659,24 @@
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(false); });
     const onKey = (e) => { if (e.key === 'Escape') { dismiss(false); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
+  }
+
+  /// Map a plugin icon name to an <img> tag using the PNG icon set.
+  function iconHtml(name, size) {
+    if (!name) return '';
+    size = size || 14;
+    // Map icon names to filenames (dark variants for dark theme).
+    const map = {
+      'file': 'file-dark', 'folder': 'folder', 'folder-open': 'folder-open',
+      'server': 'server', 'network-server': 'network-server', 'terminal': 'terminal',
+      'go-home': 'go-home-dark', 'go-next': 'go-next-dark', 'go-previous': 'go-previous-dark',
+      'refresh': 'view-refresh-dark', 'folder-new': 'folder-new-dark',
+      'transfer-up': 'transfer-up-dark', 'transfer-down': 'transfer-down-dark',
+      'tab-close': 'tab-close-dark', 'computer': 'computer-dark',
+      'locked': 'locked-dark', 'unlocked': 'unlocked-dark', 'eye': 'eye-dark',
+    };
+    const file = map[name] || name;
+    return `<img src="icons/${file}.png" width="${size}" height="${size}" style="vertical-align:middle;margin-right:3px">`;
   }
 
   function getMenuItems() { return pluginMenuItems.slice(); }

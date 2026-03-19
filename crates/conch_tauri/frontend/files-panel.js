@@ -10,13 +10,13 @@
   let fitActiveTabFn = null;
   let getActiveTabFn = null;
 
-  // SVG icons (inline, 14x14)
-  const ICON_FOLDER = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M1.5 3C1.5 2.45 1.95 2 2.5 2H6l1.5 1.5H13.5C14.05 3.5 14.5 3.95 14.5 4.5V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3Z" fill="#f1fa8c"/></svg>';
-  const ICON_FILE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1.5C3.45 1.5 3 1.95 3 2.5V13.5C3 14.05 3.45 14.5 4 14.5H12C12.55 14.5 13 14.05 13 13.5V5.5L9 1.5H4Z" fill="#8be9fd"/><path d="M9 1.5V5.5H13" fill="#6272a4"/></svg>';
-  const ICON_BACK = '\u25C0';
-  const ICON_FWD = '\u25B6';
-  const ICON_HOME = '\u2302';
-  const ICON_REFRESH = '\u21BB';
+  // Icons — use PNG assets from icons/ directory
+  const ICON_FOLDER = '<img src="icons/folder.png" width="14" height="14" class="fp-icon">';
+  const ICON_FILE = '<img src="icons/file-dark.png" width="14" height="14" class="fp-icon">';
+  const ICON_BACK = '<img src="icons/go-previous-dark.png" width="12" height="12" class="fp-icon">';
+  const ICON_FWD = '<img src="icons/go-next-dark.png" width="12" height="12" class="fp-icon">';
+  const ICON_HOME = '<img src="icons/go-home-dark.png" width="12" height="12" class="fp-icon">';
+  const ICON_REFRESH = '<img src="icons/view-refresh-dark.png" width="12" height="12" class="fp-icon">';
 
   // Pane state
   const localPane = createPaneState('local', true);
