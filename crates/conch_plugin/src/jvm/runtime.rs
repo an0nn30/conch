@@ -10,9 +10,54 @@ use jni::{InitArgsBuilder, JNIEnv, JavaVM, NativeMethod};
 use tokio::sync::mpsc;
 
 use crate::bus::{PluginBus, PluginMail, QueryResponse};
-use crate::native::lifecycle::LoadedPlugin;
-use crate::native::{LoadError, PluginMeta};
 use crate::HostApi;
+
+// Types previously in `native/` — inlined here since native plugins were removed.
+
+/// Metadata about a discovered/loaded plugin.
+#[derive(Debug, Clone)]
+pub struct PluginMeta {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub plugin_type: conch_plugin_sdk::PluginType,
+    pub panel_location: conch_plugin_sdk::PanelLocation,
+}
+
+/// Error type for plugin loading operations.
+#[derive(Debug)]
+pub enum LoadError {
+    Io(std::io::Error),
+    AlreadyLoaded(String),
+    NotLoaded(String),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "{e}"),
+            Self::AlreadyLoaded(n) => write!(f, "plugin '{n}' already loaded"),
+            Self::NotLoaded(n) => write!(f, "plugin '{n}' not loaded"),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+/// A loaded and running plugin.
+struct LoadedPlugin {
+    meta: PluginMeta,
+    sender: tokio::sync::mpsc::Sender<PluginMail>,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LoadedPlugin {
+    fn join(&mut self) {
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// Global trait-based HostApi. Set once by `JavaPluginManager::new()`.
 /// JNI native methods call trait methods through this.
@@ -280,7 +325,7 @@ fn java_plugin_thread(
     plugin: GlobalRef,
     mut mailbox: mpsc::Receiver<PluginMail>,
     plugin_name: String,
-    meta: &crate::native::PluginMeta,
+    meta: &PluginMeta,
 ) {
     let mut env = match jvm.attach_current_thread() {
         Ok(e) => e,
@@ -516,7 +561,6 @@ fn read_plugin_info(env: &mut JNIEnv, info: &JObject) -> Result<PluginMeta, Load
         version,
         plugin_type,
         panel_location,
-        dependencies: vec![],
     })
 }
 

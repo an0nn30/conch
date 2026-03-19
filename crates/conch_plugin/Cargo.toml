@@ -2,7 +2,7 @@
 name = "conch_plugin"
 version.workspace = true
 edition.workspace = true
-description = "Host-side plugin infrastructure: message bus, native loader, lifecycle management"
+description = "Host-side plugin infrastructure: message bus, Lua and Java runtimes"
 
 [dependencies]
 conch_plugin_sdk = { workspace = true }
@@ -10,7 +10,6 @@ tokio = { workspace = true }
 parking_lot = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
-libloading = "0.8"
 mlua = { workspace = true }
 jni = { version = "0.21", features = ["invocation"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

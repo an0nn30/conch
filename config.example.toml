@@ -185,16 +185,3 @@ java = true       # Java JAR plugins (.jar) — disabling skips JVM startup
 # paths (~/.config/conch/plugins/, exe directory, etc.). Paths here are
 # appended to those defaults.
 # search_paths = ["~/my-conch-plugins"]
-
-# ---------------------------------------------------------------------------
-# Conch — Experimental Features
-# ---------------------------------------------------------------------------
-#
-# These features are under active development and may change or be removed.
-
-[conch.experimental]
-
-# Use the Tauri-based UI with xterm.js instead of the native egui renderer.
-# Requires building with: cargo build --features tauri-ui
-# Default: false
-tauri_ui = false

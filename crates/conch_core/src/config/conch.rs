@@ -8,7 +8,6 @@ pub struct ConchConfig {
     pub keyboard: KeyboardConfig,
     pub ui: UiConfig,
     pub plugins: PluginsConfig,
-    pub experimental: ExperimentalConfig,
 }
 
 impl Default for ConchConfig {
@@ -17,27 +16,7 @@ impl Default for ConchConfig {
             keyboard: KeyboardConfig::default(),
             ui: UiConfig::default(),
             plugins: PluginsConfig::default(),
-            experimental: ExperimentalConfig::default(),
         }
-    }
-}
-
-/// Experimental features that may change or be removed.
-///
-/// ```toml
-/// [conch.experimental]
-/// tauri_ui = false   # Use Tauri/xterm.js UI instead of egui
-/// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ExperimentalConfig {
-    /// Use the Tauri-based UI (xterm.js) instead of the native egui renderer.
-    pub tauri_ui: bool,
-}
-
-impl Default for ExperimentalConfig {
-    fn default() -> Self {
-        Self { tauri_ui: false }
     }
 }
 
@@ -296,40 +275,4 @@ mod tests {
         assert_eq!(cfg.font, UiFontConfig::default());
     }
 
-    #[test]
-    fn experimental_defaults_tauri_off() {
-        let cfg = ExperimentalConfig::default();
-        assert!(!cfg.tauri_ui);
-    }
-
-    #[test]
-    fn experimental_from_toml() {
-        let toml_str = r#"tauri_ui = true"#;
-        let cfg: ExperimentalConfig = toml::from_str(toml_str).unwrap();
-        assert!(cfg.tauri_ui);
-    }
-
-    #[test]
-    fn experimental_serde_default_fills_missing() {
-        let toml_str = r#""#;
-        let cfg: ExperimentalConfig = toml::from_str(toml_str).unwrap();
-        assert!(!cfg.tauri_ui);
-    }
-
-    #[test]
-    fn conch_config_with_experimental() {
-        let toml_str = r#"
-            [experimental]
-            tauri_ui = true
-        "#;
-        let cfg: ConchConfig = toml::from_str(toml_str).unwrap();
-        assert!(cfg.experimental.tauri_ui);
-    }
-
-    #[test]
-    fn conch_config_without_experimental_gets_defaults() {
-        let toml_str = r#""#;
-        let cfg: ConchConfig = toml::from_str(toml_str).unwrap();
-        assert!(!cfg.experimental.tauri_ui);
-    }
 }
