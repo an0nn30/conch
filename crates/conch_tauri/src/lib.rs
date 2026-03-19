@@ -807,16 +807,27 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 }
                 // Restore plugins that were enabled in the previous session.
                 ps.restore_plugins(&handle);
-
-                // Rebuild the menu to include plugin-registered menu items.
-                let plugin_items = ps.menu_items.lock().clone();
                 drop(ps);
-                if !plugin_items.is_empty() {
-                    let menu = build_app_menu_with_plugins(&app.handle(), &kb_config, &plugin_items)
-                        .map_err(|e| anyhow::anyhow!("Menu rebuild failed: {e}"))?;
-                    app.handle().set_menu(menu)
-                        .map_err(|e| anyhow::anyhow!("Set menu failed: {e}"))?;
-                }
+
+                // Rebuild the menu after a short delay to let plugin threads
+                // run setup() and register their menu items.
+                let menu_handle = app.handle().clone();
+                let menu_kb = kb_config.clone();
+                let menu_ps = Arc::clone(&plugin_state);
+                std::thread::Builder::new()
+                    .name("plugin-menu-rebuild".into())
+                    .spawn(move || {
+                        // Give plugin threads time to call setup() and register menu items.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let plugin_items = menu_ps.lock().menu_items.lock().clone();
+                        if !plugin_items.is_empty() {
+                            match build_app_menu_with_plugins(&menu_handle, &menu_kb, &plugin_items) {
+                                Ok(menu) => { let _ = menu_handle.set_menu(menu); }
+                                Err(e) => log::error!("Menu rebuild after plugin restore failed: {e}"),
+                            }
+                        }
+                    })
+                    .ok();
             }
 
             // Start config/theme file watcher for hot-reload.
