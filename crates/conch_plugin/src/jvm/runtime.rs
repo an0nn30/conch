@@ -168,6 +168,11 @@ impl JavaPluginManager {
         found
     }
 
+    /// Get the plugin name from a JAR without fully loading it.
+    pub fn probe_jar_name(&mut self, jar_path: &Path) -> Option<String> {
+        self.probe_jar_metadata(jar_path).ok().map(|m| m.name)
+    }
+
     /// Read plugin metadata from a JAR by loading it in the JVM.
     fn probe_jar_metadata(&mut self, jar_path: &Path) -> Result<PluginMeta, LoadError> {
         let class_name = read_plugin_class_from_jar(jar_path)?;

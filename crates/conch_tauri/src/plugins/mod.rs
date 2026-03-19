@@ -157,15 +157,27 @@ impl PluginState {
                 continue;
             }
 
-            // Try Java.
-            if let Some((_, jar_path)) = jar_paths.iter().find(|(n, _)| n == saved_name) {
-                if let Some(ref mut mgr) = self.java_mgr {
-                    match mgr.load_plugin(jar_path) {
-                        Ok(meta) => log::info!("Restored Java plugin '{}' v{}", meta.name, meta.version),
-                        Err(e) => log::error!("Failed to restore Java plugin '{saved_name}': {e}"),
+            // Try Java — probe each JAR to match by plugin name since
+            // JAR filenames don't necessarily match plugin display names.
+            if let Some(ref mut mgr) = self.java_mgr {
+                let mut found = false;
+                for (_, jar_path) in &jar_paths {
+                    // Probe the JAR to get its plugin name.
+                    match mgr.probe_jar_name(jar_path) {
+                        Some(probe_name) if probe_name == *saved_name => {
+                            match mgr.load_plugin(jar_path) {
+                                Ok(meta) => {
+                                    log::info!("Restored Java plugin '{}' v{}", meta.name, meta.version);
+                                    found = true;
+                                }
+                                Err(e) => log::error!("Failed to restore Java plugin '{saved_name}': {e}"),
+                            }
+                            break;
+                        }
+                        _ => continue,
                     }
                 }
-                continue;
+                if found { continue; }
             }
 
             log::warn!("Previously enabled plugin '{saved_name}' not found in search paths");
