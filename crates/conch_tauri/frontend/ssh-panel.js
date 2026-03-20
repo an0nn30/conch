@@ -298,13 +298,19 @@
         serversHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
       }
     }
+    if (data.ssh_config && data.ssh_config.length) {
+      serversHtml += `<div class="ssh-export-group">~/.ssh/config</div>`;
+      for (const s of data.ssh_config) {
+        serversHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(s.id)}" data-type="server" />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+      }
+    }
 
     let tunnelsHtml = '';
     for (const t of tunnels) {
       tunnelsHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(t.id)}" data-type="tunnel" checked />${esc(t.label)} <span class="ssh-export-dim">(L${t.local_port} → ${esc(t.remote_host)}:${t.remote_port})</span></label>`;
     }
 
-    const hasServers = data.folders.some(f => f.entries.length) || data.ungrouped.length;
+    const hasServers = data.folders.some(f => f.entries.length) || data.ungrouped.length || (data.ssh_config && data.ssh_config.length);
     const hasTunnels = tunnels.length > 0;
 
     overlay.innerHTML = `
@@ -338,13 +344,44 @@
     document.addEventListener('keydown', onKey);
     overlay.querySelector('#exp-cancel').addEventListener('click', removeOverlay);
 
+    // Build a lookup of all servers by their session key (user@host:port).
+    const allServers = [];
+    for (const f of data.folders) for (const s of f.entries) allServers.push(s);
+    for (const s of data.ungrouped) allServers.push(s);
+    if (data.ssh_config) for (const s of data.ssh_config) allServers.push(s);
+
+    function serverSessionKey(s) { return s.user + '@' + s.host + ':' + s.port; }
+    function findServerForTunnel(t) {
+      return allServers.find(s => serverSessionKey(s) === t.session_key);
+    }
+
     overlay.querySelector('#exp-export').addEventListener('click', async () => {
-      const serverIds = [...overlay.querySelectorAll('input[data-type="server"]:checked')].map(cb => cb.value);
+      let serverIds = [...overlay.querySelectorAll('input[data-type="server"]:checked')].map(cb => cb.value);
       const tunnelIds = [...overlay.querySelectorAll('input[data-type="tunnel"]:checked')].map(cb => cb.value);
 
       if (serverIds.length === 0 && tunnelIds.length === 0) {
         if (window.toast) window.toast.error('Export', 'Nothing selected');
         return;
+      }
+
+      // Check if any selected tunnels depend on servers not in the export.
+      const selectedTunnels = tunnels.filter(t => tunnelIds.includes(t.id));
+      const missingServers = [];
+      for (const t of selectedTunnels) {
+        const server = findServerForTunnel(t);
+        if (server && !serverIds.includes(server.id)) {
+          missingServers.push({ tunnel: t, server });
+        }
+      }
+
+      if (missingServers.length > 0) {
+        const shouldInclude = await showDependencyPrompt(missingServers);
+        if (shouldInclude === null) return; // cancelled
+        if (shouldInclude) {
+          for (const ms of missingServers) {
+            if (!serverIds.includes(ms.server.id)) serverIds.push(ms.server.id);
+          }
+        }
       }
 
       removeOverlay();
@@ -360,6 +397,53 @@
     });
   }
 
+
+  function showDependencyPrompt(missingServers) {
+    return new Promise((resolve) => {
+      const existing = document.querySelector('.ssh-overlay.dep-prompt');
+      if (existing) existing.remove();
+
+      const overlay = document.createElement('div');
+      overlay.className = 'ssh-overlay dep-prompt';
+
+      let listHtml = '';
+      for (const ms of missingServers) {
+        listHtml += `<div class="ssh-export-item" style="padding:2px 0;">
+          <span>${esc(ms.tunnel.label)}</span>
+          <span class="ssh-export-dim">\u2192 ${esc(ms.server.label)} (${esc(ms.server.user)}@${esc(ms.server.host)}:${ms.server.port})</span>
+        </div>`;
+      }
+
+      overlay.innerHTML = `
+        <div class="ssh-form" style="min-width:400px;">
+          <div class="ssh-form-title">Include Server Connections?</div>
+          <div class="ssh-form-body">
+            <div style="margin-bottom:8px;font-size:12px;color:var(--fg);">
+              The following tunnels depend on server connections that aren't in your export:
+            </div>
+            ${listHtml}
+            <div style="margin-top:10px;font-size:11px;color:var(--dim-fg);">
+              Without these servers, the tunnels may not work on the importing machine.
+            </div>
+          </div>
+          <div class="ssh-form-buttons">
+            <button class="ssh-form-btn" id="dep-cancel">Cancel</button>
+            <button class="ssh-form-btn" id="dep-skip">Export Without</button>
+            <button class="ssh-form-btn primary" id="dep-include">Include Servers</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(overlay);
+      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
+      overlay.querySelector('#dep-cancel').addEventListener('click', () => { overlay.remove(); resolve(null); });
+      overlay.querySelector('#dep-skip').addEventListener('click', () => { overlay.remove(); resolve(false); });
+      overlay.querySelector('#dep-include').addEventListener('click', () => { overlay.remove(); resolve(true); });
+
+      const onKey = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(null); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
 
   async function importConfig() {
     try {

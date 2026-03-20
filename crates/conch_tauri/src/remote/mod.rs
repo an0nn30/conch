@@ -660,7 +660,15 @@ pub(crate) async fn remote_export(
 ) -> Result<String, String> {
     let json = {
         let state = remote.lock();
-        let payload = state.config.to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
+        let mut payload = state.config.to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
+        // Include any selected ~/.ssh/config entries in the export.
+        if let Some(ref ids) = server_ids {
+            for entry in &state.ssh_config_entries {
+                if ids.contains(&entry.id) {
+                    payload.ungrouped.push(entry.clone());
+                }
+            }
+        }
         serde_json::to_string_pretty(&payload).map_err(|e| format!("Export failed: {e}"))?
     };
 
