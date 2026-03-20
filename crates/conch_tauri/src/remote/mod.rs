@@ -976,13 +976,19 @@ pub(crate) async fn tunnel_start(
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
     tunnel_id: String,
 ) -> Result<(), String> {
+    log::info!("tunnel_start: invoked with tunnel_id={tunnel_id}");
+
     let tunnel_uuid =
-        uuid::Uuid::parse_str(&tunnel_id).map_err(|e| format!("Invalid tunnel ID: {e}"))?;
+        uuid::Uuid::parse_str(&tunnel_id).map_err(|e| {
+            log::error!("tunnel_start: invalid tunnel ID '{tunnel_id}': {e}");
+            format!("Invalid tunnel ID: {e}")
+        })?;
 
     // Clear any previous error state so this is a fresh attempt.
     {
         let mgr = remote.lock().tunnel_manager.clone();
         mgr.clear_error(&tunnel_uuid).await;
+        log::debug!("tunnel_start: cleared previous error state for {tunnel_uuid}");
     }
 
     // Get tunnel definition and matching server.
@@ -992,16 +998,33 @@ pub(crate) async fn tunnel_start(
             .config
             .find_tunnel(&tunnel_uuid)
             .cloned()
-            .ok_or_else(|| format!("Tunnel '{tunnel_id}' not found"))?;
+            .ok_or_else(|| {
+                log::error!("tunnel_start: tunnel '{tunnel_id}' not found in config");
+                format!("Tunnel '{tunnel_id}' not found")
+            })?;
+
+        log::debug!(
+            "tunnel_start: found tunnel def — label={}, session_key={}, local_port={}, remote={}:{}",
+            tunnel.label, tunnel.session_key, tunnel.local_port, tunnel.remote_host, tunnel.remote_port
+        );
 
         let server = find_server_for_tunnel(&state, &tunnel.session_key)
-            .ok_or_else(|| format!("No server configured for {}", tunnel.session_key))?;
+            .ok_or_else(|| {
+                log::error!("tunnel_start: no server found for session_key={}", tunnel.session_key);
+                format!("No server configured for {}", tunnel.session_key)
+            })?;
+
+        log::debug!(
+            "tunnel_start: matched server — label={}, host={}, port={}, user={}, auth={}",
+            server.label, server.host, server.port, server.user, server.auth_method
+        );
 
         (tunnel, server)
     };
 
     let mgr = remote.lock().tunnel_manager.clone();
     mgr.set_connecting(tunnel_uuid).await;
+    log::debug!("tunnel_start: status set to Connecting");
 
     // Set up prompt channel — tunnel prompts are auto-accepted for known hosts,
     // otherwise emitted as Tauri events (same pattern as ssh_connect).
@@ -1011,6 +1034,7 @@ pub(crate) async fn tunnel_start(
 
     // Spawn a task to service prompts.
     tokio::spawn(async move {
+        log::debug!("tunnel_start: prompt service task started");
         while let Some(prompt) = prompt_rx.recv().await {
             match prompt {
                 tunnel::TunnelPrompt::ConfirmHostKey {
@@ -1018,6 +1042,7 @@ pub(crate) async fn tunnel_start(
                     message,
                     detail,
                 } => {
+                    log::debug!("tunnel_start: received ConfirmHostKey prompt, emitting to frontend");
                     let prompt_id = uuid::Uuid::new_v4().to_string();
                     remote_for_prompts
                         .lock()
@@ -1034,6 +1059,7 @@ pub(crate) async fn tunnel_start(
                     );
                 }
                 tunnel::TunnelPrompt::Password { reply, message } => {
+                    log::debug!("tunnel_start: received Password prompt, emitting to frontend");
                     let prompt_id = uuid::Uuid::new_v4().to_string();
                     remote_for_prompts
                         .lock()
@@ -1050,8 +1076,10 @@ pub(crate) async fn tunnel_start(
                 }
             }
         }
+        log::debug!("tunnel_start: prompt service task ended");
     });
 
+    log::debug!("tunnel_start: calling start_tunnel");
     let result = mgr
         .start_tunnel(
             tunnel_uuid,
@@ -1063,8 +1091,12 @@ pub(crate) async fn tunnel_start(
         )
         .await;
 
-    if let Err(ref e) = result {
-        mgr.set_error(&tunnel_uuid, e.clone()).await;
+    match &result {
+        Ok(()) => log::info!("tunnel_start: tunnel {tunnel_uuid} started successfully"),
+        Err(e) => {
+            log::error!("tunnel_start: tunnel {tunnel_uuid} failed: {e}");
+            mgr.set_error(&tunnel_uuid, e.clone()).await;
+        }
     }
 
     result

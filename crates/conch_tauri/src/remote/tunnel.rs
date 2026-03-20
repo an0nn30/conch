@@ -70,9 +70,19 @@ impl client::Handler for TunnelSshHandler {
         &mut self,
         server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
+        log::debug!(
+            "tunnel ssh: check_server_key called for {}:{}, algo={}",
+            self.host,
+            self.port,
+            server_public_key.algorithm().as_str()
+        );
         match known_hosts::check_known_host(&self.host, self.port, server_public_key) {
-            Some(true) => return Ok(true),
+            Some(true) => {
+                log::debug!("tunnel ssh: host key already known and matches for {}:{}", self.host, self.port);
+                return Ok(true);
+            }
             Some(false) => {
+                log::warn!("tunnel ssh: HOST KEY MISMATCH for {}:{}", self.host, self.port);
                 let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
                 let message = format!(
                     "WARNING: HOST KEY HAS CHANGED for {}:{}",
@@ -83,6 +93,7 @@ impl client::Handler for TunnelSshHandler {
                     server_public_key.algorithm().as_str(),
                 );
                 let (tx, rx) = tokio::sync::oneshot::channel();
+                log::debug!("tunnel ssh: sending host key mismatch prompt to frontend");
                 let _ = self
                     .prompt_tx
                     .send(TunnelPrompt::ConfirmHostKey {
@@ -91,9 +102,13 @@ impl client::Handler for TunnelSshHandler {
                         reply: tx,
                     })
                     .await;
-                return Ok(rx.await.unwrap_or(false));
+                let result = rx.await.unwrap_or(false);
+                log::debug!("tunnel ssh: host key mismatch prompt result: {result}");
+                return Ok(result);
             }
-            None => {}
+            None => {
+                log::debug!("tunnel ssh: host key not in known_hosts for {}:{}", self.host, self.port);
+            }
         }
 
         let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
@@ -109,6 +124,7 @@ impl client::Handler for TunnelSshHandler {
         );
 
         let (tx, rx) = tokio::sync::oneshot::channel();
+        log::debug!("tunnel ssh: sending new host key confirm prompt to frontend");
         let _ = self
             .prompt_tx
             .send(TunnelPrompt::ConfirmHostKey {
@@ -119,6 +135,7 @@ impl client::Handler for TunnelSshHandler {
             .await;
 
         let accepted = rx.await.unwrap_or(false);
+        log::debug!("tunnel ssh: new host key confirm result: {accepted}");
         if accepted {
             if let Err(e) =
                 known_hosts::add_known_host(&self.host, self.port, server_public_key)
@@ -190,27 +207,49 @@ impl TunnelManager {
         remote_port: u16,
         prompt_tx: mpsc::Sender<TunnelPrompt>,
     ) -> Result<(), String> {
+        log::info!(
+            "tunnel[{id}]: starting — local_port={local_port}, remote={remote_host}:{remote_port}, \
+             server={}@{}:{}, auth={}",
+            server.user, server.host, server.port, server.auth_method
+        );
+
         // Bind local port first for fast failure.
+        log::debug!("tunnel[{id}]: binding 127.0.0.1:{local_port}");
         let listener = TcpListener::bind(format!("127.0.0.1:{local_port}"))
             .await
-            .map_err(|e| format!("Failed to bind local port {local_port}: {e}"))?;
+            .map_err(|e| {
+                log::error!("tunnel[{id}]: failed to bind local port {local_port}: {e}");
+                format!("Failed to bind local port {local_port}: {e}")
+            })?;
 
         log::info!("tunnel[{id}]: listening on 127.0.0.1:{local_port}");
 
-        let ssh_handle = connect_for_tunnel(server, prompt_tx).await?;
+        log::debug!("tunnel[{id}]: initiating SSH connection to {}@{}:{}", server.user, server.host, server.port);
+        let ssh_handle = connect_for_tunnel(server, prompt_tx).await.map_err(|e| {
+            log::error!("tunnel[{id}]: SSH connection failed: {e}");
+            e
+        })?;
 
         log::info!("tunnel[{id}]: SSH connection established");
 
+        log::debug!("tunnel[{id}]: spawning accept loop for forwarding {remote_host}:{remote_port}");
         let join_handle = tokio::spawn(async move {
+            log::debug!("tunnel[{id}]: accept loop started, waiting for connections");
             loop {
                 let (mut local_stream, peer_addr) = match listener.accept().await {
-                    Ok(conn) => conn,
+                    Ok(conn) => {
+                        log::debug!("tunnel[{id}]: accepted connection from {}", conn.1);
+                        conn
+                    }
                     Err(e) => {
                         log::error!("tunnel[{id}]: accept error: {e}");
                         break;
                     }
                 };
 
+                log::debug!(
+                    "tunnel[{id}]: opening direct-tcpip channel to {remote_host}:{remote_port} for {peer_addr}"
+                );
                 let channel = match ssh_handle
                     .channel_open_direct_tcpip(
                         &remote_host,
@@ -220,12 +259,16 @@ impl TunnelManager {
                     )
                     .await
                 {
-                    Ok(ch) => ch,
+                    Ok(ch) => {
+                        log::debug!("tunnel[{id}]: direct-tcpip channel opened for {peer_addr}");
+                        ch
+                    }
                     Err(e) => {
-                        log::error!("tunnel[{id}]: direct-tcpip failed: {e}");
+                        log::error!("tunnel[{id}]: direct-tcpip failed for {peer_addr}: {e}");
                         if e.to_string().contains("disconnect")
                             || e.to_string().contains("closed")
                         {
+                            log::warn!("tunnel[{id}]: SSH session appears disconnected, stopping accept loop");
                             break;
                         }
                         continue;
@@ -233,6 +276,7 @@ impl TunnelManager {
                 };
 
                 let tunnel_id = id;
+                log::debug!("tunnel[{id}]: spawning bidirectional copy for {peer_addr}");
                 tokio::spawn(async move {
                     let mut channel_stream = channel.into_stream();
                     match tokio::io::copy_bidirectional(&mut local_stream, &mut channel_stream)
@@ -244,11 +288,12 @@ impl TunnelManager {
                             );
                         }
                         Err(e) => {
-                            log::debug!("tunnel[{tunnel_id}]: error {peer_addr}: {e}");
+                            log::debug!("tunnel[{tunnel_id}]: copy error {peer_addr}: {e}");
                         }
                     }
                 });
             }
+            log::info!("tunnel[{id}]: accept loop exited");
         });
 
         let abort_handle = join_handle.abort_handle();
@@ -264,10 +309,16 @@ impl TunnelManager {
     }
 
     pub async fn stop(&self, id: &Uuid) {
+        log::info!("tunnel[{id}]: stop requested");
         if let Some(state) = self.tunnels.lock().await.remove(id) {
             if let Some(handle) = state.abort_handle {
+                log::debug!("tunnel[{id}]: aborting task");
                 handle.abort();
+            } else {
+                log::debug!("tunnel[{id}]: no abort handle (was in {:?} state)", state.status);
             }
+        } else {
+            log::debug!("tunnel[{id}]: not found in active tunnels");
         }
     }
 
@@ -310,6 +361,12 @@ async fn connect_for_tunnel(
     server: &ServerEntry,
     prompt_tx: mpsc::Sender<TunnelPrompt>,
 ) -> Result<client::Handle<TunnelSshHandler>, String> {
+    log::debug!(
+        "connect_for_tunnel: server={}@{}:{}, auth_method={}, key_path={:?}, proxy_command={:?}, proxy_jump={:?}",
+        server.user, server.host, server.port, server.auth_method,
+        server.key_path, server.proxy_command, server.proxy_jump
+    );
+
     let config = Arc::new(client::Config::default());
     let handler = TunnelSshHandler {
         host: server.host.clone(),
@@ -327,22 +384,36 @@ async fn connect_for_tunnel(
                 .map(|jump| format!("ssh -W %h:%p {jump}"))
         });
 
+    log::debug!("connect_for_tunnel: effective_proxy={effective_proxy:?}");
+
     let mut session = if let Some(proxy_cmd) = &effective_proxy {
-        connect_tunnel_via_proxy(proxy_cmd, &server.host, server.port, config, handler).await?
+        log::debug!("connect_for_tunnel: connecting via proxy command: {proxy_cmd}");
+        connect_tunnel_via_proxy(proxy_cmd, &server.host, server.port, config, handler).await.map_err(|e| {
+            log::error!("connect_for_tunnel: proxy connection failed: {e}");
+            e
+        })?
     } else {
         let addr = format!("{}:{}", server.host, server.port);
+        log::debug!("connect_for_tunnel: direct TCP connect to {addr}");
         client::connect(config, &addr, handler)
             .await
-            .map_err(|e| format!("Connection failed: {e}"))?
+            .map_err(|e| {
+                log::error!("connect_for_tunnel: direct connection failed: {e}");
+                format!("Connection failed: {e}")
+            })?
     };
+
+    log::debug!("connect_for_tunnel: SSH transport established, starting authentication");
 
     // Authenticate.
     let authenticated = if server.auth_method == "password" {
+        log::debug!("connect_for_tunnel: using password auth for user '{}'", server.user);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let msg = format!(
             "Password for {}@{}:{}",
             server.user, server.host, server.port
         );
+        log::debug!("connect_for_tunnel: sending password prompt to frontend");
         let _ = prompt_tx
             .send(TunnelPrompt::Password {
                 message: msg,
@@ -350,26 +421,45 @@ async fn connect_for_tunnel(
             })
             .await;
 
+        log::debug!("connect_for_tunnel: waiting for password response from frontend");
         let password = rx
             .await
-            .map_err(|_| "Password prompt cancelled".to_string())?
-            .ok_or_else(|| "Password prompt cancelled".to_string())?;
+            .map_err(|_| {
+                log::error!("connect_for_tunnel: password prompt channel closed (cancelled)");
+                "Password prompt cancelled".to_string()
+            })?
+            .ok_or_else(|| {
+                log::error!("connect_for_tunnel: user cancelled password prompt");
+                "Password prompt cancelled".to_string()
+            })?;
 
+        log::debug!("connect_for_tunnel: got password, attempting authenticate_password");
         session
             .authenticate_password(&server.user, &password)
             .await
-            .map_err(|e| format!("Auth failed: {e}"))?
+            .map_err(|e| {
+                log::error!("connect_for_tunnel: password auth failed: {e}");
+                format!("Auth failed: {e}")
+            })?
     } else {
+        log::debug!("connect_for_tunnel: using key auth for user '{}', key_path={:?}", server.user, server.key_path);
         try_tunnel_key_auth(&mut session, &server.user, server.key_path.as_deref()).await?
     };
 
+    log::debug!("connect_for_tunnel: authentication result: authenticated={authenticated}");
+
     if !authenticated {
+        log::error!(
+            "connect_for_tunnel: authentication failed for {}@{}",
+            server.user, server.host
+        );
         return Err(format!(
             "Authentication failed for {}@{}",
             server.user, server.host
         ));
     }
 
+    log::info!("connect_for_tunnel: successfully connected and authenticated {}@{}:{}", server.user, server.host, server.port);
     Ok(session)
 }
 
@@ -378,11 +468,16 @@ async fn try_tunnel_key_auth(
     user: &str,
     explicit_key_path: Option<&str>,
 ) -> Result<bool, String> {
+    log::debug!("try_tunnel_key_auth: user={user}, explicit_key_path={explicit_key_path:?}");
+
     let key_paths: Vec<std::path::PathBuf> = if let Some(path) = explicit_key_path {
-        vec![expand_tilde(path)]
+        let expanded = expand_tilde(path);
+        log::debug!("try_tunnel_key_auth: using explicit key path: {}", expanded.display());
+        vec![expanded]
     } else {
         let home = dirs::home_dir().unwrap_or_default();
         let ssh_dir = home.join(".ssh");
+        log::debug!("try_tunnel_key_auth: no explicit key, scanning default keys in {}", ssh_dir.display());
         vec![
             ssh_dir.join("id_ed25519"),
             ssh_dir.join("id_rsa"),
@@ -392,25 +487,37 @@ async fn try_tunnel_key_auth(
 
     for key_path in &key_paths {
         if !key_path.exists() {
+            log::debug!("try_tunnel_key_auth: key not found: {}", key_path.display());
             continue;
         }
 
+        log::debug!("try_tunnel_key_auth: loading key: {}", key_path.display());
         match russh_keys::load_secret_key(key_path, None) {
-            Ok(key) => match session.authenticate_publickey(user, Arc::new(key)).await {
-                Ok(true) => return Ok(true),
-                Ok(false) => continue,
-                Err(e) => {
-                    log::warn!("tunnel key auth error with {}: {e}", key_path.display());
-                    continue;
+            Ok(key) => {
+                log::debug!("try_tunnel_key_auth: key loaded, attempting publickey auth with {}", key_path.display());
+                match session.authenticate_publickey(user, Arc::new(key)).await {
+                    Ok(true) => {
+                        log::info!("try_tunnel_key_auth: success with {}", key_path.display());
+                        return Ok(true);
+                    }
+                    Ok(false) => {
+                        log::debug!("try_tunnel_key_auth: key rejected by server: {}", key_path.display());
+                        continue;
+                    }
+                    Err(e) => {
+                        log::warn!("try_tunnel_key_auth: auth error with {}: {e}", key_path.display());
+                        continue;
+                    }
                 }
-            },
+            }
             Err(e) => {
-                log::warn!("tunnel key load failed {}: {e}", key_path.display());
+                log::warn!("try_tunnel_key_auth: failed to load key {}: {e}", key_path.display());
                 continue;
             }
         }
     }
 
+    log::warn!("try_tunnel_key_auth: no key succeeded for user '{user}'");
     Ok(false)
 }
 
@@ -427,6 +534,8 @@ async fn connect_tunnel_via_proxy(
         .replace("%h", host)
         .replace("%p", &port.to_string());
 
+    log::debug!("connect_tunnel_via_proxy: expanded command: {expanded}");
+
     #[cfg(unix)]
     let child = Command::new("sh")
         .arg("-lc")
@@ -435,12 +544,16 @@ async fn connect_tunnel_via_proxy(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("Failed to spawn ProxyCommand: {e}"))?;
+        .map_err(|e| {
+            log::error!("connect_tunnel_via_proxy: failed to spawn: {e}");
+            format!("Failed to spawn ProxyCommand: {e}")
+        })?;
 
     #[cfg(windows)]
     let child = {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        log::debug!("connect_tunnel_via_proxy: spawning cmd /C {expanded}");
         Command::new("cmd")
             .arg("/C")
             .arg(&expanded)
@@ -449,16 +562,26 @@ async fn connect_tunnel_via_proxy(
             .stderr(std::process::Stdio::inherit())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
-            .map_err(|e| format!("Failed to spawn ProxyCommand: {e}"))?
+            .map_err(|e| {
+                log::error!("connect_tunnel_via_proxy: failed to spawn: {e}");
+                format!("Failed to spawn ProxyCommand: {e}")
+            })?
     };
 
+    log::debug!("connect_tunnel_via_proxy: proxy process spawned, connecting SSH stream");
     let stdin = child.stdin.unwrap();
     let stdout = child.stdout.unwrap();
     let stream = tokio::io::join(stdout, stdin);
 
-    client::connect_stream(config, stream, handler)
+    let result = client::connect_stream(config, stream, handler)
         .await
-        .map_err(|e| format!("Connection via proxy failed: {e}"))
+        .map_err(|e| {
+            log::error!("connect_tunnel_via_proxy: SSH over proxy failed: {e}");
+            format!("Connection via proxy failed: {e}")
+        });
+
+    log::debug!("connect_tunnel_via_proxy: connect_stream result: {}", if result.is_ok() { "ok" } else { "err" });
+    result
 }
 
 #[cfg(test)]
