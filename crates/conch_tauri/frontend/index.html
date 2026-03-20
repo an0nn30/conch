@@ -767,12 +767,12 @@
     <div id="drag-handle" data-tauri-drag-region></div>
     <div id="tabbar"></div>
     <div id="main-area">
-      <div id="files-panel-wrap">
+      <div id="files-panel-wrap" class="hidden">
         <div id="files-panel"></div>
         <div id="files-panel-resize"></div>
       </div>
       <div id="terminal-host"></div>
-      <div id="ssh-panel-wrap">
+      <div id="ssh-panel-wrap" class="hidden">
         <div id="ssh-panel-resize"></div>
         <div id="ssh-panel"></div>
       </div>
@@ -784,6 +784,11 @@
   </div>
   <div id="status"></div>
 
+  <script>
+    // Block the native browser context menu globally (release builds only).
+    // Custom app context menus are unaffected as they are built in JS.
+    document.addEventListener('contextmenu', e => e.preventDefault());
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
@@ -857,7 +862,7 @@
 
       // Load terminal config (font, cursor, scroll)
       // Font fallback chain with good Unicode box-drawing/braille coverage.
-      const FONT_FALLBACKS = ', "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace';
+      const FONT_FALLBACKS = ', "Symbols Nerd Font Mono", "Symbols Nerd Font", "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace';
       let termFontFamily = '"JetBrains Mono", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
       let termFontSize = 14;
       let termCursorStyle = 'block';
@@ -1094,6 +1099,20 @@
         return cleaned;
       }
 
+      function renumberTabs() {
+        let n = 1;
+        for (const tab of tabs.values()) {
+          const newLabel = 'Tab ' + n;
+          tab.label = newLabel;
+          if (!tab.hasCustomTitle) {
+            tab.button.textContent = newLabel;
+            tab.button.title = newLabel;
+          }
+          n++;
+        }
+        nextTabLabel = n;
+      }
+
       function activateTab(tabId) {
         if (!tabs.has(tabId)) {
           return;
@@ -1126,6 +1145,7 @@
         tab.term.dispose();
         tab.button.remove();
         tab.root.remove();
+        renumberTabs();
         updateTabBarVisibility();
 
         if (notifyBackend && tab.spawned) {
@@ -1194,6 +1214,7 @@
           id: tabId,
           label,
           type: 'local', // 'local' or 'ssh'
+          hasCustomTitle: false,
           button,
           root,
           term,
@@ -1213,6 +1234,7 @@
         button.addEventListener('click', () => activateTab(tabId));
         term.onTitleChange((title) => {
           const tabTitle = normalizeTabTitle(title, tab.label);
+          tab.hasCustomTitle = true;
           tab.button.textContent = tabTitle;
           tab.button.title = tabTitle;
         });
@@ -1299,6 +1321,7 @@
         button.addEventListener('click', () => activateTab(tabId));
         term.onTitleChange((title) => {
           const tabTitle = normalizeTabTitle(title, tab.label);
+          tab.hasCustomTitle = true;
           tab.button.textContent = tabTitle;
           tab.button.title = tabTitle;
         });
@@ -1732,6 +1755,9 @@
       } catch (e) {
         showStatus('Failed to initialize first tab: ' + String(e));
       }
+
+      // All UI ready — show the window.
+      await invoke('app_ready');
     })();
   </script>
 </body>

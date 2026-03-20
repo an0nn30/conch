@@ -431,6 +431,11 @@ struct SavedLayout {
 }
 
 #[tauri::command]
+fn app_ready(window: tauri::WebviewWindow) {
+    let _ = window.show();
+}
+
+#[tauri::command]
 fn get_saved_layout() -> SavedLayout {
     let state = config::load_persistent_state().unwrap_or_default();
     SavedLayout {
@@ -695,6 +700,7 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         .resizable(true)
         .decorations(dec)
         .theme(theme)
+        .visible(false)
         .build()?;
     Ok(())
 }
@@ -909,6 +915,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            app_ready,
             spawn_shell,
             write_to_pty,
             resize_pty,
