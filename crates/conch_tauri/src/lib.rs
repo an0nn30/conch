@@ -9,6 +9,7 @@ pub mod platform;
 mod pty_backend;
 pub(crate) mod plugins;
 pub(crate) mod remote;
+pub(crate) mod settings;
 pub(crate) mod theme;
 pub(crate) mod utf8_stream;
 mod watcher;
@@ -65,7 +66,7 @@ const MENU_ACTION_SSH_IMPORT: &str = "ssh-import";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
-struct TauriState {
+pub(crate) struct TauriState {
     ptys: Arc<Mutex<HashMap<String, PtyBackend>>>,
     config: Mutex<UserConfig>,
 }
@@ -517,7 +518,7 @@ fn get_zoom_level() -> f64 {
     if z > 0.0 { z } else { 1.0 }
 }
 
-fn build_app_menu<R: tauri::Runtime>(
+pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     keyboard: &conch_core::config::KeyboardConfig,
 ) -> tauri::Result<Menu<R>> {
@@ -995,6 +996,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             get_home_dir,
             open_new_window,
             rebuild_menu,
+            settings::get_all_settings,
+            settings::save_settings,
+            settings::list_themes,
             remote::ssh_connect,
             remote::ssh_quick_connect,
             remote::ssh_write,
