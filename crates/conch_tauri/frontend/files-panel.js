@@ -10,9 +10,7 @@
   let fitActiveTabFn = null;
   let getActiveTabFn = null;
 
-  // Icons — use PNG assets from icons/ directory
-  const ICON_FOLDER = '<img src="icons/folder.png" width="14" height="14" class="fp-icon">';
-  const ICON_FILE = '<img src="icons/file-dark.png" width="14" height="14" class="fp-icon">';
+  // Navigation icons — PNG assets from icons/ directory
   const ICON_BACK = '<img src="icons/go-previous-dark.png" width="12" height="12" class="fp-icon">';
   const ICON_FWD = '<img src="icons/go-next-dark.png" width="12" height="12" class="fp-icon">';
   const ICON_HOME = '<img src="icons/go-home-dark.png" width="12" height="12" class="fp-icon">';
@@ -341,7 +339,7 @@
       }
       tr.dataset.name = entry.name;
 
-      const icon = entry.is_dir ? ICON_FOLDER : ICON_FILE;
+      const icon = window.fileIcons.iconFor(entry.name, entry.is_dir, !pane.isLocal);
       let cells = `<td class="fp-cell-name">${icon} <span>${esc(entry.name)}</span>`;
       if (ts && ts.status === 'in_progress') {
         cells += `<span class="fp-transfer-pct">${ts.percent || 0}%</span>`;
