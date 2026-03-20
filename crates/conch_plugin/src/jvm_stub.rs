@@ -1,12 +1,39 @@
 //! Stub JVM plugin module — used when the Java SDK JAR was not found at build time.
 
 pub mod runtime {
-    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use crate::bus::PluginBus;
-    use crate::native::{LoadError, PluginMeta};
+    use crate::HostApi;
+
+    /// Metadata about a discovered/loaded plugin.
+    #[derive(Debug, Clone)]
+    pub struct PluginMeta {
+        pub name: String,
+        pub description: String,
+        pub version: String,
+        pub plugin_type: conch_plugin_sdk::PluginType,
+        pub panel_location: conch_plugin_sdk::PanelLocation,
+    }
+
+    /// Error type for plugin loading operations.
+    #[derive(Debug)]
+    pub enum LoadError {
+        Io(std::io::Error),
+        AlreadyLoaded(String),
+        NotLoaded(String),
+    }
+
+    impl std::fmt::Display for LoadError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Io(e) => write!(f, "{e}"),
+                Self::AlreadyLoaded(n) => write!(f, "plugin '{n}' already loaded"),
+                Self::NotLoaded(n) => write!(f, "plugin '{n}' not loaded"),
+            }
+        }
+    }
 
     pub struct JavaPluginManager {
         _private: (),
@@ -15,12 +42,16 @@ pub mod runtime {
     unsafe impl Send for JavaPluginManager {}
 
     impl JavaPluginManager {
-        pub fn new(_bus: Arc<PluginBus>, _host_api: conch_plugin_sdk::HostApi) -> Self {
+        pub fn new(_bus: Arc<PluginBus>, _host_api: Arc<dyn HostApi>) -> Self {
             log::warn!(
                 "JVM plugin support unavailable — binary was built without the Java SDK JAR. \
                  Build it with: make -C java-sdk build"
             );
             Self { _private: () }
+        }
+
+        pub fn probe_jar_name(&mut self, _jar_path: &Path) -> Option<String> {
+            None
         }
 
         pub fn discover(&mut self, _dir: &Path) -> Vec<(PathBuf, PluginMeta)> {
