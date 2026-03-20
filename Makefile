@@ -11,6 +11,7 @@ help:
 	@echo ""
 	@echo "Local builds (run on the target platform):"
 	@echo "  build          Build release binary"
+	@echo "  build-all      Build release binary + Java Plugin SDK"
 	@echo "  dmg-native     Build DMG for current macOS architecture"
 	@echo "  dmg-universal  Build universal DMG (ARM64 + x86_64, macOS only)"
 	@echo "  deb            Build .deb package (run on Linux)"
@@ -43,9 +44,12 @@ java-sdk:
 # ===========================================================================
 
 .PHONY: build
-build: java-sdk
+build:
 	cargo build --release -p conch_tauri
 	@echo "Binary at target/release/conch"
+
+.PHONY: build-all
+build-all: java-sdk build
 
 # ---------------------------------------------------------------------------
 # macOS — DMG (current architecture)
