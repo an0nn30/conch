@@ -5,6 +5,7 @@
 
 pub mod callbacks;
 pub mod config;
+pub mod handler;
 pub mod known_hosts;
 
 // Re-export russh types used by app crates (Handle, Channel, ChannelMsg).
