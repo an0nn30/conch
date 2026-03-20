@@ -747,10 +747,192 @@
     c.appendChild(viBlinkRow);
   }
 
-  // --- Plugins section (placeholder) ---
+  // --- Plugins section ---
 
   function renderPlugins(c) {
-    c.innerHTML = '<h3>Plugins</h3><p style="color:var(--dim-fg)">Coming soon...</p>';
+    const h = document.createElement('h3');
+    h.textContent = 'Plugins';
+    c.appendChild(h);
+
+    // Sub-group: Plugin System
+    addSectionLabel(c, 'Plugin System');
+
+    const enablePluginsSwitch = makeSwitch(
+      pendingSettings.conch.plugins.enabled,
+      (val) => { pendingSettings.conch.plugins.enabled = val; }
+    );
+    addRow(c, 'Enable Plugins', 'Master switch \u2014 disable to run as pure terminal', enablePluginsSwitch);
+
+    addDivider(c);
+
+    // Sub-group: Plugin Types
+    addSectionLabel(c, 'Plugin Types');
+
+    const luaSwitch = makeSwitch(
+      pendingSettings.conch.plugins.lua,
+      (val) => { pendingSettings.conch.plugins.lua = val; }
+    );
+    addRow(c, 'Lua Plugins', null, luaSwitch);
+
+    const javaSwitch = makeSwitch(
+      pendingSettings.conch.plugins.java,
+      (val) => { pendingSettings.conch.plugins.java = val; }
+    );
+    addRow(c, 'Java Plugins', 'Disabling avoids JVM startup overhead', javaSwitch);
+
+    addDivider(c);
+
+    // Sub-group: Search Paths
+    addSectionLabel(c, 'Search Paths');
+
+    const pathsContainer = document.createElement('div');
+    c.appendChild(pathsContainer);
+
+    function renderSearchPaths() {
+      pathsContainer.innerHTML = '';
+      const paths = pendingSettings.conch.plugins.search_paths || [];
+
+      for (let i = 0; i < paths.length; i++) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:6px; margin-bottom:4px;';
+
+        const pathInput = makeInput('text', paths[i], { style: 'flex:1;' });
+        pathInput.addEventListener('input', () => {
+          pendingSettings.conch.plugins.search_paths[i] = pathInput.value;
+        });
+        row.appendChild(pathInput);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'ssh-form-btn settings-env-remove';
+        removeBtn.textContent = 'X';
+        removeBtn.addEventListener('click', () => {
+          pendingSettings.conch.plugins.search_paths.splice(i, 1);
+          renderSearchPaths();
+        });
+        row.appendChild(removeBtn);
+
+        pathsContainer.appendChild(row);
+      }
+
+      const addBtn = document.createElement('button');
+      addBtn.className = 'ssh-form-btn settings-env-add';
+      addBtn.textContent = '+ Add Path';
+      addBtn.addEventListener('click', () => {
+        if (!pendingSettings.conch.plugins.search_paths) {
+          pendingSettings.conch.plugins.search_paths = [];
+        }
+        pendingSettings.conch.plugins.search_paths.push('');
+        renderSearchPaths();
+      });
+      pathsContainer.appendChild(addBtn);
+    }
+
+    renderSearchPaths();
+
+    addDivider(c);
+
+    // Sub-group: Installed Plugins
+    const installedHeader = document.createElement('div');
+    installedHeader.style.cssText = 'display:flex; justify-content:space-between; align-items:center;';
+    const installedLabel = document.createElement('div');
+    installedLabel.className = 'settings-section-label';
+    installedLabel.textContent = 'Installed Plugins';
+    installedHeader.appendChild(installedLabel);
+
+    const rescanBtn = document.createElement('button');
+    rescanBtn.className = 'ssh-form-btn';
+    rescanBtn.textContent = 'Rescan';
+    rescanBtn.addEventListener('click', async () => {
+      rescanBtn.disabled = true;
+      try {
+        cachedPlugins = await invoke('scan_plugins');
+      } catch (e) {
+        if (window.toast) window.toast.error('Plugin Scan Failed', String(e));
+      }
+      rescanBtn.disabled = false;
+      renderPluginList();
+    });
+    installedHeader.appendChild(rescanBtn);
+    c.appendChild(installedHeader);
+
+    const pluginListContainer = document.createElement('div');
+    c.appendChild(pluginListContainer);
+
+    function renderPluginList() {
+      pluginListContainer.innerHTML = '';
+
+      if (!cachedPlugins || cachedPlugins.length === 0) {
+        const empty = document.createElement('div');
+        empty.style.cssText = 'padding:16px; text-align:center; color:var(--dim-fg); font-size:12px;';
+        empty.textContent = 'No plugins found in search paths';
+        pluginListContainer.appendChild(empty);
+        return;
+      }
+
+      for (const plugin of cachedPlugins) {
+        const row = document.createElement('div');
+        row.style.cssText = 'background:var(--bg); border-radius:6px; padding:8px 10px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;';
+
+        const left = document.createElement('div');
+        left.style.cssText = 'display:flex; align-items:center; gap:8px; min-width:0;';
+
+        // Type badge
+        const badge = document.createElement('span');
+        const pType = (plugin.plugin_type || '').toLowerCase();
+        if (pType === 'lua') {
+          badge.style.cssText = 'background:#a6e3a1; color:#1e1e2e; font-size:9px; padding:1px 6px; border-radius:3px; text-transform:uppercase; font-weight:600; flex-shrink:0;';
+        } else {
+          badge.style.cssText = 'background:#f9e2af; color:#1e1e2e; font-size:9px; padding:1px 6px; border-radius:3px; text-transform:uppercase; font-weight:600; flex-shrink:0;';
+        }
+        badge.textContent = pType;
+        left.appendChild(badge);
+
+        // Name + meta
+        const info = document.createElement('div');
+        info.style.cssText = 'min-width:0;';
+        const nameEl = document.createElement('div');
+        nameEl.style.fontWeight = 'bold';
+        nameEl.textContent = plugin.name;
+        info.appendChild(nameEl);
+        const meta = document.createElement('div');
+        meta.style.cssText = 'color:var(--dim-fg); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+        meta.textContent = (plugin.version || '') + ' \u2014 ' + (plugin.path || '');
+        info.appendChild(meta);
+        left.appendChild(info);
+
+        row.appendChild(left);
+
+        // Enable/Disable button
+        const actionBtn = document.createElement('button');
+        actionBtn.className = 'ssh-form-btn';
+        actionBtn.style.cssText = 'flex-shrink:0; margin-left:8px;';
+        actionBtn.textContent = plugin.loaded ? 'Disable' : 'Enable';
+        actionBtn.addEventListener('click', async () => {
+          actionBtn.disabled = true;
+          try {
+            if (plugin.loaded) {
+              await invoke('disable_plugin', { name: plugin.name, source: plugin.source });
+              await invoke('rebuild_menu').catch(() => {});
+              if (window.toast) window.toast.info('Plugin Disabled', plugin.name);
+            } else {
+              await invoke('enable_plugin', { name: plugin.name, source: plugin.source, path: plugin.path });
+              await invoke('rebuild_menu').catch(() => {});
+              if (window.toast) window.toast.success('Plugin Enabled', plugin.name);
+            }
+            cachedPlugins = await invoke('scan_plugins');
+          } catch (e) {
+            if (window.toast) window.toast.error('Plugin Action Failed', String(e));
+          }
+          actionBtn.disabled = false;
+          renderPluginList();
+        });
+        row.appendChild(actionBtn);
+
+        pluginListContainer.appendChild(row);
+      }
+    }
+
+    renderPluginList();
   }
 
   // --- Advanced section ---

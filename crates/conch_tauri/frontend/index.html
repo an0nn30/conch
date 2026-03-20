@@ -908,7 +908,6 @@
   <script src="utils.js"></script>
   <script src="titlebar.js"></script>
   <script src="toast.js"></script>
-  <script src="plugin-manager.js"></script>
   <script src="plugin-widgets.js"></script>
   <script src="settings.js"></script>
   <script src="file-icons.js"></script>
@@ -1545,11 +1544,6 @@
           listen: listenOnCurrentWindow,
           getServerData: () => window.sshPanel ? window.sshPanel.getServerData() : { folders: [], ungrouped: [], ssh_config: [] },
         });
-      }
-
-      // ---- Plugin manager init ----
-      if (window.pluginManager) {
-        window.pluginManager.init({ invoke });
       }
 
       // ---- Settings dialog init ----
