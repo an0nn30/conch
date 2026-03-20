@@ -761,7 +761,7 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
 /// Launch the Tauri-based UI.
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
     let (transfer_tx, mut transfer_rx) =
-        tokio::sync::mpsc::unbounded_channel::<remote::transfer::TransferProgress>();
+        tokio::sync::mpsc::unbounded_channel::<conch_remote::transfer::TransferProgress>();
     let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
     let plugins_config = config.conch.plugins.clone();
     let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new(plugins_config.clone())));

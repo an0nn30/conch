@@ -6,7 +6,7 @@
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 
-use super::ssh::SshHandler;
+use crate::handler::ConchSshHandler;
 
 /// A file entry returned from SFTP or local filesystem operations.
 #[derive(Debug, Clone, Serialize)]
@@ -19,8 +19,8 @@ pub struct FileEntry {
 }
 
 /// Open an SFTP session on the given SSH handle.
-async fn open_sftp(
-    ssh: &russh::client::Handle<SshHandler>,
+pub(crate) async fn open_sftp(
+    ssh: &russh::client::Handle<ConchSshHandler>,
 ) -> Result<SftpSession, String> {
     let channel = ssh
         .channel_open_session()
@@ -37,7 +37,7 @@ async fn open_sftp(
 
 /// List directory entries at `path`.
 pub async fn list_dir(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
 ) -> Result<Vec<FileEntry>, String> {
     let sftp = open_sftp(ssh).await?;
@@ -62,7 +62,7 @@ pub async fn list_dir(
 
 /// Stat a single path.
 pub async fn stat(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
 ) -> Result<FileEntry, String> {
     let sftp = open_sftp(ssh).await?;
@@ -85,7 +85,7 @@ pub async fn stat(
 
 /// Read file contents (up to `length` bytes from `offset`), returned as base64.
 pub async fn read_file(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
     offset: u64,
     length: usize,
@@ -128,7 +128,7 @@ pub struct ReadFileResult {
 
 /// Write data to a file (base64-encoded input).
 pub async fn write_file(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
     data_b64: &str,
 ) -> Result<u64, String> {
@@ -154,7 +154,7 @@ pub async fn write_file(
 
 /// Create a directory.
 pub async fn mkdir(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
 ) -> Result<(), String> {
     let sftp = open_sftp(ssh).await?;
@@ -165,7 +165,7 @@ pub async fn mkdir(
 
 /// Rename a file or directory.
 pub async fn rename(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     from: &str,
     to: &str,
 ) -> Result<(), String> {
@@ -177,7 +177,7 @@ pub async fn rename(
 
 /// Delete a file or directory.
 pub async fn remove(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
     is_dir: bool,
 ) -> Result<(), String> {
@@ -195,7 +195,7 @@ pub async fn remove(
 
 /// Resolve a path to its canonical absolute form.
 pub async fn realpath(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
 ) -> Result<String, String> {
     let sftp = open_sftp(ssh).await?;

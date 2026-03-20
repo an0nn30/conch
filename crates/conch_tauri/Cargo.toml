@@ -17,6 +17,7 @@ path = "src/lib.rs"
 conch_core = { workspace = true }
 conch_plugin = { workspace = true }
 conch_plugin_sdk = { workspace = true }
+conch_remote = { workspace = true }
 tauri = { version = "2" }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
@@ -32,13 +33,8 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 arboard = "3"
 
-# SSH + SFTP
-russh = "0.48"
-russh-keys = "0.48"
-russh-sftp = "2.1"
-ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256"] }
+# SSH (via conch_remote, only async-trait needed locally for TauriRemoteCallbacks)
 async-trait = "0.1"
-base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

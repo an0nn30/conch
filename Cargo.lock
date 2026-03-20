@@ -600,16 +600,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "conch_remote"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "dirs",
+ "log",
+ "parking_lot",
+ "russh",
+ "russh-keys",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "ssh-key",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "conch_tauri"
 version = "2.0.0"
 dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
- "base64 0.22.1",
  "conch_core",
  "conch_plugin",
  "conch_plugin_sdk",
+ "conch_remote",
  "dirs",
  "env_logger",
  "libc",
@@ -618,12 +638,8 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "portable-pty",
- "russh",
- "russh-keys",
- "russh-sftp",
  "serde",
  "serde_json",
- "ssh-key",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

@@ -1,9 +1,9 @@
 //! SSH server configuration — server entries, folders, persistence.
 //!
-//! Persisted to `~/.config/conch/remote/servers.json`.
+//! Persisted to a caller-supplied config directory as `servers.json`.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -169,27 +169,22 @@ impl SshConfig {
 // Persistence
 // ---------------------------------------------------------------------------
 
-fn config_dir() -> PathBuf {
-    conch_core::config::config_dir().join("remote")
-}
-
-fn config_path() -> PathBuf {
-    config_dir().join("servers.json")
-}
-
-pub fn load_config() -> SshConfig {
-    let path = config_path();
+/// Load the SSH config from `config_dir/servers.json`.
+/// Returns an empty `SshConfig` if the file does not exist or cannot be parsed.
+pub fn load_config(config_dir: &Path) -> SshConfig {
+    let path = config_dir.join("servers.json");
     match fs::read_to_string(&path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
         Err(_) => SshConfig::default(),
     }
 }
 
-pub fn save_config(config: &SshConfig) {
-    let dir = config_dir();
-    let _ = fs::create_dir_all(&dir);
+/// Persist the SSH config to `config_dir/servers.json`.
+/// Creates `config_dir` if it does not exist.
+pub fn save_config(config_dir: &Path, config: &SshConfig) {
+    let _ = fs::create_dir_all(config_dir);
     if let Ok(json) = serde_json::to_string_pretty(config) {
-        let _ = fs::write(config_path(), json);
+        let _ = fs::write(config_dir.join("servers.json"), json);
     }
 }
 
@@ -304,6 +299,7 @@ impl SshConfig {
 // ~/.ssh/config import
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_os = "ios"))]
 pub fn parse_ssh_config() -> Vec<ServerEntry> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
@@ -316,6 +312,7 @@ pub fn parse_ssh_config() -> Vec<ServerEntry> {
     parse_ssh_config_str(&contents)
 }
 
+#[cfg(not(target_os = "ios"))]
 fn parse_ssh_config_str(contents: &str) -> Vec<ServerEntry> {
     let mut entries = Vec::new();
     let mut current: Option<PartialEntry> = None;
@@ -401,6 +398,7 @@ fn parse_ssh_config_str(contents: &str) -> Vec<ServerEntry> {
     entries
 }
 
+#[cfg(not(target_os = "ios"))]
 struct PartialEntry {
     alias: String,
     hostname: Option<String>,
@@ -411,6 +409,7 @@ struct PartialEntry {
     proxy_jump: Option<String>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl PartialEntry {
     fn into_server_entry(self) -> Option<ServerEntry> {
         let host = self.hostname.unwrap_or_else(|| self.alias.clone());
@@ -545,6 +544,7 @@ mod tests {
         assert_eq!(port, 2222);
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[test]
     fn parse_ssh_config_basic() {
         let config = "\
@@ -566,6 +566,7 @@ Host server2
         assert_eq!(entries[1].host, "example.com");
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[test]
     fn parse_ssh_config_skip_wildcard() {
         let config = "\
@@ -580,6 +581,7 @@ Host myserver
         assert_eq!(entries[0].label, "myserver");
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[test]
     fn parse_ssh_config_proxy_jump() {
         let config = "\
@@ -593,5 +595,23 @@ Host bastion-target
             entries[0].proxy_jump.as_deref(),
             Some("bastion.example.com")
         );
+    }
+
+    #[test]
+    fn load_config_from_missing_dir() {
+        let cfg = load_config(&std::path::PathBuf::from("/nonexistent/dir"));
+        assert!(cfg.folders.is_empty());
+        assert!(cfg.ungrouped.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SshConfig::default();
+        cfg.add_server(make_entry("s1", "host1"));
+        save_config(dir.path(), &cfg);
+        let loaded = load_config(dir.path());
+        assert_eq!(loaded.ungrouped.len(), 1);
+        assert_eq!(loaded.ungrouped[0].host, "host1");
     }
 }

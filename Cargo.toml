@@ -4,6 +4,7 @@ members = [
     "crates/conch_core",
     "crates/conch_plugin_sdk",
     "crates/conch_plugin",
+    "crates/conch_remote",
     "crates/conch_tauri",
 ]
 
@@ -17,6 +18,7 @@ license = "Apache-2.0"
 conch_core = { path = "crates/conch_core" }
 conch_plugin_sdk = { path = "crates/conch_plugin_sdk" }
 conch_plugin = { path = "crates/conch_plugin" }
+conch_remote = { path = "crates/conch_remote" }
 conch_tauri = { path = "crates/conch_tauri" }
 
 # Serialization (shared)

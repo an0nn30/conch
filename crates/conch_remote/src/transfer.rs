@@ -10,8 +10,9 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use super::sftp;
-use super::ssh::SshHandler;
+use crate::handler::ConchSshHandler;
+use crate::sftp;
+use crate::sftp::open_sftp;
 
 // ---------------------------------------------------------------------------
 // Transfer types
@@ -49,7 +50,7 @@ pub struct TransferProgress {
 // Transfer handle
 // ---------------------------------------------------------------------------
 
-pub(crate) struct TransferHandle {
+pub struct TransferHandle {
     pub cancelled: Arc<AtomicBool>,
     pub abort_handle: tokio::task::AbortHandle,
 }
@@ -58,7 +59,7 @@ pub(crate) struct TransferHandle {
 // Transfer registry
 // ---------------------------------------------------------------------------
 
-pub(crate) struct TransferRegistry {
+pub struct TransferRegistry {
     pub transfers: HashMap<String, TransferHandle>,
 }
 
@@ -90,9 +91,9 @@ impl TransferRegistry {
 
 /// Start a background download from remote to local.
 /// Returns the transfer_id.
-pub(crate) fn start_download(
+pub fn start_download(
     transfer_id: String,
-    ssh_handle: Arc<russh::client::Handle<SshHandler>>,
+    ssh_handle: Arc<russh::client::Handle<ConchSshHandler>>,
     remote_path: String,
     local_path: String,
     progress_tx: mpsc::UnboundedSender<TransferProgress>,
@@ -163,7 +164,7 @@ pub(crate) fn start_download(
 
 /// Download a single file via SFTP in chunks.
 async fn download_file(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     remote_path: &str,
     local_path: &str,
     cancelled: &AtomicBool,
@@ -235,9 +236,9 @@ async fn download_file(
 
 /// Start a background upload from local to remote.
 /// Returns the transfer_id.
-pub(crate) fn start_upload(
+pub fn start_upload(
     transfer_id: String,
-    ssh_handle: Arc<russh::client::Handle<SshHandler>>,
+    ssh_handle: Arc<russh::client::Handle<ConchSshHandler>>,
     local_path: String,
     remote_path: String,
     progress_tx: mpsc::UnboundedSender<TransferProgress>,
@@ -308,7 +309,7 @@ pub(crate) fn start_upload(
 
 /// Upload a single file via SFTP in chunks.
 async fn upload_file(
-    ssh: &russh::client::Handle<SshHandler>,
+    ssh: &russh::client::Handle<ConchSshHandler>,
     local_path: &str,
     remote_path: &str,
     cancelled: &AtomicBool,
@@ -372,26 +373,6 @@ async fn upload_file(
     }
 
     Ok(bytes_transferred)
-}
-
-// ---------------------------------------------------------------------------
-// SFTP helper (reuse the open_sftp pattern)
-// ---------------------------------------------------------------------------
-
-async fn open_sftp(
-    ssh: &russh::client::Handle<SshHandler>,
-) -> Result<russh_sftp::client::SftpSession, String> {
-    let channel = ssh
-        .channel_open_session()
-        .await
-        .map_err(|e| format!("failed to open SFTP channel: {e}"))?;
-    channel
-        .request_subsystem(true, "sftp")
-        .await
-        .map_err(|e| format!("SFTP subsystem request failed: {e}"))?;
-    russh_sftp::client::SftpSession::new(channel.into_stream())
-        .await
-        .map_err(|e| format!("SFTP session init failed: {e}"))
 }
 
 #[cfg(test)]

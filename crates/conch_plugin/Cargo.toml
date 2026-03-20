@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "Host-side plugin infrastructure: message bus, Lua and Java runtimes"
 
+[features]
+default = ["java"]
+java = ["dep:jni"]
+
 [dependencies]
 conch_plugin_sdk = { workspace = true }
 tokio = { workspace = true }
@@ -11,6 +15,6 @@ parking_lot = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
 mlua = { workspace = true }
-jni = { version = "0.21", features = ["invocation"] }
+jni = { version = "0.21", features = ["invocation"], optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"

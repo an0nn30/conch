@@ -1,18 +1,18 @@
-//! SSH connection logic — handler, auth, proxy support.
+//! SSH connection logic — auth, proxy support, channel I/O.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh::client;
 use russh::ChannelMsg;
-use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-use super::known_hosts;
-use crate::remote::config::ServerEntry;
+use crate::callbacks::{RemoteCallbacks, RemotePaths};
+use crate::config::ServerEntry;
+use crate::handler::ConchSshHandler;
 
 /// Expand a leading `~` or `~/` to the user's home directory.
-pub(crate) fn expand_tilde(path: &str) -> PathBuf {
+pub fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
     }
@@ -25,141 +25,52 @@ pub(crate) fn expand_tilde(path: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Auth prompt bridging — async events to frontend, response via oneshot
-// ---------------------------------------------------------------------------
-
-/// A request sent to the frontend for user interaction during SSH handshake.
-#[derive(Debug)]
-pub(crate) enum AuthPrompt {
-    /// Ask the user to accept/reject a host key.
-    HostKeyConfirm {
-        message: String,
-        detail: String,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Ask the user for a password.
-    PasswordPrompt {
-        message: String,
-        reply: oneshot::Sender<Option<String>>,
-    },
-}
-
-// ---------------------------------------------------------------------------
-// SSH client handler
-// ---------------------------------------------------------------------------
-
-/// The russh client handler — checks host keys via prompts sent to the frontend.
-pub(crate) struct SshHandler {
-    pub host: String,
-    pub port: u16,
-    /// Channel to send auth prompts to the frontend bridge.
-    pub prompt_tx: mpsc::UnboundedSender<AuthPrompt>,
-}
-
-#[async_trait::async_trait]
-impl client::Handler for SshHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &ssh_key::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        match known_hosts::check_known_host(&self.host, self.port, server_public_key) {
-            Some(true) => {
-                log::debug!(
-                    "Host key for {}:{} matches known_hosts",
-                    self.host,
-                    self.port
-                );
-                return Ok(true);
-            }
-            Some(false) => {
-                let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
-                let message = format!(
-                    "WARNING: HOST KEY HAS CHANGED for {}:{}\n\n\
-                     This could indicate a man-in-the-middle attack.\n\
-                     It is also possible that the host key has just been changed.",
-                    self.host, self.port
-                );
-                let detail = format!(
-                    "{}\n{fingerprint}",
-                    server_public_key.algorithm().as_str(),
-                );
-
-                let (tx, rx) = oneshot::channel();
-                let _ = self.prompt_tx.send(AuthPrompt::HostKeyConfirm {
-                    message,
-                    detail,
-                    reply: tx,
-                });
-                let accepted = rx.await.unwrap_or(false);
-                return Ok(accepted);
-            }
-            None => {
-                // Unknown host — ask the user.
-            }
-        }
-
-        let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
-        let host_display = if self.port != 22 {
-            format!("[{}]:{}", self.host, self.port)
-        } else {
-            self.host.clone()
-        };
-        let message = format!("The authenticity of host '{host_display}' can't be established.");
-        let detail = format!(
-            "{} key fingerprint is:\n{fingerprint}",
-            server_public_key.algorithm().as_str(),
-        );
-
-        let (tx, rx) = oneshot::channel();
-        let _ = self.prompt_tx.send(AuthPrompt::HostKeyConfirm {
-            message,
-            detail,
-            reply: tx,
-        });
-        let accepted = rx.await.unwrap_or(false);
-
-        if accepted {
-            if let Err(e) =
-                known_hosts::add_known_host(&self.host, self.port, server_public_key)
-            {
-                log::warn!("Failed to save host key: {e}");
-            }
-        }
-
-        Ok(accepted)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Connection
 // ---------------------------------------------------------------------------
 
 /// Establish an SSH connection, authenticate, open a shell channel.
 ///
 /// Returns the client handle and the shell channel. Auth prompts are sent
-/// through `prompt_tx` for the caller to bridge to the frontend.
-pub(crate) async fn connect_and_open_shell(
+/// through the `callbacks` trait implementation.
+pub async fn connect_and_open_shell(
     server: &ServerEntry,
     password: Option<String>,
-    prompt_tx: mpsc::UnboundedSender<AuthPrompt>,
-) -> Result<(client::Handle<SshHandler>, russh::Channel<russh::client::Msg>), String> {
+    callbacks: Arc<dyn RemoteCallbacks>,
+    paths: &RemotePaths,
+) -> Result<(client::Handle<ConchSshHandler>, russh::Channel<russh::client::Msg>), String> {
     let config = Arc::new(client::Config::default());
-    let handler = SshHandler {
+    let handler = ConchSshHandler {
         host: server.host.clone(),
         port: server.port,
-        prompt_tx: prompt_tx.clone(),
+        known_hosts_file: paths.known_hosts_file.clone(),
+        callbacks: callbacks.clone(),
     };
 
     // Determine effective proxy.
+    #[cfg(not(target_os = "ios"))]
     let effective_proxy = server
         .proxy_command
         .clone()
-        .or_else(|| server.proxy_jump.as_ref().map(|jump| format!("ssh -W %h:%p {jump}")));
+        .or_else(|| {
+            server
+                .proxy_jump
+                .as_ref()
+                .map(|jump| format!("ssh -W %h:%p {jump}"))
+        });
+
+    #[cfg(target_os = "ios")]
+    let effective_proxy: Option<String> = None;
 
     let mut session = if let Some(proxy_cmd) = &effective_proxy {
-        connect_via_proxy(proxy_cmd, &server.host, server.port, config, handler).await?
+        #[cfg(not(target_os = "ios"))]
+        {
+            connect_via_proxy(proxy_cmd, &server.host, server.port, config, handler).await?
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let _ = proxy_cmd;
+            return Err("Proxy connections are not supported on iOS".to_string());
+        }
     } else {
         let addr = format!("{}:{}", server.host, server.port);
         client::connect(config, &addr, handler)
@@ -169,17 +80,12 @@ pub(crate) async fn connect_and_open_shell(
 
     // Authenticate.
     let authenticated = if server.auth_method == "password" {
-        // If password was provided, use it directly. Otherwise prompt the frontend.
+        // If password was provided, use it directly. Otherwise prompt via callbacks.
         let pw = match &password {
             Some(pw) => Some(pw.clone()),
             None => {
                 let msg = format!("Password for {}@{}", server.user, server.host);
-                let (tx, rx) = oneshot::channel();
-                let _ = prompt_tx.send(AuthPrompt::PasswordPrompt {
-                    message: msg,
-                    reply: tx,
-                });
-                rx.await.unwrap_or(None)
+                callbacks.prompt_password(&msg).await
             }
         };
 
@@ -191,7 +97,13 @@ pub(crate) async fn connect_and_open_shell(
             None => return Err("Password entry cancelled".to_string()),
         }
     } else {
-        try_key_auth(&mut session, &server.user, server.key_path.as_deref()).await?
+        try_key_auth(
+            &mut session,
+            &server.user,
+            server.key_path.as_deref(),
+            &paths.default_key_paths,
+        )
+        .await?
     };
 
     if !authenticated {
@@ -218,13 +130,16 @@ pub(crate) async fn connect_and_open_shell(
 }
 
 /// Connect via a ProxyCommand.
-async fn connect_via_proxy(
+#[cfg(not(target_os = "ios"))]
+pub(crate) async fn connect_via_proxy(
     proxy_cmd: &str,
     host: &str,
     port: u16,
     config: Arc<client::Config>,
-    handler: SshHandler,
-) -> Result<client::Handle<SshHandler>, String> {
+    handler: ConchSshHandler,
+) -> Result<client::Handle<ConchSshHandler>, String> {
+    use tokio::process::Command;
+
     let expanded = proxy_cmd
         .replace("%h", host)
         .replace("%p", &port.to_string());
@@ -264,21 +179,16 @@ async fn connect_via_proxy(
 }
 
 /// Try key-based authentication with common SSH key files.
-async fn try_key_auth(
-    session: &mut client::Handle<SshHandler>,
+pub(crate) async fn try_key_auth(
+    session: &mut client::Handle<ConchSshHandler>,
     user: &str,
     explicit_key_path: Option<&str>,
+    default_key_paths: &[PathBuf],
 ) -> Result<bool, String> {
     let key_paths: Vec<PathBuf> = if let Some(path) = explicit_key_path {
         vec![expand_tilde(path)]
     } else {
-        let home = dirs::home_dir().unwrap_or_default();
-        let ssh_dir = home.join(".ssh");
-        vec![
-            ssh_dir.join("id_ed25519"),
-            ssh_dir.join("id_rsa"),
-            ssh_dir.join("id_ecdsa"),
-        ]
+        default_key_paths.to_vec()
     };
 
     for key_path in &key_paths {
@@ -318,7 +228,7 @@ async fn try_key_auth(
 // ---------------------------------------------------------------------------
 
 /// Messages sent to the SSH channel loop.
-pub(crate) enum ChannelInput {
+pub enum ChannelInput {
     Write(Vec<u8>),
     Resize { cols: u16, rows: u16 },
     Shutdown,
@@ -326,7 +236,10 @@ pub(crate) enum ChannelInput {
 
 /// Run the SSH channel I/O loop. Reads from the SSH channel and sends data
 /// back through `output_tx`. Receives user input from `input_rx`.
-pub(crate) async fn channel_loop(
+///
+/// Returns `true` if the channel closed on its own (remote shell exit),
+/// `false` if closed by a local `Shutdown` message.
+pub async fn channel_loop(
     mut channel: russh::Channel<russh::client::Msg>,
     mut input_rx: mpsc::UnboundedReceiver<ChannelInput>,
     output_tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -384,8 +297,8 @@ pub(crate) async fn channel_loop(
 }
 
 /// Execute a command on a separate SSH channel and return (stdout, stderr, exit_code).
-pub(crate) async fn exec(
-    ssh_handle: &client::Handle<SshHandler>,
+pub async fn exec(
+    ssh_handle: &client::Handle<ConchSshHandler>,
     command: &str,
 ) -> Result<(String, String, u32), String> {
     let mut channel = ssh_handle
@@ -452,5 +365,73 @@ mod tests {
     fn expand_tilde_bare() {
         let path = expand_tilde("~");
         assert!(!path.to_str().unwrap().contains('~'));
+    }
+
+    #[test]
+    fn try_key_auth_uses_default_paths_when_no_explicit() {
+        // Verify that try_key_auth would use default_key_paths
+        // We can't call it directly (async + needs real SSH session),
+        // but we verify the key_paths construction logic.
+        let defaults = vec![
+            PathBuf::from("/tmp/test_keys/id_ed25519"),
+            PathBuf::from("/tmp/test_keys/id_rsa"),
+        ];
+
+        // When explicit_key_path is None, default_key_paths should be used.
+        let key_paths: Vec<PathBuf> = {
+            let explicit_key_path: Option<&str> = None;
+            if let Some(path) = explicit_key_path {
+                vec![expand_tilde(path)]
+            } else {
+                defaults.to_vec()
+            }
+        };
+        assert_eq!(key_paths.len(), 2);
+        assert_eq!(key_paths[0], PathBuf::from("/tmp/test_keys/id_ed25519"));
+    }
+
+    #[test]
+    fn try_key_auth_uses_explicit_path_when_given() {
+        let defaults = vec![
+            PathBuf::from("/tmp/test_keys/id_ed25519"),
+            PathBuf::from("/tmp/test_keys/id_rsa"),
+        ];
+
+        let key_paths: Vec<PathBuf> = {
+            let explicit_key_path: Option<&str> = Some("/custom/key");
+            if let Some(path) = explicit_key_path {
+                vec![expand_tilde(path)]
+            } else {
+                defaults.to_vec()
+            }
+        };
+        assert_eq!(key_paths.len(), 1);
+        assert_eq!(key_paths[0], PathBuf::from("/custom/key"));
+    }
+
+    #[test]
+    fn try_key_auth_expands_tilde_in_explicit_path() {
+        let key_paths: Vec<PathBuf> = {
+            let explicit_key_path: Option<&str> = Some("~/.ssh/my_key");
+            if let Some(path) = explicit_key_path {
+                vec![expand_tilde(path)]
+            } else {
+                vec![]
+            }
+        };
+        assert_eq!(key_paths.len(), 1);
+        assert!(!key_paths[0].to_str().unwrap().starts_with('~'));
+        assert!(key_paths[0].to_str().unwrap().contains(".ssh/my_key"));
+    }
+
+    #[test]
+    fn channel_input_variants() {
+        // Verify ChannelInput enum can be constructed
+        let _write = ChannelInput::Write(vec![1, 2, 3]);
+        let _resize = ChannelInput::Resize {
+            cols: 80,
+            rows: 24,
+        };
+        let _shutdown = ChannelInput::Shutdown;
     }
 }

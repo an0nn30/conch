@@ -1,0 +1,24 @@
+[package]
+name = "conch_remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-agnostic SSH, SFTP, and tunnel operations for Conch"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+base64 = { workspace = true }
+async-trait = "0.1"
+russh = "0.48"
+russh-keys = "0.48"
+russh-sftp = "2.1"
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256"] }
+
+[dev-dependencies]
+tempfile = "3"

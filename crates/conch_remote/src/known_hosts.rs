@@ -2,13 +2,15 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn known_hosts_path() -> Option<PathBuf> {
+/// Returns the default path to `~/.ssh/known_hosts`, or `None` if the home
+/// directory cannot be determined.
+pub fn default_known_hosts_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("known_hosts"))
 }
 
-fn host_key(host: &str, port: u16) -> String {
+pub(crate) fn host_key(host: &str, port: u16) -> String {
     if port == 22 {
         host.to_string()
     } else {
@@ -16,19 +18,19 @@ fn host_key(host: &str, port: u16) -> String {
     }
 }
 
-/// Check if a host key is already in known_hosts.
+/// Check if a host key is already in the given `known_hosts` file.
 ///
 /// Returns:
 /// - `Some(true)` if the key matches
 /// - `Some(false)` if the host exists but key differs (MITM warning)
 /// - `None` if the host is unknown
 pub fn check_known_host(
+    known_hosts_file: &Path,
     host: &str,
     port: u16,
     server_key: &ssh_key::PublicKey,
 ) -> Option<bool> {
-    let path = known_hosts_path()?;
-    let contents = fs::read_to_string(&path).ok()?;
+    let contents = fs::read_to_string(known_hosts_file).ok()?;
     let lookup = host_key(host, port);
     let server_key_str = server_key.to_openssh().ok()?;
     let server_key_data = key_data_from_openssh(&server_key_str);
@@ -65,15 +67,14 @@ pub fn check_known_host(
     None
 }
 
-/// Add a host key to `~/.ssh/known_hosts`.
+/// Add a host key to the given `known_hosts` file.
 pub fn add_known_host(
+    known_hosts_file: &Path,
     host: &str,
     port: u16,
     server_key: &ssh_key::PublicKey,
 ) -> Result<(), String> {
-    let path = known_hosts_path().ok_or("cannot determine home directory")?;
-
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = known_hosts_file.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("cannot create ~/.ssh: {e}"))?;
     }
 
@@ -87,7 +88,7 @@ pub fn add_known_host(
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(known_hosts_file)
         .map_err(|e| format!("cannot open known_hosts: {e}"))?;
 
     file.write_all(line.as_bytes())
@@ -96,7 +97,7 @@ pub fn add_known_host(
     Ok(())
 }
 
-fn key_data_from_openssh(openssh_str: &str) -> String {
+pub(crate) fn key_data_from_openssh(openssh_str: &str) -> String {
     let mut parts = openssh_str.splitn(3, ' ');
     let key_type = parts.next().unwrap_or("");
     let b64 = parts.next().unwrap_or("");
@@ -129,5 +130,12 @@ mod tests {
         let input = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest";
         let data = key_data_from_openssh(input);
         assert_eq!(data, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest");
+    }
+
+    #[test]
+    fn default_known_hosts_path_is_under_ssh_dir() {
+        if let Some(path) = default_known_hosts_path() {
+            assert!(path.ends_with(".ssh/known_hosts"));
+        }
     }
 }

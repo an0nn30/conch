@@ -3,7 +3,7 @@
 //! Both modules return `FileEntry` so the frontend can treat local and
 //! remote file browsers identically.
 
-use super::sftp::FileEntry;
+use conch_remote::sftp::FileEntry;
 
 /// List directory entries at the given local path.
 pub fn list_dir(path: &str) -> Result<Vec<FileEntry>, String> {

@@ -9,11 +9,11 @@
 
 pub mod bus;
 pub mod host_api;
-#[cfg(java_sdk_available)]
+#[cfg(feature = "java")]
 pub mod jvm;
-#[cfg(not(java_sdk_available))]
+#[cfg(not(feature = "java"))]
 pub mod jvm_stub;
-#[cfg(not(java_sdk_available))]
+#[cfg(not(feature = "java"))]
 pub use jvm_stub as jvm;
 pub mod lua;
 

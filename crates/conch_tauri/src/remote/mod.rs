@@ -3,14 +3,13 @@
 //! Exposes Tauri commands for SSH session lifecycle. The frontend sees
 //! the same `pty-output` / `pty-exit` events as local PTY tabs — xterm.js
 //! doesn't care whether bytes come from a local shell or an SSH channel.
+//!
+//! All SSH/SFTP/transfer/tunnel logic is delegated to `conch_remote`.
+//! This module provides the Tauri command wrappers and the
+//! `TauriRemoteCallbacks` implementation that bridges `RemoteCallbacks`
+//! to Tauri events + oneshot prompt channels.
 
-pub(crate) mod config;
-mod known_hosts;
 pub(crate) mod local_fs;
-pub(crate) mod sftp;
-pub(crate) mod ssh;
-pub(crate) mod transfer;
-pub(crate) mod tunnel;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,10 +19,90 @@ use serde::Serialize;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 
-use config::{ServerEntry, SshConfig};
-use ssh::{AuthPrompt, ChannelInput, SshHandler};
+use conch_remote::callbacks::{RemoteCallbacks, RemotePaths};
+use conch_remote::config::{ExportPayload, SavedTunnel, ServerEntry, ServerFolder, SshConfig};
+use conch_remote::handler::ConchSshHandler;
+use conch_remote::ssh::ChannelInput;
+use conch_remote::transfer::{TransferProgress, TransferRegistry};
+use conch_remote::tunnel::{TunnelManager, TunnelStatus};
 
 use crate::{PtyExitEvent, PtyOutputEvent};
+
+// ---------------------------------------------------------------------------
+// TauriRemoteCallbacks — bridges RemoteCallbacks to Tauri events
+// ---------------------------------------------------------------------------
+
+/// Bridges `conch_remote::callbacks::RemoteCallbacks` to Tauri events and
+/// oneshot prompt channels. When the SSH handler needs user interaction
+/// (host key confirmation, password entry), this implementation emits a
+/// Tauri event and waits on a oneshot channel that the frontend will
+/// resolve via `auth_respond_host_key` / `auth_respond_password`.
+pub(crate) struct TauriRemoteCallbacks {
+    pub app: tauri::AppHandle,
+    pub pending_prompts: Arc<Mutex<PendingPrompts>>,
+}
+
+#[async_trait::async_trait]
+impl RemoteCallbacks for TauriRemoteCallbacks {
+    async fn verify_host_key(&self, message: &str, fingerprint: &str) -> bool {
+        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_prompts
+            .lock()
+            .host_key
+            .insert(prompt_id.clone(), tx);
+        let _ = self.app.emit(
+            "ssh-host-key-prompt",
+            HostKeyPromptEvent {
+                prompt_id,
+                message: message.to_string(),
+                detail: fingerprint.to_string(),
+            },
+        );
+        rx.await.unwrap_or(false)
+    }
+
+    async fn prompt_password(&self, message: &str) -> Option<String> {
+        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_prompts
+            .lock()
+            .password
+            .insert(prompt_id.clone(), tx);
+        let _ = self.app.emit(
+            "ssh-password-prompt",
+            PasswordPromptEvent {
+                prompt_id,
+                message: message.to_string(),
+            },
+        );
+        rx.await.unwrap_or(None)
+    }
+
+    fn on_transfer_progress(&self, _transfer_id: &str, _bytes: u64, _total: Option<u64>) {
+        // Transfer progress is handled via the existing mpsc channel pattern
+        // in the transfer module, not through callbacks.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Desktop paths
+// ---------------------------------------------------------------------------
+
+/// Build the `RemotePaths` for a desktop environment.
+fn desktop_remote_paths() -> RemotePaths {
+    let home = dirs::home_dir().unwrap_or_default();
+    let ssh_dir = home.join(".ssh");
+    RemotePaths {
+        known_hosts_file: ssh_dir.join("known_hosts"),
+        config_dir: conch_core::config::config_dir().join("remote"),
+        default_key_paths: vec![
+            ssh_dir.join("id_ed25519"),
+            ssh_dir.join("id_rsa"),
+            ssh_dir.join("id_ecdsa"),
+        ],
+    }
+}
 
 /// Spawn an async task that drains `output_rx` and emits `pty-output` events,
 /// buffering partial UTF-8 sequences between channel messages.
@@ -45,7 +124,11 @@ fn spawn_output_forwarder(
             let _ = app.emit_to(
                 &wl,
                 "pty-output",
-                PtyOutputEvent { window_label: wl.clone(), tab_id, data: text },
+                PtyOutputEvent {
+                    window_label: wl.clone(),
+                    tab_id,
+                    data: text,
+                },
             );
         }
     });
@@ -71,7 +154,7 @@ struct PasswordPromptEvent {
 }
 
 /// Pending auth prompts waiting for frontend responses.
-struct PendingPrompts {
+pub(crate) struct PendingPrompts {
     host_key: HashMap<String, tokio::sync::oneshot::Sender<bool>>,
     password: HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>,
 }
@@ -92,7 +175,7 @@ impl PendingPrompts {
 /// A live SSH session tracked by the backend.
 pub(crate) struct SshSession {
     pub input_tx: mpsc::UnboundedSender<ChannelInput>,
-    pub ssh_handle: Arc<russh::client::Handle<SshHandler>>,
+    pub ssh_handle: Arc<conch_remote::russh::client::Handle<ConchSshHandler>>,
     pub host: String,
     pub user: String,
     pub port: u16,
@@ -107,29 +190,31 @@ pub(crate) struct RemoteState {
     /// Hosts imported from `~/.ssh/config`.
     pub ssh_config_entries: Vec<ServerEntry>,
     /// Pending auth prompts waiting for frontend responses.
-    pending_prompts: PendingPrompts,
+    pub pending_prompts: Arc<Mutex<PendingPrompts>>,
     /// Active tunnel manager.
-    pub tunnel_manager: tunnel::TunnelManager,
+    pub tunnel_manager: TunnelManager,
     /// Active file transfers.
-    pub transfers: Arc<Mutex<transfer::TransferRegistry>>,
+    pub transfers: Arc<Mutex<TransferRegistry>>,
     /// Channel for transfer progress events (forwarded to Tauri events).
-    pub transfer_progress_tx: mpsc::UnboundedSender<transfer::TransferProgress>,
+    pub transfer_progress_tx: mpsc::UnboundedSender<TransferProgress>,
+    /// Platform-specific paths for SSH operations.
+    pub paths: RemotePaths,
 }
 
 impl RemoteState {
-    pub fn new(
-        transfer_progress_tx: mpsc::UnboundedSender<transfer::TransferProgress>,
-    ) -> Self {
-        let config = config::load_config();
-        let ssh_config_entries = config::parse_ssh_config();
+    pub fn new(transfer_progress_tx: mpsc::UnboundedSender<TransferProgress>) -> Self {
+        let paths = desktop_remote_paths();
+        let config = conch_remote::config::load_config(&paths.config_dir);
+        let ssh_config_entries = conch_remote::config::parse_ssh_config();
         Self {
             sessions: HashMap::new(),
             config,
             ssh_config_entries,
-            pending_prompts: PendingPrompts::new(),
-            tunnel_manager: tunnel::TunnelManager::new(),
-            transfers: Arc::new(Mutex::new(transfer::TransferRegistry::new())),
+            pending_prompts: Arc::new(Mutex::new(PendingPrompts::new())),
+            tunnel_manager: TunnelManager::new(),
+            transfers: Arc::new(Mutex::new(TransferRegistry::new())),
             transfer_progress_tx,
+            paths,
         }
     }
 }
@@ -169,90 +254,38 @@ pub(crate) async fn ssh_connect(
     };
 
     // Check for duplicate.
-    {
+    let (pending_prompts, paths) = {
         let state = remote.lock();
         if state.sessions.contains_key(&key) {
-            return Err(format!("Tab {tab_id} already has an SSH session on window {window_label}"));
+            return Err(format!(
+                "Tab {tab_id} already has an SSH session on window {window_label}"
+            ));
         }
-    }
+        (Arc::clone(&state.pending_prompts), state.paths.clone())
+    };
 
-    // Set up the auth prompt bridge.
-    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<AuthPrompt>();
-
-    let app_handle = app.clone();
-    let server_clone = server.clone();
-    let key_clone = key.clone();
-    let remote_clone = Arc::clone(&*remote);
-
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-    tokio::spawn(async move {
-        let result =
-            ssh::connect_and_open_shell(&server_clone, password, prompt_tx).await;
-        let _ = result_tx.send(result);
+    // Build callbacks and connect via conch_remote.
+    let callbacks: Arc<dyn RemoteCallbacks> = Arc::new(TauriRemoteCallbacks {
+        app: app.clone(),
+        pending_prompts: Arc::clone(&pending_prompts),
     });
 
-    // Bridge auth prompts to the frontend via Tauri events.
-    // When the SSH handler needs user interaction, it sends an AuthPrompt.
-    // We emit a Tauri event and store the reply channel so the frontend
-    // can respond via `auth_respond_host_key` / `auth_respond_password`.
-    let prompt_app = app.clone();
-    let prompt_remote = Arc::clone(&*remote);
-    let connection_result: Result<_, String> = tokio::spawn(async move {
-        let mut result_rx = result_rx;
-        loop {
-            tokio::select! {
-                result = &mut result_rx => {
-                    return result.map_err(|_| "Connection task dropped".to_string())?;
-                }
-                prompt = prompt_rx.recv() => {
-                    match prompt {
-                        Some(AuthPrompt::HostKeyConfirm { reply, message, detail }) => {
-                            let prompt_id = uuid::Uuid::new_v4().to_string();
-                            prompt_remote.lock().pending_prompts.host_key.insert(
-                                prompt_id.clone(), reply,
-                            );
-                            let _ = prompt_app.emit("ssh-host-key-prompt", HostKeyPromptEvent {
-                                prompt_id,
-                                message,
-                                detail,
-                            });
-                        }
-                        Some(AuthPrompt::PasswordPrompt { reply, message }) => {
-                            let prompt_id = uuid::Uuid::new_v4().to_string();
-                            prompt_remote.lock().pending_prompts.password.insert(
-                                prompt_id.clone(), reply,
-                            );
-                            let _ = prompt_app.emit("ssh-password-prompt", PasswordPromptEvent {
-                                prompt_id,
-                                message,
-                            });
-                        }
-                        None => {
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|e| format!("Connection task panicked: {e}"))?;
-
-    let (ssh_handle, channel) = connection_result?;
+    let (ssh_handle, channel) =
+        conch_remote::ssh::connect_and_open_shell(&server, password, callbacks, &paths).await?;
 
     // Set up the channel I/O loop.
     let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     // Request initial resize.
     let _ = input_tx.send(ChannelInput::Resize { cols, rows });
 
     // Store the session.
+    let remote_clone = Arc::clone(&*remote);
     {
         let mut state = remote_clone.lock();
         state.sessions.insert(
-            key_clone.clone(),
+            key.clone(),
             SshSession {
                 input_tx,
                 ssh_handle: Arc::new(ssh_handle),
@@ -265,10 +298,12 @@ pub(crate) async fn ssh_connect(
 
     // Spawn channel loop.
     let remote_for_loop = Arc::clone(&remote_clone);
-    let key_for_loop = key_clone.clone();
+    let key_for_loop = key.clone();
     let wl = window_label.clone();
+    let app_handle = app.clone();
     tokio::spawn(async move {
-        let exited_naturally = ssh::channel_loop(channel, input_rx, output_tx).await;
+        let exited_naturally =
+            conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
 
         // Clean up session.
         remote_for_loop.lock().sessions.remove(&key_for_loop);
@@ -323,66 +358,32 @@ pub(crate) async fn ssh_quick_connect(
     };
 
     // Don't persist quick-connect entries to config — they're ephemeral.
-    // Connect directly using the entry instead of going through ssh_connect's
-    // server lookup.
     let window_label = window.label().to_string();
     let key = session_key(&window_label, tab_id);
 
-    {
+    let (pending_prompts, paths) = {
         let state = remote.lock();
         if state.sessions.contains_key(&key) {
-            return Err(format!("Tab {tab_id} already has an SSH session on window {window_label}"));
+            return Err(format!(
+                "Tab {tab_id} already has an SSH session on window {window_label}"
+            ));
         }
-    }
+        (Arc::clone(&state.pending_prompts), state.paths.clone())
+    };
 
-    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<AuthPrompt>();
-    let app_handle = app.clone();
-    let entry_clone = entry.clone();
-    let remote_clone = Arc::clone(&*remote);
-
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-    tokio::spawn(async move {
-        let result = ssh::connect_and_open_shell(&entry_clone, password, prompt_tx).await;
-        let _ = result_tx.send(result);
+    let callbacks: Arc<dyn RemoteCallbacks> = Arc::new(TauriRemoteCallbacks {
+        app: app.clone(),
+        pending_prompts: Arc::clone(&pending_prompts),
     });
 
-    let prompt_app = app.clone();
-    let prompt_remote = Arc::clone(&*remote);
-    let connection_result: Result<_, String> = tokio::spawn(async move {
-        let mut result_rx = result_rx;
-        loop {
-            tokio::select! {
-                result = &mut result_rx => {
-                    return result.map_err(|_| "Connection task dropped".to_string())?;
-                }
-                prompt = prompt_rx.recv() => {
-                    match prompt {
-                        Some(AuthPrompt::HostKeyConfirm { reply, message, detail }) => {
-                            let prompt_id = uuid::Uuid::new_v4().to_string();
-                            prompt_remote.lock().pending_prompts.host_key.insert(prompt_id.clone(), reply);
-                            let _ = prompt_app.emit("ssh-host-key-prompt", HostKeyPromptEvent { prompt_id, message, detail });
-                        }
-                        Some(AuthPrompt::PasswordPrompt { reply, message }) => {
-                            let prompt_id = uuid::Uuid::new_v4().to_string();
-                            prompt_remote.lock().pending_prompts.password.insert(prompt_id.clone(), reply);
-                            let _ = prompt_app.emit("ssh-password-prompt", PasswordPromptEvent { prompt_id, message });
-                        }
-                        None => { continue; }
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|e| format!("Connection task panicked: {e}"))?;
-
-    let (ssh_handle, channel) = connection_result?;
+    let (ssh_handle, channel) =
+        conch_remote::ssh::connect_and_open_shell(&entry, password, callbacks, &paths).await?;
 
     let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let _ = input_tx.send(ChannelInput::Resize { cols, rows });
 
+    let remote_clone = Arc::clone(&*remote);
     {
         let mut state = remote_clone.lock();
         state.sessions.insert(
@@ -400,11 +401,20 @@ pub(crate) async fn ssh_quick_connect(
     let remote_for_loop = Arc::clone(&remote_clone);
     let key_for_loop = key.clone();
     let wl = window_label.clone();
+    let app_handle = app.clone();
     tokio::spawn(async move {
-        let exited_naturally = ssh::channel_loop(channel, input_rx, output_tx).await;
+        let exited_naturally =
+            conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         remote_for_loop.lock().sessions.remove(&key_for_loop);
         if exited_naturally {
-            let _ = app_handle.emit_to(&wl, "pty-exit", PtyExitEvent { window_label: wl.clone(), tab_id });
+            let _ = app_handle.emit_to(
+                &wl,
+                "pty-exit",
+                PtyExitEvent {
+                    window_label: wl.clone(),
+                    tab_id,
+                },
+            );
         }
     });
 
@@ -468,9 +478,9 @@ pub(crate) fn ssh_disconnect(
 
 #[derive(Serialize)]
 pub(crate) struct ServerListResponse {
-    folders: Vec<config::ServerFolder>,
-    ungrouped: Vec<config::ServerEntry>,
-    ssh_config: Vec<config::ServerEntry>,
+    folders: Vec<ServerFolder>,
+    ungrouped: Vec<ServerEntry>,
+    ssh_config: Vec<ServerEntry>,
 }
 
 #[tauri::command]
@@ -499,7 +509,7 @@ pub(crate) fn remote_save_server(
     } else {
         state.config.add_server(entry);
     }
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
 }
 
 #[tauri::command]
@@ -509,7 +519,7 @@ pub(crate) fn remote_delete_server(
 ) {
     let mut state = remote.lock();
     state.config.remove_server(&server_id);
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
 }
 
 #[tauri::command]
@@ -519,7 +529,7 @@ pub(crate) fn remote_add_folder(
 ) {
     let mut state = remote.lock();
     state.config.add_folder(&name);
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
 }
 
 #[tauri::command]
@@ -529,7 +539,7 @@ pub(crate) fn remote_delete_folder(
 ) {
     let mut state = remote.lock();
     state.config.remove_folder(&folder_id);
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
 }
 
 #[tauri::command]
@@ -537,7 +547,7 @@ pub(crate) fn remote_import_ssh_config(
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
 ) -> Vec<ServerEntry> {
     let mut state = remote.lock();
-    state.ssh_config_entries = config::parse_ssh_config();
+    state.ssh_config_entries = conch_remote::config::parse_ssh_config();
     state.ssh_config_entries.clone()
 }
 
@@ -552,8 +562,9 @@ pub(crate) fn auth_respond_host_key(
     prompt_id: String,
     accepted: bool,
 ) {
-    let mut state = remote.lock();
-    if let Some(reply) = state.pending_prompts.host_key.remove(&prompt_id) {
+    let state = remote.lock();
+    let mut prompts = state.pending_prompts.lock();
+    if let Some(reply) = prompts.host_key.remove(&prompt_id) {
         let _ = reply.send(accepted);
     }
 }
@@ -565,8 +576,9 @@ pub(crate) fn auth_respond_password(
     prompt_id: String,
     password: Option<String>,
 ) {
-    let mut state = remote.lock();
-    if let Some(reply) = state.pending_prompts.password.remove(&prompt_id) {
+    let state = remote.lock();
+    let mut prompts = state.pending_prompts.lock();
+    if let Some(reply) = prompts.password.remove(&prompt_id) {
         let _ = reply.send(password);
     }
 }
@@ -616,7 +628,7 @@ pub(crate) fn remote_rename_folder(
     if let Some(folder) = state.config.folders.iter_mut().find(|f| f.id == folder_id) {
         folder.name = new_name;
     }
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
 }
 
 /// Toggle folder expanded/collapsed state.
@@ -628,7 +640,7 @@ pub(crate) fn remote_set_folder_expanded(
 ) {
     let mut state = remote.lock();
     state.config.set_folder_expanded(&folder_id, expanded);
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
 }
 
 /// Move a server to a different folder (or ungrouped if folder_id is None).
@@ -648,7 +660,7 @@ pub(crate) fn remote_move_server(
         } else {
             state.config.add_server(entry);
         }
-        config::save_config(&state.config);
+        conch_remote::config::save_config(&state.paths.config_dir, &state.config);
     }
 }
 
@@ -663,7 +675,10 @@ pub(crate) async fn remote_export(
 ) -> Result<String, String> {
     let json = {
         let state = remote.lock();
-        let mut payload = state.config.to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
+        let mut payload =
+            state
+                .config
+                .to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
         // Include any selected ~/.ssh/config entries in the export.
         if let Some(ref ids) = server_ids {
             for entry in &state.ssh_config_entries {
@@ -714,7 +729,7 @@ pub(crate) async fn remote_import(
     let json = std::fs::read_to_string(path.as_path().unwrap())
         .map_err(|e| format!("Failed to read file: {e}"))?;
 
-    let payload: config::ExportPayload =
+    let payload: ExportPayload =
         serde_json::from_str(&json).map_err(|e| format!("Invalid import file: {e}"))?;
     if payload.version != 1 {
         return Err(format!("Unsupported export version: {}", payload.version));
@@ -729,7 +744,7 @@ pub(crate) async fn remote_import(
     // so it matches on activation without needing an edit+save cycle.
     resolve_imported_tunnel_keys(&mut state, &existing_tunnel_ids);
 
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
     Ok(format!(
         "Imported {servers} server(s), {folders} folder(s), {tunnels} tunnel(s)"
     ))
@@ -748,7 +763,7 @@ pub(crate) fn remote_duplicate_server(
         dup.label = format!("{} (copy)", dup.label);
         let result = dup.clone();
         state.config.add_server(dup);
-        config::save_config(&state.config);
+        conch_remote::config::save_config(&state.paths.config_dir, &state.config);
         Some(result)
     } else {
         None
@@ -764,7 +779,7 @@ fn get_ssh_handle(
     state: &RemoteState,
     window_label: &str,
     tab_id: u32,
-) -> Result<Arc<russh::client::Handle<SshHandler>>, String> {
+) -> Result<Arc<conch_remote::russh::client::Handle<ConchSshHandler>>, String> {
     let key = session_key(window_label, tab_id);
     state
         .sessions
@@ -779,12 +794,12 @@ pub(crate) async fn sftp_list_dir(
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
     tab_id: u32,
     path: String,
-) -> Result<Vec<sftp::FileEntry>, String> {
+) -> Result<Vec<conch_remote::sftp::FileEntry>, String> {
     let ssh = {
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::list_dir(&ssh, &path).await
+    conch_remote::sftp::list_dir(&ssh, &path).await
 }
 
 #[tauri::command]
@@ -793,12 +808,12 @@ pub(crate) async fn sftp_stat(
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
     tab_id: u32,
     path: String,
-) -> Result<sftp::FileEntry, String> {
+) -> Result<conch_remote::sftp::FileEntry, String> {
     let ssh = {
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::stat(&ssh, &path).await
+    conch_remote::sftp::stat(&ssh, &path).await
 }
 
 #[tauri::command]
@@ -809,12 +824,12 @@ pub(crate) async fn sftp_read_file(
     path: String,
     offset: u64,
     length: u64,
-) -> Result<sftp::ReadFileResult, String> {
+) -> Result<conch_remote::sftp::ReadFileResult, String> {
     let ssh = {
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::read_file(&ssh, &path, offset, length as usize).await
+    conch_remote::sftp::read_file(&ssh, &path, offset, length as usize).await
 }
 
 #[tauri::command]
@@ -829,7 +844,7 @@ pub(crate) async fn sftp_write_file(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::write_file(&ssh, &path, &data).await
+    conch_remote::sftp::write_file(&ssh, &path, &data).await
 }
 
 #[tauri::command]
@@ -843,7 +858,7 @@ pub(crate) async fn sftp_mkdir(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::mkdir(&ssh, &path).await
+    conch_remote::sftp::mkdir(&ssh, &path).await
 }
 
 #[tauri::command]
@@ -858,7 +873,7 @@ pub(crate) async fn sftp_rename(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::rename(&ssh, &from, &to).await
+    conch_remote::sftp::rename(&ssh, &from, &to).await
 }
 
 #[tauri::command]
@@ -873,7 +888,7 @@ pub(crate) async fn sftp_remove(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::remove(&ssh, &path, is_dir).await
+    conch_remote::sftp::remove(&ssh, &path, is_dir).await
 }
 
 #[tauri::command]
@@ -887,7 +902,7 @@ pub(crate) async fn sftp_realpath(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), tab_id)?
     };
-    sftp::realpath(&ssh, &path).await
+    conch_remote::sftp::realpath(&ssh, &path).await
 }
 
 // ---------------------------------------------------------------------------
@@ -895,12 +910,12 @@ pub(crate) async fn sftp_realpath(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub(crate) fn local_list_dir(path: String) -> Result<Vec<sftp::FileEntry>, String> {
+pub(crate) fn local_list_dir(path: String) -> Result<Vec<conch_remote::sftp::FileEntry>, String> {
     local_fs::list_dir(&path)
 }
 
 #[tauri::command]
-pub(crate) fn local_stat(path: String) -> Result<sftp::FileEntry, String> {
+pub(crate) fn local_stat(path: String) -> Result<conch_remote::sftp::FileEntry, String> {
     local_fs::stat(&path)
 }
 
@@ -940,7 +955,7 @@ pub(crate) async fn transfer_download(
         (ssh, tid, ptx, reg)
     };
 
-    Ok(transfer::start_download(
+    Ok(conch_remote::transfer::start_download(
         transfer_id,
         ssh,
         remote_path,
@@ -967,7 +982,7 @@ pub(crate) async fn transfer_upload(
         (ssh, tid, ptx, reg)
     };
 
-    Ok(transfer::start_upload(
+    Ok(conch_remote::transfer::start_upload(
         transfer_id,
         ssh,
         local_path,
@@ -1005,7 +1020,7 @@ pub(crate) async fn tunnel_start(
     }
 
     // Get tunnel definition and matching server.
-    let (tunnel_def, server) = {
+    let (tunnel_def, server, pending_prompts, paths) = {
         let state = remote.lock();
         let tunnel = state
             .config
@@ -1016,59 +1031,20 @@ pub(crate) async fn tunnel_start(
         let server = find_server_for_tunnel(&state, &tunnel.session_key)
             .ok_or_else(|| format!("No server configured for {}", tunnel.session_key))?;
 
-        (tunnel, server)
+        (
+            tunnel,
+            server,
+            Arc::clone(&state.pending_prompts),
+            state.paths.clone(),
+        )
     };
 
     let mgr = remote.lock().tunnel_manager.clone();
     mgr.set_connecting(tunnel_uuid).await;
 
-    // Set up prompt channel — tunnel prompts are auto-accepted for known hosts,
-    // otherwise emitted as Tauri events (same pattern as ssh_connect).
-    let (prompt_tx, mut prompt_rx) = mpsc::channel::<tunnel::TunnelPrompt>(4);
-    let remote_for_prompts = Arc::clone(&*remote);
-    let prompt_app = app.clone();
-
-    // Spawn a task to service prompts.
-    tokio::spawn(async move {
-        while let Some(prompt) = prompt_rx.recv().await {
-            match prompt {
-                tunnel::TunnelPrompt::ConfirmHostKey {
-                    reply,
-                    message,
-                    detail,
-                } => {
-                    let prompt_id = uuid::Uuid::new_v4().to_string();
-                    remote_for_prompts
-                        .lock()
-                        .pending_prompts
-                        .host_key
-                        .insert(prompt_id.clone(), reply);
-                    let _ = prompt_app.emit(
-                        "ssh-host-key-prompt",
-                        HostKeyPromptEvent {
-                            prompt_id,
-                            message,
-                            detail,
-                        },
-                    );
-                }
-                tunnel::TunnelPrompt::Password { reply, message } => {
-                    let prompt_id = uuid::Uuid::new_v4().to_string();
-                    remote_for_prompts
-                        .lock()
-                        .pending_prompts
-                        .password
-                        .insert(prompt_id.clone(), reply);
-                    let _ = prompt_app.emit(
-                        "ssh-password-prompt",
-                        PasswordPromptEvent {
-                            prompt_id,
-                            message,
-                        },
-                    );
-                }
-            }
-        }
+    let callbacks: Arc<dyn RemoteCallbacks> = Arc::new(TauriRemoteCallbacks {
+        app: app.clone(),
+        pending_prompts,
     });
 
     let result = mgr
@@ -1078,7 +1054,8 @@ pub(crate) async fn tunnel_start(
             tunnel_def.local_port,
             tunnel_def.remote_host.clone(),
             tunnel_def.remote_port,
-            prompt_tx,
+            callbacks,
+            &paths,
         )
         .await;
 
@@ -1104,7 +1081,7 @@ pub(crate) async fn tunnel_stop(
 #[tauri::command]
 pub(crate) fn tunnel_save(
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
-    tunnel: config::SavedTunnel,
+    tunnel: SavedTunnel,
 ) {
     let mut state = remote.lock();
     // Update if exists, otherwise add.
@@ -1113,7 +1090,7 @@ pub(crate) fn tunnel_save(
     } else {
         state.config.add_tunnel(tunnel);
     }
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
 }
 
 #[tauri::command]
@@ -1130,7 +1107,7 @@ pub(crate) async fn tunnel_delete(
 
     let mut state = remote.lock();
     state.config.remove_tunnel(&tunnel_uuid);
-    config::save_config(&state.config);
+    conch_remote::config::save_config(&state.paths.config_dir, &state.config);
     Ok(())
 }
 
@@ -1149,9 +1126,9 @@ pub(crate) async fn tunnel_get_all(
         result.push(TunnelWithStatus {
             tunnel: t.clone(),
             status: status.map(|s| match s {
-                tunnel::TunnelStatus::Connecting => "connecting".to_string(),
-                tunnel::TunnelStatus::Active => "active".to_string(),
-                tunnel::TunnelStatus::Error(e) => format!("error: {e}"),
+                TunnelStatus::Connecting => "connecting".to_string(),
+                TunnelStatus::Active => "active".to_string(),
+                TunnelStatus::Error(e) => format!("error: {e}"),
             }),
         });
     }
@@ -1162,7 +1139,7 @@ pub(crate) async fn tunnel_get_all(
 #[derive(Serialize)]
 pub(crate) struct TunnelWithStatus {
     #[serde(flatten)]
-    tunnel: config::SavedTunnel,
+    tunnel: SavedTunnel,
     status: Option<String>,
 }
 
@@ -1174,7 +1151,7 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
         .all_servers()
         .chain(state.ssh_config_entries.iter())
     {
-        if config::SavedTunnel::make_session_key(&s.user, &s.host, s.port) == session_key {
+        if SavedTunnel::make_session_key(&s.user, &s.host, s.port) == session_key {
             return Some(s.clone());
         }
     }
@@ -1183,11 +1160,8 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
     // host with a different user, or use an SSH config Host alias as the
     // hostname.  Try progressively looser matches so we inherit the correct
     // proxy/key settings instead of falling back to a bare entry.
-    if let Some((_user, host_part, port)) =
-        config::SavedTunnel::parse_session_key(session_key)
-    {
-        // 2a. Match by host + port (ignoring user).  Covers tunnels imported
-        //     from another system where the username differed.
+    if let Some((_user, host_part, port)) = SavedTunnel::parse_session_key(session_key) {
+        // 2a. Match by host + port (ignoring user).
         for s in state
             .config
             .all_servers()
@@ -1198,9 +1172,7 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
             }
         }
 
-        // 2b. Match SSH config Host alias (label).  Covers tunnels whose
-        //     session_key used the alias (e.g. "bastion") instead of the
-        //     resolved HostName.
+        // 2b. Match SSH config Host alias (label).
         for s in state.ssh_config_entries.iter() {
             if s.label == host_part {
                 return Some(s.clone());
@@ -1209,7 +1181,7 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
     }
 
     // Fallback: parse the session_key and create a minimal entry.
-    config::SavedTunnel::parse_session_key(session_key).map(|(user, host, port)| ServerEntry {
+    SavedTunnel::parse_session_key(session_key).map(|(user, host, port)| ServerEntry {
         id: String::new(),
         label: session_key.to_string(),
         host,
@@ -1227,16 +1199,13 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
 /// When a tunnel's session_key doesn't exactly match any known server, try
 /// progressively looser matching (host+port, then SSH config alias) and
 /// rewrite the session_key to the canonical form so it matches on activation.
-fn resolve_imported_tunnel_keys(
-    state: &mut RemoteState,
-    existing_ids: &[uuid::Uuid],
-) {
+fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::Uuid]) {
     // Build a set of all known canonical session_keys for quick lookup.
     let known_keys: Vec<String> = state
         .config
         .all_servers()
         .chain(state.ssh_config_entries.iter())
-        .map(|s| config::SavedTunnel::make_session_key(&s.user, &s.host, s.port))
+        .map(|s| SavedTunnel::make_session_key(&s.user, &s.host, s.port))
         .collect();
 
     // Snapshot entries for matching (avoid borrow conflict).
@@ -1252,9 +1221,9 @@ fn resolve_imported_tunnel_keys(
         }
 
         if let Some((_user, host_part, port)) =
-            config::SavedTunnel::parse_session_key(&tunnel.session_key)
+            SavedTunnel::parse_session_key(&tunnel.session_key)
         {
-            // Try host+port match (covers user mismatch, e.g. dustin vs root).
+            // Try host+port match (covers user mismatch).
             let matched = config_entries
                 .iter()
                 .chain(ssh_entries.iter())
@@ -1263,13 +1232,10 @@ fn resolve_imported_tunnel_keys(
                 .or_else(|| ssh_entries.iter().find(|s| s.label == host_part));
 
             if let Some(entry) = matched {
-                let new_key = config::SavedTunnel::make_session_key(
-                    &entry.user,
-                    &entry.host,
-                    entry.port,
-                );
+                let new_key =
+                    SavedTunnel::make_session_key(&entry.user, &entry.host, entry.port);
                 log::info!(
-                    "resolve_imported_tunnel_keys: '{}' → '{}' via server '{}'",
+                    "resolve_imported_tunnel_keys: '{}' -> '{}' via server '{}'",
                     tunnel.session_key,
                     new_key,
                     entry.label
@@ -1347,7 +1313,7 @@ mod tests {
 
     /// Build a minimal RemoteState for testing (no config files, no SSH config).
     fn test_state_with(
-        config: config::SshConfig,
+        config: SshConfig,
         ssh_config_entries: Vec<ServerEntry>,
     ) -> RemoteState {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1355,10 +1321,15 @@ mod tests {
             sessions: HashMap::new(),
             config,
             ssh_config_entries,
-            pending_prompts: PendingPrompts::new(),
-            tunnel_manager: tunnel::TunnelManager::new(),
-            transfers: Arc::new(Mutex::new(transfer::TransferRegistry::new())),
+            pending_prompts: Arc::new(Mutex::new(PendingPrompts::new())),
+            tunnel_manager: TunnelManager::new(),
+            transfers: Arc::new(Mutex::new(TransferRegistry::new())),
             transfer_progress_tx: tx,
+            paths: RemotePaths {
+                known_hosts_file: std::path::PathBuf::from("/tmp/test_known_hosts"),
+                config_dir: std::path::PathBuf::from("/tmp/test_config"),
+                default_key_paths: vec![],
+            },
         }
     }
 
@@ -1388,19 +1359,18 @@ mod tests {
 
     #[test]
     fn find_server_user_mismatch_matches_by_host_port() {
-        // Real scenario: SSH config has User root, but tunnel was exported
-        // with user dustin.  Should still match by host+port.
         let mut ssh_entry =
             make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
         ssh_entry.proxy_command =
             Some("cloudflared access ssh --hostname %h".to_string());
         let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
 
-        let result = find_server_for_tunnel(
-            &state,
-            "dustin@bastion.nexxuscraft.com:22",
+        let result =
+            find_server_for_tunnel(&state, "dustin@bastion.nexxuscraft.com:22");
+        assert!(
+            result.is_some(),
+            "should match by host+port despite user mismatch"
         );
-        assert!(result.is_some(), "should match by host+port despite user mismatch");
         let server = result.unwrap();
         assert_eq!(server.host, "bastion.nexxuscraft.com");
         assert_eq!(
@@ -1412,7 +1382,6 @@ mod tests {
 
     #[test]
     fn find_server_alias_no_false_positive() {
-        // SSH config entry label AND host don't match session_key host.
         let ssh_entry = make_server("prod-db", "db.example.com", "admin", 22);
         let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
 
@@ -1423,9 +1392,7 @@ mod tests {
 
     #[test]
     fn find_server_by_ssh_alias() {
-        // SSH config: Host bastion → HostName bastion.example.com
-        let mut ssh_entry =
-            make_server("bastion", "bastion.example.com", "admin", 22);
+        let mut ssh_entry = make_server("bastion", "bastion.example.com", "admin", 22);
         ssh_entry.proxy_command = Some("ssh -W %h:%p jump".to_string());
         let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
 
@@ -1446,7 +1413,7 @@ mod tests {
         ssh_entry.proxy_command =
             Some("cloudflared access ssh --hostname %h".to_string());
         let mut cfg = SshConfig::default();
-        cfg.tunnels.push(config::SavedTunnel {
+        cfg.tunnels.push(SavedTunnel {
             id: uuid::Uuid::new_v4(),
             label: "minecraft-local".to_string(),
             session_key: "dustin@bastion.nexxuscraft.com:22".to_string(),
@@ -1467,10 +1434,9 @@ mod tests {
 
     #[test]
     fn resolve_imported_tunnel_keys_rewrites_alias() {
-        let ssh_entry =
-            make_server("bastion", "bastion.example.com", "admin", 22);
+        let ssh_entry = make_server("bastion", "bastion.example.com", "admin", 22);
         let mut cfg = SshConfig::default();
-        cfg.tunnels.push(config::SavedTunnel {
+        cfg.tunnels.push(SavedTunnel {
             id: uuid::Uuid::new_v4(),
             label: "test tunnel".to_string(),
             session_key: "admin@bastion:22".to_string(),
@@ -1491,11 +1457,10 @@ mod tests {
 
     #[test]
     fn resolve_imported_tunnel_keys_skips_existing() {
-        let ssh_entry =
-            make_server("bastion", "bastion.example.com", "admin", 22);
+        let ssh_entry = make_server("bastion", "bastion.example.com", "admin", 22);
         let tunnel_id = uuid::Uuid::new_v4();
         let mut cfg = SshConfig::default();
-        cfg.tunnels.push(config::SavedTunnel {
+        cfg.tunnels.push(SavedTunnel {
             id: tunnel_id,
             label: "existing tunnel".to_string(),
             session_key: "admin@bastion:22".to_string(),
@@ -1515,10 +1480,9 @@ mod tests {
 
     #[test]
     fn resolve_imported_tunnel_keys_preserves_already_matching() {
-        let ssh_entry =
-            make_server("bastion", "bastion.example.com", "admin", 22);
+        let ssh_entry = make_server("bastion", "bastion.example.com", "admin", 22);
         let mut cfg = SshConfig::default();
-        cfg.tunnels.push(config::SavedTunnel {
+        cfg.tunnels.push(SavedTunnel {
             id: uuid::Uuid::new_v4(),
             label: "good tunnel".to_string(),
             session_key: "admin@bastion.example.com:22".to_string(),
@@ -1535,5 +1499,21 @@ mod tests {
             state.config.tunnels[0].session_key,
             "admin@bastion.example.com:22",
         );
+    }
+
+    #[test]
+    fn pending_prompts_new_is_empty() {
+        let prompts = PendingPrompts::new();
+        assert!(prompts.host_key.is_empty());
+        assert!(prompts.password.is_empty());
+    }
+
+    #[test]
+    fn desktop_remote_paths_populated() {
+        let paths = desktop_remote_paths();
+        // Should have 3 default key paths.
+        assert_eq!(paths.default_key_paths.len(), 3);
+        assert!(paths.known_hosts_file.to_str().unwrap().contains("known_hosts"));
+        assert!(paths.config_dir.to_str().unwrap().contains("remote"));
     }
 }

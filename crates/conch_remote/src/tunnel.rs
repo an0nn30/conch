@@ -9,12 +9,12 @@ use std::sync::Arc;
 use russh::client;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::config::ServerEntry;
-use super::known_hosts;
-use super::ssh::expand_tilde;
+use crate::callbacks::{RemoteCallbacks, RemotePaths};
+use crate::config::ServerEntry;
+use crate::handler::ConchSshHandler;
 
 // ---------------------------------------------------------------------------
 // Tunnel status
@@ -29,7 +29,7 @@ pub enum TunnelStatus {
 }
 
 #[derive(Serialize)]
-pub(crate) struct TunnelInfo {
+pub struct TunnelInfo {
     pub id: String,
     pub status: TunnelStatus,
 }
@@ -40,102 +40,11 @@ struct TunnelState {
 }
 
 // ---------------------------------------------------------------------------
-// Tunnel-only SSH handler (no PTY, no terminal tab)
-// ---------------------------------------------------------------------------
-
-/// Auth prompt sent from the tunnel SSH handler.
-pub(crate) enum TunnelPrompt {
-    ConfirmHostKey {
-        message: String,
-        detail: String,
-        reply: tokio::sync::oneshot::Sender<bool>,
-    },
-    Password {
-        message: String,
-        reply: tokio::sync::oneshot::Sender<Option<String>>,
-    },
-}
-
-struct TunnelSshHandler {
-    host: String,
-    port: u16,
-    prompt_tx: mpsc::Sender<TunnelPrompt>,
-}
-
-#[async_trait::async_trait]
-impl client::Handler for TunnelSshHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &ssh_key::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        match known_hosts::check_known_host(&self.host, self.port, server_public_key) {
-            Some(true) => return Ok(true),
-            Some(false) => {
-                let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
-                let message = format!(
-                    "WARNING: HOST KEY HAS CHANGED for {}:{}",
-                    self.host, self.port
-                );
-                let detail = format!(
-                    "{}\n{fingerprint}",
-                    server_public_key.algorithm().as_str(),
-                );
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = self
-                    .prompt_tx
-                    .send(TunnelPrompt::ConfirmHostKey {
-                        message,
-                        detail,
-                        reply: tx,
-                    })
-                    .await;
-                return Ok(rx.await.unwrap_or(false));
-            }
-            None => {}
-        }
-
-        let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
-        let host_display = if self.port != 22 {
-            format!("[{}]:{}", self.host, self.port)
-        } else {
-            self.host.clone()
-        };
-        let message = format!("The authenticity of host '{host_display}' can't be established.");
-        let detail = format!(
-            "{} key fingerprint is:\n{fingerprint}",
-            server_public_key.algorithm().as_str(),
-        );
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = self
-            .prompt_tx
-            .send(TunnelPrompt::ConfirmHostKey {
-                message,
-                detail,
-                reply: tx,
-            })
-            .await;
-
-        let accepted = rx.await.unwrap_or(false);
-        if accepted {
-            if let Err(e) =
-                known_hosts::add_known_host(&self.host, self.port, server_public_key)
-            {
-                log::warn!("tunnel ssh: failed to save host key: {e}");
-            }
-        }
-        Ok(accepted)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tunnel manager
 // ---------------------------------------------------------------------------
 
 /// Manages active SSH port-forwarding tunnels.
-pub(crate) struct TunnelManager {
+pub struct TunnelManager {
     tunnels: Arc<Mutex<HashMap<Uuid, TunnelState>>>,
 }
 
@@ -188,7 +97,8 @@ impl TunnelManager {
         local_port: u16,
         remote_host: String,
         remote_port: u16,
-        prompt_tx: mpsc::Sender<TunnelPrompt>,
+        callbacks: Arc<dyn RemoteCallbacks>,
+        paths: &RemotePaths,
     ) -> Result<(), String> {
         // Bind local port first for fast failure.
         let listener = TcpListener::bind(format!("127.0.0.1:{local_port}"))
@@ -197,7 +107,7 @@ impl TunnelManager {
 
         log::info!("tunnel[{id}]: listening on 127.0.0.1:{local_port}");
 
-        let ssh_handle = connect_for_tunnel(server, prompt_tx).await?;
+        let ssh_handle = connect_for_tunnel(server, callbacks, paths).await?;
 
         log::info!("tunnel[{id}]: SSH connection established");
 
@@ -308,15 +218,19 @@ impl TunnelManager {
 
 async fn connect_for_tunnel(
     server: &ServerEntry,
-    prompt_tx: mpsc::Sender<TunnelPrompt>,
-) -> Result<client::Handle<TunnelSshHandler>, String> {
+    callbacks: Arc<dyn RemoteCallbacks>,
+    paths: &RemotePaths,
+) -> Result<client::Handle<ConchSshHandler>, String> {
     let config = Arc::new(client::Config::default());
-    let handler = TunnelSshHandler {
+    let handler = ConchSshHandler {
         host: server.host.clone(),
         port: server.port,
-        prompt_tx: prompt_tx.clone(),
+        known_hosts_file: paths.known_hosts_file.clone(),
+        callbacks: Arc::clone(&callbacks),
     };
 
+    // Proxy: desktop-only
+    #[cfg(not(target_os = "ios"))]
     let effective_proxy = server
         .proxy_command
         .clone()
@@ -324,11 +238,22 @@ async fn connect_for_tunnel(
             server
                 .proxy_jump
                 .as_ref()
-                .map(|jump| format!("ssh -W %h:%p {jump}"))
+                .map(|j| format!("ssh -W %h:%p {j}"))
         });
+    #[cfg(target_os = "ios")]
+    let effective_proxy: Option<String> = None;
 
     let mut session = if let Some(proxy_cmd) = &effective_proxy {
-        connect_tunnel_via_proxy(proxy_cmd, &server.host, server.port, config, handler).await?
+        #[cfg(not(target_os = "ios"))]
+        {
+            crate::ssh::connect_via_proxy(proxy_cmd, &server.host, server.port, config, handler)
+                .await?
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let _ = proxy_cmd;
+            return Err("Proxy connections are not supported on iOS".to_string());
+        }
     } else {
         let addr = format!("{}:{}", server.host, server.port);
         client::connect(config, &addr, handler)
@@ -336,31 +261,28 @@ async fn connect_for_tunnel(
             .map_err(|e| format!("Connection failed: {e}"))?
     };
 
-    // Authenticate.
+    // Auth
     let authenticated = if server.auth_method == "password" {
-        let (tx, rx) = tokio::sync::oneshot::channel();
         let msg = format!(
             "Password for {}@{}:{}",
             server.user, server.host, server.port
         );
-        let _ = prompt_tx
-            .send(TunnelPrompt::Password {
-                message: msg,
-                reply: tx,
-            })
-            .await;
-
-        let password = rx
+        let password = callbacks
+            .prompt_password(&msg)
             .await
-            .map_err(|_| "Password prompt cancelled".to_string())?
             .ok_or_else(|| "Password prompt cancelled".to_string())?;
-
         session
             .authenticate_password(&server.user, &password)
             .await
             .map_err(|e| format!("Auth failed: {e}"))?
     } else {
-        try_tunnel_key_auth(&mut session, &server.user, server.key_path.as_deref()).await?
+        crate::ssh::try_key_auth(
+            &mut session,
+            &server.user,
+            server.key_path.as_deref(),
+            &paths.default_key_paths,
+        )
+        .await?
     };
 
     if !authenticated {
@@ -371,94 +293,6 @@ async fn connect_for_tunnel(
     }
 
     Ok(session)
-}
-
-async fn try_tunnel_key_auth(
-    session: &mut client::Handle<TunnelSshHandler>,
-    user: &str,
-    explicit_key_path: Option<&str>,
-) -> Result<bool, String> {
-    let key_paths: Vec<std::path::PathBuf> = if let Some(path) = explicit_key_path {
-        vec![expand_tilde(path)]
-    } else {
-        let home = dirs::home_dir().unwrap_or_default();
-        let ssh_dir = home.join(".ssh");
-        vec![
-            ssh_dir.join("id_ed25519"),
-            ssh_dir.join("id_rsa"),
-            ssh_dir.join("id_ecdsa"),
-        ]
-    };
-
-    for key_path in &key_paths {
-        if !key_path.exists() {
-            continue;
-        }
-
-        match russh_keys::load_secret_key(key_path, None) {
-            Ok(key) => match session.authenticate_publickey(user, Arc::new(key)).await {
-                Ok(true) => return Ok(true),
-                Ok(false) => continue,
-                Err(e) => {
-                    log::warn!("tunnel key auth error with {}: {e}", key_path.display());
-                    continue;
-                }
-            },
-            Err(e) => {
-                log::warn!("tunnel key load failed {}: {e}", key_path.display());
-                continue;
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-async fn connect_tunnel_via_proxy(
-    proxy_cmd: &str,
-    host: &str,
-    port: u16,
-    config: Arc<client::Config>,
-    handler: TunnelSshHandler,
-) -> Result<client::Handle<TunnelSshHandler>, String> {
-    use tokio::process::Command;
-
-    let expanded = proxy_cmd
-        .replace("%h", host)
-        .replace("%p", &port.to_string());
-
-    #[cfg(unix)]
-    let child = Command::new("sh")
-        .arg("-lc")
-        .arg(&expanded)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn ProxyCommand: {e}"))?;
-
-    #[cfg(windows)]
-    let child = {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        Command::new("cmd")
-            .arg("/C")
-            .arg(&expanded)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("Failed to spawn ProxyCommand: {e}"))?
-    };
-
-    let stdin = child.stdin.unwrap();
-    let stdout = child.stdout.unwrap();
-    let stream = tokio::io::join(stdout, stdin);
-
-    client::connect_stream(config, stream, handler)
-        .await
-        .map_err(|e| format!("Connection via proxy failed: {e}"))
 }
 
 #[cfg(test)]
