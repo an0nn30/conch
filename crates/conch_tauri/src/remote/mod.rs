@@ -1181,17 +1181,31 @@ pub(crate) struct TunnelWithStatus {
 
 /// Find a server matching a tunnel's session_key.
 fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<ServerEntry> {
-    let all_servers = state
-        .config
-        .all_servers()
-        .chain(state.ssh_config_entries.iter());
+    log::debug!("find_server_for_tunnel: looking up session_key={session_key}");
 
-    for s in all_servers {
-        if config::SavedTunnel::make_session_key(&s.user, &s.host, s.port) == session_key {
+    let config_servers: Vec<&ServerEntry> = state.config.all_servers().collect();
+    log::debug!(
+        "find_server_for_tunnel: {} config servers, {} ssh_config entries",
+        config_servers.len(),
+        state.ssh_config_entries.len()
+    );
+
+    for s in config_servers.into_iter().chain(state.ssh_config_entries.iter()) {
+        let candidate_key = config::SavedTunnel::make_session_key(&s.user, &s.host, s.port);
+        log::debug!(
+            "find_server_for_tunnel: checking '{}' (label={}, proxy_command={:?}, proxy_jump={:?}) — key={}",
+            s.host, s.label, s.proxy_command, s.proxy_jump, candidate_key
+        );
+        if candidate_key == session_key {
+            log::info!(
+                "find_server_for_tunnel: matched server '{}' (proxy_command={:?}, proxy_jump={:?})",
+                s.label, s.proxy_command, s.proxy_jump
+            );
             return Some(s.clone());
         }
     }
 
+    log::warn!("find_server_for_tunnel: no matching server found, using fallback for {session_key}");
     // Fallback: parse the session_key and create a minimal entry.
     config::SavedTunnel::parse_session_key(session_key).map(|(user, host, port)| ServerEntry {
         id: String::new(),
