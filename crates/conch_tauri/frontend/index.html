@@ -863,7 +863,14 @@
       display: inline-block; padding: 2px 6px; border: 1px solid var(--tab-border);
       border-radius: 3px; background: var(--input-bg); color: var(--fg);
       font: 11px/1.2 "JetBrains Mono", monospace; min-width: 20px; text-align: center;
+      cursor: pointer; user-select: none;
     }
+    .settings-shortcut-key:hover { border-color: var(--dim-fg); }
+    .settings-shortcut-key.recording {
+      border-color: var(--blue, #7aa2f7); color: var(--blue, #7aa2f7);
+      animation: shortcut-pulse 1s ease-in-out infinite;
+    }
+    @keyframes shortcut-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
   </style>
 </head>
 <body>
