@@ -717,7 +717,15 @@ pub(crate) async fn remote_import(
         return Err(format!("Unsupported export version: {}", payload.version));
     }
     let mut state = remote.lock();
+    let existing_tunnel_ids: Vec<uuid::Uuid> =
+        state.config.tunnels.iter().map(|t| t.id).collect();
     let (servers, folders, tunnels) = state.config.merge_import(payload);
+
+    // Resolve session_keys of newly imported tunnels: if a tunnel's host
+    // matches a known server with a different user, rewrite the session_key
+    // so it matches on activation without needing an edit+save cycle.
+    resolve_imported_tunnel_keys(&mut state, &existing_tunnel_ids);
+
     config::save_config(&state.config);
     Ok(format!(
         "Imported {servers} server(s), {folders} folder(s), {tunnels} tunnel(s)"
@@ -1157,14 +1165,43 @@ pub(crate) struct TunnelWithStatus {
 
 /// Find a server matching a tunnel's session_key.
 fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<ServerEntry> {
-    let all_servers = state
+    // First pass: exact session_key match.
+    for s in state
         .config
         .all_servers()
-        .chain(state.ssh_config_entries.iter());
-
-    for s in all_servers {
+        .chain(state.ssh_config_entries.iter())
+    {
         if config::SavedTunnel::make_session_key(&s.user, &s.host, s.port) == session_key {
             return Some(s.clone());
+        }
+    }
+
+    // Second pass: fuzzy matching — the session_key may reference the same
+    // host with a different user, or use an SSH config Host alias as the
+    // hostname.  Try progressively looser matches so we inherit the correct
+    // proxy/key settings instead of falling back to a bare entry.
+    if let Some((_user, host_part, port)) =
+        config::SavedTunnel::parse_session_key(session_key)
+    {
+        // 2a. Match by host + port (ignoring user).  Covers tunnels imported
+        //     from another system where the username differed.
+        for s in state
+            .config
+            .all_servers()
+            .chain(state.ssh_config_entries.iter())
+        {
+            if s.host == host_part && s.port == port {
+                return Some(s.clone());
+            }
+        }
+
+        // 2b. Match SSH config Host alias (label).  Covers tunnels whose
+        //     session_key used the alias (e.g. "bastion") instead of the
+        //     resolved HostName.
+        for s in state.ssh_config_entries.iter() {
+            if s.label == host_part {
+                return Some(s.clone());
+            }
         }
     }
 
@@ -1180,6 +1217,64 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
         proxy_command: None,
         proxy_jump: None,
     })
+}
+
+/// Resolve session_keys of newly imported tunnels against known servers.
+///
+/// When a tunnel's session_key doesn't exactly match any known server, try
+/// progressively looser matching (host+port, then SSH config alias) and
+/// rewrite the session_key to the canonical form so it matches on activation.
+fn resolve_imported_tunnel_keys(
+    state: &mut RemoteState,
+    existing_ids: &[uuid::Uuid],
+) {
+    // Build a set of all known canonical session_keys for quick lookup.
+    let known_keys: Vec<String> = state
+        .config
+        .all_servers()
+        .chain(state.ssh_config_entries.iter())
+        .map(|s| config::SavedTunnel::make_session_key(&s.user, &s.host, s.port))
+        .collect();
+
+    // Snapshot entries for matching (avoid borrow conflict).
+    let ssh_entries: Vec<ServerEntry> = state.ssh_config_entries.clone();
+    let config_entries: Vec<ServerEntry> = state.config.all_servers().cloned().collect();
+
+    for tunnel in &mut state.config.tunnels {
+        if existing_ids.contains(&tunnel.id) {
+            continue;
+        }
+        if known_keys.contains(&tunnel.session_key) {
+            continue; // already matches a known server
+        }
+
+        if let Some((_user, host_part, port)) =
+            config::SavedTunnel::parse_session_key(&tunnel.session_key)
+        {
+            // Try host+port match (covers user mismatch, e.g. dustin vs root).
+            let matched = config_entries
+                .iter()
+                .chain(ssh_entries.iter())
+                .find(|s| s.host == host_part && s.port == port)
+                // Then try SSH config alias match.
+                .or_else(|| ssh_entries.iter().find(|s| s.label == host_part));
+
+            if let Some(entry) = matched {
+                let new_key = config::SavedTunnel::make_session_key(
+                    &entry.user,
+                    &entry.host,
+                    entry.port,
+                );
+                log::info!(
+                    "resolve_imported_tunnel_keys: '{}' → '{}' via server '{}'",
+                    tunnel.session_key,
+                    new_key,
+                    entry.label
+                );
+                tunnel.session_key = new_key;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,5 +1340,197 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let state = RemoteState::new(tx);
         assert!(state.sessions.is_empty());
+    }
+
+    /// Build a minimal RemoteState for testing (no config files, no SSH config).
+    fn test_state_with(
+        config: config::SshConfig,
+        ssh_config_entries: Vec<ServerEntry>,
+    ) -> RemoteState {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        RemoteState {
+            sessions: HashMap::new(),
+            config,
+            ssh_config_entries,
+            pending_prompts: PendingPrompts::new(),
+            tunnel_manager: tunnel::TunnelManager::new(),
+            transfers: Arc::new(Mutex::new(transfer::TransferRegistry::new())),
+            transfer_progress_tx: tx,
+        }
+    }
+
+    fn make_server(label: &str, host: &str, user: &str, port: u16) -> ServerEntry {
+        ServerEntry {
+            id: format!("sshconfig_{label}"),
+            label: label.to_string(),
+            host: host.to_string(),
+            port,
+            user: user.to_string(),
+            auth_method: "key".to_string(),
+            key_path: None,
+            proxy_command: None,
+            proxy_jump: None,
+        }
+    }
+
+    #[test]
+    fn find_server_exact_match() {
+        let ssh_entry = make_server("bastion", "bastion.example.com", "admin", 22);
+        let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
+
+        let result = find_server_for_tunnel(&state, "admin@bastion.example.com:22");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().host, "bastion.example.com");
+    }
+
+    #[test]
+    fn find_server_user_mismatch_matches_by_host_port() {
+        // Real scenario: SSH config has User root, but tunnel was exported
+        // with user dustin.  Should still match by host+port.
+        let mut ssh_entry =
+            make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
+        ssh_entry.proxy_command =
+            Some("cloudflared access ssh --hostname %h".to_string());
+        let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
+
+        let result = find_server_for_tunnel(
+            &state,
+            "dustin@bastion.nexxuscraft.com:22",
+        );
+        assert!(result.is_some(), "should match by host+port despite user mismatch");
+        let server = result.unwrap();
+        assert_eq!(server.host, "bastion.nexxuscraft.com");
+        assert_eq!(
+            server.proxy_command.as_deref(),
+            Some("cloudflared access ssh --hostname %h"),
+            "should inherit proxy from SSH config entry"
+        );
+    }
+
+    #[test]
+    fn find_server_alias_no_false_positive() {
+        // SSH config entry label AND host don't match session_key host.
+        let ssh_entry = make_server("prod-db", "db.example.com", "admin", 22);
+        let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
+
+        let result = find_server_for_tunnel(&state, "admin@bastion:22");
+        assert!(result.is_some(), "fallback should still return something");
+        assert_eq!(result.unwrap().host, "bastion");
+    }
+
+    #[test]
+    fn find_server_by_ssh_alias() {
+        // SSH config: Host bastion → HostName bastion.example.com
+        let mut ssh_entry =
+            make_server("bastion", "bastion.example.com", "admin", 22);
+        ssh_entry.proxy_command = Some("ssh -W %h:%p jump".to_string());
+        let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
+
+        let result = find_server_for_tunnel(&state, "admin@bastion:22");
+        assert!(result.is_some(), "should match via SSH config alias");
+        let server = result.unwrap();
+        assert_eq!(server.host, "bastion.example.com");
+        assert_eq!(
+            server.proxy_command.as_deref(),
+            Some("ssh -W %h:%p jump"),
+        );
+    }
+
+    #[test]
+    fn resolve_imported_tunnel_keys_rewrites_user_mismatch() {
+        let mut ssh_entry =
+            make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
+        ssh_entry.proxy_command =
+            Some("cloudflared access ssh --hostname %h".to_string());
+        let mut cfg = SshConfig::default();
+        cfg.tunnels.push(config::SavedTunnel {
+            id: uuid::Uuid::new_v4(),
+            label: "minecraft-local".to_string(),
+            session_key: "dustin@bastion.nexxuscraft.com:22".to_string(),
+            local_port: 25565,
+            remote_host: "10.0.1.31".to_string(),
+            remote_port: 25580,
+            auto_start: false,
+        });
+        let mut state = test_state_with(cfg, vec![ssh_entry]);
+
+        resolve_imported_tunnel_keys(&mut state, &[]);
+
+        assert_eq!(
+            state.config.tunnels[0].session_key,
+            "root@bastion.nexxuscraft.com:22",
+        );
+    }
+
+    #[test]
+    fn resolve_imported_tunnel_keys_rewrites_alias() {
+        let ssh_entry =
+            make_server("bastion", "bastion.example.com", "admin", 22);
+        let mut cfg = SshConfig::default();
+        cfg.tunnels.push(config::SavedTunnel {
+            id: uuid::Uuid::new_v4(),
+            label: "test tunnel".to_string(),
+            session_key: "admin@bastion:22".to_string(),
+            local_port: 8080,
+            remote_host: "localhost".to_string(),
+            remote_port: 80,
+            auto_start: false,
+        });
+        let mut state = test_state_with(cfg, vec![ssh_entry]);
+
+        resolve_imported_tunnel_keys(&mut state, &[]);
+
+        assert_eq!(
+            state.config.tunnels[0].session_key,
+            "admin@bastion.example.com:22",
+        );
+    }
+
+    #[test]
+    fn resolve_imported_tunnel_keys_skips_existing() {
+        let ssh_entry =
+            make_server("bastion", "bastion.example.com", "admin", 22);
+        let tunnel_id = uuid::Uuid::new_v4();
+        let mut cfg = SshConfig::default();
+        cfg.tunnels.push(config::SavedTunnel {
+            id: tunnel_id,
+            label: "existing tunnel".to_string(),
+            session_key: "admin@bastion:22".to_string(),
+            local_port: 8080,
+            remote_host: "localhost".to_string(),
+            remote_port: 80,
+            auto_start: false,
+        });
+        let mut state = test_state_with(cfg, vec![ssh_entry]);
+
+        resolve_imported_tunnel_keys(&mut state, &[tunnel_id]);
+
+        assert_eq!(
+            state.config.tunnels[0].session_key, "admin@bastion:22",
+        );
+    }
+
+    #[test]
+    fn resolve_imported_tunnel_keys_preserves_already_matching() {
+        let ssh_entry =
+            make_server("bastion", "bastion.example.com", "admin", 22);
+        let mut cfg = SshConfig::default();
+        cfg.tunnels.push(config::SavedTunnel {
+            id: uuid::Uuid::new_v4(),
+            label: "good tunnel".to_string(),
+            session_key: "admin@bastion.example.com:22".to_string(),
+            local_port: 9090,
+            remote_host: "localhost".to_string(),
+            remote_port: 443,
+            auto_start: false,
+        });
+        let mut state = test_state_with(cfg, vec![ssh_entry]);
+
+        resolve_imported_tunnel_keys(&mut state, &[]);
+
+        assert_eq!(
+            state.config.tunnels[0].session_key,
+            "admin@bastion.example.com:22",
+        );
     }
 }
