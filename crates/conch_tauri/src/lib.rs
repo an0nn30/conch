@@ -10,6 +10,7 @@ mod pty_backend;
 pub(crate) mod plugins;
 pub(crate) mod remote;
 pub(crate) mod theme;
+pub(crate) mod utf8_stream;
 mod watcher;
 
 use std::collections::HashMap;
@@ -1019,6 +1020,7 @@ fn pty_reader_loop(
     mut reader: Box<dyn std::io::Read + Send>,
 ) {
     let mut buf = [0u8; 8192];
+    let mut utf8 = crate::utf8_stream::Utf8Accumulator::new();
 
     loop {
         use std::io::Read;
@@ -1037,9 +1039,10 @@ fn pty_reader_loop(
                 break;
             }
             Ok(n) => {
-                // Send raw bytes as a string (xterm.js expects UTF-8 or latin1).
-                // Use lossy conversion for binary data.
-                let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let text = utf8.push(&buf[..n]);
+                if text.is_empty() {
+                    continue;
+                }
                 let _ = handle.emit_to(
                     &window_label,
                     "pty-output",

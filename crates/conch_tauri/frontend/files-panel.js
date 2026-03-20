@@ -92,8 +92,8 @@
   // ---------------------------------------------------------------------------
 
   function isHidden() { return panelWrapEl.classList.contains('hidden'); }
-  function showPanel() { panelWrapEl.classList.remove('hidden'); if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50); saveLayoutState(); }
-  function hidePanel() { panelWrapEl.classList.add('hidden'); if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50); saveLayoutState(); }
+  function showPanel() { panelWrapEl.classList.remove('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState(); }
+  function hidePanel() { panelWrapEl.classList.add('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState(); }
   function togglePanel() { if (isHidden()) showPanel(); else hidePanel(); }
 
   function initResize() {

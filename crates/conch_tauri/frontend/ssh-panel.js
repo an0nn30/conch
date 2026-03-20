@@ -148,13 +148,13 @@
 
   function showPanel() {
     panelWrapEl.classList.remove('hidden');
-    if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50);
+    if (fitActiveTabFn) fitActiveTabFn();
     saveLayoutState();
   }
 
   function hidePanel() {
     panelWrapEl.classList.add('hidden');
-    if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50);
+    if (fitActiveTabFn) fitActiveTabFn();
     saveLayoutState();
   }
 

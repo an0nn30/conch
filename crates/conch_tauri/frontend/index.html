@@ -821,6 +821,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
   <script src="utils.js"></script>
   <script src="titlebar.js"></script>
   <script src="toast.js"></script>
@@ -1135,6 +1136,32 @@
         }, 100);
       }
 
+      // Create a Terminal with all addons loaded. Must be called after the
+      // root element is attached to the DOM (WebGL addon needs a live canvas).
+      function initTerminal(root) {
+        const term = new Terminal({
+          theme,
+          fontFamily: termFontFamily,
+          fontSize: termFontSize,
+          cursorStyle: termCursorStyle,
+          cursorBlink: termCursorBlink,
+          scrollSensitivity: termScrollSensitivity,
+          allowProposedApi: true,
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(new WebLinksAddon.WebLinksAddon());
+        if (typeof Unicode11Addon !== 'undefined') {
+          term.loadAddon(new Unicode11Addon.Unicode11Addon());
+          term.unicode.activeVersion = '11';
+        }
+        term.open(root);
+        if (typeof WebglAddon !== 'undefined') {
+          try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
+        }
+        return { term, fitAddon };
+      }
+
       function normalizeTabTitle(rawTitle, fallback) {
         const cleaned = String(rawTitle || '').replace(/\s+/g, ' ').trim();
         if (!cleaned) {
@@ -1235,29 +1262,12 @@
         tabBarEl.appendChild(button);
         terminalHostEl.appendChild(root);
 
-        const term = new Terminal({
-          theme,
-          fontFamily: termFontFamily,
-          fontSize: termFontSize,
-          cursorStyle: termCursorStyle,
-          cursorBlink: termCursorBlink,
-          scrollSensitivity: termScrollSensitivity,
-          allowProposedApi: true,
-        });
-        const fitAddon = new FitAddon.FitAddon();
-        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-        term.loadAddon(fitAddon);
-        term.loadAddon(webLinksAddon);
-        if (typeof Unicode11Addon !== 'undefined') {
-          term.loadAddon(new Unicode11Addon.Unicode11Addon());
-          term.unicode.activeVersion = '11';
-        }
-        term.open(root);
+        const { term, fitAddon } = initTerminal(root);
 
         const tab = {
           id: tabId,
           label,
-          type: 'local', // 'local' or 'ssh'
+          type: 'local',
           hasCustomTitle: false,
           button,
           root,
@@ -1325,24 +1335,7 @@
         tabBarEl.appendChild(button);
         terminalHostEl.appendChild(root);
 
-        const term = new Terminal({
-          theme,
-          fontFamily: termFontFamily,
-          fontSize: termFontSize,
-          cursorStyle: termCursorStyle,
-          cursorBlink: termCursorBlink,
-          scrollSensitivity: termScrollSensitivity,
-          allowProposedApi: true,
-        });
-        const fitAddon = new FitAddon.FitAddon();
-        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-        term.loadAddon(fitAddon);
-        term.loadAddon(webLinksAddon);
-        if (typeof Unicode11Addon !== 'undefined') {
-          term.loadAddon(new Unicode11Addon.Unicode11Addon());
-          term.unicode.activeVersion = '11';
-        }
-        term.open(root);
+        const { term, fitAddon } = initTerminal(root);
 
         const tab = {
           id: tabId,
@@ -1801,6 +1794,13 @@
         debouncedFitAndResize();
       });
       resizeObserver.observe(terminalHostEl);
+
+      // Preload the bundled Nerd Font so the canvas renderer can use it for
+      // glyph fallback.  CSS @font-face is lazy — without this the browser
+      // never downloads the font because no DOM text references it.
+      try {
+        await document.fonts.load(termFontSize + 'px "Symbols Nerd Font Mono"');
+      } catch (_) { /* font may already be loaded or missing — not fatal */ }
 
       try {
         await createTab();

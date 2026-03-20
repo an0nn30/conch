@@ -25,6 +25,32 @@ use ssh::{AuthPrompt, ChannelInput, SshHandler};
 
 use crate::{PtyExitEvent, PtyOutputEvent};
 
+/// Spawn an async task that drains `output_rx` and emits `pty-output` events,
+/// buffering partial UTF-8 sequences between channel messages.
+fn spawn_output_forwarder(
+    app: &tauri::AppHandle,
+    window_label: &str,
+    tab_id: u32,
+    mut output_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let app = app.clone();
+    let wl = window_label.to_owned();
+    tokio::spawn(async move {
+        let mut utf8 = crate::utf8_stream::Utf8Accumulator::new();
+        while let Some(data) = output_rx.recv().await {
+            let text = utf8.push(&data);
+            if text.is_empty() {
+                continue;
+            }
+            let _ = app.emit_to(
+                &wl,
+                "pty-output",
+                PtyOutputEvent { window_label: wl.clone(), tab_id, data: text },
+            );
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Auth prompt events — frontend receives these, responds via commands
 // ---------------------------------------------------------------------------
@@ -259,23 +285,7 @@ pub(crate) async fn ssh_connect(
         }
     });
 
-    // Spawn output forwarder (channel output → Tauri events).
-    let wl2 = window_label.clone();
-    let app2 = app.clone();
-    tokio::spawn(async move {
-        while let Some(data) = output_rx.recv().await {
-            let text = String::from_utf8_lossy(&data).into_owned();
-            let _ = app2.emit_to(
-                &wl2,
-                "pty-output",
-                PtyOutputEvent {
-                    window_label: wl2.clone(),
-                    tab_id,
-                    data: text,
-                },
-            );
-        }
-    });
+    spawn_output_forwarder(&app, &window_label, tab_id, output_rx);
 
     Ok(())
 }
@@ -398,14 +408,7 @@ pub(crate) async fn ssh_quick_connect(
         }
     });
 
-    let wl2 = window_label.clone();
-    let app2 = app.clone();
-    tokio::spawn(async move {
-        while let Some(data) = output_rx.recv().await {
-            let text = String::from_utf8_lossy(&data).into_owned();
-            let _ = app2.emit_to(&wl2, "pty-output", PtyOutputEvent { window_label: wl2.clone(), tab_id, data: text });
-        }
-    });
+    spawn_output_forwarder(&app, &window_label, tab_id, output_rx);
 
     Ok(())
 }
