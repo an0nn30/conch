@@ -1114,9 +1114,25 @@
         }
         const dims = tab.fitAddon.proposeDimensions();
         if (dims) {
+          // Skip if dimensions haven't changed (avoids redundant PTY resizes)
+          if (tab.lastCols === dims.cols && tab.lastRows === dims.rows) {
+            return;
+          }
+          tab.lastCols = dims.cols;
+          tab.lastRows = dims.rows;
           const cmd = tab.type === 'ssh' ? 'ssh_resize' : 'resize_pty';
           invoke(cmd, { tabId: tab.id, cols: dims.cols, rows: dims.rows }).catch(() => {});
         }
+      }
+
+      // Debounced version for continuous resize sources (ResizeObserver, panel drag).
+      // Coalesces rapid calls to avoid flooding the PTY with resize commands.
+      let _fitDebounceTimer = null;
+      function debouncedFitAndResize() {
+        clearTimeout(_fitDebounceTimer);
+        _fitDebounceTimer = setTimeout(() => {
+          fitAndResizeTab(currentTab());
+        }, 100);
       }
 
       function normalizeTabTitle(rawTitle, fallback) {
@@ -1402,7 +1418,7 @@
           panelEl: filesPanelEl,
           panelWrapEl: filesPanelWrapEl,
           resizeHandleEl: filesResizeEl,
-          fitActiveTab: () => fitAndResizeTab(currentTab()),
+          fitActiveTab: debouncedFitAndResize,
           getActiveTab: () => currentTab(),
         });
       }
@@ -1419,7 +1435,7 @@
           panelEl: sshPanelEl,
           panelWrapEl: sshPanelWrapEl,
           resizeHandleEl: sshResizeEl,
-          fitActiveTab: () => fitAndResizeTab(currentTab()),
+          fitActiveTab: debouncedFitAndResize,
           refocusTerminal: () => { const tab = currentTab(); if (tab) tab.term.focus(); },
         });
       }
@@ -1782,7 +1798,7 @@
       });
 
       const resizeObserver = new ResizeObserver(() => {
-        fitAndResizeTab(currentTab());
+        debouncedFitAndResize();
       });
       resizeObserver.observe(terminalHostEl);
 
