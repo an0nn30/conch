@@ -1,0 +1,45 @@
+/* Dracula color theme — CSS custom properties */
+
+:root {
+  /* Background layers */
+  --bg:           #282a36;
+  --bg-darker:    #21222c;
+  --bg-card:      #313341;
+  --bg-input:     #3a3c4e;
+
+  /* Foreground */
+  --fg:           #f8f8f2;
+  --text-secondary: #6272a4;
+
+  /* Dracula palette */
+  --purple:       #bd93f9;
+  --pink:         #ff79c6;
+  --cyan:         #8be9fd;
+  --green:        #50fa7b;
+  --yellow:       #f1fa8c;
+  --orange:       #ffb86c;
+  --red:          #ff5555;
+  --comment:      #6272a4;
+
+  /* Semantic aliases */
+  --accent:       var(--purple);
+  --accent-dim:   #7c5cbf;
+  --success:      var(--green);
+  --warning:      var(--orange);
+  --error:        var(--red);
+
+  /* Borders */
+  --border:       #44475a;
+  --border-subtle: #383a4a;
+
+  /* Tab bar */
+  --tab-bg:       #21222c;
+  --tab-active:   var(--purple);
+  --tab-inactive: #6272a4;
+
+  /* Safe area fallbacks (overridden at runtime via JS if env() not available) */
+  --safe-top:    env(safe-area-inset-top,    0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left:   env(safe-area-inset-left,   0px);
+  --safe-right:  env(safe-area-inset-right,  0px);
+}
