@@ -38,6 +38,11 @@
       terminal.clear();
     }
 
+    // Wait for the view to be fully laid out before fitting,
+    // then use the fitted dimensions for the SSH connection.
+    await new Promise(r => setTimeout(r, 100));
+    if (fitAddon) fitAddon.fit();
+
     try {
       const sessionId = await window.__TAURI__.core.invoke('ssh_quick_connect', {
         spec,
@@ -49,8 +54,11 @@
       currentSessionId = sessionId;
       titleEl.textContent = spec;
 
-      // Focus terminal
-      terminal.focus();
+      // Fit again now that we're connected (in case layout shifted)
+      requestAnimationFrame(() => {
+        if (fitAddon) fitAddon.fit();
+        terminal.focus();
+      });
     } catch (err) {
       titleEl.textContent = 'Connection failed';
       window.toast.error('SSH Error', err);

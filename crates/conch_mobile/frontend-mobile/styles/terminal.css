@@ -6,7 +6,8 @@
   top: 0;
   left: 0;
   right: 0;
-  bottom: 0;
+  /* Leave room for the native UITabBar (49pt + safe area bottom) */
+  bottom: calc(49px + env(safe-area-inset-bottom, 34px));
   z-index: 1000;
   background: var(--bg);
   flex-direction: column;
