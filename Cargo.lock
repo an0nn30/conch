@@ -580,12 +580,19 @@ dependencies = [
 name = "conch_mobile"
 version = "2.0.0"
 dependencies = [
+ "async-trait",
+ "conch_core",
+ "conch_remote",
+ "dirs",
  "log",
  "objc2",
+ "parking_lot",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
