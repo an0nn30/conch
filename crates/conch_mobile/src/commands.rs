@@ -30,7 +30,7 @@ struct PtyExitEvent {
 }
 
 #[derive(Clone, Serialize)]
-struct ActiveSessionInfo {
+pub(crate) struct ActiveSessionInfo {
     session_id: String,
     host: String,
     user: String,

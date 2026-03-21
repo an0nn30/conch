@@ -7,9 +7,24 @@ mod callbacks;
 mod commands;
 mod state;
 
+use std::sync::Arc;
+use parking_lot::Mutex;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mobile_state = Arc::new(Mutex::new(state::MobileState::new()));
+
     tauri::Builder::default()
+        .manage(mobile_state)
+        .invoke_handler(tauri::generate_handler![
+            commands::ssh_quick_connect,
+            commands::ssh_write,
+            commands::ssh_resize,
+            commands::ssh_disconnect,
+            commands::auth_respond_host_key,
+            commands::auth_respond_password,
+            commands::get_sessions,
+        ])
         .setup(|app| {
             #[cfg(target_os = "ios")]
             {
@@ -28,7 +43,6 @@ pub fn run() {
 mod tests {
     #[test]
     fn app_module_loads() {
-        // Smoke test — verifies the crate compiles and links.
         assert!(true);
     }
 }
