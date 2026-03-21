@@ -4,6 +4,7 @@
 mod ios_native;
 
 mod callbacks;
+mod commands;
 mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
