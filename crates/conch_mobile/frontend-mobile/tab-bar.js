@@ -49,6 +49,15 @@
         switchTo(event.payload);
       });
 
+      // Listen for tab bar height so we can add bottom padding
+      window.__TAURI__.event.listen('native-tab-bar-ready', (event) => {
+        const height = event.payload;
+        // Add padding so content scrolls above the floating native tab bar
+        if (contentEl) {
+          contentEl.style.paddingBottom = (height + 34) + 'px'; // tab height + safe area
+        }
+      });
+
       // Hide the HTML tab bar — native one is handling it
       if (tabBarEl) tabBarEl.style.display = 'none';
     } else {

@@ -162,17 +162,11 @@ pub fn setup_native_tab_bar(webview: &WebviewWindow) {
             let delegate = create_tab_bar_delegate();
             let _: () = msg_send![tab_bar, setDelegate: delegate];
 
-            // Resize the webview to make room for the tab bar
-            let webview_frame = CGRect {
-                origin: CGPoint { x: 0.0, y: 0.0 },
-                size: CGSize {
-                    width: bounds.size.width,
-                    height: bounds.size.height - total_tab_height,
-                },
-            };
-            let _: () = msg_send![wk_webview, setFrame: webview_frame];
+            // Keep webview full-screen — tab bar floats on top.
+            // The webview JS adds bottom padding via the native-tab-bar-ready event.
+            // No setFrame needed — webview already fills the screen.
 
-            // Add the tab bar to the superview
+            // Add the tab bar on top of the webview
             let _: () = msg_send![superview, addSubview: tab_bar];
 
             log::info!(
