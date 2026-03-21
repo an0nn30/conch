@@ -2,10 +2,54 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Mobile viewport: full bleed, no scaling, honor safe areas -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+
+  <!-- iOS web-app / PWA meta tags -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Conch">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#282a36">
+
   <title>Conch</title>
+
+  <!-- CSS: theme variables first, then layout -->
+  <link rel="stylesheet" href="styles/theme.css">
+  <link rel="stylesheet" href="styles/main.css">
 </head>
-<body style="background:#282a36;color:#f8f8f2;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-  <h1>Conch Mobile</h1>
+<body>
+  <!-- App shell -->
+  <div id="app">
+    <!-- Scrollable tab content area -->
+    <div id="tab-content"></div>
+
+    <!-- Solid bottom tab bar (no blur, no floating) -->
+    <nav id="tab-bar" role="tablist" aria-label="Main navigation"></nav>
+  </div>
+
+  <!-- Utilities (must load before anything that calls window.utils) -->
+  <script src="utils.js"></script>
+  <script src="toast.js"></script>
+
+  <!-- Tab bar controller -->
+  <script src="tab-bar.js"></script>
+
+  <!-- Tab content modules -->
+  <script src="connections.js"></script>
+  <script src="vault.js"></script>
+  <script src="profile.js"></script>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      // Register render functions for each tab
+      window.tabBar.register('connections', () => window.connectionsTab.render());
+      window.tabBar.register('vault',       () => window.vaultTab.render());
+      window.tabBar.register('profile',     () => window.profileTab.render());
+
+      // Mount tab bar (renders default active tab: connections)
+      window.tabBar.init();
+    });
+  </script>
 </body>
 </html>
