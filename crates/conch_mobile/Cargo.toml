@@ -17,3 +17,6 @@ tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"

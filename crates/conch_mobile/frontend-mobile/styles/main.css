@@ -9,7 +9,14 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-html, body {
+html {
+  width: 100%;
+  height: 100%;
+  background: var(--tab-bg, #21222c);
+  overflow: hidden;
+}
+
+body {
   width: 100%;
   height: 100%;
   background: var(--bg);
