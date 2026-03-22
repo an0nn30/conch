@@ -246,6 +246,12 @@ pub(crate) async fn vault_pick_key_file(
 }
 
 #[tauri::command]
+pub(crate) fn vault_check_path_exists(path: String) -> bool {
+    let expanded = conch_remote::ssh::expand_tilde(&path);
+    expanded.exists() || expanded.with_extension("pub").exists()
+}
+
+#[tauri::command]
 pub(crate) fn vault_generate_key(
     vault: tauri::State<'_, VaultState>,
     request: KeyGenRequest,
@@ -602,5 +608,29 @@ mod tests {
         assert!(json.contains("\"exists\":true"));
         assert!(json.contains("\"locked\":false"));
         assert!(json.contains("\"seconds_remaining\":900"));
+    }
+
+    #[test]
+    fn check_path_exists_detects_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_test");
+        std::fs::write(&path, "key data").unwrap();
+        assert!(vault_check_path_exists(path.display().to_string()));
+    }
+
+    #[test]
+    fn check_path_exists_detects_pub_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_test");
+        let pub_path = path.with_extension("pub");
+        std::fs::write(&pub_path, "pub key data").unwrap();
+        assert!(vault_check_path_exists(path.display().to_string()));
+    }
+
+    #[test]
+    fn check_path_exists_false_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent_key");
+        assert!(!vault_check_path_exists(path.display().to_string()));
     }
 }

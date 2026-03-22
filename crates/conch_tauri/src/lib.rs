@@ -1168,6 +1168,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             vault_commands::vault_get_settings,
             vault_commands::vault_update_settings,
             vault_commands::vault_pick_key_file,
+            vault_commands::vault_check_path_exists,
             vault_commands::vault_generate_key,
             vault_commands::vault_list_keys,
             vault_commands::vault_delete_key,

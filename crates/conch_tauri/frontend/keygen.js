@@ -148,9 +148,38 @@
       document.removeEventListener('keydown', onKey, true);
     });
 
-    overlay.querySelector('#keygen-generate').addEventListener('click', async () => {
+    // Helper: actually run the key generation.
+    async function doGenerate() {
       const keyType = typeSelect.value;
       const comment = overlay.querySelector('#keygen-comment').value.trim();
+      const passphrase = overlay.querySelector('#keygen-passphrase').value;
+      const savePath = pathInput.value.trim();
+
+      const generateBtn = overlay.querySelector('#keygen-generate');
+      generateBtn.disabled = true;
+      generateBtn.textContent = 'Generating…';
+
+      try {
+        const result = await invoke('vault_generate_key', {
+          request: {
+            key_type: keyType,
+            comment: comment || null,
+            passphrase: passphrase || null,
+            save_path: savePath,
+          },
+        });
+
+        document.removeEventListener('keydown', onKey, true);
+        removeOverlay();
+        showResultDialog(result, opts);
+      } catch (e) {
+        generateBtn.disabled = false;
+        generateBtn.textContent = 'Generate';
+        window.toast.error('Key Generation Failed', String(e));
+      }
+    }
+
+    overlay.querySelector('#keygen-generate').addEventListener('click', async () => {
       const passphrase = overlay.querySelector('#keygen-passphrase').value;
       const passphraseConfirm = overlay.querySelector('#keygen-passphrase-confirm').value;
       const savePath = pathInput.value.trim();
@@ -167,29 +196,37 @@
         return;
       }
 
-      const generateBtn = overlay.querySelector('#keygen-generate');
-      generateBtn.disabled = true;
-      generateBtn.textContent = 'Generating…';
+      // Remove any previous overwrite warning.
+      const oldWarn = overlay.querySelector('.keygen-overwrite-warning');
+      if (oldWarn) oldWarn.remove();
 
+      // Check if the file already exists on disk.
       try {
-        const result = await invoke('vault_generate_key', {
-          request: {
-            key_type: keyType,
-            comment: comment || null,
-            passphrase: passphrase || null,
-            save_path: savePath,
-          },
-        });
+        const exists = await invoke('vault_check_path_exists', { path: savePath });
+        if (exists) {
+          const noteEl = overlay.querySelector('.keygen-note');
+          const warning = document.createElement('div');
+          warning.className = 'keygen-overwrite-warning';
+          warning.innerHTML = '<span class="keygen-overwrite-text">A key file already exists at this path. Overwrite?</span>'
+            + ' <button class="ssh-form-btn keygen-overwrite-btn" id="keygen-overwrite">Overwrite</button>'
+            + ' <button class="ssh-form-btn" id="keygen-overwrite-cancel">Cancel</button>';
+          noteEl.parentNode.insertBefore(warning, noteEl.nextSibling);
 
-        // Clean up the key listener before showing result.
-        document.removeEventListener('keydown', onKey, true);
-        removeOverlay();
-        showResultDialog(result, opts);
-      } catch (e) {
-        generateBtn.disabled = false;
-        generateBtn.textContent = 'Generate';
-        window.toast.error('Key Generation Failed', String(e));
+          warning.querySelector('#keygen-overwrite').addEventListener('click', () => {
+            warning.remove();
+            doGenerate();
+          });
+          warning.querySelector('#keygen-overwrite-cancel').addEventListener('click', () => {
+            warning.remove();
+          });
+          return;
+        }
+      } catch (_) {
+        // If the check fails, proceed with generation — save_key_to_disk
+        // will surface any real filesystem errors.
       }
+
+      doGenerate();
     });
   }
 

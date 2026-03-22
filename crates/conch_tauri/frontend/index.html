@@ -995,6 +995,15 @@
     .keygen-note {
       font-size: 11px; color: var(--dim-fg); line-height: 1.5; padding: 2px 0;
     }
+    .keygen-overwrite-warning {
+      display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+      margin-top: 6px; border-radius: 4px;
+      background: color-mix(in srgb, var(--yellow) 15%, var(--bg));
+      border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent);
+      font-size: 12px;
+    }
+    .keygen-overwrite-text { color: var(--yellow); flex: 1; }
+    .keygen-overwrite-btn { background: var(--yellow); color: var(--bg); }
     .keygen-success-icon {
       display: inline-block; width: 20px; height: 20px; line-height: 20px;
       background: var(--green); color: var(--bg);
