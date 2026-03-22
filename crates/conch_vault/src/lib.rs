@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod encryption;
 pub mod error;
+pub mod keychain;
 pub mod keygen;
 pub mod lock;
 pub mod model;
