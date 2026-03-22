@@ -1,8 +1,10 @@
+pub mod agent;
 pub mod encryption;
 pub mod error;
 pub mod keygen;
 pub mod lock;
 pub mod model;
+pub mod system_agent;
 
 pub use error::VaultError;
 pub use model::*;
