@@ -954,6 +954,22 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 })
                 .ok();
 
+            // Check whether a legacy-to-vault migration is needed.
+            // If the vault file does not exist yet AND servers.json has legacy entries
+            // (plain-text user/auth fields without a vault_account_id), notify the
+            // frontend so it can prompt the user to set up the vault and migrate.
+            {
+                let vault_exists = vault_state.lock().vault_exists();
+                if !vault_exists {
+                    let has_legacy = remote_state.lock().config.has_legacy_entries();
+                    if has_legacy {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.emit("vault-migration-needed", ());
+                        }
+                    }
+                }
+            }
+
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -1135,6 +1151,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             vault_commands::vault_get_settings,
             vault_commands::vault_update_settings,
             vault_commands::vault_generate_key,
+            vault_commands::vault_migrate_legacy,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;

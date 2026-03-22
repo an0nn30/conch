@@ -175,6 +175,35 @@ impl SshConfig {
             *existing = tunnel;
         }
     }
+
+    // -- Migration helpers --
+
+    /// Returns true if any server entry has legacy user/auth fields but no vault
+    /// account linked yet.
+    pub fn has_legacy_entries(&self) -> bool {
+        self.all_servers()
+            .any(|e| e.user.is_some() && e.vault_account_id.is_none())
+    }
+
+    /// Collect unique (user, key_path) combinations from legacy entries.
+    ///
+    /// Returns a `Vec` of `(username, key_path, display_name_hint)` tuples.
+    /// Entries that share the same user + key_path are de-duplicated so that
+    /// exactly one vault account is created per distinct credential.
+    pub fn collect_unique_credentials(&self) -> Vec<(String, Option<String>, String)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for entry in self.all_servers() {
+            if let Some(user) = &entry.user {
+                let key = (user.clone(), entry.key_path.clone());
+                if seen.insert(key.clone()) {
+                    let hint = format!("{}@{}", user, entry.host);
+                    result.push((user.clone(), entry.key_path.clone(), hint));
+                }
+            }
+        }
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +719,50 @@ Host bastion-target
         for server in &payload.ungrouped {
             assert!(server.vault_account_id.is_none());
         }
+    }
+
+    #[test]
+    fn detect_legacy_entries() {
+        let json = r#"{
+            "folders": [],
+            "ungrouped": [{
+                "id": "s1", "label": "Old Server", "host": "example.com",
+                "port": 22, "user": "root", "auth_method": "key",
+                "key_path": "/home/user/.ssh/id_ed25519"
+            }],
+            "tunnels": []
+        }"#;
+        let cfg: SshConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.has_legacy_entries());
+    }
+
+    #[test]
+    fn collect_unique_credentials_deduplicates() {
+        let json = r#"{
+            "folders": [],
+            "ungrouped": [
+                {"id": "s1", "label": "A", "host": "a.com", "port": 22,
+                 "user": "deploy", "auth_method": "key", "key_path": "/k1"},
+                {"id": "s2", "label": "B", "host": "b.com", "port": 22,
+                 "user": "deploy", "auth_method": "key", "key_path": "/k1"},
+                {"id": "s3", "label": "C", "host": "c.com", "port": 22,
+                 "user": "root", "auth_method": "password"}
+            ],
+            "tunnels": []
+        }"#;
+        let cfg: SshConfig = serde_json::from_str(json).unwrap();
+        let creds = cfg.collect_unique_credentials();
+        assert_eq!(creds.len(), 2, "deploy+/k1 and root+password should be 2 unique credentials");
+    }
+
+    #[test]
+    fn has_legacy_entries_false_when_vault_account_set() {
+        let mut cfg = SshConfig::default();
+        let mut entry = make_entry("s1", "host1");
+        entry.vault_account_id = Some(uuid::Uuid::new_v4());
+        // Entry has vault_account_id so it is NOT legacy.
+        cfg.add_server(entry);
+        assert!(!cfg.has_legacy_entries());
     }
 
     #[test]
