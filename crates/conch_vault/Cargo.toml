@@ -20,5 +20,8 @@ ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "p384", "encr
 keyring = { version = "3", features = ["apple-native", "linux-native"] }
 base64 = { workspace = true }
 
+[features]
+vault_eager_import = []
+
 [dev-dependencies]
 tempfile = "3"

@@ -47,6 +47,10 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSLocale"] }
 [dev-dependencies]
 tempfile = "3"
 
+[features]
+default = ["vault_eager_import"]
+vault_eager_import = ["conch_vault/vault_eager_import"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

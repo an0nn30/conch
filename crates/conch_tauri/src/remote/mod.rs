@@ -768,6 +768,7 @@ pub(crate) async fn remote_export(
 pub(crate) async fn remote_import(
     app: tauri::AppHandle,
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
 ) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
     let path = app
@@ -792,12 +793,62 @@ pub(crate) async fn remote_import(
     let mut state = remote.lock();
     let existing_tunnel_ids: Vec<uuid::Uuid> =
         state.config.tunnels.iter().map(|t| t.id).collect();
+
+    // Capture pre-import lengths so we can find newly added entries afterwards.
+    let ungrouped_before = state.config.ungrouped.len();
+    let folders_before = state.config.folders.len();
+
     let (servers, folders, tunnels) = state.config.merge_import(payload);
 
     // Resolve session_keys of newly imported tunnels: if a tunnel's host
     // matches a known server with a different user, rewrite the session_key
     // so it matches on activation without needing an edit+save cycle.
     resolve_imported_tunnel_keys(&mut state, &existing_tunnel_ids);
+
+    // With vault_eager_import: create skeleton vault accounts for imported
+    // server entries that have user/key_path legacy fields but no vault link.
+    #[cfg(feature = "vault_eager_import")]
+    {
+        let vault_mgr = vault.lock();
+        if !vault_mgr.is_locked() {
+            // Process ungrouped and folder entries separately to satisfy the
+            // borrow checker (two distinct mutable fields of state.config).
+            let mut linked = 0usize;
+            {
+                let mut new_ungrouped: Vec<&mut ServerEntry> = state
+                    .config
+                    .ungrouped
+                    .iter_mut()
+                    .skip(ungrouped_before)
+                    .collect();
+                linked += eagerly_create_vault_accounts(&*vault_mgr, &mut new_ungrouped)
+                    .unwrap_or(0);
+            }
+            {
+                for folder in state.config.folders.iter_mut().skip(folders_before) {
+                    let mut folder_entries: Vec<&mut ServerEntry> =
+                        folder.entries.iter_mut().collect();
+                    linked += eagerly_create_vault_accounts(&*vault_mgr, &mut folder_entries)
+                        .unwrap_or(0);
+                }
+            }
+            if linked > 0 {
+                log::info!(
+                    "vault_eager_import: linked {linked} imported server(s) to new vault accounts"
+                );
+                if let Err(e) = vault_mgr.save() {
+                    log::warn!(
+                        "vault_eager_import: failed to save vault after eager import: {e}"
+                    );
+                }
+            }
+        }
+    }
+    // Suppress unused-variable warnings when feature is disabled.
+    #[cfg(not(feature = "vault_eager_import"))]
+    {
+        let _ = (ungrouped_before, folders_before, &vault);
+    }
 
     conch_remote::config::save_config(&state.paths.config_dir, &state.config);
     Ok(format!(
@@ -1393,6 +1444,53 @@ fn parse_quick_connect(input: &str) -> (String, String, u16) {
     (user, host, port)
 }
 
+// ---------------------------------------------------------------------------
+// Vault eager import (feature-gated)
+// ---------------------------------------------------------------------------
+
+/// Create skeleton vault accounts for imported server entries that carry
+/// `user` + optional `key_path` legacy fields but have no `vault_account_id`.
+///
+/// Only compiled when the `vault_eager_import` feature is enabled. The vault
+/// must already be unlocked before calling this function.
+///
+/// Returns the number of accounts created.
+#[cfg(feature = "vault_eager_import")]
+fn eagerly_create_vault_accounts(
+    vault: &conch_vault::VaultManager,
+    entries: &mut [&mut ServerEntry],
+) -> Result<usize, String> {
+    use std::path::PathBuf;
+    let mut count = 0;
+    for entry in entries.iter_mut() {
+        if entry.vault_account_id.is_none() {
+            if let Some(user) = &entry.user {
+                let auth = match &entry.key_path {
+                    Some(kp) => conch_vault::AuthMethod::Key {
+                        path: PathBuf::from(kp),
+                        passphrase: None,
+                    },
+                    None => conch_vault::AuthMethod::Password(String::new()),
+                };
+                let display = format!("{}@{}", user, entry.host);
+                match vault.add_account(display, user.clone(), auth) {
+                    Ok(id) => {
+                        entry.vault_account_id = Some(id);
+                        count += 1;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "vault_eager_import: failed to create account for {}: {e}",
+                            entry.host
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1785,6 +1883,112 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"server_id\":\"s1\""));
         assert!(json.contains("\"host\":\"example.com\""));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Vault eager import tests (feature-gated)
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "vault_eager_import")]
+    #[test]
+    fn eager_import_creates_vault_account_for_entry_with_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+
+        let mut entry = make_server("prod", "prod.example.com", "deploy", 22);
+        assert!(entry.vault_account_id.is_none());
+
+        let mut entries: Vec<&mut ServerEntry> = vec![&mut entry];
+        let count = eagerly_create_vault_accounts(&mgr, &mut entries).unwrap();
+
+        assert_eq!(count, 1);
+        assert!(entry.vault_account_id.is_some());
+
+        // Verify the account was actually stored in the vault.
+        let accounts = mgr.list_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].username, "deploy");
+        assert_eq!(accounts[0].display_name, "deploy@prod.example.com");
+    }
+
+    #[cfg(feature = "vault_eager_import")]
+    #[test]
+    fn eager_import_uses_key_auth_when_key_path_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+
+        let mut entry = make_server("bastion", "bastion.example.com", "admin", 22);
+        entry.key_path = Some("/home/admin/.ssh/id_ed25519".into());
+
+        let mut entries: Vec<&mut ServerEntry> = vec![&mut entry];
+        eagerly_create_vault_accounts(&mgr, &mut entries).unwrap();
+
+        let accounts = mgr.list_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        match &accounts[0].auth {
+            conch_vault::AuthMethod::Key { path, passphrase } => {
+                assert_eq!(path.to_str().unwrap(), "/home/admin/.ssh/id_ed25519");
+                assert!(passphrase.is_none());
+            }
+            other => panic!("expected Key auth, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "vault_eager_import")]
+    #[test]
+    fn eager_import_skips_entry_without_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+
+        // Entry with no user — should be skipped.
+        let mut entry = ServerEntry {
+            id: "s1".into(),
+            label: "no-user".into(),
+            host: "host.example.com".into(),
+            port: 22,
+            user: None,
+            auth_method: None,
+            key_path: None,
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        };
+
+        let mut entries: Vec<&mut ServerEntry> = vec![&mut entry];
+        let count = eagerly_create_vault_accounts(&mgr, &mut entries).unwrap();
+
+        assert_eq!(count, 0);
+        assert!(entry.vault_account_id.is_none());
+        assert!(mgr.list_accounts().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "vault_eager_import")]
+    #[test]
+    fn eager_import_skips_entry_already_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+        let existing_id = mgr
+            .add_account(
+                "existing".into(),
+                "root".into(),
+                conch_vault::AuthMethod::Password(String::new()),
+            )
+            .unwrap();
+
+        let mut entry = make_server("srv", "srv.example.com", "root", 22);
+        entry.vault_account_id = Some(existing_id);
+
+        let mut entries: Vec<&mut ServerEntry> = vec![&mut entry];
+        let count = eagerly_create_vault_accounts(&mgr, &mut entries).unwrap();
+
+        // Should not create a second account.
+        assert_eq!(count, 0);
+        assert_eq!(entry.vault_account_id, Some(existing_id));
+        assert_eq!(mgr.list_accounts().unwrap().len(), 1);
     }
 
 }
