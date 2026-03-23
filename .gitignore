@@ -37,3 +37,4 @@ java-sdk/build/
 # Local build scripts
 build.ps1
 .superpowers/
+.worktrees/
