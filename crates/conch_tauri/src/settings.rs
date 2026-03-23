@@ -4,6 +4,7 @@ use conch_core::config::{self, UserConfig};
 use serde::Serialize;
 use tauri::Emitter;
 
+use crate::theme;
 use crate::TauriState;
 
 #[derive(Serialize)]
@@ -28,6 +29,12 @@ pub(crate) fn list_themes() -> Vec<String> {
     }
     themes.sort();
     themes
+}
+
+#[tauri::command]
+pub(crate) fn preview_theme_colors(name: String) -> theme::ThemeColors {
+    let scheme = conch_core::color_scheme::resolve_theme(&name);
+    theme::resolve_theme_colors_from_scheme(&scheme)
 }
 
 #[tauri::command]
@@ -191,5 +198,23 @@ mod tests {
         let mut b = UserConfig::default();
         b.conch.plugins.enabled = false;
         assert!(needs_restart(&a, &b));
+    }
+
+    #[test]
+    fn preview_theme_colors_returns_dracula_defaults() {
+        let tc = crate::theme::resolve_theme_colors_from_scheme(
+            &conch_core::color_scheme::resolve_theme("dracula"),
+        );
+        assert_eq!(tc.background, "#282a36");
+        assert_eq!(tc.red, "#ff5555");
+    }
+
+    #[test]
+    fn preview_theme_colors_unknown_falls_back_to_dracula() {
+        let tc = crate::theme::resolve_theme_colors_from_scheme(
+            &conch_core::color_scheme::resolve_theme("nonexistent_theme_xyz"),
+        );
+        // Should fall back to Dracula
+        assert_eq!(tc.background, "#282a36");
     }
 }

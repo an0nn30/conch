@@ -1103,6 +1103,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             settings::get_all_settings,
             settings::save_settings,
             settings::list_themes,
+            settings::preview_theme_colors,
             remote::ssh_connect,
             remote::ssh_quick_connect,
             remote::ssh_write,
