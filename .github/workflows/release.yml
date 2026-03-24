@@ -140,20 +140,19 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # NOTE: Exact artifact filenames (e.g., Conch-v*-setup.exe.nsis.zip)
-      # should be verified after the first Tauri build — glob patterns used
-      # here as a best-effort match.
-      - name: Upload NSIS installer
+      - name: Upload NSIS installer and signature
         run: |
           ./.github/workflows/upload_asset.sh \
-            ./target/release/bundle/nsis/*.exe $GITHUB_TOKEN
+            "./target/release/bundle/nsis/Conch_${{ steps.version.outputs.version }}_x64-setup.exe" $GITHUB_TOKEN
+          ./.github/workflows/upload_asset.sh \
+            "./target/release/bundle/nsis/Conch_${{ steps.version.outputs.version }}_x64-setup.exe.sig" $GITHUB_TOKEN
 
-      - name: Upload update artifact
+      - name: Upload MSI installer and signature
         run: |
           ./.github/workflows/upload_asset.sh \
-            ./target/release/bundle/nsis/*.nsis.zip $GITHUB_TOKEN
+            "./target/release/bundle/msi/Conch_${{ steps.version.outputs.version }}_x64_en-US.msi" $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
-            ./target/release/bundle/nsis/*.nsis.zip.sig $GITHUB_TOKEN
+            "./target/release/bundle/msi/Conch_${{ steps.version.outputs.version }}_x64_en-US.msi.sig" $GITHUB_TOKEN
 
   # ---------------------------------------------------------------------------
   # Generate latest.json — Tauri updater endpoint artifact
@@ -181,15 +180,12 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           gh release download "$TAG" --pattern "*.sig" --dir sigs/
 
-      # NOTE: The artifact filenames in the URLs below (Conch.app.tar.gz,
-      # Conch-v*-setup.exe.nsis.zip) should be verified after the first
-      # successful Tauri build and updated if they differ.
       - name: Generate latest.json
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${{ steps.version.outputs.version }}"
-          MAC_SIG=$(cat sigs/*.tar.gz.sig 2>/dev/null || echo "")
-          WIN_SIG=$(cat sigs/*.nsis.zip.sig 2>/dev/null || echo "")
+          MAC_SIG=$(cat sigs/Conch.app.tar.gz.sig 2>/dev/null || echo "")
+          WIN_SIG=$(cat "sigs/Conch_${VERSION}_x64-setup.exe.sig" 2>/dev/null || echo "")
 
           cat > latest.json << ENDJSON
           {
@@ -207,7 +203,7 @@ jobs:
               },
               "windows-x86_64": {
                 "signature": "$WIN_SIG",
-                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/Conch-v${VERSION}-setup.exe.nsis.zip"
+                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/Conch_${VERSION}_x64-setup.exe"
               }
             }
           }
