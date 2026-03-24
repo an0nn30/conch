@@ -74,7 +74,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build --target universal-apple-darwin
+        run: cargo tauri build --target universal-apple-darwin --config '{"bundle":{"active":true}}'
 
       - name: Extract version
         id: version
@@ -132,7 +132,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build
+        run: cargo tauri build --config '{"bundle":{"active":true}}'
 
       - name: Extract version
         id: version

@@ -67,6 +67,13 @@
           { id: 'win-fullscreen', label: 'Fullscreen' },
         ]
       },
+      {
+        label: 'Help', items: [
+          { id: 'check-for-updates', label: 'Check for Updates\u2026' },
+          { type: 'separator' },
+          { id: 'about', label: 'About Conch' },
+        ]
+      },
     ];
   }
 
