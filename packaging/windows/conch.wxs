@@ -1,5 +1,5 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-   <Package Name="Conch" UpgradeCode="f3a1d8b2-6c4e-4a9f-b7d5-2e8c1f0a3b6d" Language="1033" Codepage="1252" Version="2.0.0" Manufacturer="an0nn30" InstallerVersion="200">
+   <Package Name="Conch" UpgradeCode="f3a1d8b2-6c4e-4a9f-b7d5-2e8c1f0a3b6d" Language="1033" Codepage="1252" Version="2.0.1" Manufacturer="an0nn30" InstallerVersion="200">
       <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
       <Icon Id="ConchIco" SourceFile=".\crates\conch_tauri\icons\icon.ico" />
       <WixVariable Id="WixUILicenseRtf" Value=".\packaging\windows\license.rtf" />
