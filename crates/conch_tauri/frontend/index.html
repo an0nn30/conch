@@ -779,9 +779,6 @@
     .terminal-pane.active {
       display: block;
     }
-    /* Hide xterm.js link underlines unless Cmd/Ctrl is held */
-    .xterm-screen a { text-decoration: none !important; cursor: text !important; }
-    .link-modifier-held .xterm-screen a { text-decoration: underline !important; cursor: pointer !important; }
     #status {
       position: fixed;
       top: 12px;
@@ -1428,8 +1425,7 @@
         });
         const fitAddon = new FitAddon.FitAddon();
         term.loadAddon(fitAddon);
-        term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
-          if (!event.metaKey && !event.ctrlKey) return;
+        term.loadAddon(new WebLinksAddon.WebLinksAddon((_event, uri) => {
           if (tauri.shell && tauri.shell.open) {
             tauri.shell.open(uri);
           } else {
@@ -2037,18 +2033,6 @@
         window.titlebar.init(handleMenuAction);
         delete window._initTitlebarPending;
       }
-
-      // Toggle link underline visibility when Cmd/Ctrl is held.
-      const termHost = document.getElementById('terminal-host');
-      document.addEventListener('keydown', (e) => {
-        if ((e.key === 'Meta' || e.key === 'Control') && termHost) termHost.classList.add('link-modifier-held');
-      });
-      document.addEventListener('keyup', (e) => {
-        if ((e.key === 'Meta' || e.key === 'Control') && termHost) termHost.classList.remove('link-modifier-held');
-      });
-      window.addEventListener('blur', () => {
-        if (termHost) termHost.classList.remove('link-modifier-held');
-      });
 
       // Global Escape handler — close overlays or refocus terminal.
       // Uses capture phase so it fires before xterm.js swallows the event.
