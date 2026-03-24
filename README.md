@@ -39,7 +39,11 @@ Think MobaXterm, but open source, cross-platform, and extensible.
 
 **SSH Tunnels** (built-in) — Local port forwarding with persistent tunnel definitions. Start/stop from the sidebar or the tunnel manager dialog.
 
-**Theming** — Full [Alacritty-compatible](https://github.com/alacritty/alacritty-theme) `.toml` theme support. Drop a theme file in `~/.config/conch/themes/` and set `[colors] theme = "name"`. Hot-reload on file change.
+**Credential Vault** — Encrypted credential storage using AES-256-GCM with Argon2id key derivation. OS keychain integration for biometric unlock (Touch ID, Windows Hello). Built-in SSH key generation (Ed25519, ECDSA, RSA), auto-lock timer, and vault-aware SSH connections. Accessible via Tools > Credential Vault.
+
+**Settings Dialog** — Comprehensive settings UI accessible via File > Settings (or `Cmd+,`). Configure appearance, terminal, shell, keyboard shortcuts, plugins, and advanced settings with an Apply/Cancel workflow.
+
+**Theming** — Full [Alacritty-compatible](https://github.com/alacritty/alacritty-theme) `.toml` theme support. Drop a theme file in `~/.config/conch/themes/` and set `[colors] theme = "name"`. Hot-reload on file change. Live preview in the Settings dialog shows theme colors before applying.
 
 **Zen Mode** — `Cmd+Shift+Z` hides all panels for a distraction-free terminal.
 
@@ -66,7 +70,7 @@ See the [Java Plugin SDK](java-sdk/) for the API reference.
 
 ### Lua plugins
 
-Lightweight **Lua 5.4 plugins** for quick scripting. Drop a `.lua` file in your plugins directory and enable it via Tools > Plugin Manager.
+Lightweight **Lua 5.4 plugins** for quick scripting. Drop a `.lua` file in your plugins directory and enable it via Settings > Plugins.
 
 ```lua
 -- plugin-name: Hello World
@@ -88,7 +92,7 @@ end
 
 ### Plugin management
 
-Plugins are managed via **Tools > Plugin Manager**:
+Plugins are managed via **Settings > Plugins**:
 - Scans all configured search paths for `.lua` and `.jar` plugins
 - Enable/disable plugins with a single click
 - Enabled plugins are remembered across restarts
@@ -96,9 +100,13 @@ Plugins are managed via **Tools > Plugin Manager**:
 
 ### Plugin development
 
-See the **[VS Code extension](editors/vscode/)** for Lua API completions and hover docs.
+See the **[VS Code extension](editors/vscode/)** or **[Neovim definitions](editors/neovim/)** for Lua API completions and hover docs.
 
 ## Installation
+
+### Pre-built binaries
+
+Download the latest release for your platform from the [Releases page](https://github.com/an0nn30/rusty_conch/releases).
 
 ### Build from source
 
@@ -129,9 +137,10 @@ sudo apt-get install -y \
 
 | Shortcut | Action |
 |----------|--------|
+| `Cmd+,` | Settings |
 | `Cmd+T` | New tab |
 | `Cmd+W` | Close tab |
-| `Cmd+1`–`9` | Switch to tab N |
+| `Cmd+1`--`9` | Switch to tab N |
 | `Cmd+Shift+N` | New window |
 | `Cmd+Shift+E` | Toggle file explorer (left panel) |
 | `Cmd+Shift+R` | Toggle sessions panel (right panel) |
@@ -145,7 +154,7 @@ All shortcuts are configurable in `[conch.keyboard]`. Plugins can also register 
 
 ## Configuration
 
-Conch uses a TOML config at `~/.config/conch/config.toml` (Linux/macOS) or `%APPDATA%\conch\config.toml` (Windows).
+Most settings can be configured through the Settings dialog (File > Settings or `Cmd+,`). For manual editing, Conch uses a TOML config at `~/.config/conch/config.toml` (Linux/macOS) or `%APPDATA%\conch\config.toml` (Windows).
 
 Alacritty-compatible sections (`[window]`, `[font]`, `[colors]`, `[terminal]`) work as-is. Conch adds its own sections:
 
@@ -176,15 +185,20 @@ crates/
   conch_core/         Config loading, color schemes, persistent state
   conch_plugin_sdk/   Widget/event types shared with Lua and Java plugins
   conch_plugin/       Plugin host — message bus, Lua runner, Java runtime
-  conch_tauri/        The app — Tauri/xterm.js UI, SSH, SFTP, file explorer
-java-sdk/             Java Plugin SDK (JAR + sources + javadoc)
+  conch_remote/       Platform-agnostic SSH, SFTP, tunnels (russh)
+  conch_tauri/        The app — Tauri/xterm.js UI, built-in SSH/SFTP/tunnels
+  conch_vault/        Credential vault — encrypted storage, key generation
+java-sdk/             Java Plugin SDK (JAR + sources)
 editors/
   vscode/             VS Code extension for Lua plugin development
+  neovim/             Neovim/LuaLS type definitions for Lua plugin development
 ```
 
 ## Contributing
 
-Conch is actively developed. Bug reports, feature requests, and pull requests are welcome.
+Conch is actively developed. Bug reports, feature requests, and pull requests are welcome — please [open an issue](https://github.com/an0nn30/rusty_conch/issues) to start a discussion. When submitting PRs, use branch prefixes: `feat/`, `fix/`, `chore/`, or `perf/`.
+
+For plugin development, see the [Java Plugin SDK](java-sdk/) and the editor extensions in [editors/](editors/).
 
 ## License
 
