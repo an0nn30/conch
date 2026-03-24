@@ -21,6 +21,15 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/an0nn30/conch/releases/latest/download/latest.json"
+      ],
+      "pubkey": "PLACEHOLDER_REPLACE_WITH_REAL_PUBKEY"
+    }
   }
 }
