@@ -246,22 +246,24 @@ struct DownloadProgress {
 }
 
 /// Check for an available update. Returns `Ok(Some(info))` if an update is
-/// available, `Ok(None)` if up to date, or swallows errors and returns `Ok(None)`.
+/// available, `Ok(None)` if up to date. Returns `Err` on network/API failure
+/// so the frontend can show "Unable to check" for manual checks.
 #[tauri::command]
 pub(crate) async fn check_for_update(
     app: AppHandle,
     pending: tauri::State<'_, PendingUpdate>,
 ) -> Result<Option<UpdateInfo>, String> {
-    let updater = match app.updater_builder().build() {
-        Ok(u) => u,
-        Err(e) => {
-            log::warn!("Failed to build updater: {e}");
-            return Ok(None);
-        }
-    };
+    // Note: verify the exact tauri-plugin-updater v2 API at implementation time.
+    // It may be `app.updater()?.check().await` or `app.updater_builder().build()?.check().await`.
+    let update = app
+        .updater()
+        .map_err(|e| format!("Failed to build updater: {e}"))?
+        .check()
+        .await
+        .map_err(|e| format!("Update check failed: {e}"))?;
 
-    match updater.check().await {
-        Ok(Some(update)) => {
+    match update {
+        Some(update) => {
             let info = UpdateInfo {
                 version: update.version.clone(),
                 body: update.body.clone(),
@@ -269,11 +271,7 @@ pub(crate) async fn check_for_update(
             *pending.0.lock() = Some(update);
             Ok(Some(info))
         }
-        Ok(None) => Ok(None),
-        Err(e) => {
-            log::warn!("Update check failed: {e}");
-            Ok(None)
-        }
+        None => Ok(None),
     }
 }
 
@@ -312,8 +310,8 @@ pub(crate) async fn install_update(
     Ok(())
 }
 
-/// Restart the app. Uses tauri-plugin-process for reliable relaunch on all
-/// platforms (app.restart() has a known macOS bug — tauri-apps/tauri#13923).
+/// Restart the app. Requires tauri-plugin-process to be registered for
+/// reliable relaunch on all platforms (fixes tauri-apps/tauri#13923).
 #[tauri::command]
 pub(crate) fn restart_app(app: AppHandle) {
     app.restart();
@@ -432,30 +430,23 @@ if cfg!(not(target_os = "linux")) {
         let app_handle = app.handle().clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            let updater = match app_handle.updater_builder().build() {
-                Ok(u) => u,
-                Err(e) => {
-                    log::warn!("Startup update check failed to build updater: {e}");
-                    return;
-                }
+            // Startup check swallows all errors silently
+            let update = match app_handle.updater() {
+                Ok(u) => u.check().await,
+                Err(e) => { log::warn!("Startup updater init failed: {e}"); return; }
             };
-            match updater.check().await {
+            match update {
                 Ok(Some(update)) => {
                     let info = updater::UpdateInfo {
                         version: update.version.clone(),
                         body: update.body.clone(),
                     };
-                    // Store in managed state so install_update can use it
                     let pending = app_handle.state::<updater::PendingUpdate>();
                     *pending.0.lock() = Some(update);
                     let _ = app_handle.emit("update-available", &info);
                 }
-                Ok(None) => {
-                    log::debug!("No updates available");
-                }
-                Err(e) => {
-                    log::warn!("Startup update check failed: {e}");
-                }
+                Ok(None) => log::debug!("No updates available"),
+                Err(e) => log::warn!("Startup update check failed: {e}"),
             }
         });
     }
@@ -551,6 +542,10 @@ After the existing event listeners (around the area where `menu-action` listener
 await listen('update-available', (event) => {
   const info = event.payload;
   if (!info || !info.version) return;
+  showUpdateAvailableToast(info);
+});
+
+function showUpdateAvailableToast(info) {
   window.toast.show({
     level: 'info',
     title: 'Update Available',
@@ -561,8 +556,10 @@ await listen('update-available', (event) => {
       callback: () => startUpdate(),
     },
   });
-});
+}
 ```
+
+Note: `listen` (app-wide) is correct here — the startup check emits via `app_handle.emit()` which is app-scoped. This is a deliberate deviation from `listenOnCurrentWindow` used elsewhere because update notifications are app-level, not window-level.
 
 - [ ] **Step 2: Add startUpdate() function and progress listener**
 
@@ -579,15 +576,14 @@ async function startUpdate() {
 
   try {
     await invoke('install_update');
-    // Dismiss progress toast
     if (updateProgressToast) {
-      updateProgressToast.querySelector('.conch-toast-close').click();
+      window.toast.dismiss(updateProgressToast);
       updateProgressToast = null;
     }
     showRestartDialog();
   } catch (e) {
     if (updateProgressToast) {
-      updateProgressToast.querySelector('.conch-toast-close').click();
+      window.toast.dismiss(updateProgressToast);
       updateProgressToast = null;
     }
     window.toast.error('Update Failed', String(e));
@@ -659,28 +655,24 @@ function showRestartDialog() {
 
 - [ ] **Step 5: Handle manual menu check-for-updates action**
 
-In the `handleMenuAction()` function (around line 1995), add a case:
+In the `handleMenuAction()` function (around line 1995), add an if-block (this function uses if-chains, not switch-case):
 
 ```javascript
-case 'check-for-updates':
+if (action === 'check-for-updates') {
   invoke('check_for_update').then(info => {
     if (info) {
-      window.toast.show({
-        level: 'info',
-        title: 'Update Available',
-        body: 'Conch v' + window.utils.esc(info.version) + ' is available.',
-        duration: 0,
-        action: {
-          label: 'Update Now',
-          callback: () => startUpdate(),
-        },
-      });
+      showUpdateAvailableToast(info);
     } else {
       window.toast.info('Up to Date', "You're running the latest version.");
     }
+  }).catch(() => {
+    window.toast.warn('Update Check Failed', 'Unable to check for updates.');
   });
   return;
+}
 ```
+
+The `check_for_update` command returns `Err` on network/API failures, which the `.catch()` handles by showing a warning toast. For the startup check, errors are swallowed silently (handled in the Rust startup task).
 
 - [ ] **Step 6: Commit**
 
@@ -704,24 +696,16 @@ In the `renderAdvanced()` function (around line 1153), add a new section before 
 // Updates section (macOS/Windows only)
 addSectionLabel(c, 'Updates');
 
-const updateToggle = document.createElement('label');
-updateToggle.className = 'settings-switch';
-const updateInput = document.createElement('input');
-updateInput.type = 'checkbox';
-updateInput.checked = pendingSettings.conch.check_for_updates !== false;
-updateInput.addEventListener('change', () => {
-  pendingSettings.conch.check_for_updates = updateInput.checked;
-});
-const updateSlider = document.createElement('span');
-updateSlider.className = 'slider';
-updateToggle.appendChild(updateInput);
-updateToggle.appendChild(updateSlider);
-addRow(c, 'Check for updates on startup', 'Automatically check for new versions when the app starts (macOS and Windows)', updateToggle);
+const updateSwitch = makeSwitch(
+  pendingSettings.conch.check_for_updates !== false,
+  (val) => { pendingSettings.conch.check_for_updates = val; }
+);
+addRow(c, 'Check for updates on startup', 'Automatically check for new versions when the app starts (macOS and Windows)', updateSwitch);
 
 addDivider(c);
 ```
 
-This follows the exact same switch toggle pattern used in the Plugins settings section.
+This uses the existing `makeSwitch(checked, onChange)` helper (around line 702 in settings.js) which handles the checkbox + slider DOM construction.
 
 - [ ] **Step 2: Commit**
 
