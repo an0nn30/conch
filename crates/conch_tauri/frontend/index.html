@@ -2173,35 +2173,39 @@
         dialog.appendChild(title);
 
         const body = document.createElement('div');
-        body.style.cssText = 'padding:20px 24px;color:var(--fg);font-size:13px;line-height:1.7';
+        body.style.cssText = 'padding:20px 24px;color:var(--fg);font-size:13px;line-height:1.7;display:flex;gap:20px;align-items:flex-start';
 
         const icon = document.createElement('img');
         icon.src = 'icons/app-icon.png';
-        icon.style.cssText = 'width:64px;height:64px;margin-bottom:12px;display:block';
+        icon.style.cssText = 'width:64px;height:64px;flex-shrink:0;border-radius:12px';
         body.appendChild(icon);
+
+        const content = document.createElement('div');
+        content.style.cssText = 'flex:1;min-width:0';
 
         const heading = document.createElement('div');
         heading.style.cssText = 'font-size:18px;font-weight:700;margin-bottom:4px';
         heading.textContent = 'Conch ' + window.utils.esc(ver);
-        body.appendChild(heading);
+        content.appendChild(heading);
 
         const build = document.createElement('div');
-        build.style.cssText = 'color:var(--text-secondary);font-size:12px;margin-bottom:16px';
+        build.style.cssText = 'color:var(--text-secondary);font-size:12px;margin-bottom:12px';
         build.textContent = 'Build #' + window.utils.esc(commit) + ', built on ' + window.utils.esc(buildDate);
-        body.appendChild(build);
+        content.appendChild(build);
 
         const runtime = document.createElement('div');
-        runtime.style.cssText = 'color:var(--text-secondary);font-size:12px;margin-bottom:16px';
+        runtime.style.cssText = 'color:var(--text-secondary);font-size:12px;margin-bottom:12px';
         runtime.textContent = 'Platform: ' + window.utils.esc(platform);
-        body.appendChild(runtime);
+        content.appendChild(runtime);
 
         const license = document.createElement('div');
         license.style.cssText = 'color:var(--text-secondary);font-size:11px;line-height:1.6';
         license.innerHTML = 'Licensed under <a href="#" style="color:var(--blue)" onclick="event.preventDefault();if(window.__TAURI__&&window.__TAURI__.shell)window.__TAURI__.shell.open(\'https://www.apache.org/licenses/LICENSE-2.0\')">Apache License 2.0</a><br>'
           + 'Icons: <a href="#" style="color:var(--blue)" onclick="event.preventDefault();if(window.__TAURI__&&window.__TAURI__.shell)window.__TAURI__.shell.open(\'https://github.com/snwh/paper-icon-theme\')">Paper Icon Theme</a> by Sam Hewitt (<a href="#" style="color:var(--blue)" onclick="event.preventDefault();if(window.__TAURI__&&window.__TAURI__.shell)window.__TAURI__.shell.open(\'https://creativecommons.org/licenses/by-sa/4.0/\')">CC BY-SA 4.0</a>)<br><br>'
           + 'Copyright \u00A9 2026 Dustin Watts and contributors';
-        body.appendChild(license);
+        content.appendChild(license);
 
+        body.appendChild(content);
         dialog.appendChild(body);
 
         const buttons = document.createElement('div');
