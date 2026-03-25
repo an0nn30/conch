@@ -1137,6 +1137,7 @@
   <script src="utils.js"></script>
   <script src="titlebar.js"></script>
   <script src="toast.js"></script>
+  <script src="notification-panel.js"></script>
   <script src="plugin-widgets.js"></script>
   <script src="settings.js"></script>
   <script src="file-icons.js"></script>
@@ -1284,6 +1285,9 @@
             position: appCfg.notification_position || 'bottom',
             nativeNotifications: appCfg.native_notifications !== false,
           });
+        }
+        if (window.notificationPanel) {
+          window.notificationPanel.init();
         }
 
         // Apply UI chrome font settings.
