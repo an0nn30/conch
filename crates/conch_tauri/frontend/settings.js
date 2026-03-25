@@ -681,6 +681,18 @@
           { key: 'toggle_bottom_panel', label: 'Toggle Bottom Panel' },
         ],
       },
+      {
+        label: 'Split Panes',
+        shortcuts: [
+          { key: 'split_vertical', label: 'Split Pane Vertically' },
+          { key: 'split_horizontal', label: 'Split Pane Horizontally' },
+          { key: 'close_pane', label: 'Close Pane' },
+          { key: 'navigate_pane_up', label: 'Navigate Pane Up' },
+          { key: 'navigate_pane_down', label: 'Navigate Pane Down' },
+          { key: 'navigate_pane_left', label: 'Navigate Pane Left' },
+          { key: 'navigate_pane_right', label: 'Navigate Pane Right' },
+        ],
+      },
     ];
 
     for (let gi = 0; gi < groups.length; gi++) {
