@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 description = "Host-side plugin infrastructure: message bus, Lua and Java runtimes"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(has_java_jar)'] }
+
 [features]
 default = ["java"]
 java = ["dep:jni"]

@@ -9,11 +9,11 @@
 
 pub mod bus;
 pub mod host_api;
-#[cfg(feature = "java")]
+#[cfg(all(feature = "java", has_java_jar))]
 pub mod jvm;
-#[cfg(not(feature = "java"))]
+#[cfg(not(all(feature = "java", has_java_jar)))]
 pub mod jvm_stub;
-#[cfg(not(feature = "java"))]
+#[cfg(not(all(feature = "java", has_java_jar)))]
 pub use jvm_stub as jvm;
 pub mod lua;
 
