@@ -1100,6 +1100,10 @@
       font: 11px/1.5 "JetBrains Mono", "Menlo", monospace;
       word-break: break-all; white-space: pre-wrap;
     }
+    #terminal-context-menu button:hover {
+      background: var(--blue);
+      color: #fff;
+    }
   </style>
 </head>
 <body>
@@ -2230,6 +2234,54 @@
         });
       }
 
+      // ---- Terminal context menu ----
+      const termContextMenu = document.getElementById('terminal-context-menu');
+
+      terminalHostEl.addEventListener('contextmenu', (e) => {
+        // Find the pane element this right-click occurred in.
+        const paneEl = e.target.closest('.terminal-pane');
+        if (!paneEl) return;
+        const paneId = parseInt(paneEl.dataset.paneId, 10);
+        const pane = panes.get(paneId);
+        if (!pane) return;
+
+        // If terminal has mouse tracking active (tmux/vim), let the tmux bridge handle it.
+        if (terminalMouseModeIsActive(pane.term)) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Position the menu at cursor.
+        termContextMenu.style.left = e.clientX + 'px';
+        termContextMenu.style.top = e.clientY + 'px';
+        termContextMenu.style.display = 'block';
+
+        // Focus the pane that was right-clicked.
+        setFocusedPane(paneId);
+      });
+
+      // Handle context menu item clicks.
+      termContextMenu.addEventListener('click', (e) => {
+        const btn = e.target.closest('.context-item');
+        if (!btn) return;
+        termContextMenu.style.display = 'none';
+        const action = btn.dataset.action;
+        if (action === 'split-vertical') splitPane('vertical');
+        if (action === 'split-horizontal') splitPane('horizontal');
+      });
+
+      // Dismiss on click outside or Escape.
+      document.addEventListener('mousedown', (e) => {
+        if (termContextMenu.style.display !== 'none' && !termContextMenu.contains(e.target)) {
+          termContextMenu.style.display = 'none';
+        }
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && termContextMenu.style.display !== 'none') {
+          termContextMenu.style.display = 'none';
+        }
+      }, true);
+
       await listenOnCurrentWindow('pty-output', (event) => {
         const payload = event.payload || {};
         const windowLabel = payload.window_label;
@@ -2717,5 +2769,9 @@
       await invoke('app_ready');
     })();
   </script>
+  <div id="terminal-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+    <button class="context-item" data-action="split-vertical" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Vertically</button>
+    <button class="context-item" data-action="split-horizontal" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Horizontally</button>
+  </div>
 </body>
 </html>
