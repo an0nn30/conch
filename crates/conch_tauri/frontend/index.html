@@ -1146,6 +1146,7 @@
   <script src="ssh-panel.js"></script>
   <script src="tunnel-manager.js"></script>
   <script src="split-tree.js"></script>
+  <script src="split-pane.js"></script>
   <script>
     const statusEl = document.getElementById('status');
     function showStatus(message) {
@@ -1710,6 +1711,7 @@
           debounceTimer: null,
         };
         panes.set(paneId, pane);
+        pane.resizeObserver = window.splitPane.createPaneResizeObserver(pane, fitAndResizePane);
 
         const tab = {
           id: tabId,
@@ -1722,6 +1724,11 @@
           focusedPaneId: paneId,
         };
         tabs.set(tabId, tab);
+        window.splitPane.setupDividerDrag(
+          containerEl,
+          () => tab.treeRoot,
+          (newTree) => { tab.treeRoot = newTree; }
+        );
         updateTabBarVisibility();
 
         requestAnimationFrame(() => {
@@ -1802,6 +1809,7 @@
           debounceTimer: null,
         };
         panes.set(paneId, pane);
+        pane.resizeObserver = window.splitPane.createPaneResizeObserver(pane, fitAndResizePane);
 
         const tab = {
           id: tabId,
@@ -1814,6 +1822,11 @@
           focusedPaneId: paneId,
         };
         tabs.set(tabId, tab);
+        window.splitPane.setupDividerDrag(
+          containerEl,
+          () => tab.treeRoot,
+          (newTree) => { tab.treeRoot = newTree; }
+        );
         updateTabBarVisibility();
 
         requestAnimationFrame(() => {
@@ -2517,11 +2530,6 @@
           console.warn('Config reload failed:', e);
         }
       });
-
-      const resizeObserver = new ResizeObserver(() => {
-        debouncedFitAndResize();
-      });
-      resizeObserver.observe(terminalHostEl);
 
       // Preload the bundled Nerd Font so the canvas renderer can use it for
       // glyph fallback.  CSS @font-face is lazy — without this the browser
