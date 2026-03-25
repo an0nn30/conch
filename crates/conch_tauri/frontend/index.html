@@ -2176,15 +2176,18 @@
 
       // ---- Drag and drop ----
       // Prevent the webview from navigating on file drops.
+      // Use capture phase so we intercept drag events before xterm.js or
+      // child elements can swallow them.
       terminalHostEl.addEventListener('dragover', (e) => {
         e.preventDefault();
-        e.stopPropagation();
         terminalHostEl.classList.add('drag-over');
-      });
+      }, true);
       terminalHostEl.addEventListener('dragleave', (e) => {
-        e.preventDefault();
-        terminalHostEl.classList.remove('drag-over');
-      });
+        // Only remove drag-over when leaving terminalHostEl itself, not its children.
+        if (e.target === terminalHostEl || !terminalHostEl.contains(e.relatedTarget)) {
+          terminalHostEl.classList.remove('drag-over');
+        }
+      }, true);
       terminalHostEl.addEventListener('drop', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -2201,7 +2204,7 @@
             writePathsToTerminal(paths);
           }
         }
-      });
+      }, true);
 
       // Tauri drag-drop event (provides real filesystem paths).
       if (currentWindow && typeof currentWindow.onDragDropEvent === 'function') {
