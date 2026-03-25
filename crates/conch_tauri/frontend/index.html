@@ -1891,7 +1891,7 @@
           tab.label = getTabLabel(button) || label;
           fitAndResizePane(pane);
           if (window.sshPanel) window.sshPanel.refreshSessions();
-          if (window.filesPanel) window.filesPanel.onTabChanged(tab);
+          if (window.filesPanel) window.filesPanel.onTabChanged(pane);
         } catch (e) {
           term.writeln('\x1b[31mSSH connection failed: ' + e + '\x1b[0m');
           term.writeln('\x1b[90mPress any key to close this tab.\x1b[0m');
