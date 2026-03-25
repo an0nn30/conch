@@ -1289,6 +1289,14 @@
         if (window.notificationPanel) {
           window.notificationPanel.init();
         }
+        try {
+          const layoutData = await invoke('get_saved_layout');
+          if (layoutData.bottom_panel_visible === false) {
+            document.getElementById('bottom-panel').classList.add('hidden');
+          } else {
+            document.getElementById('bottom-panel').classList.remove('hidden');
+          }
+        } catch (_) {}
 
         // Apply UI chrome font settings.
         const r = document.documentElement.style;
@@ -1826,7 +1834,7 @@
 
       // Save window layout on resize (debounced).
       let windowResaveSaveTimer = null;
-      window.addEventListener('resize', () => {
+      function debouncedSaveLayout() {
         if (windowResaveSaveTimer) clearTimeout(windowResaveSaveTimer);
         windowResaveSaveTimer = setTimeout(() => {
           invoke('save_window_layout', {
@@ -1835,10 +1843,12 @@
               ssh_panel_visible: window.sshPanel ? !window.sshPanel.isHidden() : true,
               files_panel_width: filesPanelEl.offsetWidth,
               files_panel_visible: window.filesPanel ? !window.filesPanel.isHidden() : true,
+              bottom_panel_visible: !document.getElementById('bottom-panel').classList.contains('hidden'),
             },
           }).catch(() => {});
         }, 500);
-      });
+      }
+      window.addEventListener('resize', debouncedSaveLayout);
 
       // ---- Vault init ----
       if (window.vault) {
@@ -2101,11 +2111,14 @@
           invoke('set_zoom_level', { scaleFactor: 1.0 }).catch(() => {});
           return;
         }
-        // Toggle bottom panel (placeholder — no bottom panel content yet).
+        // Toggle bottom panel.
         if (action === 'toggle-bottom-panel') {
           const bp = document.getElementById('bottom-panel');
-          if (bp) bp.classList.toggle('hidden');
-          setTimeout(() => fitAndResizeTab(currentTab()), 50);
+          if (bp) {
+            bp.classList.toggle('hidden');
+            setTimeout(() => fitAndResizeTab(currentTab()), 50);
+            debouncedSaveLayout();
+          }
           return;
         }
         if (action === 'about') {
