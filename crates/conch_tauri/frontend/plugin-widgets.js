@@ -7,6 +7,9 @@
   let invoke = null;
   let listen = null;
   const pluginMenuItems = [];
+  // Tracks handles for panels registered at the bottom location.
+  // Maps handle (number) → plugin name (string).
+  const bottomPanelHandles = new Map();
 
   function log(msg) { console.log('[plugin-widgets] ' + msg); }
 
@@ -14,9 +17,49 @@
     invoke = opts.invoke;
     listen = opts.listen;
 
+    // Track panel registrations so we know which handles belong to bottom panels.
+    listen('plugin-panel-registered', (event) => {
+      const { handle, plugin, name, location } = event.payload;
+      if (location === 'bottom') {
+        bottomPanelHandles.set(handle, plugin);
+        if (window.notificationPanel) {
+          window.notificationPanel.addPluginTab(
+            'plugin-' + plugin,
+            name || plugin,
+            (container) => {
+              renderWidgets(container, '[]', plugin);
+            }
+          );
+        }
+      }
+    });
+
+    // Listen for plugin panel removal and clean up bottom panel tabs.
+    listen('plugin-panel-removed', (event) => {
+      const { handle, plugin } = event.payload;
+      if (bottomPanelHandles.has(handle)) {
+        bottomPanelHandles.delete(handle);
+        if (window.notificationPanel) {
+          window.notificationPanel.removePluginTab('plugin-' + plugin);
+        }
+      }
+    });
+
     // Listen for widget updates from plugins.
     listen('plugin-widgets-updated', (event) => {
       const { handle, plugin, widgets_json } = event.payload;
+      if (bottomPanelHandles.has(handle)) {
+        // Route bottom-panel plugin widgets to the notification panel tab system.
+        if (window.notificationPanel) {
+          window.notificationPanel.updatePluginTab(
+            'plugin-' + plugin,
+            (container) => {
+              renderWidgets(container, widgets_json, plugin);
+            }
+          );
+        }
+        return;
+      }
       const container = document.querySelector(`[data-plugin-handle="${handle}"]`);
       if (container) {
         renderWidgets(container, widgets_json, plugin);
