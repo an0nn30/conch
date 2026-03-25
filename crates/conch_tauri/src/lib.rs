@@ -82,6 +82,8 @@ const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 const MENU_ACTION_SPLIT_VERTICAL: &str = "split-vertical";
 const MENU_ACTION_SPLIT_HORIZONTAL: &str = "split-horizontal";
 const MENU_ACTION_CLOSE_PANE: &str = "close-pane";
+const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
+const MENU_ACTION_RENAME_TAB: &str = "rename-tab";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -298,6 +300,8 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         // Rebuild full menu bar with new tools menu.
         let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
         let close_tab = MenuItem::with_id(app, MENU_CLOSE_TAB_ID, "Close Tab", true, Some("CmdOrCtrl+W"))?;
+        let rename_tab_accel = config_key_to_accelerator(&keyboard.rename_tab);
+        let rename_tab = MenuItem::with_id(app, MENU_RENAME_TAB_ID, "Rename Tab", true, Some(&rename_tab_accel))?;
         let new_window = MenuItem::with_id(app, MENU_NEW_WINDOW_ID, "New Window", true, Some("CmdOrCtrl+Shift+N"))?;
         let separator = PredefinedMenuItem::separator(app)?;
         let close_window = PredefinedMenuItem::close_window(app, None)?;
@@ -306,7 +310,7 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let ssh_import = MenuItem::with_id(app, MENU_SSH_IMPORT_ID, "Import", true, None::<&str>)?;
         let ssh_manager_menu = Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
         let separator2 = PredefinedMenuItem::separator(app)?;
-        let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &close_tab, &close_window])?;
+        let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &rename_tab, &close_tab, &close_window])?;
         let edit_menu = Submenu::with_items(app, "Edit", true, &[
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
@@ -495,6 +499,7 @@ struct KeyboardShortcuts {
     split_vertical: String,
     split_horizontal: String,
     close_pane: String,
+    rename_tab: String,
 }
 
 #[tauri::command]
@@ -508,6 +513,7 @@ fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> KeyboardShortc
         split_vertical: kb.split_vertical.clone(),
         split_horizontal: kb.split_horizontal.clone(),
         close_pane: kb.close_pane.clone(),
+        rename_tab: kb.rename_tab.clone(),
     }
 }
 
@@ -616,6 +622,8 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     let separator = PredefinedMenuItem::separator(app)?;
     let close_window = PredefinedMenuItem::close_window(app, None)?;
 
+    let rename_tab_accel = config_key_to_accelerator(&keyboard.rename_tab);
+    let rename_tab = MenuItem::with_id(app, MENU_RENAME_TAB_ID, "Rename Tab", true, Some(&rename_tab_accel))?;
     let ssh_export = MenuItem::with_id(app, MENU_SSH_EXPORT_ID, "Export Connections", true, None::<&str>)?;
     let ssh_import = MenuItem::with_id(app, MENU_SSH_IMPORT_ID, "Import Connections", true, None::<&str>)?;
     let ssh_manager_menu = Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
@@ -624,7 +632,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         app,
         "File",
         true,
-        &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &close_tab, &close_window],
+        &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &rename_tab, &close_tab, &close_window],
     )?;
     let edit_menu = Submenu::with_items(
         app,
@@ -1086,6 +1094,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_NEW_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_NEW_TAB),
             MENU_CLOSE_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_CLOSE_TAB),
+            MENU_RENAME_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_RENAME_TAB),
             MENU_TOGGLE_LEFT_PANEL_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_TOGGLE_LEFT_PANEL)
             }

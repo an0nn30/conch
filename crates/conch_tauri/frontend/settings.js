@@ -668,6 +668,7 @@
         shortcuts: [
           { key: 'new_tab', label: 'New Tab' },
           { key: 'close_tab', label: 'Close Tab' },
+          { key: 'rename_tab', label: 'Rename Tab' },
           { key: 'new_window', label: 'New Window' },
           { key: 'quit', label: 'Quit' },
         ],

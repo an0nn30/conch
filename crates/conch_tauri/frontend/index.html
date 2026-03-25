@@ -1102,7 +1102,8 @@
       font: 11px/1.5 "JetBrains Mono", "Menlo", monospace;
       word-break: break-all; white-space: pre-wrap;
     }
-    #terminal-context-menu button:hover {
+    #terminal-context-menu button:hover,
+    #tab-context-menu button:hover {
       background: var(--blue);
       color: #fff;
     }
@@ -1677,6 +1678,69 @@
 
       function getTabLabel(button) {
         return button._labelSpan ? button._labelSpan.textContent : button.textContent;
+      }
+
+      // ---- Tab rename ----
+      function renameActiveTab() {
+        if (activeTabId == null) return;
+        const tab = tabs.get(activeTabId);
+        if (!tab || !tab.button._labelSpan) return;
+        startTabRename(tab);
+      }
+
+      function startTabRename(tab) {
+        const labelSpan = tab.button._labelSpan;
+        const currentText = labelSpan.textContent;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = currentText;
+        input.className = 'tab-rename-input';
+        input.style.cssText = 'width:100%; border:none; outline:none; background:transparent; color:inherit; font:inherit; padding:0; margin:0;';
+
+        labelSpan.textContent = '';
+        labelSpan.appendChild(input);
+        input.focus();
+        input.select();
+
+        function commit() {
+          const newName = input.value.trim();
+          if (input.parentNode) {
+            labelSpan.removeChild(input);
+          }
+          if (newName && newName !== currentText) {
+            labelSpan.textContent = newName;
+            tab.label = newName;
+            tab.hasCustomTitle = true;
+            tab.button.title = newName;
+          } else {
+            labelSpan.textContent = currentText;
+          }
+          // Refocus the terminal
+          const pane = panes.get(tab.focusedPaneId);
+          if (pane) pane.term.focus();
+        }
+
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            labelSpan.textContent = currentText;
+            if (input.parentNode) labelSpan.removeChild(input);
+            const pane = panes.get(tab.focusedPaneId);
+            if (pane) pane.term.focus();
+          }
+          e.stopPropagation();
+        }, true);
+
+        input.addEventListener('blur', () => {
+          // Small delay to allow click handlers to fire first
+          setTimeout(() => {
+            if (input.parentNode) commit();
+          }, 50);
+        });
       }
 
       async function createTab() {
@@ -2275,15 +2339,54 @@
         if (action === 'split-horizontal') splitPane('horizontal');
       });
 
-      // Dismiss on click outside or Escape.
+      // ---- Tab context menu (right-click on tab button) ----
+      const tabContextMenu = document.getElementById('tab-context-menu');
+      let tabContextMenuTabId = null;
+
+      tabBarEl.addEventListener('contextmenu', (e) => {
+        const btn = e.target.closest('.tab-btn');
+        if (!btn) return;
+        e.preventDefault();
+        // Find the tab ID for this button.
+        for (const [id, tab] of tabs) {
+          if (tab.button === btn) {
+            tabContextMenuTabId = id;
+            break;
+          }
+        }
+        tabContextMenu.style.left = e.clientX + 'px';
+        tabContextMenu.style.top = e.clientY + 'px';
+        tabContextMenu.style.display = 'block';
+      });
+
+      tabContextMenu.addEventListener('click', (e) => {
+        const btn = e.target.closest('.context-item');
+        if (!btn) return;
+        tabContextMenu.style.display = 'none';
+        const action = btn.dataset.action;
+        if (action === 'rename-tab' && tabContextMenuTabId != null) {
+          const tab = tabs.get(tabContextMenuTabId);
+          if (tab) startTabRename(tab);
+        }
+        if (action === 'close-tab' && tabContextMenuTabId != null) {
+          closeTab(tabContextMenuTabId);
+        }
+        tabContextMenuTabId = null;
+      });
+
+      // Dismiss context menus on click outside or Escape.
       document.addEventListener('mousedown', (e) => {
         if (termContextMenu.style.display !== 'none' && !termContextMenu.contains(e.target)) {
           termContextMenu.style.display = 'none';
         }
+        if (tabContextMenu.style.display !== 'none' && !tabContextMenu.contains(e.target)) {
+          tabContextMenu.style.display = 'none';
+        }
       });
       document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && termContextMenu.style.display !== 'none') {
-          termContextMenu.style.display = 'none';
+        if (e.key === 'Escape') {
+          if (termContextMenu.style.display !== 'none') termContextMenu.style.display = 'none';
+          if (tabContextMenu.style.display !== 'none') tabContextMenu.style.display = 'none';
         }
       }, true);
 
@@ -2410,6 +2513,10 @@
         }
         if (action === 'close-pane' && focusedPaneId != null) {
           closePane(focusedPaneId);
+          return;
+        }
+        if (action === 'rename-tab') {
+          renameActiveTab();
           return;
         }
         // Toggle bottom panel (placeholder — no bottom panel content yet).
@@ -2777,6 +2884,10 @@
   <div id="terminal-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
     <button class="context-item" data-action="split-vertical" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Vertically</button>
     <button class="context-item" data-action="split-horizontal" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Horizontally</button>
+  </div>
+  <div id="tab-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+    <button class="context-item" data-action="rename-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Rename Tab</button>
+    <button class="context-item" data-action="close-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Close Tab</button>
   </div>
 </body>
 </html>

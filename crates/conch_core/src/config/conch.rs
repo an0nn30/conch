@@ -96,6 +96,7 @@ pub struct KeyboardConfig {
     pub navigate_pane_down: String,
     pub navigate_pane_left: String,
     pub navigate_pane_right: String,
+    pub rename_tab: String,
 }
 
 impl Default for KeyboardConfig {
@@ -116,6 +117,7 @@ impl Default for KeyboardConfig {
             navigate_pane_down: "cmd+alt+down".into(),
             navigate_pane_left: "cmd+alt+left".into(),
             navigate_pane_right: "cmd+alt+right".into(),
+            rename_tab: "F2".into(),
         }
     }
 }
