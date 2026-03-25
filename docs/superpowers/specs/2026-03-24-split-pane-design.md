@@ -71,9 +71,14 @@ Helper functions replace direct tab field access:
 The `tab_id: u32` parameter in all Tauri commands is renamed to `pane_id: u32`. This is a semantic change — the backend no longer knows about tabs; it only manages sessions keyed by pane ID. The `TauriState::ptys` HashMap key changes from `window_label:tab_id` to `window_label:pane_id`.
 
 Affected Rust command signatures (all change `tab_id` → `pane_id`):
-- `spawn_shell`, `write_to_pty`, `resize_pty`, `close_pty`
-- `ssh_connect`, `ssh_write`, `ssh_resize`, `ssh_disconnect`
-- `ssh_open_channel` (new)
+- PTY: `spawn_shell`, `write_to_pty`, `resize_pty`, `close_pty`
+- SSH: `ssh_connect`, `ssh_quick_connect`, `ssh_write`, `ssh_resize`, `ssh_disconnect`
+- SFTP: `sftp_list_dir`, `sftp_stat`, `sftp_read_file`, `sftp_write_file`, `sftp_mkdir`, `sftp_rename`, `sftp_remove`, `sftp_realpath`
+- New: `ssh_open_channel`
+
+Frontend `invoke()` call sites requiring `tabId` → `paneId` migration:
+- `index.html` (~11 sites): `spawn_shell`, `write_to_pty`/`ssh_write`, `resize_pty`/`ssh_resize`, `close_pty`/`ssh_disconnect`, `ssh_connect`/`ssh_quick_connect`, drag-drop handler, plugin write callback
+- `files-panel.js` (2 sites): `sftp_realpath`, `sftp_list_dir`
 
 The `session_key` helper changes accordingly:
 ```rust
@@ -244,7 +249,7 @@ When a split is triggered:
 
 A new Tauri command `ssh_open_channel` opens an additional channel on an already-established SSH connection.
 
-**`connectionId`:** A string of the form `window_label:pane_id` where `pane_id` is the original pane that established the SSH connection. This is stable for the lifetime of the connection and used as the key for connection lookup.
+**`connectionId`:** A string of the form `conn:window_label:pane_id` where `pane_id` is the original pane that established the SSH connection. The `conn:` prefix distinguishes connection keys from session keys (which use `window_label:pane_id` without prefix). This ID is stable for the lifetime of the connection.
 
 **Rust data model changes:**
 
@@ -256,15 +261,30 @@ struct SshConnection {
     host: String,
     user: String,
     port: u16,
-    ref_count: AtomicU32,   // number of active channels
+    ref_count: u32,   // number of active channels (Mutex-protected, no atomic needed)
 }
 ```
 
-`RemoteState` gains a `connections: HashMap<String, SshConnection>` map alongside the existing `sessions` map. Each `SshSession` gains a `connection_id: String` field and drops the `ssh_handle` (looked up via the connection).
+`RemoteState` gains a `connections: Mutex<HashMap<String, SshConnection>>` map alongside the existing `sessions` map. Each `SshSession` gains a `connection_id: String` field and drops the `ssh_handle` (looked up via the connection).
 
-When `ssh_connect` is called (original connection), it creates both an `SshConnection` entry and an `SshSession` entry. When `ssh_open_channel` is called, it looks up the `SshConnection` by `connectionId`, calls `ssh_handle.channel_open_session()`, and creates a new `SshSession` with its own `input_tx` and output forwarder task.
+When `ssh_connect` or `ssh_quick_connect` is called (original connection), it:
+1. Creates an `SshConnection` entry with `ref_count: 1` and the `Arc`-wrapped `ssh_handle` (the `Arc` wrapping moves from per-session to per-connection).
+2. Creates an `SshSession` entry with the `connection_id` and its own `input_tx`, but no `ssh_handle` (looked up through the connection).
 
-**SFTP routing:** The SFTP file browser panel uses the SSH connection of the **focused** SSH pane. When focus changes to a different SSH pane (even on the same connection), the file browser reflects the currently focused pane's connection. The `get_ssh_handle()` helper is updated to accept a `pane_id` and look up the connection through the session's `connection_id`.
+When `ssh_open_channel` is called, it:
+1. Looks up the `SshConnection` by `connectionId`.
+2. Calls `ssh_handle.channel_open_session()` to open a new channel.
+3. Increments `ref_count`.
+4. Creates a new `SshSession` with the same `connection_id`, its own `input_tx`, and its own output forwarder task.
+
+**SFTP routing:** The SFTP file browser panel uses the SSH connection of the **focused** SSH pane. The `files-panel.js` `onTabChanged` callback becomes `onFocusChanged(pane)` — it receives the focused pane object and checks `pane.type` and `pane.paneId` instead of tab-level fields. The stored `activeRemoteTabId` becomes `activeRemotePaneId`.
+
+When focus changes:
+- Focus moves to an SSH pane: SFTP panel activates, uses that pane's `connectionId`. Directory state is retained per-connection (if switching between panes on the same connection, the working directory is preserved).
+- Focus moves to a local pane: SFTP panel deactivates (same as current behavior when switching to a local tab).
+- Focus moves to an SSH pane on a different connection: SFTP panel switches to that connection, resets working directory to home.
+
+The `get_ssh_handle()` helper is updated to accept a `pane_id`, look up the session's `connection_id`, and retrieve the `ssh_handle` from the connections map.
 
 **Channel cleanup atomicity:** Channel close decrements the connection's `ref_count` atomically. When it reaches zero, the connection is removed from the `connections` map and disconnected. `Mutex` around the `connections` map ensures safe concurrent access if two channels close simultaneously.
 
