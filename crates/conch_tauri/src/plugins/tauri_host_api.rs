@@ -251,7 +251,7 @@ impl HostApi for TauriHostApi {
     }
 
     fn show_form(&self, json: &str) -> Option<String> {
-        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let prompt_id = format!("{}:{}", self.name, uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_dialogs.lock().forms.insert(prompt_id.clone(), tx);
         let _ = self.app_handle.emit("plugin-form-dialog", serde_json::json!({
@@ -263,7 +263,7 @@ impl HostApi for TauriHostApi {
     }
 
     fn show_confirm(&self, msg: &str) -> bool {
-        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let prompt_id = format!("{}:{}", self.name, uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_dialogs.lock().confirms.insert(prompt_id.clone(), tx);
         let _ = self.app_handle.emit("plugin-confirm-dialog", serde_json::json!({
@@ -274,7 +274,7 @@ impl HostApi for TauriHostApi {
     }
 
     fn show_prompt(&self, msg: &str, default_value: &str) -> Option<String> {
-        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let prompt_id = format!("{}:{}", self.name, uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_dialogs.lock().prompts.insert(prompt_id.clone(), tx);
         let _ = self.app_handle.emit("plugin-prompt-dialog", serde_json::json!({

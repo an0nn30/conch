@@ -14,6 +14,7 @@ use conch_plugin::jvm::runtime::JavaPluginManager;
 use conch_plugin::lua::runner;
 use parking_lot::Mutex;
 use serde::Serialize;
+use tauri::Emitter;
 
 use tauri_host_api::TauriHostApi;
 
@@ -43,6 +44,17 @@ impl PendingDialogs {
             confirms: HashMap::new(),
         }
     }
+
+    /// Remove all pending dialog channels whose prompt_id belongs to the
+    /// given plugin.  Prompt IDs are prefixed with `"{plugin_name}:"`.
+    /// Dropping the oneshot senders causes the blocked plugin thread to
+    /// receive `None` / `false`, which is the expected cancellation value.
+    fn drain_for_plugin(&mut self, plugin_name: &str) {
+        let prefix = format!("{plugin_name}:");
+        self.forms.retain(|id, _| !id.starts_with(&prefix));
+        self.prompts.retain(|id, _| !id.starts_with(&prefix));
+        self.confirms.retain(|id, _| !id.starts_with(&prefix));
+    }
 }
 
 /// A menu item registered by a plugin.
@@ -53,6 +65,13 @@ pub(crate) struct PluginMenuItem {
     pub label: String,
     pub action: String,
     pub keybind: Option<String>,
+}
+
+/// Payload emitted when all panels for a plugin are removed.
+#[derive(Clone, Serialize)]
+struct PluginPanelsRemoved {
+    plugin: String,
+    handles: Vec<u64>,
 }
 
 pub(crate) struct PluginState {
@@ -111,6 +130,30 @@ impl PluginState {
         let mut state = conch_core::config::load_persistent_state().unwrap_or_default();
         state.loaded_plugins = names;
         let _ = conch_core::config::save_persistent_state(&state);
+    }
+
+    /// Remove panels, menu items, and pending dialogs belonging to a plugin.
+    /// Returns the list of removed panel handles so callers can notify the
+    /// frontend.
+    fn cleanup_plugin_resources(&self, plugin_name: &str) -> Vec<u64> {
+        // Collect and remove panels owned by this plugin.
+        let mut removed_handles = Vec::new();
+        self.panels.lock().retain(|handle, info| {
+            if info.plugin_name == plugin_name {
+                removed_handles.push(*handle);
+                false
+            } else {
+                true
+            }
+        });
+
+        // Remove menu items registered by this plugin.
+        self.menu_items.lock().retain(|item| item.plugin != plugin_name);
+
+        // Drop pending dialog channels owned by this plugin.
+        self.pending_dialogs.lock().drain_for_plugin(plugin_name);
+
+        removed_handles
     }
 
     /// Auto-enable plugins that were enabled in the previous session.
@@ -385,6 +428,7 @@ pub(crate) fn enable_plugin(
 /// Disable (unload) a plugin by name.
 #[tauri::command]
 pub(crate) fn disable_plugin(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<PluginState>>>,
     name: String,
     source: String,
@@ -397,6 +441,15 @@ pub(crate) fn disable_plugin(
             let _ = plugin.sender.blocking_send(conch_plugin::bus::PluginMail::Shutdown);
             ps.running_lua.remove(idx);
             ps.bus.unregister_plugin(&name);
+
+            let removed_handles = ps.cleanup_plugin_resources(&name);
+            if !removed_handles.is_empty() {
+                let _ = app.emit("plugin-panels-removed", PluginPanelsRemoved {
+                    plugin: name.clone(),
+                    handles: removed_handles,
+                });
+            }
+
             ps.persist_enabled_plugins();
             Ok(())
         } else {
@@ -405,6 +458,15 @@ pub(crate) fn disable_plugin(
     } else if source == "Java" {
         if let Some(ref mut mgr) = ps.java_mgr {
             mgr.unload_plugin(&name).map_err(|e| format!("Failed to unload: {e}"))?;
+
+            let removed_handles = ps.cleanup_plugin_resources(&name);
+            if !removed_handles.is_empty() {
+                let _ = app.emit("plugin-panels-removed", PluginPanelsRemoved {
+                    plugin: name.clone(),
+                    handles: removed_handles,
+                });
+            }
+
             ps.persist_enabled_plugins();
             Ok(())
         } else {
@@ -561,5 +623,132 @@ mod tests {
     fn search_paths_expands_tilde() {
         let paths = plugin_search_paths(&["~/my-plugins".to_string()]);
         assert!(paths.iter().any(|p| !p.to_string_lossy().starts_with('~')));
+    }
+
+    #[test]
+    fn cleanup_removes_panels_for_plugin() {
+        let state = PluginState::new(conch_core::config::PluginsConfig::default());
+
+        // Insert panels for two different plugins.
+        {
+            let mut panels = state.panels.lock();
+            panels.insert(1, PanelInfo {
+                plugin_name: "my-plugin".into(),
+                panel_name: "Panel A".into(),
+                location: "left".into(),
+                icon: None,
+                widgets_json: "[]".into(),
+            });
+            panels.insert(2, PanelInfo {
+                plugin_name: "other-plugin".into(),
+                panel_name: "Panel B".into(),
+                location: "right".into(),
+                icon: None,
+                widgets_json: "[]".into(),
+            });
+            panels.insert(3, PanelInfo {
+                plugin_name: "my-plugin".into(),
+                panel_name: "Panel C".into(),
+                location: "bottom".into(),
+                icon: None,
+                widgets_json: "[]".into(),
+            });
+        }
+
+        let removed = state.cleanup_plugin_resources("my-plugin");
+
+        assert_eq!(removed.len(), 2, "should remove exactly 2 panels for my-plugin");
+        assert!(removed.contains(&1));
+        assert!(removed.contains(&3));
+
+        let panels = state.panels.lock();
+        assert_eq!(panels.len(), 1, "only other-plugin panel should remain");
+        assert!(panels.contains_key(&2));
+    }
+
+    #[test]
+    fn cleanup_removes_menu_items_for_plugin() {
+        let state = PluginState::new(conch_core::config::PluginsConfig::default());
+
+        {
+            let mut items = state.menu_items.lock();
+            items.push(PluginMenuItem {
+                plugin: "my-plugin".into(),
+                menu: "Tools".into(),
+                label: "Do Thing".into(),
+                action: "do_thing".into(),
+                keybind: None,
+            });
+            items.push(PluginMenuItem {
+                plugin: "other-plugin".into(),
+                menu: "Tools".into(),
+                label: "Other".into(),
+                action: "other".into(),
+                keybind: None,
+            });
+            items.push(PluginMenuItem {
+                plugin: "my-plugin".into(),
+                menu: "View".into(),
+                label: "Show".into(),
+                action: "show".into(),
+                keybind: Some("cmd+k".into()),
+            });
+        }
+
+        state.cleanup_plugin_resources("my-plugin");
+
+        let items = state.menu_items.lock();
+        assert_eq!(items.len(), 1, "only other-plugin menu item should remain");
+        assert_eq!(items[0].plugin, "other-plugin");
+    }
+
+    #[test]
+    fn cleanup_drains_pending_dialogs_for_plugin() {
+        let state = PluginState::new(conch_core::config::PluginsConfig::default());
+
+        {
+            let mut dialogs = state.pending_dialogs.lock();
+            let (tx1, _rx1) = tokio::sync::oneshot::channel();
+            dialogs.forms.insert("my-plugin:uuid-1".into(), tx1);
+
+            let (tx2, _rx2) = tokio::sync::oneshot::channel();
+            dialogs.prompts.insert("my-plugin:uuid-2".into(), tx2);
+
+            let (tx3, _rx3) = tokio::sync::oneshot::channel();
+            dialogs.confirms.insert("other-plugin:uuid-3".into(), tx3);
+
+            let (tx4, _rx4) = tokio::sync::oneshot::channel();
+            dialogs.forms.insert("other-plugin:uuid-4".into(), tx4);
+        }
+
+        state.cleanup_plugin_resources("my-plugin");
+
+        let dialogs = state.pending_dialogs.lock();
+        assert!(dialogs.forms.get("my-plugin:uuid-1").is_none(),
+            "form dialog for my-plugin should be removed");
+        assert!(dialogs.prompts.get("my-plugin:uuid-2").is_none(),
+            "prompt dialog for my-plugin should be removed");
+        assert!(dialogs.confirms.contains_key("other-plugin:uuid-3"),
+            "confirm dialog for other-plugin should remain");
+        assert!(dialogs.forms.contains_key("other-plugin:uuid-4"),
+            "form dialog for other-plugin should remain");
+    }
+
+    #[test]
+    fn drain_for_plugin_is_noop_when_no_matching_dialogs() {
+        let mut dialogs = PendingDialogs::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        dialogs.forms.insert("other:uuid-1".into(), tx);
+
+        dialogs.drain_for_plugin("nonexistent");
+
+        assert_eq!(dialogs.forms.len(), 1, "should not remove unrelated dialogs");
+    }
+
+    #[test]
+    fn cleanup_with_no_resources_returns_empty() {
+        let state = PluginState::new(conch_core::config::PluginsConfig::default());
+        let removed = state.cleanup_plugin_resources("nonexistent");
+        assert!(removed.is_empty(), "should return empty vec when plugin has no resources");
     }
 }
