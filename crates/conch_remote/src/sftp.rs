@@ -153,10 +153,7 @@ pub async fn write_file(
 }
 
 /// Create a directory.
-pub async fn mkdir(
-    ssh: &russh::client::Handle<ConchSshHandler>,
-    path: &str,
-) -> Result<(), String> {
+pub async fn mkdir(ssh: &russh::client::Handle<ConchSshHandler>, path: &str) -> Result<(), String> {
     let sftp = open_sftp(ssh).await?;
     sftp.create_dir(path)
         .await

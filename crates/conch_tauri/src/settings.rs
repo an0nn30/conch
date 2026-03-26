@@ -4,8 +4,8 @@ use conch_core::config::{self, UserConfig};
 use serde::Serialize;
 use tauri::Emitter;
 
-use crate::theme;
 use crate::TauriState;
+use crate::theme;
 
 #[derive(Serialize)]
 pub(crate) struct SaveSettingsResult {

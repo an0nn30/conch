@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use russh::client;
 use russh::ChannelMsg;
+use russh::client;
 use tokio::sync::mpsc;
 use zeroize::Zeroize;
 
@@ -74,7 +74,13 @@ pub async fn connect_and_open_shell(
     credentials: &SshCredentials,
     callbacks: Arc<dyn RemoteCallbacks>,
     paths: &RemotePaths,
-) -> Result<(client::Handle<ConchSshHandler>, russh::Channel<russh::client::Msg>), String> {
+) -> Result<
+    (
+        client::Handle<ConchSshHandler>,
+        russh::Channel<russh::client::Msg>,
+    ),
+    String,
+> {
     let config = Arc::new(client::Config::default());
     let handler = ConchSshHandler {
         host: server.host.clone(),
@@ -85,15 +91,12 @@ pub async fn connect_and_open_shell(
 
     // Determine effective proxy.
     #[cfg(not(target_os = "ios"))]
-    let effective_proxy = server
-        .proxy_command
-        .clone()
-        .or_else(|| {
-            server
-                .proxy_jump
-                .as_ref()
-                .map(|jump| format!("ssh -W %h:%p {jump}"))
-        });
+    let effective_proxy = server.proxy_command.clone().or_else(|| {
+        server
+            .proxy_jump
+            .as_ref()
+            .map(|jump| format!("ssh -W %h:%p {jump}"))
+    });
 
     #[cfg(target_os = "ios")]
     let effective_proxy: Option<String> = None;
@@ -159,8 +162,7 @@ pub async fn connect_and_open_shell(
             let pw = match &credentials.password {
                 Some(pw) if !pw.is_empty() => Some(pw.clone()),
                 _ => {
-                    let msg =
-                        format!("Password for {}@{}", credentials.username, server.host);
+                    let msg = format!("Password for {}@{}", credentials.username, server.host);
                     callbacks.prompt_password(&msg).await
                 }
             };
@@ -276,22 +278,17 @@ pub(crate) async fn try_key_auth(
         }
 
         match russh_keys::load_secret_key(key_path, key_passphrase) {
-            Ok(key) => {
-                match session
-                    .authenticate_publickey(user, Arc::new(key))
-                    .await
-                {
-                    Ok(true) => {
-                        log::info!("SSH key auth success with {}", key_path.display());
-                        return Ok(true);
-                    }
-                    Ok(false) => continue,
-                    Err(e) => {
-                        log::warn!("SSH key auth error with {}: {e}", key_path.display());
-                        continue;
-                    }
+            Ok(key) => match session.authenticate_publickey(user, Arc::new(key)).await {
+                Ok(true) => {
+                    log::info!("SSH key auth success with {}", key_path.display());
+                    return Ok(true);
                 }
-            }
+                Ok(false) => continue,
+                Err(e) => {
+                    log::warn!("SSH key auth error with {}: {e}", key_path.display());
+                    continue;
+                }
+            },
             Err(e) => {
                 log::warn!("Failed to load SSH key {}: {e}", key_path.display());
                 continue;
@@ -534,10 +531,7 @@ mod tests {
     fn channel_input_variants() {
         // Verify ChannelInput enum can be constructed
         let _write = ChannelInput::Write(vec![1, 2, 3]);
-        let _resize = ChannelInput::Resize {
-            cols: 80,
-            rows: 24,
-        };
+        let _resize = ChannelInput::Resize { cols: 80, rows: 24 };
         let _shutdown = ChannelInput::Shutdown;
     }
 
@@ -567,7 +561,11 @@ mod tests {
 
         // After zeroize, the password and key_passphrase strings should be empty
         // (zeroize on String overwrites the buffer and sets length to 0).
-        assert_eq!(creds.password.as_deref(), Some(""), "password should be zeroized");
+        assert_eq!(
+            creds.password.as_deref(),
+            Some(""),
+            "password should be zeroized"
+        );
         assert_eq!(
             creds.key_passphrase.as_deref(),
             Some(""),

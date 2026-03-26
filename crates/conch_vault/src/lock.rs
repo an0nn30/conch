@@ -1,6 +1,6 @@
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 
 /// Tracks vault lock state and inactivity timeout.
 pub struct LockManager {

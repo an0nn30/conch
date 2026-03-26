@@ -56,49 +56,83 @@ pub trait HostApi: Send + Sync {
     fn open_session(&self, meta_json: &str) -> u64;
     fn close_session(&self, handle: u64);
     fn set_session_status(&self, handle: u64, status: u8, detail: Option<&str>);
-    fn session_prompt(&self, handle: u64, prompt_type: u8, msg: &str, detail: Option<&str>) -> Option<String>;
+    fn session_prompt(
+        &self,
+        handle: u64,
+        prompt_type: u8,
+        msg: &str,
+        detail: Option<&str>,
+    ) -> Option<String>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct MockHostApi { name: String }
+    struct MockHostApi {
+        name: String,
+    }
 
     impl HostApi for MockHostApi {
-        fn plugin_name(&self) -> &str { &self.name }
-        fn register_panel(&self, _: PanelLocation, _: &str, _: Option<&str>) -> u64 { 1 }
+        fn plugin_name(&self) -> &str {
+            &self.name
+        }
+        fn register_panel(&self, _: PanelLocation, _: &str, _: Option<&str>) -> u64 {
+            1
+        }
         fn set_widgets(&self, _: u64, _: &str) {}
         fn log(&self, _: u8, _: &str) {}
         fn notify(&self, _: &str) {}
         fn set_status(&self, _: Option<&str>, _: u8, _: f32) {}
         fn publish_event(&self, _: &str, _: &str) {}
         fn subscribe(&self, _: &str) {}
-        fn query_plugin(&self, _: &str, _: &str, _: &str) -> Option<String> { None }
+        fn query_plugin(&self, _: &str, _: &str, _: &str) -> Option<String> {
+            None
+        }
         fn register_service(&self, _: &str) {}
-        fn get_config(&self, _: &str) -> Option<String> { None }
+        fn get_config(&self, _: &str) -> Option<String> {
+            None
+        }
         fn set_config(&self, _: &str, _: &str) {}
         fn clipboard_set(&self, _: &str) {}
-        fn clipboard_get(&self) -> Option<String> { None }
-        fn get_theme(&self) -> Option<String> { None }
+        fn clipboard_get(&self) -> Option<String> {
+            None
+        }
+        fn get_theme(&self) -> Option<String> {
+            None
+        }
         fn register_menu_item(&self, _: &str, _: &str, _: &str, _: Option<&str>) {}
-        fn show_form(&self, _: &str) -> Option<String> { None }
-        fn show_confirm(&self, _: &str) -> bool { false }
-        fn show_prompt(&self, _: &str, _: &str) -> Option<String> { None }
+        fn show_form(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn show_confirm(&self, _: &str) -> bool {
+            false
+        }
+        fn show_prompt(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
         fn show_alert(&self, _: &str, _: &str) {}
         fn show_error(&self, _: &str, _: &str) {}
-        fn show_context_menu(&self, _: &str) -> Option<String> { None }
+        fn show_context_menu(&self, _: &str) -> Option<String> {
+            None
+        }
         fn write_to_pty(&self, _: &[u8]) {}
         fn new_tab(&self, _: Option<&str>, _: bool) {}
-        fn open_session(&self, _: &str) -> u64 { 0 }
+        fn open_session(&self, _: &str) -> u64 {
+            0
+        }
         fn close_session(&self, _: u64) {}
         fn set_session_status(&self, _: u64, _: u8, _: Option<&str>) {}
-        fn session_prompt(&self, _: u64, _: u8, _: &str, _: Option<&str>) -> Option<String> { None }
+        fn session_prompt(&self, _: u64, _: u8, _: &str, _: Option<&str>) -> Option<String> {
+            None
+        }
     }
 
     #[test]
     fn mock_host_api_implements_trait() {
-        let api: Box<dyn HostApi> = Box::new(MockHostApi { name: "test".into() });
+        let api: Box<dyn HostApi> = Box::new(MockHostApi {
+            name: "test".into(),
+        });
         assert_eq!(api.plugin_name(), "test");
         assert!(!api.show_confirm("?"));
     }

@@ -10,7 +10,9 @@ pub struct FontFamily {
 
 impl Default for FontFamily {
     fn default() -> Self {
-        Self { family: "JetBrains Mono".into() }
+        Self {
+            family: "JetBrains Mono".into(),
+        }
     }
 }
 

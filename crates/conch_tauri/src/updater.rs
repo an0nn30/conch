@@ -83,9 +83,7 @@ pub(crate) async fn check_for_update<R: Runtime>(
 /// frontend can show a progress indicator. Does **not** restart the app —
 /// call `restart_app` separately after informing the user.
 #[tauri::command]
-pub(crate) async fn install_update<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<(), String> {
+pub(crate) async fn install_update<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let update = {
         let state = app.state::<PendingUpdate>();
         state.0.lock().take()

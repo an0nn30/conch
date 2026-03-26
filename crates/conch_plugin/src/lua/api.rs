@@ -139,16 +139,18 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
 
     ui.set(
         "panel_scroll_text",
-        lua.create_function(|lua, (id, text, max_height): (String, String, Option<f32>)| {
-            with_acc(lua, |acc| {
-                acc.push_widget(Widget::ScrollText {
-                    id,
-                    text,
-                    max_height,
-                })
-            });
-            Ok(())
-        })?,
+        lua.create_function(
+            |lua, (id, text, max_height): (String, String, Option<f32>)| {
+                with_acc(lua, |acc| {
+                    acc.push_widget(Widget::ScrollText {
+                        id,
+                        text,
+                        max_height,
+                    })
+                });
+                Ok(())
+            },
+        )?,
     )?;
 
     ui.set(
@@ -177,13 +179,15 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
 
     ui.set(
         "panel_icon_label",
-        lua.create_function(|lua, (icon, text, style): (String, String, Option<String>)| {
-            let style = style.and_then(|s| parse_text_style(&s));
-            with_acc(lua, |acc| {
-                acc.push_widget(Widget::IconLabel { icon, text, style })
-            });
-            Ok(())
-        })?,
+        lua.create_function(
+            |lua, (icon, text, style): (String, String, Option<String>)| {
+                let style = style.and_then(|s| parse_text_style(&s));
+                with_acc(lua, |acc| {
+                    acc.push_widget(Widget::IconLabel { icon, text, style })
+                });
+                Ok(())
+            },
+        )?,
     )?;
 
     ui.set(
@@ -197,16 +201,18 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
 
     ui.set(
         "panel_progress",
-        lua.create_function(|lua, (id, fraction, label): (String, f32, Option<String>)| {
-            with_acc(lua, |acc| {
-                acc.push_widget(Widget::Progress {
-                    id,
-                    fraction,
-                    label,
-                })
-            });
-            Ok(())
-        })?,
+        lua.create_function(
+            |lua, (id, fraction, label): (String, f32, Option<String>)| {
+                with_acc(lua, |acc| {
+                    acc.push_widget(Widget::Progress {
+                        id,
+                        fraction,
+                        label,
+                    })
+                });
+                Ok(())
+            },
+        )?,
     )?;
 
     ui.set(
@@ -230,19 +236,17 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
 
     ui.set(
         "panel_button",
-        lua.create_function(
-            |lua, (id, label, icon): (String, String, Option<String>)| {
-                with_acc(lua, |acc| {
-                    acc.push_widget(Widget::Button {
-                        id,
-                        label,
-                        icon,
-                        enabled: None,
-                    })
-                });
-                Ok(())
-            },
-        )?,
+        lua.create_function(|lua, (id, label, icon): (String, String, Option<String>)| {
+            with_acc(lua, |acc| {
+                acc.push_widget(Widget::Button {
+                    id,
+                    label,
+                    icon,
+                    enabled: None,
+                })
+            });
+            Ok(())
+        })?,
     )?;
 
     ui.set(
@@ -316,17 +320,19 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
 
     ui.set(
         "panel_tree",
-        lua.create_function(|lua, (id, nodes, selected): (String, LuaTable, Option<String>)| {
-            let nodes = lua_to_tree_nodes(&nodes)?;
-            with_acc(lua, |acc| {
-                acc.push_widget(Widget::TreeView {
-                    id,
-                    nodes,
-                    selected,
-                })
-            });
-            Ok(())
-        })?,
+        lua.create_function(
+            |lua, (id, nodes, selected): (String, LuaTable, Option<String>)| {
+                let nodes = lua_to_tree_nodes(&nodes)?;
+                with_acc(lua, |acc| {
+                    acc.push_widget(Widget::TreeView {
+                        id,
+                        nodes,
+                        selected,
+                    })
+                });
+                Ok(())
+            },
+        )?,
     )?;
 
     ui.set(
@@ -341,9 +347,7 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_path_bar",
         lua.create_function(|lua, (id, segments): (String, Vec<String>)| {
-            with_acc(lua, |acc| {
-                acc.push_widget(Widget::PathBar { id, segments })
-            });
+            with_acc(lua, |acc| acc.push_widget(Widget::PathBar { id, segments }));
             Ok(())
         })?,
     )?;
@@ -398,21 +402,19 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
 
     ui.set(
         "panel_scroll_area",
-        lua.create_function(
-            |lua, (func, max_height): (LuaFunction, Option<f32>)| {
-                with_acc(lua, |acc| acc.push_scope());
-                func.call::<()>(())?;
-                let children = with_acc(lua, |acc| acc.pop_scope());
-                with_acc(lua, |acc| {
-                    acc.push_widget(Widget::ScrollArea {
-                        id: None,
-                        max_height,
-                        children,
-                    })
-                });
-                Ok(())
-            },
-        )?,
+        lua.create_function(|lua, (func, max_height): (LuaFunction, Option<f32>)| {
+            with_acc(lua, |acc| acc.push_scope());
+            func.call::<()>(())?;
+            let children = with_acc(lua, |acc| acc.pop_scope());
+            with_acc(lua, |acc| {
+                acc.push_widget(Widget::ScrollArea {
+                    id: None,
+                    max_height,
+                    children,
+                })
+            });
+            Ok(())
+        })?,
     )?;
 
     ui.set(
@@ -588,9 +590,8 @@ fn register_app_table(lua: &Lua) -> LuaResult<()> {
                         .unwrap_or_else(|_| "null".to_string()),
                     None => "null".to_string(),
                 };
-                let result = with_host_api(lua, |api| {
-                    api.query_plugin(&target, &method, &args_json)
-                });
+                let result =
+                    with_host_api(lua, |api| api.query_plugin(&target, &method, &args_json));
                 Ok(result)
             },
         )?,
@@ -651,8 +652,14 @@ fn register_session_table(lua: &Lua) -> LuaResult<()> {
                 .output()
             {
                 Ok(output) => {
-                    result.set("stdout", String::from_utf8_lossy(&output.stdout).to_string())?;
-                    result.set("stderr", String::from_utf8_lossy(&output.stderr).to_string())?;
+                    result.set(
+                        "stdout",
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                    )?;
+                    result.set(
+                        "stderr",
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                    )?;
                     result.set("exit_code", output.status.code().unwrap_or(-1))?;
                     result.set("status", "ok")?;
                 }
@@ -706,7 +713,9 @@ fn register_session_table(lua: &Lua) -> LuaResult<()> {
     session.set(
         "new_tab",
         lua.create_function(|lua, (command, plain): (Option<String>, Option<bool>)| {
-            with_host_api(lua, |api| api.new_tab(command.as_deref(), plain.unwrap_or(false)));
+            with_host_api(lua, |api| {
+                api.new_tab(command.as_deref(), plain.unwrap_or(false))
+            });
             Ok(())
         })?,
     )?;
@@ -899,7 +908,10 @@ fn build_table_widget(columns: LuaValue, rows: LuaValue) -> LuaResult<Widget> {
                 return build_table_advanced(col_tbl);
             }
 
-            let col_names: Vec<String> = col_tbl.clone().sequence_values().collect::<LuaResult<_>>()?;
+            let col_names: Vec<String> = col_tbl
+                .clone()
+                .sequence_values()
+                .collect::<LuaResult<_>>()?;
             let columns: Vec<TableColumn> = col_names
                 .into_iter()
                 .enumerate()
@@ -1225,9 +1237,7 @@ mod tests {
     fn widget_accumulator_basic() {
         let mut acc = WidgetAccumulator::new();
         acc.push_widget(Widget::Separator);
-        acc.push_widget(Widget::Heading {
-            text: "Hi".into(),
-        });
+        acc.push_widget(Widget::Heading { text: "Hi".into() });
         let widgets = acc.take_widgets();
         assert_eq!(widgets.len(), 2);
     }
@@ -1269,7 +1279,10 @@ mod tests {
 
     #[test]
     fn parse_badge_variants() {
-        assert!(matches!(parse_badge_variant("success"), BadgeVariant::Success));
+        assert!(matches!(
+            parse_badge_variant("success"),
+            BadgeVariant::Success
+        ));
         assert!(matches!(parse_badge_variant("warn"), BadgeVariant::Warn));
         assert!(matches!(parse_badge_variant("warning"), BadgeVariant::Warn));
         assert!(matches!(parse_badge_variant("unknown"), BadgeVariant::Info));

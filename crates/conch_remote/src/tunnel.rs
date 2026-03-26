@@ -134,8 +134,7 @@ impl TunnelManager {
                     Ok(ch) => ch,
                     Err(e) => {
                         log::error!("tunnel[{id}]: direct-tcpip failed: {e}");
-                        if e.to_string().contains("disconnect")
-                            || e.to_string().contains("closed")
+                        if e.to_string().contains("disconnect") || e.to_string().contains("closed")
                         {
                             break;
                         }
@@ -233,15 +232,12 @@ async fn connect_for_tunnel(
 
     // Proxy: desktop-only
     #[cfg(not(target_os = "ios"))]
-    let effective_proxy = server
-        .proxy_command
-        .clone()
-        .or_else(|| {
-            server
-                .proxy_jump
-                .as_ref()
-                .map(|j| format!("ssh -W %h:%p {j}"))
-        });
+    let effective_proxy = server.proxy_command.clone().or_else(|| {
+        server
+            .proxy_jump
+            .as_ref()
+            .map(|j| format!("ssh -W %h:%p {j}"))
+    });
     #[cfg(target_os = "ios")]
     let effective_proxy: Option<String> = None;
 
@@ -459,7 +455,10 @@ mod tests {
         ));
 
         mgr.clear_error(&id).await;
-        assert!(mgr.status(&id).await.is_none(), "error state should be removed");
+        assert!(
+            mgr.status(&id).await.is_none(),
+            "error state should be removed"
+        );
     }
 
     #[tokio::test]
@@ -478,6 +477,9 @@ mod tests {
 
         mgr.clear_error(&id).await;
         // Active state should NOT be removed by clear_error
-        assert!(mgr.is_active(&id).await, "active tunnel should not be cleared");
+        assert!(
+            mgr.is_active(&id).await,
+            "active tunnel should not be cleared"
+        );
     }
 }

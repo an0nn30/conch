@@ -201,7 +201,8 @@ impl VaultManager {
     pub fn update_settings(&self, settings: VaultSettings) -> Result<(), VaultError> {
         let mut guard = self.vault.lock();
         let vault = guard.as_mut().ok_or(VaultError::Locked)?;
-        self.lock_manager.set_timeout_minutes(settings.auto_lock_minutes);
+        self.lock_manager
+            .set_timeout_minutes(settings.auto_lock_minutes);
         vault.settings = settings;
         self.lock_manager.touch();
         Ok(())
@@ -253,7 +254,10 @@ impl VaultManager {
     }
 
     /// Find accounts matching a username.
-    pub fn find_accounts_by_username(&self, username: &str) -> Result<Vec<VaultAccount>, VaultError> {
+    pub fn find_accounts_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Vec<VaultAccount>, VaultError> {
         let guard = self.vault.lock();
         let vault = guard.as_ref().ok_or(VaultError::Locked)?;
         self.lock_manager.touch();
@@ -321,7 +325,11 @@ mod tests {
 
         // Add
         let id = mgr
-            .add_account("Deploy".into(), "deploy".into(), AuthMethod::Password("pass".into()))
+            .add_account(
+                "Deploy".into(),
+                "deploy".into(),
+                AuthMethod::Password("pass".into()),
+            )
             .unwrap();
 
         // List
@@ -362,9 +370,16 @@ mod tests {
         let (mgr, _dir) = make_manager();
         mgr.create(b"master").unwrap();
 
-        mgr.add_account("A".into(), "root".into(), AuthMethod::Password("p1".into())).unwrap();
-        mgr.add_account("B".into(), "deploy".into(), AuthMethod::Password("p2".into())).unwrap();
-        mgr.add_account("C".into(), "root".into(), AuthMethod::Password("p3".into())).unwrap();
+        mgr.add_account("A".into(), "root".into(), AuthMethod::Password("p1".into()))
+            .unwrap();
+        mgr.add_account(
+            "B".into(),
+            "deploy".into(),
+            AuthMethod::Password("p2".into()),
+        )
+        .unwrap();
+        mgr.add_account("C".into(), "root".into(), AuthMethod::Password("p3".into()))
+            .unwrap();
 
         let roots = mgr.find_accounts_by_username("root").unwrap();
         assert_eq!(roots.len(), 2);

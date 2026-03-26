@@ -46,13 +46,21 @@ impl SystemAgentBridge {
     }
 
     /// Remove a key from the system agent using ssh-add -d.
-    pub fn remove_key(&self, account_id: Uuid, key_path: &std::path::Path) -> Result<(), VaultError> {
+    pub fn remove_key(
+        &self,
+        account_id: Uuid,
+        key_path: &std::path::Path,
+    ) -> Result<(), VaultError> {
         if !Self::is_available() {
             return Ok(()); // Nothing to remove if agent isn't running
         }
 
         let pub_path = key_path.with_extension("pub");
-        let path_to_remove = if pub_path.exists() { &pub_path } else { key_path };
+        let path_to_remove = if pub_path.exists() {
+            &pub_path
+        } else {
+            key_path
+        };
 
         let output = std::process::Command::new("ssh-add")
             .arg("-d")

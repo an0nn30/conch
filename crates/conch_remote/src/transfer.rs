@@ -3,8 +3,8 @@
 //! Uses SFTP for transfers. Future: rsync detection and fallback.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -157,7 +157,10 @@ pub fn start_download(
         cancelled,
         abort_handle: task.abort_handle(),
     };
-    registry.lock().transfers.insert(transfer_id.clone(), handle);
+    registry
+        .lock()
+        .transfers
+        .insert(transfer_id.clone(), handle);
 
     transfer_id
 }
@@ -302,7 +305,10 @@ pub fn start_upload(
         cancelled,
         abort_handle: task.abort_handle(),
     };
-    registry.lock().transfers.insert(transfer_id.clone(), handle);
+    registry
+        .lock()
+        .transfers
+        .insert(transfer_id.clone(), handle);
 
     transfer_id
 }
@@ -320,8 +326,7 @@ async fn upload_file(
     use std::time::Instant;
     use tokio::io::AsyncWriteExt;
 
-    let local_meta =
-        std::fs::metadata(local_path).map_err(|e| format!("stat local file: {e}"))?;
+    let local_meta = std::fs::metadata(local_path).map_err(|e| format!("stat local file: {e}"))?;
     let total_bytes = local_meta.len();
 
     let mut local_file =

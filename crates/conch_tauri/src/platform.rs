@@ -139,7 +139,10 @@ fn fix_path() {
         if out.status.success() {
             let full_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !full_path.is_empty() {
-                log::debug!("Expanded PATH from login shell: {}", &full_path[..full_path.len().min(200)]);
+                log::debug!(
+                    "Expanded PATH from login shell: {}",
+                    &full_path[..full_path.len().min(200)]
+                );
                 unsafe { std::env::set_var("PATH", &full_path) };
             }
         }

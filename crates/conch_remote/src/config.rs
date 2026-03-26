@@ -82,15 +82,12 @@ pub struct SshConfig {
 
 impl SshConfig {
     pub fn find_server(&self, id: &str) -> Option<&ServerEntry> {
-        self.ungrouped
-            .iter()
-            .find(|s| s.id == id)
-            .or_else(|| {
-                self.folders
-                    .iter()
-                    .flat_map(|f| f.entries.iter())
-                    .find(|s| s.id == id)
-            })
+        self.ungrouped.iter().find(|s| s.id == id).or_else(|| {
+            self.folders
+                .iter()
+                .flat_map(|f| f.entries.iter())
+                .find(|s| s.id == id)
+        })
     }
 
     pub fn find_server_by_label(&self, label: &str) -> Option<&ServerEntry> {
@@ -467,9 +464,7 @@ struct PartialEntry {
 impl PartialEntry {
     fn into_server_entry(self) -> Option<ServerEntry> {
         let host = self.hostname.unwrap_or_else(|| self.alias.clone());
-        let user = self.user.or_else(|| {
-            std::env::var("USER").ok()
-        });
+        let user = self.user.or_else(|| std::env::var("USER").ok());
 
         Some(ServerEntry {
             id: format!("sshconfig_{}", self.alias),
@@ -752,7 +747,11 @@ Host bastion-target
         }"#;
         let cfg: SshConfig = serde_json::from_str(json).unwrap();
         let creds = cfg.collect_unique_credentials();
-        assert_eq!(creds.len(), 2, "deploy+/k1 and root+password should be 2 unique credentials");
+        assert_eq!(
+            creds.len(),
+            2,
+            "deploy+/k1 and root+password should be 2 unique credentials"
+        );
     }
 
     #[test]

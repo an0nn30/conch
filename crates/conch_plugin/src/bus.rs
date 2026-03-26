@@ -65,9 +65,7 @@ pub enum PluginMail {
     /// A direct query from another plugin (or the host).
     BusQuery(QueryRequest),
     /// Host requests the plugin to render its widget tree.
-    RenderRequest {
-        reply: oneshot::Sender<String>,
-    },
+    RenderRequest { reply: oneshot::Sender<String> },
     /// A widget interaction event (button click, text input, etc.).
     /// JSON-encoded `PluginEvent::Widget(...)`.
     WidgetEvent { json: String },
@@ -135,9 +133,7 @@ impl PluginBus {
     /// [`sender_for`](Self::sender_for)) can send messages through it.
     pub fn register_plugin(&self, name: &str) -> mpsc::Receiver<PluginMail> {
         let (tx, rx) = mpsc::channel(MAILBOX_CAPACITY);
-        self.plugin_senders
-            .write()
-            .insert(name.to_string(), tx);
+        self.plugin_senders.write().insert(name.to_string(), tx);
         rx
     }
 
@@ -277,7 +273,10 @@ impl PluginBus {
             reply: reply_tx,
         });
 
-        sender.send(req).await.map_err(|_| BusError::ChannelClosed)?;
+        sender
+            .send(req)
+            .await
+            .map_err(|_| BusError::ChannelClosed)?;
 
         reply_rx.await.map_err(|_| BusError::ResponseDropped)
     }
@@ -395,7 +394,10 @@ mod tests {
             }
         });
 
-        let resp = bus.query("target", "ping", json!(null), "caller").await.unwrap();
+        let resp = bus
+            .query("target", "ping", json!(null), "caller")
+            .await
+            .unwrap();
         assert_eq!(resp.result.unwrap(), json!("pong"));
         handle.await.unwrap();
     }
@@ -403,7 +405,10 @@ mod tests {
     #[tokio::test]
     async fn query_missing_plugin_returns_error() {
         let bus = PluginBus::new();
-        let err = bus.query("ghost", "method", json!(null), "src").await.unwrap_err();
+        let err = bus
+            .query("ghost", "method", json!(null), "src")
+            .await
+            .unwrap_err();
         assert!(matches!(err, BusError::PluginNotFound(_)));
     }
 

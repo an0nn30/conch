@@ -77,7 +77,9 @@ impl Default for CursorStyleConfig {
     }
 }
 
-fn deserialize_blinking<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+fn deserialize_blinking<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
     use serde::de;
 
     struct BlinkingVisitor;
@@ -97,7 +99,10 @@ fn deserialize_blinking<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Re
             match v.to_lowercase().as_str() {
                 "always" | "on" => Ok(true),
                 "never" | "off" => Ok(false),
-                _ => Err(de::Error::unknown_variant(v, &["Never", "Off", "On", "Always"])),
+                _ => Err(de::Error::unknown_variant(
+                    v,
+                    &["Never", "Off", "On", "Always"],
+                )),
             }
         }
     }
@@ -123,50 +128,70 @@ mod tests {
 
     #[test]
     fn blinking_deserialize_true() {
-        let cfg: CursorStyleConfig = toml::from_str(r#"shape = "Block"
-blinking = true"#).unwrap();
+        let cfg: CursorStyleConfig = toml::from_str(
+            r#"shape = "Block"
+blinking = true"#,
+        )
+        .unwrap();
         assert!(cfg.blinking);
     }
 
     #[test]
     fn blinking_deserialize_false() {
-        let cfg: CursorStyleConfig = toml::from_str(r#"shape = "Block"
-blinking = false"#).unwrap();
+        let cfg: CursorStyleConfig = toml::from_str(
+            r#"shape = "Block"
+blinking = false"#,
+        )
+        .unwrap();
         assert!(!cfg.blinking);
     }
 
     #[test]
     fn blinking_deserialize_always_string() {
-        let cfg: CursorStyleConfig = toml::from_str(r#"shape = "Block"
-blinking = "Always""#).unwrap();
+        let cfg: CursorStyleConfig = toml::from_str(
+            r#"shape = "Block"
+blinking = "Always""#,
+        )
+        .unwrap();
         assert!(cfg.blinking);
     }
 
     #[test]
     fn blinking_deserialize_on_string() {
-        let cfg: CursorStyleConfig = toml::from_str(r#"shape = "Block"
-blinking = "On""#).unwrap();
+        let cfg: CursorStyleConfig = toml::from_str(
+            r#"shape = "Block"
+blinking = "On""#,
+        )
+        .unwrap();
         assert!(cfg.blinking);
     }
 
     #[test]
     fn blinking_deserialize_never_string() {
-        let cfg: CursorStyleConfig = toml::from_str(r#"shape = "Block"
-blinking = "Never""#).unwrap();
+        let cfg: CursorStyleConfig = toml::from_str(
+            r#"shape = "Block"
+blinking = "Never""#,
+        )
+        .unwrap();
         assert!(!cfg.blinking);
     }
 
     #[test]
     fn blinking_deserialize_off_string() {
-        let cfg: CursorStyleConfig = toml::from_str(r#"shape = "Block"
-blinking = "off""#).unwrap();
+        let cfg: CursorStyleConfig = toml::from_str(
+            r#"shape = "Block"
+blinking = "off""#,
+        )
+        .unwrap();
         assert!(!cfg.blinking);
     }
 
     #[test]
     fn blinking_deserialize_invalid_string_errors() {
-        let result: Result<CursorStyleConfig, _> = toml::from_str(r#"shape = "Block"
-blinking = "maybe""#);
+        let result: Result<CursorStyleConfig, _> = toml::from_str(
+            r#"shape = "Block"
+blinking = "maybe""#,
+        );
         assert!(result.is_err());
     }
 

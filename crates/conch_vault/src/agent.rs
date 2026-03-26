@@ -40,11 +40,14 @@ impl SshAgent {
             if let Some(path) = key_path {
                 match load_private_key(path, &account.auth) {
                     Ok(pk) => {
-                        keys.insert(account.id, LoadedKey {
-                            account_id: account.id,
-                            username: account.username.clone(),
-                            private_key: pk,
-                        });
+                        keys.insert(
+                            account.id,
+                            LoadedKey {
+                                account_id: account.id,
+                                username: account.username.clone(),
+                                private_key: pk,
+                            },
+                        );
                         log::info!("agent: loaded key for account '{}'", account.display_name);
                     }
                     Err(e) => {
@@ -61,7 +64,10 @@ impl SshAgent {
 
     /// Get a loaded key by vault account ID.
     pub fn get_key(&self, account_id: Uuid) -> Option<PrivateKey> {
-        self.keys.lock().get(&account_id).map(|k| k.private_key.clone())
+        self.keys
+            .lock()
+            .get(&account_id)
+            .map(|k| k.private_key.clone())
     }
 
     /// Get all loaded key account IDs.
@@ -101,7 +107,7 @@ fn load_private_key(path: &Path, auth: &AuthMethod) -> Result<PrivateKey, VaultE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keygen::{generate_key, save_key_to_disk, KeyGenOptions, KeyType};
+    use crate::keygen::{KeyGenOptions, KeyType, generate_key, save_key_to_disk};
 
     fn make_test_account_with_key(dir: &Path) -> VaultAccount {
         let key_path = dir.join("test_key");

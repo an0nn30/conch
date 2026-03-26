@@ -36,7 +36,11 @@ impl client::Handler for ConchSshHandler {
 
         match check {
             Some(true) => {
-                log::debug!("Host key for {}:{} matches known_hosts", self.host, self.port);
+                log::debug!(
+                    "Host key for {}:{} matches known_hosts",
+                    self.host,
+                    self.port
+                );
                 return Ok(true);
             }
             Some(false) => {
@@ -47,10 +51,7 @@ impl client::Handler for ConchSshHandler {
                      It is also possible that the host key has just been changed.",
                     self.host, self.port
                 );
-                let fp_str = format!(
-                    "{}\n{fingerprint}",
-                    server_public_key.algorithm().as_str(),
-                );
+                let fp_str = format!("{}\n{fingerprint}", server_public_key.algorithm().as_str(),);
                 let accepted = self.callbacks.verify_host_key(&message, &fp_str).await;
                 return Ok(accepted);
             }

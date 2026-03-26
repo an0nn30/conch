@@ -49,14 +49,20 @@ pub fn generate_key(options: &KeyGenOptions) -> Result<GeneratedKey, VaultError>
             },
         )
         .map_err(|e| VaultError::KeyGen(e.to_string()))?,
-        KeyType::RsaSha256 => {
-            PrivateKey::random(&mut rng, Algorithm::Rsa { hash: Some(HashAlg::Sha256) })
-                .map_err(|e| VaultError::KeyGen(e.to_string()))?
-        }
-        KeyType::RsaSha512 => {
-            PrivateKey::random(&mut rng, Algorithm::Rsa { hash: Some(HashAlg::Sha512) })
-                .map_err(|e| VaultError::KeyGen(e.to_string()))?
-        }
+        KeyType::RsaSha256 => PrivateKey::random(
+            &mut rng,
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256),
+            },
+        )
+        .map_err(|e| VaultError::KeyGen(e.to_string()))?,
+        KeyType::RsaSha512 => PrivateKey::random(
+            &mut rng,
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512),
+            },
+        )
+        .map_err(|e| VaultError::KeyGen(e.to_string()))?,
     };
 
     let public_key = private_key.public_key();

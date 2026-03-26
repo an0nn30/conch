@@ -6,13 +6,13 @@
 
 mod ipc;
 pub mod platform;
-mod pty_backend;
 pub(crate) mod plugins;
+mod pty_backend;
 pub(crate) mod remote;
 pub(crate) mod settings;
 pub(crate) mod theme;
-pub(crate) mod utf8_stream;
 pub(crate) mod updater;
+pub(crate) mod utf8_stream;
 pub(crate) mod vault_commands;
 mod watcher;
 
@@ -282,14 +282,11 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         }
         for item in plugin_items {
             let menu_id = format!("plugin.{}.{}", item.plugin, item.action);
-            let accel = item.keybind.as_deref().map(|k| config_key_to_accelerator(k));
-            let mi = MenuItem::with_id(
-                app,
-                &menu_id,
-                &item.label,
-                true,
-                accel.as_deref(),
-            )?;
+            let accel = item
+                .keybind
+                .as_deref()
+                .map(|k| config_key_to_accelerator(k));
+            let mi = MenuItem::with_id(app, &menu_id, &item.label, true, accel.as_deref())?;
             tools_items.push(Box::new(mi));
         }
 
@@ -298,86 +295,251 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let new_tools = Submenu::with_items(app, "Tools", true, &refs)?;
 
         // Rebuild full menu bar with new tools menu.
-        let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
-        let close_tab = MenuItem::with_id(app, MENU_CLOSE_TAB_ID, "Close Tab", true, Some("CmdOrCtrl+W"))?;
+        let new_tab =
+            MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
+        let close_tab = MenuItem::with_id(
+            app,
+            MENU_CLOSE_TAB_ID,
+            "Close Tab",
+            true,
+            Some("CmdOrCtrl+W"),
+        )?;
         let rename_tab_accel = config_key_to_accelerator(&keyboard.rename_tab);
-        let rename_tab = MenuItem::with_id(app, MENU_RENAME_TAB_ID, "Rename Tab", true, Some(&rename_tab_accel))?;
-        let new_window = MenuItem::with_id(app, MENU_NEW_WINDOW_ID, "New Window", true, Some("CmdOrCtrl+Shift+N"))?;
+        let rename_tab = MenuItem::with_id(
+            app,
+            MENU_RENAME_TAB_ID,
+            "Rename Tab",
+            true,
+            Some(&rename_tab_accel),
+        )?;
+        let new_window = MenuItem::with_id(
+            app,
+            MENU_NEW_WINDOW_ID,
+            "New Window",
+            true,
+            Some("CmdOrCtrl+Shift+N"),
+        )?;
         let separator = PredefinedMenuItem::separator(app)?;
         let close_window = PredefinedMenuItem::close_window(app, None)?;
-        let settings = MenuItem::with_id(app, MENU_SETTINGS_ID, "Settings\u{2026}", true, Some("CmdOrCtrl+Comma"))?;
+        let settings = MenuItem::with_id(
+            app,
+            MENU_SETTINGS_ID,
+            "Settings\u{2026}",
+            true,
+            Some("CmdOrCtrl+Comma"),
+        )?;
         let ssh_export = MenuItem::with_id(app, MENU_SSH_EXPORT_ID, "Export", true, None::<&str>)?;
         let ssh_import = MenuItem::with_id(app, MENU_SSH_IMPORT_ID, "Import", true, None::<&str>)?;
-        let ssh_manager_menu = Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
+        let ssh_manager_menu =
+            Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
         let separator2 = PredefinedMenuItem::separator(app)?;
-        let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &rename_tab, &close_tab, &close_window])?;
-        let edit_menu = Submenu::with_items(app, "Edit", true, &[
-            &PredefinedMenuItem::cut(app, None)?,
-            &PredefinedMenuItem::copy(app, None)?,
-            &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
-        ])?;
+        let file_menu = Submenu::with_items(
+            app,
+            "File",
+            true,
+            &[
+                &new_tab,
+                &new_window,
+                &separator,
+                &ssh_manager_menu,
+                &separator2,
+                &rename_tab,
+                &close_tab,
+                &close_window,
+            ],
+        )?;
+        let edit_menu = Submenu::with_items(
+            app,
+            "Edit",
+            true,
+            &[
+                &PredefinedMenuItem::cut(app, None)?,
+                &PredefinedMenuItem::copy(app, None)?,
+                &PredefinedMenuItem::paste(app, None)?,
+                &PredefinedMenuItem::select_all(app, None)?,
+            ],
+        )?;
 
         let toggle_left_accel = config_key_to_accelerator(&keyboard.toggle_left_panel);
-        let toggle_left = MenuItem::with_id(app, MENU_TOGGLE_LEFT_PANEL_ID, "Toggle File Explorer", true, Some(&toggle_left_accel))?;
+        let toggle_left = MenuItem::with_id(
+            app,
+            MENU_TOGGLE_LEFT_PANEL_ID,
+            "Toggle File Explorer",
+            true,
+            Some(&toggle_left_accel),
+        )?;
         let toggle_right_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
-        let toggle_right = MenuItem::with_id(app, MENU_TOGGLE_RIGHT_PANEL_ID, "Toggle Sessions Panel", true, Some(&toggle_right_accel))?;
+        let toggle_right = MenuItem::with_id(
+            app,
+            MENU_TOGGLE_RIGHT_PANEL_ID,
+            "Toggle Sessions Panel",
+            true,
+            Some(&toggle_right_accel),
+        )?;
         let toggle_bottom_accel = config_key_to_accelerator(&keyboard.toggle_bottom_panel);
-        let toggle_bottom = MenuItem::with_id(app, "view.toggle_bottom_panel", "Toggle Bottom Panel", true, Some(&toggle_bottom_accel))?;
-        let focus_sessions = MenuItem::with_id(app, MENU_FOCUS_SESSIONS_ID, "Toggle & Focus Sessions", true, Some("CmdOrCtrl+/"))?;
+        let toggle_bottom = MenuItem::with_id(
+            app,
+            "view.toggle_bottom_panel",
+            "Toggle Bottom Panel",
+            true,
+            Some(&toggle_bottom_accel),
+        )?;
+        let focus_sessions = MenuItem::with_id(
+            app,
+            MENU_FOCUS_SESSIONS_ID,
+            "Toggle & Focus Sessions",
+            true,
+            Some("CmdOrCtrl+/"),
+        )?;
         let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
-        let zen_mode = MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
-        let zoom_in = MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
-        let zoom_out = MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
-        let zoom_reset = MenuItem::with_id(app, MENU_ZOOM_RESET_ID, "Reset Zoom", true, Some("CmdOrCtrl+0"))?;
+        let zen_mode =
+            MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
+        let zoom_in =
+            MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
+        let zoom_out =
+            MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+        let zoom_reset = MenuItem::with_id(
+            app,
+            MENU_ZOOM_RESET_ID,
+            "Reset Zoom",
+            true,
+            Some("CmdOrCtrl+0"),
+        )?;
         let split_v_accel = config_key_to_accelerator(&keyboard.split_vertical);
-        let split_v = MenuItem::with_id(app, MENU_SPLIT_VERTICAL_ID, "Split Pane Vertically", true, Some(&split_v_accel))?;
+        let split_v = MenuItem::with_id(
+            app,
+            MENU_SPLIT_VERTICAL_ID,
+            "Split Pane Vertically",
+            true,
+            Some(&split_v_accel),
+        )?;
         let split_h_accel = config_key_to_accelerator(&keyboard.split_horizontal);
-        let split_h = MenuItem::with_id(app, MENU_SPLIT_HORIZONTAL_ID, "Split Pane Horizontally", true, Some(&split_h_accel))?;
+        let split_h = MenuItem::with_id(
+            app,
+            MENU_SPLIT_HORIZONTAL_ID,
+            "Split Pane Horizontally",
+            true,
+            Some(&split_h_accel),
+        )?;
         let close_pane_accel = config_key_to_accelerator(&keyboard.close_pane);
-        let close_pane_item = MenuItem::with_id(app, MENU_CLOSE_PANE_ID, "Close Pane", true, Some(&close_pane_accel))?;
-        let view_menu = Submenu::with_items(app, "View", true, &[
-            &toggle_left, &toggle_right, &toggle_bottom,
-            &PredefinedMenuItem::separator(app)?,
-            &split_v, &split_h, &close_pane_item,
-            &PredefinedMenuItem::separator(app)?,
-            &focus_sessions, &zen_mode,
-            &PredefinedMenuItem::separator(app)?,
-            &zoom_in, &zoom_out, &zoom_reset,
-        ])?;
+        let close_pane_item = MenuItem::with_id(
+            app,
+            MENU_CLOSE_PANE_ID,
+            "Close Pane",
+            true,
+            Some(&close_pane_accel),
+        )?;
+        let view_menu = Submenu::with_items(
+            app,
+            "View",
+            true,
+            &[
+                &toggle_left,
+                &toggle_right,
+                &toggle_bottom,
+                &PredefinedMenuItem::separator(app)?,
+                &split_v,
+                &split_h,
+                &close_pane_item,
+                &PredefinedMenuItem::separator(app)?,
+                &focus_sessions,
+                &zen_mode,
+                &PredefinedMenuItem::separator(app)?,
+                &zoom_in,
+                &zoom_out,
+                &zoom_reset,
+            ],
+        )?;
 
-        let window_menu = Submenu::with_items(app, "Window", true, &[
-            &PredefinedMenuItem::minimize(app, None)?,
-            &PredefinedMenuItem::maximize(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::fullscreen(app, None)?,
-        ])?;
+        let window_menu = Submenu::with_items(
+            app,
+            "Window",
+            true,
+            &[
+                &PredefinedMenuItem::minimize(app, None)?,
+                &PredefinedMenuItem::maximize(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::fullscreen(app, None)?,
+            ],
+        )?;
 
         #[cfg(target_os = "macos")]
         {
             let app_name = app.package_info().name.clone();
-            let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
-            let app_menu = Submenu::with_items(app, app_name, true, &[
-                &MenuItem::with_id(app, MENU_ABOUT_ID, "About Conch", true, None::<&str>)?,
-                &PredefinedMenuItem::separator(app)?,
-                &settings,
-                &check_updates,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::hide(app, None)?,
-                &PredefinedMenuItem::hide_others(app, None)?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::quit(app, None)?,
-            ])?;
-            return Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &new_tools, &window_menu]);
+            let check_updates = MenuItem::with_id(
+                app,
+                MENU_CHECK_UPDATES_ID,
+                "Check for Updates\u{2026}",
+                true,
+                None::<&str>,
+            )?;
+            let app_menu = Submenu::with_items(
+                app,
+                app_name,
+                true,
+                &[
+                    &MenuItem::with_id(app, MENU_ABOUT_ID, "About Conch", true, None::<&str>)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &settings,
+                    &check_updates,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, None)?,
+                ],
+            )?;
+            return Menu::with_items(
+                app,
+                &[
+                    &app_menu,
+                    &file_menu,
+                    &edit_menu,
+                    &view_menu,
+                    &new_tools,
+                    &window_menu,
+                ],
+            );
         }
 
         #[cfg(not(target_os = "macos"))]
         {
             let separator3 = PredefinedMenuItem::separator(app)?;
-            let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
+            let check_updates = MenuItem::with_id(
+                app,
+                MENU_CHECK_UPDATES_ID,
+                "Check for Updates\u{2026}",
+                true,
+                None::<&str>,
+            )?;
             let help_menu = Submenu::with_items(app, "Help", true, &[&check_updates])?;
-            let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &settings, &separator3, &close_tab, &close_window])?;
-            return Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &new_tools, &window_menu, &help_menu]);
+            let file_menu = Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[
+                    &new_tab,
+                    &new_window,
+                    &separator,
+                    &ssh_manager_menu,
+                    &separator2,
+                    &settings,
+                    &separator3,
+                    &close_tab,
+                    &close_window,
+                ],
+            )?;
+            return Menu::with_items(
+                app,
+                &[
+                    &file_menu,
+                    &edit_menu,
+                    &view_menu,
+                    &new_tools,
+                    &window_menu,
+                    &help_menu,
+                ],
+            );
         }
     }
 
@@ -623,16 +785,44 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     let close_window = PredefinedMenuItem::close_window(app, None)?;
 
     let rename_tab_accel = config_key_to_accelerator(&keyboard.rename_tab);
-    let rename_tab = MenuItem::with_id(app, MENU_RENAME_TAB_ID, "Rename Tab", true, Some(&rename_tab_accel))?;
-    let ssh_export = MenuItem::with_id(app, MENU_SSH_EXPORT_ID, "Export Connections", true, None::<&str>)?;
-    let ssh_import = MenuItem::with_id(app, MENU_SSH_IMPORT_ID, "Import Connections", true, None::<&str>)?;
-    let ssh_manager_menu = Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
+    let rename_tab = MenuItem::with_id(
+        app,
+        MENU_RENAME_TAB_ID,
+        "Rename Tab",
+        true,
+        Some(&rename_tab_accel),
+    )?;
+    let ssh_export = MenuItem::with_id(
+        app,
+        MENU_SSH_EXPORT_ID,
+        "Export Connections",
+        true,
+        None::<&str>,
+    )?;
+    let ssh_import = MenuItem::with_id(
+        app,
+        MENU_SSH_IMPORT_ID,
+        "Import Connections",
+        true,
+        None::<&str>,
+    )?;
+    let ssh_manager_menu =
+        Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
     let separator2 = PredefinedMenuItem::separator(app)?;
     let file_menu = Submenu::with_items(
         app,
         "File",
         true,
-        &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &rename_tab, &close_tab, &close_window],
+        &[
+            &new_tab,
+            &new_window,
+            &separator,
+            &ssh_manager_menu,
+            &separator2,
+            &rename_tab,
+            &close_tab,
+            &close_window,
+        ],
     )?;
     let edit_menu = Submenu::with_items(
         app,
@@ -670,40 +860,77 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         Some("CmdOrCtrl+/"),
     )?;
     let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
-    let zen_mode = MenuItem::with_id(
-        app,
-        MENU_ZEN_MODE_ID,
-        "Zen Mode",
-        true,
-        Some(&zen_accel),
-    )?;
+    let zen_mode = MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
     let zoom_in = MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
     let zoom_out = MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
-    let zoom_reset = MenuItem::with_id(app, MENU_ZOOM_RESET_ID, "Reset Zoom", true, Some("CmdOrCtrl+0"))?;
+    let zoom_reset = MenuItem::with_id(
+        app,
+        MENU_ZOOM_RESET_ID,
+        "Reset Zoom",
+        true,
+        Some("CmdOrCtrl+0"),
+    )?;
     let toggle_bottom_accel = config_key_to_accelerator(&keyboard.toggle_bottom_panel);
-    let toggle_bottom = MenuItem::with_id(app, "view.toggle_bottom_panel", "Toggle Bottom Panel", true, Some(&toggle_bottom_accel))?;
+    let toggle_bottom = MenuItem::with_id(
+        app,
+        "view.toggle_bottom_panel",
+        "Toggle Bottom Panel",
+        true,
+        Some(&toggle_bottom_accel),
+    )?;
     let split_v_accel = config_key_to_accelerator(&keyboard.split_vertical);
-    let split_v = MenuItem::with_id(app, MENU_SPLIT_VERTICAL_ID, "Split Pane Vertically", true, Some(&split_v_accel))?;
+    let split_v = MenuItem::with_id(
+        app,
+        MENU_SPLIT_VERTICAL_ID,
+        "Split Pane Vertically",
+        true,
+        Some(&split_v_accel),
+    )?;
     let split_h_accel = config_key_to_accelerator(&keyboard.split_horizontal);
-    let split_h = MenuItem::with_id(app, MENU_SPLIT_HORIZONTAL_ID, "Split Pane Horizontally", true, Some(&split_h_accel))?;
+    let split_h = MenuItem::with_id(
+        app,
+        MENU_SPLIT_HORIZONTAL_ID,
+        "Split Pane Horizontally",
+        true,
+        Some(&split_h_accel),
+    )?;
     let close_pane_accel = config_key_to_accelerator(&keyboard.close_pane);
-    let close_pane_item = MenuItem::with_id(app, MENU_CLOSE_PANE_ID, "Close Pane", true, Some(&close_pane_accel))?;
+    let close_pane_item = MenuItem::with_id(
+        app,
+        MENU_CLOSE_PANE_ID,
+        "Close Pane",
+        true,
+        Some(&close_pane_accel),
+    )?;
     let view_menu = Submenu::with_items(
         app,
         "View",
         true,
         &[
-            &toggle_left, &toggle_right, &toggle_bottom,
+            &toggle_left,
+            &toggle_right,
+            &toggle_bottom,
             &PredefinedMenuItem::separator(app)?,
-            &split_v, &split_h, &close_pane_item,
+            &split_v,
+            &split_h,
+            &close_pane_item,
             &PredefinedMenuItem::separator(app)?,
-            &focus_sessions, &zen_mode,
+            &focus_sessions,
+            &zen_mode,
             &PredefinedMenuItem::separator(app)?,
-            &zoom_in, &zoom_out, &zoom_reset,
+            &zoom_in,
+            &zoom_out,
+            &zoom_reset,
         ],
     )?;
 
-    let settings = MenuItem::with_id(app, MENU_SETTINGS_ID, "Settings\u{2026}", true, Some("CmdOrCtrl+Comma"))?;
+    let settings = MenuItem::with_id(
+        app,
+        MENU_SETTINGS_ID,
+        "Settings\u{2026}",
+        true,
+        Some("CmdOrCtrl+Comma"),
+    )?;
     let manage_tunnels = MenuItem::with_id(
         app,
         MENU_MANAGE_TUNNELS_ID,
@@ -725,13 +952,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         None::<&str>,
     )?;
-    let lock_vault = MenuItem::with_id(
-        app,
-        MENU_VAULT_LOCK_ID,
-        "Lock Vault",
-        true,
-        None::<&str>,
-    )?;
+    let lock_vault = MenuItem::with_id(app, MENU_VAULT_LOCK_ID, "Lock Vault", true, None::<&str>)?;
     let tools_menu = Submenu::with_items(
         app,
         "Tools",
@@ -760,7 +981,13 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     #[cfg(target_os = "macos")]
     {
         let app_name = app.package_info().name.clone();
-        let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
+        let check_updates = MenuItem::with_id(
+            app,
+            MENU_CHECK_UPDATES_ID,
+            "Check for Updates\u{2026}",
+            true,
+            None::<&str>,
+        )?;
         let app_menu = Submenu::with_items(
             app,
             app_name,
@@ -779,22 +1006,55 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         )?;
         return Menu::with_items(
             app,
-            &[&app_menu, &file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu],
+            &[
+                &app_menu,
+                &file_menu,
+                &edit_menu,
+                &view_menu,
+                &tools_menu,
+                &window_menu,
+            ],
         );
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let separator3 = PredefinedMenuItem::separator(app)?;
-        let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
+        let check_updates = MenuItem::with_id(
+            app,
+            MENU_CHECK_UPDATES_ID,
+            "Check for Updates\u{2026}",
+            true,
+            None::<&str>,
+        )?;
         let help_menu = Submenu::with_items(app, "Help", true, &[&check_updates])?;
         let file_menu = Submenu::with_items(
             app,
             "File",
             true,
-            &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &settings, &separator3, &close_tab, &close_window],
+            &[
+                &new_tab,
+                &new_window,
+                &separator,
+                &ssh_manager_menu,
+                &separator2,
+                &settings,
+                &separator3,
+                &close_tab,
+                &close_window,
+            ],
         )?;
-        Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu, &help_menu])
+        Menu::with_items(
+            app,
+            &[
+                &file_menu,
+                &edit_menu,
+                &view_menu,
+                &tools_menu,
+                &window_menu,
+                &help_menu,
+            ],
+        )
     }
 }
 
@@ -810,7 +1070,10 @@ fn focused_webview_window<R: tauri::Runtime>(
     windows.into_values().next()
 }
 
-pub(crate) fn emit_menu_action_to_focused_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, action: &str) {
+pub(crate) fn emit_menu_action_to_focused_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    action: &str,
+) {
     if let Some(window) = focused_webview_window(app) {
         let _ = window.emit(
             MENU_ACTION_EVENT,
@@ -866,7 +1129,11 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         conch_core::config::WindowDecorations::None
             | conch_core::config::WindowDecorations::Buttonless
     );
-    let dec = if cfg!(target_os = "windows") { false } else { user_wants_dec };
+    let dec = if cfg!(target_os = "windows") {
+        false
+    } else {
+        user_wants_dec
+    };
     let theme = appearance_to_theme(&user_cfg.colors.appearance_mode);
 
     let new_win = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
@@ -890,7 +1157,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         tokio::sync::mpsc::unbounded_channel::<conch_remote::transfer::TransferProgress>();
     let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
     let plugins_config = config.conch.plugins.clone();
-    let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new(plugins_config.clone())));
+    let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new(
+        plugins_config.clone(),
+    )));
 
     let config_dir = config::config_dir();
     let vault_path = config_dir.join("vault.enc");
@@ -993,9 +1262,17 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                             std::thread::sleep(std::time::Duration::from_millis(500));
                             let plugin_items = menu_ps.lock().menu_items.lock().clone();
                             if !plugin_items.is_empty() {
-                                match build_app_menu_with_plugins(&menu_handle, &menu_kb, &plugin_items) {
-                                    Ok(menu) => { let _ = menu_handle.set_menu(menu); }
-                                    Err(e) => log::error!("Menu rebuild after plugin restore failed: {e}"),
+                                match build_app_menu_with_plugins(
+                                    &menu_handle,
+                                    &menu_kb,
+                                    &plugin_items,
+                                ) {
+                                    Ok(menu) => {
+                                        let _ = menu_handle.set_menu(menu);
+                                    }
+                                    Err(e) => {
+                                        log::error!("Menu rebuild after plugin restore failed: {e}")
+                                    }
                                 }
                             }
                         })
@@ -1033,11 +1310,13 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 let app_for_timer = app.handle().clone();
                 std::thread::Builder::new()
                     .name("vault-auto-lock".into())
-                    .spawn(move || loop {
-                        std::thread::sleep(std::time::Duration::from_secs(30));
-                        let did_lock = vault_for_timer.lock().check_timeout();
-                        if did_lock {
-                            let _ = app_for_timer.emit("vault-locked", ());
+                    .spawn(move || {
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(30));
+                            let did_lock = vault_for_timer.lock().check_timeout();
+                            if did_lock {
+                                let _ = app_for_timer.emit("vault-locked", ());
+                            }
                         }
                     })
                     .ok();
@@ -1070,7 +1349,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                         let update = match app_handle.updater() {
                             Ok(u) => u.check().await,
-                            Err(e) => { log::warn!("Startup updater init failed: {e}"); return; }
+                            Err(e) => {
+                                log::warn!("Startup updater init failed: {e}");
+                                return;
+                            }
                         };
                         match update {
                             Ok(Some(update)) => {
@@ -1102,7 +1384,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             MENU_ZOOM_IN_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_ZOOM_IN),
             MENU_ZOOM_OUT_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_ZOOM_OUT),
             MENU_ZOOM_RESET_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_ZOOM_RESET),
-            "view.toggle_bottom_panel" => emit_menu_action_to_focused_window(app, "toggle-bottom-panel"),
+            "view.toggle_bottom_panel" => {
+                emit_menu_action_to_focused_window(app, "toggle-bottom-panel")
+            }
             MENU_TOGGLE_RIGHT_PANEL_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_TOGGLE_RIGHT_PANEL)
             }
@@ -1113,29 +1397,19 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             MENU_MANAGE_TUNNELS_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_MANAGE_TUNNELS)
             }
-            MENU_SSH_EXPORT_ID => {
-                emit_menu_action_to_focused_window(app, MENU_ACTION_SSH_EXPORT)
+            MENU_SSH_EXPORT_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_SSH_EXPORT),
+            MENU_SSH_IMPORT_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_SSH_IMPORT),
+            MENU_VAULT_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_VAULT_OPEN),
+            MENU_KEYGEN_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_KEYGEN_OPEN),
+            MENU_VAULT_LOCK_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_VAULT_LOCK),
+            MENU_CHECK_UPDATES_ID => emit_menu_action_to_focused_window(app, "check-for-updates"),
+            MENU_ABOUT_ID => emit_menu_action_to_focused_window(app, "about"),
+            MENU_SPLIT_VERTICAL_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_SPLIT_VERTICAL)
             }
-            MENU_SSH_IMPORT_ID => {
-                emit_menu_action_to_focused_window(app, MENU_ACTION_SSH_IMPORT)
+            MENU_SPLIT_HORIZONTAL_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_SPLIT_HORIZONTAL)
             }
-            MENU_VAULT_ID => {
-                emit_menu_action_to_focused_window(app, MENU_ACTION_VAULT_OPEN)
-            }
-            MENU_KEYGEN_ID => {
-                emit_menu_action_to_focused_window(app, MENU_ACTION_KEYGEN_OPEN)
-            }
-            MENU_VAULT_LOCK_ID => {
-                emit_menu_action_to_focused_window(app, MENU_ACTION_VAULT_LOCK)
-            }
-            MENU_CHECK_UPDATES_ID => {
-                emit_menu_action_to_focused_window(app, "check-for-updates")
-            }
-            MENU_ABOUT_ID => {
-                emit_menu_action_to_focused_window(app, "about")
-            }
-            MENU_SPLIT_VERTICAL_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_SPLIT_VERTICAL),
-            MENU_SPLIT_HORIZONTAL_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_SPLIT_HORIZONTAL),
             MENU_CLOSE_PANE_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_CLOSE_PANE),
             MENU_NEW_WINDOW_ID => {
                 if let Err(e) = create_new_window(app) {
@@ -1158,7 +1432,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                             // Find the actual plugin name that registered this action.
                             // The source_name might be "java" (shared) while the real
                             // plugin name on the bus is different (e.g., "Form Test").
-                            let real_plugin = ps_guard.menu_items.lock()
+                            let real_plugin = ps_guard
+                                .menu_items
+                                .lock()
                                 .iter()
                                 .find(|i| i.plugin == source_name && i.action == action)
                                 .map(|i| i.plugin.clone());
@@ -1166,9 +1442,15 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                             // Try direct match first, then all registered plugins.
                             let target = real_plugin.as_deref().unwrap_or(source_name);
                             let sent = if let Some(sender) = bus.sender_for(target) {
-                                let event = conch_plugin_sdk::PluginEvent::MenuAction { action: action.clone() };
+                                let event = conch_plugin_sdk::PluginEvent::MenuAction {
+                                    action: action.clone(),
+                                };
                                 let json = serde_json::to_string(&event).unwrap_or_default();
-                                sender.blocking_send(conch_plugin::bus::PluginMail::WidgetEvent { json }).is_ok()
+                                sender
+                                    .blocking_send(conch_plugin::bus::PluginMail::WidgetEvent {
+                                        json,
+                                    })
+                                    .is_ok()
                             } else {
                                 false
                             };
@@ -1183,7 +1465,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                                     for meta in mgr.loaded_plugins() {
                                         if let Some(sender) = bus.sender_for(&meta.name) {
                                             let _ = sender.blocking_send(
-                                                conch_plugin::bus::PluginMail::WidgetEvent { json: json.clone() }
+                                                conch_plugin::bus::PluginMail::WidgetEvent {
+                                                    json: json.clone(),
+                                                },
                                             );
                                         }
                                     }

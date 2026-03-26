@@ -191,11 +191,17 @@ pub fn resolve_theme(value: &str) -> ColorScheme {
                     return scheme;
                 }
                 Err(e) => {
-                    log::warn!("Failed to load theme '{}': {e}, using built-in Dracula", value);
+                    log::warn!(
+                        "Failed to load theme '{}': {e}, using built-in Dracula",
+                        value
+                    );
                 }
             }
         } else if !value.eq_ignore_ascii_case("dracula") {
-            log::info!("Theme '{}' not found in themes dir, using built-in Dracula", value);
+            log::info!(
+                "Theme '{}' not found in themes dir, using built-in Dracula",
+                value
+            );
         }
     }
     ColorScheme::default()

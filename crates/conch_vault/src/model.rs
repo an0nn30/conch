@@ -71,7 +71,9 @@ impl Zeroize for AuthMethod {
                 }
             }
             AuthMethod::KeyAndPassword {
-                passphrase, password, ..
+                passphrase,
+                password,
+                ..
             } => {
                 if let Some(p) = passphrase {
                     p.zeroize();

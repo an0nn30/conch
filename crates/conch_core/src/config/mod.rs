@@ -95,8 +95,12 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
-pub fn config_path() -> PathBuf { config_dir().join("config.toml") }
-fn state_path() -> PathBuf { config_dir().join("state.toml") }
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+fn state_path() -> PathBuf {
+    config_dir().join("state.toml")
+}
 
 // ---------------------------------------------------------------------------
 // Load / Save — UserConfig
@@ -108,16 +112,18 @@ pub fn load_user_config() -> Result<UserConfig> {
         log::info!("No config.toml at {}, using defaults", path.display());
         return Ok(UserConfig::default());
     }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let config: UserConfig = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let config: UserConfig =
+        toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(config)
 }
 
 pub fn save_user_config(config: &UserConfig) -> Result<()> {
     let dir = config_dir();
-    if !dir.exists() { fs::create_dir_all(&dir)?; }
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
     let contents = toml::to_string_pretty(config).context("Failed to serialize config")?;
     fs::write(config_path(), contents)?;
     Ok(())
@@ -133,16 +139,18 @@ pub fn load_persistent_state() -> Result<PersistentState> {
         log::info!("No state.toml at {}, using defaults", path.display());
         return Ok(PersistentState::default());
     }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let state: PersistentState = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let state: PersistentState =
+        toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(state)
 }
 
 pub fn save_persistent_state(state: &PersistentState) -> Result<()> {
     let dir = config_dir();
-    if !dir.exists() { fs::create_dir_all(&dir)?; }
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
     let contents = toml::to_string_pretty(state).context("Failed to serialize state")?;
     fs::write(state_path(), contents)?;
     Ok(())
@@ -178,7 +186,10 @@ mod tests {
     #[test]
     fn default_font_when_neither_set() {
         let cfg = UserConfig::default();
-        assert_eq!(cfg.resolved_terminal_font().size, FontConfig::default().size);
+        assert_eq!(
+            cfg.resolved_terminal_font().size,
+            FontConfig::default().size
+        );
     }
 
     #[test]

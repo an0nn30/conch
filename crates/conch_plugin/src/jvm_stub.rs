@@ -4,8 +4,8 @@ pub mod runtime {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use crate::bus::PluginBus;
     use crate::HostApi;
+    use crate::bus::PluginBus;
 
     /// Metadata about a discovered/loaded plugin.
     #[derive(Debug, Clone)]

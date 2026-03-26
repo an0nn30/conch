@@ -8,17 +8,23 @@ use crate::error::VaultError;
 
 /// Always returns an error — keychain storage has been removed.
 pub fn store_master_key(_key: &[u8]) -> Result<(), VaultError> {
-    Err(VaultError::Keychain("keychain support has been removed".into()))
+    Err(VaultError::Keychain(
+        "keychain support has been removed".into(),
+    ))
 }
 
 /// Always returns an error — keychain retrieval has been removed.
 pub fn retrieve_master_key() -> Result<Vec<u8>, VaultError> {
-    Err(VaultError::Keychain("keychain support has been removed".into()))
+    Err(VaultError::Keychain(
+        "keychain support has been removed".into(),
+    ))
 }
 
 /// Always returns an error — keychain deletion has been removed.
 pub fn delete_master_key() -> Result<(), VaultError> {
-    Err(VaultError::Keychain("keychain support has been removed".into()))
+    Err(VaultError::Keychain(
+        "keychain support has been removed".into(),
+    ))
 }
 
 /// Always returns false — keychain support has been removed.

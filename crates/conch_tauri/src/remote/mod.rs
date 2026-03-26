@@ -309,8 +309,7 @@ pub(crate) async fn ssh_connect(
     };
 
     let (ssh_handle, channel) =
-        conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths)
-            .await?;
+        conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths).await?;
 
     // Set up the channel I/O loop.
     let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -352,8 +351,7 @@ pub(crate) async fn ssh_connect(
     let wl = window_label.clone();
     let app_handle = app.clone();
     tokio::spawn(async move {
-        let exited_naturally =
-            conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
+        let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
 
         // Clean up session and decrement connection ref count.
         let mut state = remote_for_loop.lock();
@@ -491,8 +489,7 @@ pub(crate) async fn ssh_quick_connect(
     let wl = window_label.clone();
     let app_handle = app.clone();
     tokio::spawn(async move {
-        let exited_naturally =
-            conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
+        let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         let mut state = remote_for_loop.lock();
         if let Some(session) = state.sessions.remove(&key_for_loop) {
             if let Some(conn) = state.connections.get_mut(&session.connection_id) {
@@ -732,10 +729,7 @@ pub(crate) fn remote_delete_server(
 }
 
 #[tauri::command]
-pub(crate) fn remote_add_folder(
-    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
-    name: String,
-) {
+pub(crate) fn remote_add_folder(remote: tauri::State<'_, Arc<Mutex<RemoteState>>>, name: String) {
     let mut state = remote.lock();
     state.config.add_folder(&name);
     conch_remote::config::save_config(&state.paths.config_dir, &state.config);
@@ -884,10 +878,9 @@ pub(crate) async fn remote_export(
 ) -> Result<String, String> {
     let json = {
         let state = remote.lock();
-        let mut payload =
-            state
-                .config
-                .to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
+        let mut payload = state
+            .config
+            .to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
         // Include any selected ~/.ssh/config entries in the export.
         if let Some(ref ids) = server_ids {
             for entry in &state.ssh_config_entries {
@@ -945,8 +938,7 @@ pub(crate) async fn remote_import(
         return Err(format!("Unsupported export version: {}", payload.version));
     }
     let mut state = remote.lock();
-    let existing_tunnel_ids: Vec<uuid::Uuid> =
-        state.config.tunnels.iter().map(|t| t.id).collect();
+    let existing_tunnel_ids: Vec<uuid::Uuid> = state.config.tunnels.iter().map(|t| t.id).collect();
 
     // Capture pre-import lengths so we can find newly added entries afterwards.
     let ungrouped_before = state.config.ungrouped.len();
@@ -975,8 +967,8 @@ pub(crate) async fn remote_import(
                     .iter_mut()
                     .skip(ungrouped_before)
                     .collect();
-                linked += eagerly_create_vault_accounts(&*vault_mgr, &mut new_ungrouped)
-                    .unwrap_or(0);
+                linked +=
+                    eagerly_create_vault_accounts(&*vault_mgr, &mut new_ungrouped).unwrap_or(0);
             }
             {
                 for folder in state.config.folders.iter_mut().skip(folders_before) {
@@ -991,9 +983,7 @@ pub(crate) async fn remote_import(
                     "vault_eager_import: linked {linked} imported server(s) to new vault accounts"
                 );
                 if let Err(e) = vault_mgr.save() {
-                    log::warn!(
-                        "vault_eager_import: failed to save vault after eager import: {e}"
-                    );
+                    log::warn!("vault_eager_import: failed to save vault after eager import: {e}");
                 }
             }
         }
@@ -1356,10 +1346,7 @@ pub(crate) async fn tunnel_stop(
 }
 
 #[tauri::command]
-pub(crate) fn tunnel_save(
-    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
-    tunnel: SavedTunnel,
-) {
+pub(crate) fn tunnel_save(remote: tauri::State<'_, Arc<Mutex<RemoteState>>>, tunnel: SavedTunnel) {
     let mut state = remote.lock();
     // Update if exists, otherwise add.
     if state.config.find_tunnel(&tunnel.id).is_some() {
@@ -1499,7 +1486,9 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
         .config
         .all_servers()
         .chain(state.ssh_config_entries.iter())
-        .map(|s| SavedTunnel::make_session_key(s.user.as_deref().unwrap_or("root"), &s.host, s.port))
+        .map(|s| {
+            SavedTunnel::make_session_key(s.user.as_deref().unwrap_or("root"), &s.host, s.port)
+        })
         .collect();
 
     // Snapshot entries for matching (avoid borrow conflict).
@@ -1514,8 +1503,7 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
             continue; // already matches a known server
         }
 
-        if let Some((_user, host_part, port)) =
-            SavedTunnel::parse_session_key(&tunnel.session_key)
+        if let Some((_user, host_part, port)) = SavedTunnel::parse_session_key(&tunnel.session_key)
         {
             // Try host+port match (covers user mismatch).
             let matched = config_entries
@@ -1526,8 +1514,11 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
                 .or_else(|| ssh_entries.iter().find(|s| s.label == host_part));
 
             if let Some(entry) = matched {
-                let new_key =
-                    SavedTunnel::make_session_key(entry.user.as_deref().unwrap_or("root"), &entry.host, entry.port);
+                let new_key = SavedTunnel::make_session_key(
+                    entry.user.as_deref().unwrap_or("root"),
+                    &entry.host,
+                    entry.port,
+                );
                 log::info!(
                     "resolve_imported_tunnel_keys: '{}' -> '{}' via server '{}'",
                     tunnel.session_key,
@@ -1548,10 +1539,7 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
 /// when no vault account is linked).
 fn credentials_from_server(server: &ServerEntry, password: Option<String>) -> SshCredentials {
     SshCredentials {
-        username: server
-            .user
-            .clone()
-            .unwrap_or_else(|| "root".to_string()),
+        username: server.user.clone().unwrap_or_else(|| "root".to_string()),
         auth_method: server
             .auth_method
             .clone()
@@ -1609,7 +1597,8 @@ fn try_vault_credentials(
     if mgr.is_locked() {
         return Err("VAULT_LOCKED".into());
     }
-    let account = mgr.get_account(account_id)
+    let account = mgr
+        .get_account(account_id)
         .map_err(|_| format!("Vault account {account_id} not found — it may have been deleted"))?;
     Ok(Some(credentials_from_vault_account(&account)))
 }
@@ -1744,10 +1733,7 @@ mod tests {
     }
 
     /// Build a minimal RemoteState for testing (no config files, no SSH config).
-    fn test_state_with(
-        config: SshConfig,
-        ssh_config_entries: Vec<ServerEntry>,
-    ) -> RemoteState {
+    fn test_state_with(config: SshConfig, ssh_config_entries: Vec<ServerEntry>) -> RemoteState {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         RemoteState {
             sessions: HashMap::new(),
@@ -1793,14 +1779,11 @@ mod tests {
 
     #[test]
     fn find_server_user_mismatch_matches_by_host_port() {
-        let mut ssh_entry =
-            make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
-        ssh_entry.proxy_command =
-            Some("cloudflared access ssh --hostname %h".to_string());
+        let mut ssh_entry = make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
+        ssh_entry.proxy_command = Some("cloudflared access ssh --hostname %h".to_string());
         let state = test_state_with(SshConfig::default(), vec![ssh_entry]);
 
-        let result =
-            find_server_for_tunnel(&state, "dustin@bastion.nexxuscraft.com:22");
+        let result = find_server_for_tunnel(&state, "dustin@bastion.nexxuscraft.com:22");
         assert!(
             result.is_some(),
             "should match by host+port despite user mismatch"
@@ -1834,10 +1817,7 @@ mod tests {
         assert!(result.is_some(), "should match via SSH config alias");
         let server = result.unwrap();
         assert_eq!(server.host, "bastion.example.com");
-        assert_eq!(
-            server.proxy_command.as_deref(),
-            Some("ssh -W %h:%p jump"),
-        );
+        assert_eq!(server.proxy_command.as_deref(), Some("ssh -W %h:%p jump"),);
     }
 
     #[test]
@@ -1850,10 +1830,7 @@ mod tests {
         let state = test_state_with(SshConfig::default(), vec![server_a, server_b]);
 
         // Should resolve to server_b by entry ID even though both share host/port.
-        let result = find_server_by_entry_id(
-            &state,
-            Some("bbbbbbbb-1111-2222-3333-444444444444"),
-        );
+        let result = find_server_by_entry_id(&state, Some("bbbbbbbb-1111-2222-3333-444444444444"));
         assert!(result.is_some(), "should find server by entry ID");
         let server = result.unwrap();
         assert_eq!(server.user.as_deref(), Some("bob"));
@@ -1891,20 +1868,15 @@ mod tests {
         cfg.add_server(server);
         let state = test_state_with(cfg, vec![]);
 
-        let result = find_server_by_entry_id(
-            &state,
-            Some("cccccccc-1111-2222-3333-444444444444"),
-        );
+        let result = find_server_by_entry_id(&state, Some("cccccccc-1111-2222-3333-444444444444"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().host, "secure.example.com");
     }
 
     #[test]
     fn resolve_imported_tunnel_keys_rewrites_user_mismatch() {
-        let mut ssh_entry =
-            make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
-        ssh_entry.proxy_command =
-            Some("cloudflared access ssh --hostname %h".to_string());
+        let mut ssh_entry = make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
+        ssh_entry.proxy_command = Some("cloudflared access ssh --hostname %h".to_string());
         let mut cfg = SshConfig::default();
         cfg.tunnels.push(SavedTunnel {
             id: uuid::Uuid::new_v4(),
@@ -1969,9 +1941,7 @@ mod tests {
 
         resolve_imported_tunnel_keys(&mut state, &[tunnel_id]);
 
-        assert_eq!(
-            state.config.tunnels[0].session_key, "admin@bastion:22",
-        );
+        assert_eq!(state.config.tunnels[0].session_key, "admin@bastion:22",);
     }
 
     #[test]
@@ -2010,7 +1980,13 @@ mod tests {
         let paths = desktop_remote_paths();
         // Should have 3 default key paths.
         assert_eq!(paths.default_key_paths.len(), 3);
-        assert!(paths.known_hosts_file.to_str().unwrap().contains("known_hosts"));
+        assert!(
+            paths
+                .known_hosts_file
+                .to_str()
+                .unwrap()
+                .contains("known_hosts")
+        );
         assert!(paths.config_dir.to_str().unwrap().contains("remote"));
     }
 
@@ -2308,5 +2284,4 @@ mod tests {
         assert_eq!(entry.vault_account_id, Some(existing_id));
         assert_eq!(mgr.list_accounts().unwrap().len(), 1);
     }
-
 }

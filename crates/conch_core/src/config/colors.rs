@@ -69,24 +69,42 @@ mod tests {
 
     #[test]
     fn appearance_mode_deserialize_dark() {
-        assert_eq!(parse_mode(r#"mode = "dark""#).unwrap(), AppearanceMode::Dark);
+        assert_eq!(
+            parse_mode(r#"mode = "dark""#).unwrap(),
+            AppearanceMode::Dark
+        );
     }
 
     #[test]
     fn appearance_mode_deserialize_light() {
-        assert_eq!(parse_mode(r#"mode = "light""#).unwrap(), AppearanceMode::Light);
+        assert_eq!(
+            parse_mode(r#"mode = "light""#).unwrap(),
+            AppearanceMode::Light
+        );
     }
 
     #[test]
     fn appearance_mode_deserialize_system() {
-        assert_eq!(parse_mode(r#"mode = "system""#).unwrap(), AppearanceMode::System);
+        assert_eq!(
+            parse_mode(r#"mode = "system""#).unwrap(),
+            AppearanceMode::System
+        );
     }
 
     #[test]
     fn appearance_mode_case_insensitive() {
-        assert_eq!(parse_mode(r#"mode = "DARK""#).unwrap(), AppearanceMode::Dark);
-        assert_eq!(parse_mode(r#"mode = "Light""#).unwrap(), AppearanceMode::Light);
-        assert_eq!(parse_mode(r#"mode = "SYSTEM""#).unwrap(), AppearanceMode::System);
+        assert_eq!(
+            parse_mode(r#"mode = "DARK""#).unwrap(),
+            AppearanceMode::Dark
+        );
+        assert_eq!(
+            parse_mode(r#"mode = "Light""#).unwrap(),
+            AppearanceMode::Light
+        );
+        assert_eq!(
+            parse_mode(r#"mode = "SYSTEM""#).unwrap(),
+            AppearanceMode::System
+        );
     }
 
     #[test]

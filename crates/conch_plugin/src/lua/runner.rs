@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use conch_plugin_sdk::widgets::{PluginEvent, Widget};
-use mlua::prelude::*;
 use mlua::StdLib;
+use mlua::prelude::*;
 use tokio::sync::mpsc;
 
+use crate::HostApi;
 use crate::bus::PluginMail;
 use crate::lua::api;
 use crate::lua::metadata::{self, LuaPluginMeta};
-use crate::HostApi;
 
 /// A discovered Lua plugin (not yet running).
 #[derive(Debug, Clone)]
@@ -166,7 +166,9 @@ fn lua_plugin_thread(
                         dispatch_event(&lua, &event);
                     }
                     Err(e) => {
-                        log::warn!("[lua:{chunk_name}] failed to parse PluginEvent: {e} — json: {json}");
+                        log::warn!(
+                            "[lua:{chunk_name}] failed to parse PluginEvent: {e} — json: {json}"
+                        );
                     }
                 }
             }
@@ -208,7 +210,9 @@ fn dispatch_event(lua: &Lua, event: &PluginEvent) {
 
     // Parse the JSON into a Lua table so the plugin gets a native table.
     let lua_literal = json_to_lua_literal(&json);
-    let Ok(tbl) = lua.load(&format!("return {}", lua_literal)).eval::<LuaTable>()
+    let Ok(tbl) = lua
+        .load(&format!("return {}", lua_literal))
+        .eval::<LuaTable>()
     else {
         log::warn!("dispatch_event: failed to eval lua literal: {lua_literal}");
         // Fallback: pass as string.
@@ -341,7 +345,9 @@ mod tests {
     #[test]
     fn json_to_lua_literal_menu_action() {
         use conch_plugin_sdk::PluginEvent;
-        let event = PluginEvent::MenuAction { action: "trigger_notification".into() };
+        let event = PluginEvent::MenuAction {
+            action: "trigger_notification".into(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         eprintln!("JSON: {json}");
         let lua_str = json_to_lua_literal(&json);
@@ -396,14 +402,22 @@ mod tests {
     fn sandbox_loadfile_not_available() {
         let lua = sandboxed_lua();
         let result: LuaValue = lua.load("return loadfile").eval().unwrap();
-        assert_eq!(result, LuaValue::Nil, "loadfile global must be nil in sandbox");
+        assert_eq!(
+            result,
+            LuaValue::Nil,
+            "loadfile global must be nil in sandbox"
+        );
     }
 
     #[test]
     fn sandbox_require_not_available() {
         let lua = sandboxed_lua();
         let result: LuaValue = lua.load("return require").eval().unwrap();
-        assert_eq!(result, LuaValue::Nil, "require global must be nil in sandbox");
+        assert_eq!(
+            result,
+            LuaValue::Nil,
+            "require global must be nil in sandbox"
+        );
     }
 
     #[test]
@@ -427,7 +441,10 @@ mod tests {
     fn sandbox_math_available() {
         let lua = sandboxed_lua();
         let result: f64 = lua.load("return math.abs(-42)").eval().unwrap();
-        assert!((result - 42.0).abs() < f64::EPSILON, "math library must be available");
+        assert!(
+            (result - 42.0).abs() < f64::EPSILON,
+            "math library must be available"
+        );
     }
 
     #[test]

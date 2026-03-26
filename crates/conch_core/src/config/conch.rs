@@ -190,7 +190,10 @@ mod tests {
 
     #[test]
     fn plugins_disabled_master_switch() {
-        let cfg = PluginsConfig { enabled: false, ..Default::default() };
+        let cfg = PluginsConfig {
+            enabled: false,
+            ..Default::default()
+        };
         assert!(!cfg.any_enabled());
     }
 
@@ -272,7 +275,7 @@ mod tests {
         let toml_str = r#"small = 10.0"#;
         let f: UiFontConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(f.small, 10.0);
-        assert_eq!(f.list, 14.0);  // default
+        assert_eq!(f.list, 14.0); // default
         assert_eq!(f.normal, 14.0); // default
     }
 
@@ -358,5 +361,4 @@ mod tests {
         assert_eq!(cfg.split_vertical, "cmd+d");
         assert_eq!(cfg.close_pane, "cmd+shift+w");
     }
-
 }
