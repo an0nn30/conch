@@ -8,14 +8,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use conch_plugin_sdk::widgets::{PluginEvent, Widget};
-use mlua::StdLib;
 use mlua::prelude::*;
+use mlua::{HookTriggers, StdLib};
 use tokio::sync::mpsc;
 
 use crate::HostApi;
 use crate::bus::PluginMail;
 use crate::lua::api;
 use crate::lua::metadata::{self, LuaPluginMeta};
+
+/// Maximum Lua instructions per callback invocation (render, on_event, on_query).
+/// Roughly corresponds to a few seconds of CPU time. Prevents infinite loops.
+const LUA_INSTRUCTION_LIMIT: u32 = 1_000_000;
 
 /// A discovered Lua plugin (not yet running).
 #[derive(Debug, Clone)]
@@ -187,6 +191,28 @@ fn lua_plugin_thread(
     }
 }
 
+/// Run a closure with an instruction-count hook that aborts runaway Lua code.
+///
+/// Sets a Lua hook that fires every [`LUA_INSTRUCTION_LIMIT`] instructions and
+/// returns an error, causing the Lua call to fail with a runtime error. The
+/// hook is removed after the closure completes (whether it succeeded or not).
+fn with_instruction_limit<F, T>(lua: &Lua, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(LUA_INSTRUCTION_LIMIT),
+        |_lua, _debug| {
+            Err(LuaError::RuntimeError(
+                "execution limit exceeded".to_string(),
+            ))
+        },
+    );
+    let result = f();
+    lua.remove_hook();
+    result
+}
+
 /// Call the Lua `on_event()` function with a bus event.
 fn handle_bus_event(lua: &Lua, event_type: &str, data: &serde_json::Value) {
     let event = PluginEvent::BusEvent {
@@ -216,15 +242,19 @@ fn dispatch_event(lua: &Lua, event: &PluginEvent) {
     else {
         log::warn!("dispatch_event: failed to eval lua literal: {lua_literal}");
         // Fallback: pass as string.
-        if let Err(e) = on_event.call::<()>(json) {
-            log::warn!("dispatch_event: on_event(string) error: {e}");
-        }
+        with_instruction_limit(lua, || {
+            if let Err(e) = on_event.call::<()>(json) {
+                log::warn!("dispatch_event: on_event(string) error: {e}");
+            }
+        });
         return;
     };
 
-    if let Err(e) = on_event.call::<()>(tbl) {
-        log::warn!("dispatch_event: on_event(table) error: {e}");
-    }
+    with_instruction_limit(lua, || {
+        if let Err(e) = on_event.call::<()>(tbl) {
+            log::warn!("dispatch_event: on_event(table) error: {e}");
+        }
+    });
 }
 
 /// Handle a render request by calling the Lua `render()` function.
@@ -233,7 +263,8 @@ fn handle_render(lua: &Lua) -> Vec<Widget> {
     api::with_acc_pub(lua, |acc| acc.clear());
 
     if let Ok(render_fn) = lua.globals().get::<LuaFunction>("render") {
-        if let Err(e) = render_fn.call::<()>(()) {
+        let result = with_instruction_limit(lua, || render_fn.call::<()>(()));
+        if let Err(e) = result {
             log::error!("Lua render() error: {e}");
             return vec![];
         }
@@ -246,9 +277,14 @@ fn handle_render(lua: &Lua) -> Vec<Widget> {
 fn handle_query(lua: &Lua, method: &str, args: &serde_json::Value) -> Option<serde_json::Value> {
     let on_query = lua.globals().get::<LuaFunction>("on_query").ok()?;
     let args_str = serde_json::to_string(args).unwrap_or_else(|_| "null".into());
-    let result: String = on_query
-        .call((method.to_string(), args_str))
-        .unwrap_or_else(|_| "null".into());
+    let result: String = with_instruction_limit(lua, || {
+        on_query
+            .call((method.to_string(), args_str.clone()))
+            .unwrap_or_else(|e| {
+                log::warn!("handle_query: on_query error: {e}");
+                "null".into()
+            })
+    });
     serde_json::from_str(&result).ok()
 }
 
@@ -459,5 +495,86 @@ mod tests {
         let lua = sandboxed_lua();
         let result: String = lua.load("return type(coroutine.create)").eval().unwrap();
         assert_eq!(result, "function", "coroutine library must be available");
+    }
+
+    #[test]
+    fn instruction_limit_aborts_infinite_loop() {
+        let lua = sandboxed_lua();
+        // Define an on_event that loops forever.
+        lua.load(r#"function on_event(e) while true do end end"#)
+            .exec()
+            .unwrap();
+
+        let event = PluginEvent::BusEvent {
+            event_type: "test".into(),
+            data: serde_json::Value::Null,
+        };
+
+        // dispatch_event uses with_instruction_limit internally, so the
+        // infinite loop should be terminated and the call should return
+        // without hanging.
+        dispatch_event(&lua, &event);
+        // If we reach here, the instruction limit worked.
+    }
+
+    /// Helper: create a sandboxed Lua VM with a WidgetAccumulator registered.
+    fn sandboxed_lua_with_acc() -> Lua {
+        let lua = sandboxed_lua();
+        lua.set_app_data(std::cell::RefCell::new(
+            crate::lua::api::WidgetAccumulator::new(),
+        ));
+        lua
+    }
+
+    #[test]
+    fn instruction_limit_aborts_infinite_render() {
+        let lua = sandboxed_lua_with_acc();
+        lua.load(r#"function render() while true do end end"#)
+            .exec()
+            .unwrap();
+
+        let widgets = handle_render(&lua);
+        assert!(
+            widgets.is_empty(),
+            "render should return empty vec when aborted by instruction limit"
+        );
+    }
+
+    #[test]
+    fn instruction_limit_aborts_infinite_query() {
+        let lua = sandboxed_lua();
+        lua.load(r#"function on_query(method, args) while true do end end"#)
+            .exec()
+            .unwrap();
+
+        let result = handle_query(&lua, "test", &serde_json::json!(null));
+        // Should return None or null — not hang.
+        assert!(
+            result.is_none() || result == Some(serde_json::Value::Null),
+            "on_query should return None/null when aborted, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn instruction_limit_allows_normal_execution() {
+        let lua = sandboxed_lua();
+        // A simple function that does bounded work should complete fine.
+        lua.load(
+            r#"
+            function on_event(e)
+                local sum = 0
+                for i = 1, 100 do sum = sum + i end
+            end
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+        let event = PluginEvent::BusEvent {
+            event_type: "test".into(),
+            data: serde_json::Value::Null,
+        };
+        // Should complete without error.
+        dispatch_event(&lua, &event);
     }
 }
