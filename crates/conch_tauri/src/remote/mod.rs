@@ -360,7 +360,7 @@ pub(crate) async fn ssh_connect(
         let mut state = remote_for_loop.lock();
         if let Some(session) = state.sessions.remove(&key_for_loop) {
             if let Some(conn) = state.connections.get_mut(&session.connection_id) {
-                conn.ref_count -= 1;
+                conn.ref_count = conn.ref_count.saturating_sub(1);
                 if conn.ref_count == 0 {
                     state.connections.remove(&session.connection_id);
                 }
@@ -505,7 +505,7 @@ pub(crate) async fn ssh_quick_connect(
         let mut state = remote_for_loop.lock();
         if let Some(session) = state.sessions.remove(&key_for_loop) {
             if let Some(conn) = state.connections.get_mut(&session.connection_id) {
-                conn.ref_count -= 1;
+                conn.ref_count = conn.ref_count.saturating_sub(1);
                 if conn.ref_count == 0 {
                     state.connections.remove(&session.connection_id);
                 }
@@ -675,9 +675,10 @@ pub(crate) async fn ssh_open_channel(
     let task = tokio::spawn(async move {
         let exited = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         let mut state = remote_for_loop.lock();
-        state.sessions.remove(&key_for_loop);
-        if let Some(conn) = state.connections.get_mut(&conn_id) {
-            conn.ref_count -= 1;
+        if state.sessions.remove(&key_for_loop).is_some()
+            && let Some(conn) = state.connections.get_mut(&conn_id)
+        {
+            conn.ref_count = conn.ref_count.saturating_sub(1);
             if conn.ref_count == 0 {
                 state.connections.remove(&conn_id);
             }
