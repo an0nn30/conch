@@ -6,6 +6,7 @@ use std::sync::Arc;
 use russh::client;
 use russh::ChannelMsg;
 use tokio::sync::mpsc;
+use zeroize::Zeroize;
 
 use crate::callbacks::{RemoteCallbacks, RemotePaths};
 use crate::config::ServerEntry;
@@ -24,6 +25,23 @@ pub struct SshCredentials {
     pub key_path: Option<String>,
     /// Passphrase for decrypting the private key (if any).
     pub key_passphrase: Option<String>,
+}
+
+impl Zeroize for SshCredentials {
+    fn zeroize(&mut self) {
+        if let Some(p) = &mut self.password {
+            p.zeroize();
+        }
+        if let Some(p) = &mut self.key_passphrase {
+            p.zeroize();
+        }
+    }
+}
+
+impl Drop for SshCredentials {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 /// Expand a leading `~` or `~/` to the user's home directory.
@@ -521,5 +539,58 @@ mod tests {
             rows: 24,
         };
         let _shutdown = ChannelInput::Shutdown;
+    }
+
+    #[test]
+    fn ssh_credentials_drop_does_not_panic() {
+        let creds = SshCredentials {
+            username: "user".into(),
+            auth_method: "password".into(),
+            password: Some("secret123".into()),
+            key_path: None,
+            key_passphrase: Some("passphrase456".into()),
+        };
+        drop(creds);
+    }
+
+    #[test]
+    fn ssh_credentials_zeroize_clears_secrets() {
+        let mut creds = SshCredentials {
+            username: "user".into(),
+            auth_method: "key".into(),
+            password: Some("my_password".into()),
+            key_path: Some("/path/to/key".into()),
+            key_passphrase: Some("my_passphrase".into()),
+        };
+
+        creds.zeroize();
+
+        // After zeroize, the password and key_passphrase strings should be empty
+        // (zeroize on String overwrites the buffer and sets length to 0).
+        assert_eq!(creds.password.as_deref(), Some(""), "password should be zeroized");
+        assert_eq!(
+            creds.key_passphrase.as_deref(),
+            Some(""),
+            "key_passphrase should be zeroized"
+        );
+
+        // Non-secret fields should be untouched.
+        assert_eq!(creds.username, "user");
+        assert_eq!(creds.auth_method, "key");
+        assert_eq!(creds.key_path.as_deref(), Some("/path/to/key"));
+    }
+
+    #[test]
+    fn ssh_credentials_zeroize_with_none_secrets() {
+        let mut creds = SshCredentials {
+            username: "user".into(),
+            auth_method: "key".into(),
+            password: None,
+            key_path: None,
+            key_passphrase: None,
+        };
+
+        // Should not panic when secrets are None.
+        creds.zeroize();
     }
 }
