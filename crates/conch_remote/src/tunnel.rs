@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::callbacks::{RemoteCallbacks, RemotePaths};
 use crate::config::ServerEntry;
+use crate::error::RemoteError;
 use crate::handler::ConchSshHandler;
 
 // ---------------------------------------------------------------------------
@@ -100,11 +101,13 @@ impl TunnelManager {
         remote_port: u16,
         callbacks: Arc<dyn RemoteCallbacks>,
         paths: &RemotePaths,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteError> {
         // Bind local port first for fast failure.
         let listener = TcpListener::bind(format!("127.0.0.1:{local_port}"))
             .await
-            .map_err(|e| format!("Failed to bind local port {local_port}: {e}"))?;
+            .map_err(|e| {
+                RemoteError::Tunnel(format!("Failed to bind local port {local_port}: {e}"))
+            })?;
 
         log::info!("tunnel[{id}]: listening on 127.0.0.1:{local_port}");
 
@@ -221,7 +224,7 @@ async fn connect_for_tunnel(
     credentials: &crate::ssh::SshCredentials,
     callbacks: Arc<dyn RemoteCallbacks>,
     paths: &RemotePaths,
-) -> Result<client::Handle<ConchSshHandler>, String> {
+) -> Result<client::Handle<ConchSshHandler>, RemoteError> {
     let config = Arc::new(client::Config::default());
     let handler = ConchSshHandler {
         host: server.host.clone(),
@@ -250,13 +253,15 @@ async fn connect_for_tunnel(
         #[cfg(target_os = "ios")]
         {
             let _ = proxy_cmd;
-            return Err("Proxy connections are not supported on iOS".to_string());
+            return Err(RemoteError::Connection(
+                "Proxy connections are not supported on iOS".into(),
+            ));
         }
     } else {
         let addr = format!("{}:{}", server.host, server.port);
         client::connect(config, &addr, handler)
             .await
-            .map_err(|e| format!("Connection failed: {e}"))?
+            .map_err(|e| RemoteError::Connection(format!("{e}")))?
     };
 
     // Auth
@@ -278,8 +283,8 @@ async fn connect_for_tunnel(
             Some(pw) => session
                 .authenticate_password(&credentials.username, &pw)
                 .await
-                .map_err(|e| format!("Auth failed: {e}"))?,
-            None => return Err("Password entry cancelled".to_string()),
+                .map_err(|e| RemoteError::Auth(format!("{e}")))?,
+            None => return Err(RemoteError::Auth("Password entry cancelled".into())),
         }
     } else if credentials.auth_method == "key_and_password" {
         // Try key first; fall back to password if key fails (see ssh.rs).
@@ -316,8 +321,8 @@ async fn connect_for_tunnel(
                 Some(pw) => session
                     .authenticate_password(&credentials.username, &pw)
                     .await
-                    .map_err(|e| format!("Auth failed: {e}"))?,
-                None => return Err("Password entry cancelled".to_string()),
+                    .map_err(|e| RemoteError::Auth(format!("{e}")))?,
+                None => return Err(RemoteError::Auth("Password entry cancelled".into())),
             }
         }
     } else {
@@ -332,10 +337,10 @@ async fn connect_for_tunnel(
     };
 
     if !authenticated {
-        return Err(format!(
+        return Err(RemoteError::Auth(format!(
             "Authentication failed for {}@{}",
             credentials.username, server.host
-        ));
+        )));
     }
 
     Ok(session)

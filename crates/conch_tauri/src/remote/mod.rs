@@ -200,6 +200,8 @@ pub(crate) struct SshSession {
     pub host: String,
     pub user: String,
     pub port: u16,
+    /// Handle to abort the channel loop task on cleanup.
+    pub abort_handle: Option<tokio::task::AbortHandle>,
 }
 
 /// Shared state for all remote operations.
@@ -309,7 +311,9 @@ pub(crate) async fn ssh_connect(
     };
 
     let (ssh_handle, channel) =
-        conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths).await?;
+        conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths)
+            .await
+            .map_err(|e| e.to_string())?;
 
     // Set up the channel I/O loop.
     let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -341,6 +345,7 @@ pub(crate) async fn ssh_connect(
                 host: server.host.clone(),
                 user: credentials.username.clone(),
                 port: server.port,
+                abort_handle: None,
             },
         );
     }
@@ -350,7 +355,7 @@ pub(crate) async fn ssh_connect(
     let key_for_loop = key.clone();
     let wl = window_label.clone();
     let app_handle = app.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
 
         // Clean up session and decrement connection ref count.
@@ -376,6 +381,14 @@ pub(crate) async fn ssh_connect(
             );
         }
     });
+
+    // Store the abort handle so the channel loop can be cancelled on window close.
+    {
+        let mut state = remote_clone.lock();
+        if let Some(session) = state.sessions.get_mut(&key) {
+            session.abort_handle = Some(task.abort_handle());
+        }
+    }
 
     spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
 
@@ -452,7 +465,9 @@ pub(crate) async fn ssh_quick_connect(
     let credentials = credentials_from_server(&entry, password.clone());
 
     let (ssh_handle, channel) =
-        conch_remote::ssh::connect_and_open_shell(&entry, &credentials, callbacks, &paths).await?;
+        conch_remote::ssh::connect_and_open_shell(&entry, &credentials, callbacks, &paths)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -480,6 +495,7 @@ pub(crate) async fn ssh_quick_connect(
                 host: entry.host.clone(),
                 user: credentials.username.clone(),
                 port: entry.port,
+                abort_handle: None,
             },
         );
     }
@@ -488,7 +504,7 @@ pub(crate) async fn ssh_quick_connect(
     let key_for_loop = key.clone();
     let wl = window_label.clone();
     let app_handle = app.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         let mut state = remote_for_loop.lock();
         if let Some(session) = state.sessions.remove(&key_for_loop) {
@@ -511,6 +527,14 @@ pub(crate) async fn ssh_quick_connect(
             );
         }
     });
+
+    // Store the abort handle so the channel loop can be cancelled on window close.
+    {
+        let mut state = remote_clone.lock();
+        if let Some(session) = state.sessions.get_mut(&key) {
+            session.abort_handle = Some(task.abort_handle());
+        }
+    }
 
     spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
 
@@ -613,7 +637,9 @@ pub(crate) async fn ssh_open_channel(
         Arc::clone(&conn.ssh_handle)
     };
 
-    let channel = conch_remote::ssh::open_shell_channel(&ssh_handle, cols, rows).await?;
+    let channel = conch_remote::ssh::open_shell_channel(&ssh_handle, cols, rows)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -642,6 +668,7 @@ pub(crate) async fn ssh_open_channel(
                 host,
                 user,
                 port,
+                abort_handle: None,
             },
         );
     }
@@ -651,7 +678,7 @@ pub(crate) async fn ssh_open_channel(
     let wl = window_label.clone();
     let conn_id = connection_id.clone();
     let app_handle = app.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let exited = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         let mut state = remote_for_loop.lock();
         state.sessions.remove(&key_for_loop);
@@ -673,6 +700,14 @@ pub(crate) async fn ssh_open_channel(
             );
         }
     });
+
+    // Store the abort handle so the channel loop can be cancelled on window close.
+    {
+        let mut state = remote_clone.lock();
+        if let Some(session) = state.sessions.get_mut(&key) {
+            session.abort_handle = Some(task.abort_handle());
+        }
+    }
 
     spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
     Ok(())
@@ -1056,7 +1091,9 @@ pub(crate) async fn sftp_list_dir(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::list_dir(&ssh, &path).await
+    conch_remote::sftp::list_dir(&ssh, &path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1070,7 +1107,9 @@ pub(crate) async fn sftp_stat(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::stat(&ssh, &path).await
+    conch_remote::sftp::stat(&ssh, &path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1086,7 +1125,9 @@ pub(crate) async fn sftp_read_file(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::read_file(&ssh, &path, offset, length as usize).await
+    conch_remote::sftp::read_file(&ssh, &path, offset, length as usize)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1101,7 +1142,9 @@ pub(crate) async fn sftp_write_file(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::write_file(&ssh, &path, &data).await
+    conch_remote::sftp::write_file(&ssh, &path, &data)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1115,7 +1158,9 @@ pub(crate) async fn sftp_mkdir(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::mkdir(&ssh, &path).await
+    conch_remote::sftp::mkdir(&ssh, &path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1130,7 +1175,9 @@ pub(crate) async fn sftp_rename(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::rename(&ssh, &from, &to).await
+    conch_remote::sftp::rename(&ssh, &from, &to)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1145,7 +1192,9 @@ pub(crate) async fn sftp_remove(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::remove(&ssh, &path, is_dir).await
+    conch_remote::sftp::remove(&ssh, &path, is_dir)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1159,7 +1208,9 @@ pub(crate) async fn sftp_realpath(
         let state = remote.lock();
         get_ssh_handle(&state, window.label(), pane_id)?
     };
-    conch_remote::sftp::realpath(&ssh, &path).await
+    conch_remote::sftp::realpath(&ssh, &path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,7 +1375,8 @@ pub(crate) async fn tunnel_start(
             callbacks,
             &paths,
         )
-        .await;
+        .await
+        .map_err(|e| e.to_string());
 
     if let Err(ref e) = result {
         mgr.set_error(&tunnel_uuid, e.clone()).await;

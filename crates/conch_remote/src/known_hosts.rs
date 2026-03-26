@@ -4,6 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::error::RemoteError;
+
 /// Returns the default path to `~/.ssh/known_hosts`, or `None` if the home
 /// directory cannot be determined.
 pub fn default_known_hosts_path() -> Option<PathBuf> {
@@ -73,14 +75,15 @@ pub fn add_known_host(
     host: &str,
     port: u16,
     server_key: &ssh_key::PublicKey,
-) -> Result<(), String> {
+) -> Result<(), RemoteError> {
     if let Some(parent) = known_hosts_file.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("cannot create ~/.ssh: {e}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| RemoteError::KnownHosts(format!("cannot create ~/.ssh: {e}")))?;
     }
 
     let key_str = server_key
         .to_openssh()
-        .map_err(|e| format!("cannot encode public key: {e}"))?;
+        .map_err(|e| RemoteError::KnownHosts(format!("cannot encode public key: {e}")))?;
     let key_data = key_data_from_openssh(&key_str);
     let hostname = host_key(host, port);
     let line = format!("{hostname} {key_data}\n");
@@ -89,10 +92,10 @@ pub fn add_known_host(
         .create(true)
         .append(true)
         .open(known_hosts_file)
-        .map_err(|e| format!("cannot open known_hosts: {e}"))?;
+        .map_err(|e| RemoteError::KnownHosts(format!("cannot open known_hosts: {e}")))?;
 
     file.write_all(line.as_bytes())
-        .map_err(|e| format!("cannot write known_hosts: {e}"))?;
+        .map_err(|e| RemoteError::KnownHosts(format!("cannot write known_hosts: {e}")))?;
 
     Ok(())
 }

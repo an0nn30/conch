@@ -6,6 +6,7 @@
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 
+use crate::error::RemoteError;
 use crate::handler::ConchSshHandler;
 
 /// A file entry returned from SFTP or local filesystem operations.
@@ -21,30 +22,30 @@ pub struct FileEntry {
 /// Open an SFTP session on the given SSH handle.
 pub(crate) async fn open_sftp(
     ssh: &russh::client::Handle<ConchSshHandler>,
-) -> Result<SftpSession, String> {
+) -> Result<SftpSession, RemoteError> {
     let channel = ssh
         .channel_open_session()
         .await
-        .map_err(|e| format!("failed to open SFTP channel: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("failed to open SFTP channel: {e}")))?;
     channel
         .request_subsystem(true, "sftp")
         .await
-        .map_err(|e| format!("SFTP subsystem request failed: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("SFTP subsystem request failed: {e}")))?;
     SftpSession::new(channel.into_stream())
         .await
-        .map_err(|e| format!("SFTP session init failed: {e}"))
+        .map_err(|e| RemoteError::Sftp(format!("SFTP session init failed: {e}")))
 }
 
 /// List directory entries at `path`.
 pub async fn list_dir(
     ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
-) -> Result<Vec<FileEntry>, String> {
+) -> Result<Vec<FileEntry>, RemoteError> {
     let sftp = open_sftp(ssh).await?;
     let entries = sftp
         .read_dir(path)
         .await
-        .map_err(|e| format!("read_dir failed: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("read_dir failed: {e}")))?;
 
     Ok(entries
         .map(|entry| {
@@ -64,12 +65,12 @@ pub async fn list_dir(
 pub async fn stat(
     ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
-) -> Result<FileEntry, String> {
+) -> Result<FileEntry, RemoteError> {
     let sftp = open_sftp(ssh).await?;
     let attrs = sftp
         .metadata(path)
         .await
-        .map_err(|e| format!("stat failed: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("stat failed: {e}")))?;
 
     // Extract filename from path.
     let name = path.rsplit('/').next().unwrap_or(path).to_string();
@@ -89,7 +90,7 @@ pub async fn read_file(
     path: &str,
     offset: u64,
     length: usize,
-) -> Result<ReadFileResult, String> {
+) -> Result<ReadFileResult, RemoteError> {
     use base64::Engine;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -97,12 +98,12 @@ pub async fn read_file(
     let mut file = sftp
         .open(path)
         .await
-        .map_err(|e| format!("open failed: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("open failed: {e}")))?;
 
     if offset > 0 {
         file.seek(std::io::SeekFrom::Start(offset))
             .await
-            .map_err(|e| format!("seek failed: {e}"))?;
+            .map_err(|e| RemoteError::Sftp(format!("seek failed: {e}")))?;
     }
 
     let cap = length.min(1024 * 1024); // cap at 1MB
@@ -110,7 +111,7 @@ pub async fn read_file(
     let n = file
         .read(&mut buf)
         .await
-        .map_err(|e| format!("read failed: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("read failed: {e}")))?;
     buf.truncate(n);
 
     let data = base64::engine::general_purpose::STANDARD.encode(&buf);
@@ -131,33 +132,36 @@ pub async fn write_file(
     ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
     data_b64: &str,
-) -> Result<u64, String> {
+) -> Result<u64, RemoteError> {
     use base64::Engine;
     use tokio::io::AsyncWriteExt;
 
     let data = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
-        .map_err(|e| format!("invalid base64: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("invalid base64: {e}")))?;
 
     let sftp = open_sftp(ssh).await?;
     let mut file = sftp
         .create(path)
         .await
-        .map_err(|e| format!("create failed: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("create failed: {e}")))?;
 
     file.write_all(&data)
         .await
-        .map_err(|e| format!("write failed: {e}"))?;
+        .map_err(|e| RemoteError::Sftp(format!("write failed: {e}")))?;
 
     Ok(data.len() as u64)
 }
 
 /// Create a directory.
-pub async fn mkdir(ssh: &russh::client::Handle<ConchSshHandler>, path: &str) -> Result<(), String> {
+pub async fn mkdir(
+    ssh: &russh::client::Handle<ConchSshHandler>,
+    path: &str,
+) -> Result<(), RemoteError> {
     let sftp = open_sftp(ssh).await?;
     sftp.create_dir(path)
         .await
-        .map_err(|e| format!("mkdir failed: {e}"))
+        .map_err(|e| RemoteError::Sftp(format!("mkdir failed: {e}")))
 }
 
 /// Rename a file or directory.
@@ -165,11 +169,11 @@ pub async fn rename(
     ssh: &russh::client::Handle<ConchSshHandler>,
     from: &str,
     to: &str,
-) -> Result<(), String> {
+) -> Result<(), RemoteError> {
     let sftp = open_sftp(ssh).await?;
     sftp.rename(from, to)
         .await
-        .map_err(|e| format!("rename failed: {e}"))
+        .map_err(|e| RemoteError::Sftp(format!("rename failed: {e}")))
 }
 
 /// Delete a file or directory.
@@ -177,16 +181,16 @@ pub async fn remove(
     ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
     is_dir: bool,
-) -> Result<(), String> {
+) -> Result<(), RemoteError> {
     let sftp = open_sftp(ssh).await?;
     if is_dir {
         sftp.remove_dir(path)
             .await
-            .map_err(|e| format!("rmdir failed: {e}"))
+            .map_err(|e| RemoteError::Sftp(format!("rmdir failed: {e}")))
     } else {
         sftp.remove_file(path)
             .await
-            .map_err(|e| format!("remove failed: {e}"))
+            .map_err(|e| RemoteError::Sftp(format!("remove failed: {e}")))
     }
 }
 
@@ -194,11 +198,11 @@ pub async fn remove(
 pub async fn realpath(
     ssh: &russh::client::Handle<ConchSshHandler>,
     path: &str,
-) -> Result<String, String> {
+) -> Result<String, RemoteError> {
     let sftp = open_sftp(ssh).await?;
     sftp.canonicalize(path)
         .await
-        .map_err(|e| format!("realpath failed: {e}"))
+        .map_err(|e| RemoteError::Sftp(format!("realpath failed: {e}")))
 }
 
 #[cfg(test)]

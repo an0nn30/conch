@@ -10,6 +10,7 @@ use zeroize::Zeroize;
 
 use crate::callbacks::{RemoteCallbacks, RemotePaths};
 use crate::config::ServerEntry;
+use crate::error::RemoteError;
 use crate::handler::ConchSshHandler;
 
 /// Credentials resolved from the vault (or legacy ServerEntry fields, or user prompt).
@@ -79,7 +80,7 @@ pub async fn connect_and_open_shell(
         client::Handle<ConchSshHandler>,
         russh::Channel<russh::client::Msg>,
     ),
-    String,
+    RemoteError,
 > {
     let config = Arc::new(client::Config::default());
     let handler = ConchSshHandler {
@@ -109,13 +110,15 @@ pub async fn connect_and_open_shell(
         #[cfg(target_os = "ios")]
         {
             let _ = proxy_cmd;
-            return Err("Proxy connections are not supported on iOS".to_string());
+            return Err(RemoteError::Connection(
+                "Proxy connections are not supported on iOS".into(),
+            ));
         }
     } else {
         let addr = format!("{}:{}", server.host, server.port);
         client::connect(config, &addr, handler)
             .await
-            .map_err(|e| format!("Connection failed: {e}"))?
+            .map_err(|e| RemoteError::Connection(format!("{e}")))?
     };
 
     // Authenticate.
@@ -134,8 +137,8 @@ pub async fn connect_and_open_shell(
             Some(pw) => session
                 .authenticate_password(&credentials.username, &pw)
                 .await
-                .map_err(|e| format!("Auth failed: {e}"))?,
-            None => return Err("Password entry cancelled".to_string()),
+                .map_err(|e| RemoteError::Auth(format!("{e}")))?,
+            None => return Err(RemoteError::Auth("Password entry cancelled".into())),
         }
     } else if credentials.auth_method == "key_and_password" {
         // Try key auth first; fall back to password if key fails.
@@ -171,8 +174,8 @@ pub async fn connect_and_open_shell(
                 Some(pw) => session
                     .authenticate_password(&credentials.username, &pw)
                     .await
-                    .map_err(|e| format!("Auth failed: {e}"))?,
-                None => return Err("Password entry cancelled".to_string()),
+                    .map_err(|e| RemoteError::Auth(format!("{e}")))?,
+                None => return Err(RemoteError::Auth("Password entry cancelled".into())),
             }
         }
     } else {
@@ -187,24 +190,24 @@ pub async fn connect_and_open_shell(
     };
 
     if !authenticated {
-        return Err("Authentication failed".to_string());
+        return Err(RemoteError::Auth("Authentication failed".into()));
     }
 
     // Open shell channel.
     let channel = session
         .channel_open_session()
         .await
-        .map_err(|e| format!("Channel open failed: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("Channel open failed: {e}")))?;
 
     channel
         .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
         .await
-        .map_err(|e| format!("PTY request failed: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("PTY request failed: {e}")))?;
 
     channel
         .request_shell(false)
         .await
-        .map_err(|e| format!("Shell request failed: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("Shell request failed: {e}")))?;
 
     Ok((session, channel))
 }
@@ -217,7 +220,7 @@ pub(crate) async fn connect_via_proxy(
     port: u16,
     config: Arc<client::Config>,
     handler: ConchSshHandler,
-) -> Result<client::Handle<ConchSshHandler>, String> {
+) -> Result<client::Handle<ConchSshHandler>, RemoteError> {
     use tokio::process::Command;
 
     let expanded = proxy_cmd
@@ -232,7 +235,7 @@ pub(crate) async fn connect_via_proxy(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("Failed to spawn ProxyCommand: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("Failed to spawn ProxyCommand: {e}")))?;
 
     #[cfg(windows)]
     let child = {
@@ -246,7 +249,7 @@ pub(crate) async fn connect_via_proxy(
             .stderr(std::process::Stdio::inherit())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
-            .map_err(|e| format!("Failed to spawn ProxyCommand: {e}"))?
+            .map_err(|e| RemoteError::Connection(format!("Failed to spawn ProxyCommand: {e}")))?
     };
 
     let stdin = child.stdin.unwrap();
@@ -255,7 +258,7 @@ pub(crate) async fn connect_via_proxy(
 
     client::connect_stream(config, stream, handler)
         .await
-        .map_err(|e| format!("Connection via proxy failed: {e}"))
+        .map_err(|e| RemoteError::Connection(format!("Connection via proxy failed: {e}")))
 }
 
 /// Try key-based authentication with common SSH key files.
@@ -265,7 +268,7 @@ pub(crate) async fn try_key_auth(
     explicit_key_path: Option<&str>,
     default_key_paths: &[PathBuf],
     key_passphrase: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<bool, RemoteError> {
     let key_paths: Vec<PathBuf> = if let Some(path) = explicit_key_path {
         vec![expand_tilde(path)]
     } else {
@@ -380,21 +383,21 @@ pub async fn open_shell_channel(
     session: &client::Handle<ConchSshHandler>,
     cols: u16,
     rows: u16,
-) -> Result<russh::Channel<russh::client::Msg>, String> {
+) -> Result<russh::Channel<russh::client::Msg>, RemoteError> {
     let channel = session
         .channel_open_session()
         .await
-        .map_err(|e| format!("Channel open failed: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("Channel open failed: {e}")))?;
 
     channel
         .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
         .await
-        .map_err(|e| format!("PTY request failed: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("PTY request failed: {e}")))?;
 
     channel
         .request_shell(false)
         .await
-        .map_err(|e| format!("Shell request failed: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("Shell request failed: {e}")))?;
 
     Ok(channel)
 }
@@ -403,16 +406,16 @@ pub async fn open_shell_channel(
 pub async fn exec(
     ssh_handle: &client::Handle<ConchSshHandler>,
     command: &str,
-) -> Result<(String, String, u32), String> {
+) -> Result<(String, String, u32), RemoteError> {
     let mut channel = ssh_handle
         .channel_open_session()
         .await
-        .map_err(|e| format!("failed to open exec channel: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("failed to open exec channel: {e}")))?;
 
     channel
         .exec(true, command)
         .await
-        .map_err(|e| format!("exec failed: {e}"))?;
+        .map_err(|e| RemoteError::Connection(format!("exec failed: {e}")))?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
