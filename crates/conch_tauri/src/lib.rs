@@ -4,6 +4,7 @@
 //! via `portable-pty`. This bypasses alacritty_terminal entirely — xterm.js
 //! handles all terminal emulation.
 
+pub(crate) mod cleanup;
 mod ipc;
 pub mod platform;
 pub(crate) mod plugins;
@@ -1474,6 +1475,28 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let label = window.label().to_string();
+                log::info!("Window '{label}' destroyed — starting cleanup");
+
+                // Clean up PTY sessions for this window.
+                if let Some(state) = window.try_state::<TauriState>() {
+                    let pty_count = cleanup::cleanup_ptys(&state.ptys, &label);
+                    if pty_count > 0 {
+                        log::info!("Cleaned up {pty_count} PTY session(s) for window '{label}'");
+                    }
+                }
+
+                // Clean up SSH sessions for this window.
+                if let Some(remote) = window.try_state::<Arc<Mutex<RemoteState>>>() {
+                    let ssh_count = cleanup::cleanup_ssh_sessions(&remote, &label);
+                    if ssh_count > 0 {
+                        log::info!("Cleaned up {ssh_count} SSH session(s) for window '{label}'");
                     }
                 }
             }
