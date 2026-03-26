@@ -258,34 +258,24 @@ fn connection_key(window_label: &str, pane_id: u32) -> String {
     format!("conn:{window_label}:{pane_id}")
 }
 
-/// Connect to an SSH server and open a shell channel in a tab.
-#[tauri::command]
-pub(crate) async fn ssh_connect(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
-    vault: tauri::State<'_, VaultState>,
+/// Shared logic for establishing an SSH session: duplicate check, SSH
+/// connection, channel I/O loop, output forwarder, and cleanup task.
+///
+/// Both `ssh_connect` and `ssh_quick_connect` delegate to this after
+/// resolving their respective server entry and credentials.
+async fn establish_ssh_session(
+    window_label: &str,
+    app: &tauri::AppHandle,
+    remote: &Arc<Mutex<RemoteState>>,
     pane_id: u32,
-    server_id: String,
+    server: &ServerEntry,
+    credentials: &SshCredentials,
     cols: u16,
     rows: u16,
-    password: Option<String>,
 ) -> Result<(), String> {
-    let window_label = window.label().to_string();
-    let key = session_key(&window_label, pane_id);
+    let key = session_key(window_label, pane_id);
 
-    // Find the server entry.
-    let server = {
-        let state = remote.lock();
-        state
-            .config
-            .find_server(&server_id)
-            .or_else(|| state.ssh_config_entries.iter().find(|s| s.id == server_id))
-            .cloned()
-            .ok_or_else(|| format!("Server '{server_id}' not found"))?
-    };
-
-    // Check for duplicate.
+    // Check for duplicate session.
     let (pending_prompts, paths) = {
         let state = remote.lock();
         if state.sessions.contains_key(&key) {
@@ -302,16 +292,8 @@ pub(crate) async fn ssh_connect(
         pending_prompts: Arc::clone(&pending_prompts),
     });
 
-    // Try vault credentials first, fall back to legacy ServerEntry fields.
-    let used_vault = server.vault_account_id.is_some();
-    let credentials = match try_vault_credentials(&vault, &server) {
-        Err(e) => return Err(e),
-        Ok(Some(creds)) => creds,
-        Ok(None) => credentials_from_server(&server, password.clone()),
-    };
-
     let (ssh_handle, channel) =
-        conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths)
+        conch_remote::ssh::connect_and_open_shell(server, credentials, callbacks, &paths)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -323,8 +305,8 @@ pub(crate) async fn ssh_connect(
     let _ = input_tx.send(ChannelInput::Resize { cols, rows });
 
     // Store the connection and session.
-    let conn_key = connection_key(&window_label, pane_id);
-    let remote_clone = Arc::clone(&*remote);
+    let conn_key = connection_key(window_label, pane_id);
+    let remote_clone = Arc::clone(remote);
     {
         let mut state = remote_clone.lock();
         state.connections.insert(
@@ -353,7 +335,7 @@ pub(crate) async fn ssh_connect(
     // Spawn channel loop.
     let remote_for_loop = Arc::clone(&remote_clone);
     let key_for_loop = key.clone();
-    let wl = window_label.clone();
+    let wl = window_label.to_owned();
     let app_handle = app.clone();
     let task = tokio::spawn(async move {
         let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
@@ -390,7 +372,56 @@ pub(crate) async fn ssh_connect(
         }
     }
 
-    spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
+    spawn_output_forwarder(app, window_label, pane_id, output_rx);
+
+    Ok(())
+}
+
+/// Connect to an SSH server and open a shell channel in a tab.
+#[tauri::command]
+pub(crate) async fn ssh_connect(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
+    pane_id: u32,
+    server_id: String,
+    cols: u16,
+    rows: u16,
+    password: Option<String>,
+) -> Result<(), String> {
+    let window_label = window.label().to_string();
+
+    // Find the server entry.
+    let server = {
+        let state = remote.lock();
+        state
+            .config
+            .find_server(&server_id)
+            .or_else(|| state.ssh_config_entries.iter().find(|s| s.id == server_id))
+            .cloned()
+            .ok_or_else(|| format!("Server '{server_id}' not found"))?
+    };
+
+    // Try vault credentials first, fall back to legacy ServerEntry fields.
+    let used_vault = server.vault_account_id.is_some();
+    let credentials = match try_vault_credentials(&vault, &server) {
+        Err(e) => return Err(e),
+        Ok(Some(creds)) => creds,
+        Ok(None) => credentials_from_server(&server, password.clone()),
+    };
+
+    establish_ssh_session(
+        &window_label,
+        &app,
+        &remote,
+        pane_id,
+        &server,
+        &credentials,
+        cols,
+        rows,
+    )
+    .await?;
 
     // After successful connect: if no vault account was linked, offer to save.
     if !used_vault {
@@ -445,98 +476,19 @@ pub(crate) async fn ssh_quick_connect(
 
     // Don't persist quick-connect entries to config — they're ephemeral.
     let window_label = window.label().to_string();
-    let key = session_key(&window_label, pane_id);
-
-    let (pending_prompts, paths) = {
-        let state = remote.lock();
-        if state.sessions.contains_key(&key) {
-            return Err(format!(
-                "Pane {pane_id} already has an SSH session on window {window_label}"
-            ));
-        }
-        (Arc::clone(&state.pending_prompts), state.paths.clone())
-    };
-
-    let callbacks: Arc<dyn RemoteCallbacks> = Arc::new(TauriRemoteCallbacks {
-        app: app.clone(),
-        pending_prompts: Arc::clone(&pending_prompts),
-    });
-
     let credentials = credentials_from_server(&entry, password.clone());
 
-    let (ssh_handle, channel) =
-        conch_remote::ssh::connect_and_open_shell(&entry, &credentials, callbacks, &paths)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let _ = input_tx.send(ChannelInput::Resize { cols, rows });
-
-    let conn_key = connection_key(&window_label, pane_id);
-    let remote_clone = Arc::clone(&*remote);
-    {
-        let mut state = remote_clone.lock();
-        state.connections.insert(
-            conn_key.clone(),
-            SshConnection {
-                ssh_handle: Arc::new(ssh_handle),
-                host: entry.host.clone(),
-                user: credentials.username.clone(),
-                port: entry.port,
-                ref_count: 1,
-            },
-        );
-        state.sessions.insert(
-            key.clone(),
-            SshSession {
-                input_tx,
-                connection_id: conn_key.clone(),
-                host: entry.host.clone(),
-                user: credentials.username.clone(),
-                port: entry.port,
-                abort_handle: None,
-            },
-        );
-    }
-
-    let remote_for_loop = Arc::clone(&remote_clone);
-    let key_for_loop = key.clone();
-    let wl = window_label.clone();
-    let app_handle = app.clone();
-    let task = tokio::spawn(async move {
-        let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
-        let mut state = remote_for_loop.lock();
-        if let Some(session) = state.sessions.remove(&key_for_loop) {
-            if let Some(conn) = state.connections.get_mut(&session.connection_id) {
-                conn.ref_count = conn.ref_count.saturating_sub(1);
-                if conn.ref_count == 0 {
-                    state.connections.remove(&session.connection_id);
-                }
-            }
-        }
-        drop(state);
-        if exited_naturally {
-            let _ = app_handle.emit_to(
-                &wl,
-                "pty-exit",
-                PtyExitEvent {
-                    window_label: wl.clone(),
-                    pane_id,
-                },
-            );
-        }
-    });
-
-    // Store the abort handle so the channel loop can be cancelled on window close.
-    {
-        let mut state = remote_clone.lock();
-        if let Some(session) = state.sessions.get_mut(&key) {
-            session.abort_handle = Some(task.abort_handle());
-        }
-    }
-
-    spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
+    establish_ssh_session(
+        &window_label,
+        &app,
+        &remote,
+        pane_id,
+        &entry,
+        &credentials,
+        cols,
+        rows,
+    )
+    .await?;
 
     // After successful quick-connect: if a password was used, offer to save
     // the credentials to the vault and create a persistent server entry.
