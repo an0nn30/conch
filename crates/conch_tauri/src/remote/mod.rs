@@ -392,6 +392,17 @@ pub(crate) async fn ssh_connect(
 ) -> Result<(), String> {
     let window_label = window.label().to_string();
 
+    // Reject early if pane already has an active session (before vault lookup).
+    {
+        let state = remote.lock();
+        let key = session_key(&window_label, pane_id);
+        if state.sessions.contains_key(&key) {
+            return Err(format!(
+                "Pane {pane_id} already has an SSH session on window {window_label}"
+            ));
+        }
+    }
+
     // Find the server entry.
     let server = {
         let state = remote.lock();
@@ -476,6 +487,18 @@ pub(crate) async fn ssh_quick_connect(
 
     // Don't persist quick-connect entries to config — they're ephemeral.
     let window_label = window.label().to_string();
+
+    // Reject early if pane already has an active session.
+    {
+        let state = remote.lock();
+        let key = session_key(&window_label, pane_id);
+        if state.sessions.contains_key(&key) {
+            return Err(format!(
+                "Pane {pane_id} already has an SSH session on window {window_label}"
+            ));
+        }
+    }
+
     let credentials = credentials_from_server(&entry, password.clone());
 
     establish_ssh_session(
