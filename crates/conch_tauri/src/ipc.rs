@@ -111,14 +111,14 @@ fn ipc_listen_loop(listener: std::os::unix::net::UnixListener, app: tauri::AppHa
                     }
                     match serde_json::from_str::<IpcMessage>(line) {
                         Ok(IpcMessage::CreateWindow { .. }) => {
-                            if let Err(e) = super::create_new_window(&app) {
+                            if let Err(e) = crate::windows::create_new_window(&app) {
                                 log::error!("IPC create_window failed: {e}");
                             }
                         }
                         Ok(IpcMessage::CreateTab { .. }) => {
-                            super::emit_menu_action_to_focused_window(
+                            crate::menu::emit_menu_action_to_focused_window(
                                 &app,
-                                super::MENU_ACTION_NEW_TAB,
+                                crate::menu::MENU_ACTION_NEW_TAB,
                             );
                         }
                         Err(e) => {

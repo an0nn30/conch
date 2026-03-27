@@ -26,8 +26,8 @@ use conch_remote::ssh::{ChannelInput, SshCredentials};
 use conch_remote::transfer::{TransferProgress, TransferRegistry};
 use conch_remote::tunnel::{TunnelManager, TunnelStatus};
 
+use crate::pty::{PtyExitEvent, PtyOutputEvent};
 use crate::vault_commands::VaultState;
-use crate::{PtyExitEvent, PtyOutputEvent};
 
 // ---------------------------------------------------------------------------
 // TauriRemoteCallbacks — bridges RemoteCallbacks to Tauri events

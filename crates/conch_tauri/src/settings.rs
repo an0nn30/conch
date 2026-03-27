@@ -63,7 +63,7 @@ pub(crate) fn save_settings(
 
     // Rebuild menu to pick up keyboard shortcut changes.
     let kb = &new_config.conch.keyboard;
-    if let Ok(menu) = crate::build_app_menu(&app, kb) {
+    if let Ok(menu) = crate::menu::build_app_menu(&app, kb) {
         let _ = app.set_menu(menu);
     }
 
