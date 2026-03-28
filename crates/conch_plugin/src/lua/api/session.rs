@@ -88,7 +88,7 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
     session.set(
         "write",
         lua.create_function(|lua, text: String| {
-            with_host_api(lua, |api| api.write_to_pty(text.as_bytes()));
+            with_host_api(lua, |api| api.write_to_pty(text.as_bytes()))?;
             Ok(())
         })?,
     )?;
@@ -102,7 +102,7 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, (command, plain): (Option<String>, Option<bool>)| {
             with_host_api(lua, |api| {
                 api.new_tab(command.as_deref(), plain.unwrap_or(false))
-            });
+            })?;
             Ok(())
         })?,
     )?;

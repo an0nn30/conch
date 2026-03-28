@@ -260,7 +260,10 @@ fn dispatch_event(lua: &Lua, event: &PluginEvent) {
 /// Handle a render request by calling the Lua `render()` function.
 fn handle_render(lua: &Lua) -> Vec<Widget> {
     // Clear the accumulator before calling render.
-    api::with_acc_pub(lua, |acc| acc.clear());
+    if let Err(e) = api::with_acc_pub(lua, |acc| acc.clear()) {
+        log::error!("Lua render: failed to clear accumulator: {e}");
+        return vec![];
+    }
 
     if let Ok(render_fn) = lua.globals().get::<LuaFunction>("render") {
         let result = with_instruction_limit(lua, || render_fn.call::<()>(()));
@@ -270,7 +273,7 @@ fn handle_render(lua: &Lua) -> Vec<Widget> {
         }
     }
 
-    api::take_widgets(lua)
+    api::take_widgets(lua).unwrap_or_default()
 }
 
 /// Handle a direct query by calling `on_query()` if it exists.

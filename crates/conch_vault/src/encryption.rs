@@ -62,7 +62,11 @@ pub fn decrypt_vault(data: &[u8], password: &[u8]) -> Result<Vault, VaultError> 
     if &data[..8] != MAGIC {
         return Err(VaultError::Corrupted("invalid magic bytes".into()));
     }
-    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let version = u32::from_le_bytes(
+        data[8..12]
+            .try_into()
+            .map_err(|_| VaultError::Corrupted("invalid version header".into()))?,
+    );
     if version != FORMAT_VERSION {
         return Err(VaultError::Corrupted(format!(
             "unsupported version: {version}"
@@ -146,7 +150,11 @@ pub fn load_vault_file(path: &Path, password: &[u8]) -> Result<(Vault, CachedKey
     if &data[..8] != MAGIC {
         return Err(VaultError::Corrupted("invalid magic bytes".into()));
     }
-    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let version = u32::from_le_bytes(
+        data[8..12]
+            .try_into()
+            .map_err(|_| VaultError::Corrupted("invalid version header".into()))?,
+    );
     if version != FORMAT_VERSION {
         return Err(VaultError::Corrupted(format!(
             "unsupported version: {version}"
