@@ -252,8 +252,12 @@ pub(crate) async fn connect_via_proxy(
             .map_err(|e| RemoteError::Connection(format!("Failed to spawn ProxyCommand: {e}")))?
     };
 
-    let stdin = child.stdin.unwrap();
-    let stdout = child.stdout.unwrap();
+    let stdin = child
+        .stdin
+        .ok_or_else(|| RemoteError::Connection("proxy stdin not piped".into()))?;
+    let stdout = child
+        .stdout
+        .ok_or_else(|| RemoteError::Connection("proxy stdout not piped".into()))?;
     let stream = tokio::io::join(stdout, stdin);
 
     client::connect_stream(config, stream, handler)

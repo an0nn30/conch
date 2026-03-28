@@ -17,7 +17,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_clear",
         lua.create_function(|lua, ()| {
-            with_acc(lua, |acc| acc.clear());
+            with_acc(lua, |acc| acc.clear())?;
             Ok(())
         })?,
     )?;
@@ -27,7 +27,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_heading",
         lua.create_function(|lua, text: String| {
-            with_acc(lua, |acc| acc.push_widget(Widget::Heading { text }));
+            with_acc(lua, |acc| acc.push_widget(Widget::Heading { text }))?;
             Ok(())
         })?,
     )?;
@@ -36,7 +36,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         "panel_label",
         lua.create_function(|lua, (text, style): (String, Option<String>)| {
             let style = style.and_then(|s| parse_text_style(&s));
-            with_acc(lua, |acc| acc.push_widget(Widget::Label { text, style }));
+            with_acc(lua, |acc| acc.push_widget(Widget::Label { text, style }))?;
             Ok(())
         })?,
     )?;
@@ -44,7 +44,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_text",
         lua.create_function(|lua, text: String| {
-            with_acc(lua, |acc| acc.push_widget(Widget::Text { text }));
+            with_acc(lua, |acc| acc.push_widget(Widget::Text { text }))?;
             Ok(())
         })?,
     )?;
@@ -59,7 +59,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                         text,
                         max_height,
                     })
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -68,7 +68,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_kv",
         lua.create_function(|lua, (key, value): (String, String)| {
-            with_acc(lua, |acc| acc.push_widget(Widget::KeyValue { key, value }));
+            with_acc(lua, |acc| acc.push_widget(Widget::KeyValue { key, value }))?;
             Ok(())
         })?,
     )?;
@@ -76,7 +76,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_separator",
         lua.create_function(|lua, ()| {
-            with_acc(lua, |acc| acc.push_widget(Widget::Separator));
+            with_acc(lua, |acc| acc.push_widget(Widget::Separator))?;
             Ok(())
         })?,
     )?;
@@ -84,7 +84,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_spacer",
         lua.create_function(|lua, size: Option<f32>| {
-            with_acc(lua, |acc| acc.push_widget(Widget::Spacer { size }));
+            with_acc(lua, |acc| acc.push_widget(Widget::Spacer { size }))?;
             Ok(())
         })?,
     )?;
@@ -96,7 +96,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                 let style = style.and_then(|s| parse_text_style(&s));
                 with_acc(lua, |acc| {
                     acc.push_widget(Widget::IconLabel { icon, text, style })
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -106,7 +106,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         "panel_badge",
         lua.create_function(|lua, (text, variant): (String, String)| {
             let variant = parse_badge_variant(&variant);
-            with_acc(lua, |acc| acc.push_widget(Widget::Badge { text, variant }));
+            with_acc(lua, |acc| acc.push_widget(Widget::Badge { text, variant }))?;
             Ok(())
         })?,
     )?;
@@ -121,7 +121,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                         fraction,
                         label,
                     })
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -138,7 +138,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                         width,
                         height,
                     })
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -156,7 +156,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                     icon,
                     enabled: None,
                 })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -172,7 +172,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                     submit_on_enter: Some(true),
                     request_focus: None,
                 })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -188,7 +188,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                         hint,
                         lines,
                     })
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -199,7 +199,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, (id, label, checked): (String, String, bool)| {
             with_acc(lua, |acc| {
                 acc.push_widget(Widget::Checkbox { id, label, checked })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -214,7 +214,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                     selected,
                     options,
                 })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -225,7 +225,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         "panel_table",
         lua.create_function(|lua, (columns, rows): (LuaValue, LuaValue)| {
             let widget = build_table_widget(columns, rows)?;
-            with_acc(lua, |acc| acc.push_widget(widget));
+            with_acc(lua, |acc| acc.push_widget(widget))?;
             Ok(())
         })?,
     )?;
@@ -241,7 +241,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                         nodes,
                         selected,
                     })
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -251,7 +251,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         "panel_toolbar",
         lua.create_function(|lua, (id, items): (Option<String>, LuaTable)| {
             let items = lua_to_toolbar_items(&items)?;
-            with_acc(lua, |acc| acc.push_widget(Widget::Toolbar { id, items }));
+            with_acc(lua, |acc| acc.push_widget(Widget::Toolbar { id, items }))?;
             Ok(())
         })?,
     )?;
@@ -259,7 +259,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_path_bar",
         lua.create_function(|lua, (id, segments): (String, Vec<String>)| {
-            with_acc(lua, |acc| acc.push_widget(Widget::PathBar { id, segments }));
+            with_acc(lua, |acc| acc.push_widget(Widget::PathBar { id, segments }))?;
             Ok(())
         })?,
     )?;
@@ -270,7 +270,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
             let tabs = lua_to_tab_panes(&tabs)?;
             with_acc(lua, |acc| {
                 acc.push_widget(Widget::Tabs { id, active, tabs })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -280,9 +280,9 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_horizontal",
         lua.create_function(|lua, (func, spacing): (LuaFunction, Option<f32>)| {
-            with_acc(lua, |acc| acc.push_scope());
+            with_acc(lua, |acc| acc.push_scope())?;
             func.call::<()>(())?;
-            let children = with_acc(lua, |acc| acc.pop_scope());
+            let children = with_acc(lua, |acc| acc.pop_scope())?;
             with_acc(lua, |acc| {
                 acc.push_widget(Widget::Horizontal {
                     id: None,
@@ -290,7 +290,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                     spacing,
                     centered: None,
                 })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -298,16 +298,16 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_vertical",
         lua.create_function(|lua, (func, spacing): (LuaFunction, Option<f32>)| {
-            with_acc(lua, |acc| acc.push_scope());
+            with_acc(lua, |acc| acc.push_scope())?;
             func.call::<()>(())?;
-            let children = with_acc(lua, |acc| acc.pop_scope());
+            let children = with_acc(lua, |acc| acc.pop_scope())?;
             with_acc(lua, |acc| {
                 acc.push_widget(Widget::Vertical {
                     id: None,
                     children,
                     spacing,
                 })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -315,16 +315,16 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "panel_scroll_area",
         lua.create_function(|lua, (func, max_height): (LuaFunction, Option<f32>)| {
-            with_acc(lua, |acc| acc.push_scope());
+            with_acc(lua, |acc| acc.push_scope())?;
             func.call::<()>(())?;
-            let children = with_acc(lua, |acc| acc.pop_scope());
+            let children = with_acc(lua, |acc| acc.pop_scope())?;
             with_acc(lua, |acc| {
                 acc.push_widget(Widget::ScrollArea {
                     id: None,
                     max_height,
                     children,
                 })
-            });
+            })?;
             Ok(())
         })?,
     )?;
@@ -334,9 +334,9 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         lua.create_function(
             |lua, (id, label, func): (String, String, Option<LuaFunction>)| {
                 let children = if let Some(f) = func {
-                    with_acc(lua, |acc| acc.push_scope());
+                    with_acc(lua, |acc| acc.push_scope())?;
                     f.call::<()>(())?;
-                    with_acc(lua, |acc| acc.pop_scope())
+                    with_acc(lua, |acc| acc.pop_scope())?
                 } else {
                     vec![]
                 };
@@ -346,7 +346,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                         label,
                         children,
                     })
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -366,7 +366,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "alert",
         lua.create_function(|lua, (title, msg): (String, String)| {
-            call_show_alert(lua, &title, &msg);
+            call_show_alert(lua, &title, &msg)?;
             Ok(())
         })?,
     )?;
@@ -374,7 +374,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "error",
         lua.create_function(|lua, (title, msg): (String, String)| {
-            call_show_error(lua, &title, &msg);
+            call_show_error(lua, &title, &msg)?;
             Ok(())
         })?,
     )?;
@@ -382,7 +382,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "confirm",
         lua.create_function(|lua, msg: String| {
-            let result = call_show_confirm(lua, &msg);
+            let result = call_show_confirm(lua, &msg)?;
             Ok(result)
         })?,
     )?;
@@ -390,7 +390,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "prompt",
         lua.create_function(|lua, (msg, default): (String, Option<String>)| {
-            let result = call_show_prompt(lua, &msg, default.as_deref().unwrap_or(""));
+            let result = call_show_prompt(lua, &msg, default.as_deref().unwrap_or(""))?;
             Ok(result)
         })?,
     )?;
@@ -684,7 +684,7 @@ fn build_form_json(title: &str, fields: &LuaTable) -> LuaResult<String> {
 }
 
 fn call_show_form(lua: &Lua, json: &str) -> LuaResult<Option<LuaTable>> {
-    let result_str = with_host_api(lua, |api| api.show_form(json));
+    let result_str = with_host_api(lua, |api| api.show_form(json))?;
 
     let Some(result_str) = result_str else {
         return Ok(None);
@@ -696,19 +696,19 @@ fn call_show_form(lua: &Lua, json: &str) -> LuaResult<Option<LuaTable>> {
     Ok(Some(tbl))
 }
 
-fn call_show_alert(lua: &Lua, title: &str, msg: &str) {
-    with_host_api(lua, |api| api.show_alert(title, msg));
+fn call_show_alert(lua: &Lua, title: &str, msg: &str) -> LuaResult<()> {
+    with_host_api(lua, |api| api.show_alert(title, msg))
 }
 
-fn call_show_error(lua: &Lua, title: &str, msg: &str) {
-    with_host_api(lua, |api| api.show_error(title, msg));
+fn call_show_error(lua: &Lua, title: &str, msg: &str) -> LuaResult<()> {
+    with_host_api(lua, |api| api.show_error(title, msg))
 }
 
-fn call_show_confirm(lua: &Lua, msg: &str) -> bool {
+fn call_show_confirm(lua: &Lua, msg: &str) -> LuaResult<bool> {
     with_host_api(lua, |api| api.show_confirm(msg))
 }
 
-fn call_show_prompt(lua: &Lua, msg: &str, default: &str) -> Option<String> {
+fn call_show_prompt(lua: &Lua, msg: &str, default: &str) -> LuaResult<Option<String>> {
     with_host_api(lua, |api| api.show_prompt(msg, default))
 }
 
@@ -819,7 +819,7 @@ mod tests {
         let lua = make_test_lua();
         register_ui_table(&lua).unwrap();
         lua.load(r#"ui.panel_heading("Hello")"#).exec().unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         assert_eq!(widgets.len(), 1);
         assert!(matches!(&widgets[0], Widget::Heading { text } if text == "Hello"));
     }
@@ -839,7 +839,7 @@ mod tests {
         )
         .exec()
         .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         assert_eq!(widgets.len(), 5);
     }
 
@@ -856,7 +856,7 @@ mod tests {
         )
         .exec()
         .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         assert_eq!(widgets.len(), 1);
         assert!(matches!(&widgets[0], Widget::Heading { text } if text == "New"));
     }
@@ -875,7 +875,7 @@ mod tests {
         )
         .exec()
         .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         assert_eq!(widgets.len(), 1);
         if let Widget::Horizontal { children, .. } = &widgets[0] {
             assert_eq!(children.len(), 2);
@@ -891,7 +891,7 @@ mod tests {
         lua.load(r#"ui.panel_checkbox("cb", "Enable", true)"#)
             .exec()
             .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         assert_eq!(widgets.len(), 1);
         if let Widget::Checkbox {
             id, checked, label, ..
@@ -919,7 +919,7 @@ mod tests {
         )
         .exec()
         .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         if let Widget::ComboBox { options, .. } = &widgets[0] {
             assert_eq!(options.len(), 2);
             assert_eq!(options[0].value, "a");
@@ -943,7 +943,7 @@ mod tests {
         )
         .exec()
         .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         if let Widget::Table { columns, rows, .. } = &widgets[0] {
             assert_eq!(columns.len(), 2);
             assert_eq!(rows.len(), 2);
@@ -959,7 +959,7 @@ mod tests {
         lua.load(r#"ui.panel_badge("ok", "success")"#)
             .exec()
             .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         if let Widget::Badge { text, variant } = &widgets[0] {
             assert_eq!(text, "ok");
             assert!(matches!(variant, BadgeVariant::Success));
@@ -975,7 +975,7 @@ mod tests {
         lua.load(r#"ui.panel_progress("p", 0.75, "75%")"#)
             .exec()
             .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         if let Widget::Progress {
             fraction, label, ..
         } = &widgets[0]
@@ -994,7 +994,7 @@ mod tests {
         lua.load(r#"ui.panel_text_input("search", "", "Search...")"#)
             .exec()
             .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         if let Widget::TextInput { id, hint, .. } = &widgets[0] {
             assert_eq!(id, "search");
             assert_eq!(hint.as_deref(), Some("Search..."));
@@ -1010,7 +1010,7 @@ mod tests {
         lua.load(r#"ui.panel_path_bar("path", {"~", "projects", "conch"})"#)
             .exec()
             .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         if let Widget::PathBar { segments, .. } = &widgets[0] {
             assert_eq!(segments, &["~", "projects", "conch"]);
         } else {
@@ -1065,7 +1065,7 @@ mod tests {
         )
         .exec()
         .unwrap();
-        let widgets = take_widgets(&lua);
+        let widgets = take_widgets(&lua).unwrap();
         assert_eq!(widgets.len(), 1);
         if let Widget::Horizontal { children, .. } = &widgets[0] {
             assert_eq!(children.len(), 2);

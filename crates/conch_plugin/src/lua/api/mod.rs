@@ -103,7 +103,7 @@ pub fn register_all(lua: &Lua, host_api: Arc<dyn HostApi>) -> LuaResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Borrow the widget accumulator, call the closure, then release.
-pub(super) fn with_acc<F, R>(lua: &Lua, f: F) -> R
+pub(super) fn with_acc<F, R>(lua: &Lua, f: F) -> LuaResult<R>
 where
     F: FnOnce(&mut WidgetAccumulator) -> R,
 {
@@ -111,30 +111,30 @@ where
 }
 
 /// Public version of `with_acc` for use by the runner module.
-pub fn with_acc_pub<F, R>(lua: &Lua, f: F) -> R
+pub fn with_acc_pub<F, R>(lua: &Lua, f: F) -> LuaResult<R>
 where
     F: FnOnce(&mut WidgetAccumulator) -> R,
 {
     let cell = lua
         .app_data_ref::<RefCell<WidgetAccumulator>>()
-        .expect("WidgetAccumulator not set");
+        .ok_or_else(|| LuaError::RuntimeError("WidgetAccumulator not initialized".into()))?;
     let mut acc = cell.borrow_mut();
-    f(&mut acc)
+    Ok(f(&mut acc))
 }
 
 /// Borrow the HostApi trait object, call the closure.
-pub(super) fn with_host_api<F, R>(lua: &Lua, f: F) -> R
+pub(super) fn with_host_api<F, R>(lua: &Lua, f: F) -> LuaResult<R>
 where
     F: FnOnce(&dyn HostApi) -> R,
 {
     let bridge = lua
         .app_data_ref::<HostApiBridge>()
-        .expect("HostApiBridge not set");
-    f(bridge.api())
+        .ok_or_else(|| LuaError::RuntimeError("HostApiBridge not initialized".into()))?;
+    Ok(f(bridge.api()))
 }
 
 /// Take the accumulated widgets from the current render call.
-pub fn take_widgets(lua: &Lua) -> Vec<Widget> {
+pub fn take_widgets(lua: &Lua) -> LuaResult<Vec<Widget>> {
     with_acc(lua, |acc| acc.take_widgets())
 }
 

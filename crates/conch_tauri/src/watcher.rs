@@ -9,14 +9,20 @@ use std::time::Duration;
 
 use tauri::Emitter;
 
-/// Start watching theme files. Returns a thread join handle.
-pub fn start(app_handle: tauri::AppHandle) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
+/// Start watching theme files. Returns a thread join handle, or `None` if the
+/// thread could not be spawned.
+pub fn start(app_handle: tauri::AppHandle) -> Option<std::thread::JoinHandle<()>> {
+    match std::thread::Builder::new()
         .name("theme-watcher".into())
         .spawn(move || {
             watch_loop(app_handle);
-        })
-        .expect("Failed to spawn theme watcher thread")
+        }) {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            log::error!("Failed to spawn theme watcher thread: {e}");
+            None
+        }
+    }
 }
 
 fn watch_loop(app: tauri::AppHandle) {

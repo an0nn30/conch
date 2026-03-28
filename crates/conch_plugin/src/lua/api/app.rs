@@ -23,7 +23,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
                 "error" => 4,
                 _ => 2,
             };
-            with_host_api(lua, |api| api.log(level_num, &msg));
+            with_host_api(lua, |api| api.log(level_num, &msg))?;
             Ok(())
         })?,
     )?;
@@ -31,7 +31,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "clipboard",
         lua.create_function(|lua, text: String| {
-            with_host_api(lua, |api| api.clipboard_set(&text));
+            with_host_api(lua, |api| api.clipboard_set(&text))?;
             Ok(())
         })?,
     )?;
@@ -39,7 +39,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "clipboard_get",
         lua.create_function(|lua, ()| {
-            let result = with_host_api(lua, |api| api.clipboard_get());
+            let result = with_host_api(lua, |api| api.clipboard_get())?;
             Ok(result)
         })?,
     )?;
@@ -49,7 +49,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, (event_type, data): (String, LuaValue)| {
             let data_json = serde_json::to_string(&lua_value_to_json(data)?)
                 .unwrap_or_else(|_| "{}".to_string());
-            with_host_api(lua, |api| api.publish_event(&event_type, &data_json));
+            with_host_api(lua, |api| api.publish_event(&event_type, &data_json))?;
             Ok(())
         })?,
     )?;
@@ -57,7 +57,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "subscribe",
         lua.create_function(|lua, event_type: String| {
-            with_host_api(lua, |api| api.subscribe(&event_type));
+            with_host_api(lua, |api| api.subscribe(&event_type))?;
             Ok(())
         })?,
     )?;
@@ -73,7 +73,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
                     "duration_ms": duration_ms.unwrap_or(3000),
                 });
                 let json = notif.to_string();
-                with_host_api(lua, |api| api.notify(&json));
+                with_host_api(lua, |api| api.notify(&json))?;
                 Ok(())
             },
         )?,
@@ -82,7 +82,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "register_service",
         lua.create_function(|lua, name: String| {
-            with_host_api(lua, |api| api.register_service(&name));
+            with_host_api(lua, |api| api.register_service(&name))?;
             Ok(())
         })?,
     )?;
@@ -93,7 +93,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
             |lua, (menu, label, action, keybind): (String, String, String, Option<String>)| {
                 with_host_api(lua, |api| {
                     api.register_menu_item(&menu, &label, &action, keybind.as_deref());
-                });
+                })?;
                 Ok(())
             },
         )?,
@@ -109,7 +109,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
                     None => "null".to_string(),
                 };
                 let result =
-                    with_host_api(lua, |api| api.query_plugin(&target, &method, &args_json));
+                    with_host_api(lua, |api| api.query_plugin(&target, &method, &args_json))?;
                 Ok(result)
             },
         )?,
@@ -118,7 +118,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "get_config",
         lua.create_function(|lua, key: String| {
-            let result = with_host_api(lua, |api| api.get_config(&key));
+            let result = with_host_api(lua, |api| api.get_config(&key))?;
             Ok(result)
         })?,
     )?;
@@ -126,7 +126,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "set_config",
         lua.create_function(|lua, (key, value): (String, String)| {
-            with_host_api(lua, |api| api.set_config(&key, &value));
+            with_host_api(lua, |api| api.set_config(&key, &value))?;
             Ok(())
         })?,
     )?;

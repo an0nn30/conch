@@ -93,8 +93,8 @@ impl JavaPluginManager {
 
     /// Lazily create the JVM with the embedded SDK JAR on the classpath.
     fn ensure_jvm(&mut self) -> Result<&JavaVM, LoadError> {
-        if self.jvm.is_some() {
-            return Ok(self.jvm.as_ref().unwrap());
+        if let Some(ref jvm) = self.jvm {
+            return Ok(jvm);
         }
 
         // Write the embedded SDK JAR to a temp file.
@@ -146,7 +146,12 @@ impl JavaPluginManager {
         log::info!("jvm: JVM started successfully");
         self._sdk_jar_tempfile = Some(tmpfile);
         self.jvm = Some(jvm);
-        Ok(self.jvm.as_ref().unwrap())
+        self.jvm.as_ref().ok_or_else(|| {
+            LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "JVM initialization failed unexpectedly",
+            ))
+        })
     }
 
     /// Scan a directory for `.jar` files and probe their metadata.
@@ -162,13 +167,13 @@ impl JavaPluginManager {
             if path.extension().and_then(|e| e.to_str()) != Some("jar") {
                 continue;
             }
-            eprintln!("[jvm] probing JAR: {}", path.display());
+            log::debug!("[jvm] probing JAR: {}", path.display());
             match self.probe_jar_metadata(&path) {
                 Ok(meta) => {
-                    eprintln!("[jvm] found plugin: {} v{}", meta.name, meta.version);
+                    log::debug!("[jvm] found plugin: {} v{}", meta.name, meta.version);
                     found.push((path, meta));
                 }
-                Err(e) => eprintln!("[jvm] FAILED to probe {}: {e}", path.display()),
+                Err(e) => log::warn!("[jvm] FAILED to probe {}: {e}", path.display()),
             }
         }
         found
@@ -241,7 +246,12 @@ impl JavaPluginManager {
         }
 
         self.ensure_jvm()?;
-        let jvm = self.jvm.as_ref().unwrap();
+        let jvm = self.jvm.as_ref().ok_or_else(|| {
+            LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "JVM not available after ensure_jvm",
+            ))
+        })?;
 
         // Create the plugin object on this thread, convert to GlobalRef for the plugin thread.
         let plugin_global = {
@@ -263,7 +273,12 @@ impl JavaPluginManager {
 
         // Register on the bus.
         let mailbox_rx = self.bus.register_plugin(&name);
-        let sender = self.bus.sender_for(&name).unwrap();
+        let sender = self.bus.sender_for(&name).ok_or_else(|| {
+            LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("bus sender not found for plugin '{name}'"),
+            ))
+        })?;
 
         let jvm_ptr = jvm as *const JavaVM as usize;
         let thread_name = name.clone();

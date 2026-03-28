@@ -61,17 +61,21 @@ pub fn start(app_handle: tauri::AppHandle) -> Option<IpcGuard> {
         }
     };
 
-    listener
-        .set_nonblocking(true)
-        .expect("Failed to set non-blocking on IPC socket");
+    if let Err(e) = listener.set_nonblocking(true) {
+        log::error!("Failed to set non-blocking on IPC socket: {e}");
+        return None;
+    }
 
     let path_clone = socket_path.clone();
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("ipc-listener".into())
         .spawn(move || {
             ipc_listen_loop(listener, app_handle);
         })
-        .expect("Failed to spawn IPC listener thread");
+    {
+        log::error!("Failed to spawn IPC listener thread: {e}");
+        return None;
+    }
 
     log::info!("IPC socket listening at {}", socket_path.display());
     Some(IpcGuard {

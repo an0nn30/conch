@@ -180,8 +180,10 @@ pub(crate) async fn remote_export(
 
     match path {
         Some(path) => {
-            std::fs::write(path.as_path().unwrap(), &json)
-                .map_err(|e| format!("Failed to write file: {e}"))?;
+            let file_path = path
+                .as_path()
+                .ok_or_else(|| "Invalid file path".to_string())?;
+            std::fs::write(file_path, &json).map_err(|e| format!("Failed to write file: {e}"))?;
             Ok("Exported successfully".to_string())
         }
         None => Err("Export cancelled".to_string()),
@@ -207,8 +209,11 @@ pub(crate) async fn remote_import(
         None => return Err("Import cancelled".to_string()),
     };
 
-    let json = std::fs::read_to_string(path.as_path().unwrap())
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+    let file_path = path
+        .as_path()
+        .ok_or_else(|| "Invalid file path".to_string())?;
+    let json =
+        std::fs::read_to_string(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
     let payload: ExportPayload =
         serde_json::from_str(&json).map_err(|e| format!("Invalid import file: {e}"))?;
