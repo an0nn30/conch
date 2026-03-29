@@ -3,4 +3,4 @@
 /**
  * Layout state sent to the frontend on load.
  */
-export type SavedLayout = { window_width: number, window_height: number, ssh_panel_width: number, ssh_panel_visible: boolean, files_panel_width: number, files_panel_visible: boolean, };
+export type SavedLayout = { window_width: number, window_height: number, ssh_panel_width: number, ssh_panel_visible: boolean, files_panel_width: number, files_panel_visible: boolean, bottom_panel_visible: boolean, };

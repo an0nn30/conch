@@ -82,18 +82,14 @@ fn create_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri
     // Use custom titlebar on Windows/Linux (same as main window).
     let use_custom_titlebar = cfg!(target_os = "windows") || cfg!(target_os = "linux");
 
-    let win = WebviewWindowBuilder::new(
-        app,
-        "settings",
-        WebviewUrl::App("settings.html".into()),
-    )
-    .title("Settings — Conch")
-    .inner_size(780.0, 560.0)
-    .resizable(true)
-    .min_inner_size(600.0, 400.0)
-    .decorations(!use_custom_titlebar)
-    .theme(theme)
-    .build()?;
+    let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+        .title("Settings — Conch")
+        .inner_size(780.0, 560.0)
+        .resizable(true)
+        .min_inner_size(600.0, 400.0)
+        .decorations(!use_custom_titlebar)
+        .theme(theme)
+        .build()?;
 
     // Remove the app-level menu from this window so it has no menu bar.
     let _ = win.remove_menu();
