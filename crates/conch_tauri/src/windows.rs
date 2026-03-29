@@ -57,17 +57,22 @@ pub(crate) async fn open_new_window(app: tauri::AppHandle) -> Result<(), String>
 #[tauri::command]
 pub(crate) async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     let handle = app.clone();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
         // Focus existing settings window if already open.
         if let Some(win) = handle.get_webview_window("settings") {
             let _ = win.set_focus();
+            let _ = tx.send(Ok(()));
             return;
         }
-        if let Err(e) = create_settings_window(&handle) {
+        let result = create_settings_window(&handle).map_err(|e| {
             log::error!("Failed to create settings window: {e}");
-        }
+            e.to_string()
+        });
+        let _ = tx.send(result);
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())?
 }
 
 fn create_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
