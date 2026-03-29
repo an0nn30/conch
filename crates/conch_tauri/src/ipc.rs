@@ -53,25 +53,34 @@ pub fn start(app_handle: tauri::AppHandle) -> Option<IpcGuard> {
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) => {
-            log::error!("Failed to bind IPC socket at {}: {e}", socket_path.display());
+            log::error!(
+                "Failed to bind IPC socket at {}: {e}",
+                socket_path.display()
+            );
             return None;
         }
     };
 
-    listener
-        .set_nonblocking(true)
-        .expect("Failed to set non-blocking on IPC socket");
+    if let Err(e) = listener.set_nonblocking(true) {
+        log::error!("Failed to set non-blocking on IPC socket: {e}");
+        return None;
+    }
 
     let path_clone = socket_path.clone();
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("ipc-listener".into())
         .spawn(move || {
             ipc_listen_loop(listener, app_handle);
         })
-        .expect("Failed to spawn IPC listener thread");
+    {
+        log::error!("Failed to spawn IPC listener thread: {e}");
+        return None;
+    }
 
     log::info!("IPC socket listening at {}", socket_path.display());
-    Some(IpcGuard { socket_path: path_clone })
+    Some(IpcGuard {
+        socket_path: path_clone,
+    })
 }
 
 #[cfg(not(unix))]
@@ -101,15 +110,20 @@ fn ipc_listen_loop(listener: std::os::unix::net::UnixListener, app: tauri::AppHa
                 for line in reader.lines() {
                     let Ok(line) = line else { break };
                     let line = line.trim();
-                    if line.is_empty() { continue; }
+                    if line.is_empty() {
+                        continue;
+                    }
                     match serde_json::from_str::<IpcMessage>(line) {
                         Ok(IpcMessage::CreateWindow { .. }) => {
-                            if let Err(e) = super::create_new_window(&app) {
+                            if let Err(e) = crate::windows::create_new_window(&app) {
                                 log::error!("IPC create_window failed: {e}");
                             }
                         }
                         Ok(IpcMessage::CreateTab { .. }) => {
-                            super::emit_menu_action_to_focused_window(&app, super::MENU_ACTION_NEW_TAB);
+                            crate::menu::emit_menu_action_to_focused_window(
+                                &app,
+                                crate::menu::MENU_ACTION_NEW_TAB,
+                            );
                         }
                         Err(e) => {
                             log::warn!("Invalid IPC message: {e}");

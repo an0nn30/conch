@@ -191,12 +191,213 @@ pub fn resolve_theme(value: &str) -> ColorScheme {
                     return scheme;
                 }
                 Err(e) => {
-                    log::warn!("Failed to load theme '{}': {e}, using built-in Dracula", value);
+                    log::warn!(
+                        "Failed to load theme '{}': {e}, using built-in Dracula",
+                        value
+                    );
                 }
             }
         } else if !value.eq_ignore_ascii_case("dracula") {
-            log::info!("Theme '{}' not found in themes dir, using built-in Dracula", value);
+            log::info!(
+                "Theme '{}' not found in themes dir, using built-in Dracula",
+                value
+            );
         }
     }
     ColorScheme::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_color_scheme_primary_colors() {
+        let cs = ColorScheme::default();
+        assert_eq!(cs.primary.background, "#282a36", "Dracula background");
+        assert_eq!(cs.primary.foreground, "#f8f8f2", "Dracula foreground");
+        assert_eq!(
+            cs.primary.dim_foreground.as_deref(),
+            Some("#6272a4"),
+            "Dracula dim foreground"
+        );
+        assert_eq!(
+            cs.primary.bright_foreground.as_deref(),
+            Some("#ffffff"),
+            "Dracula bright foreground"
+        );
+    }
+
+    #[test]
+    fn default_color_scheme_optional_fields() {
+        let cs = ColorScheme::default();
+        assert!(cs.dim.is_none(), "dim should be None by default");
+        assert!(cs.cursor.is_some(), "cursor should be Some by default");
+        assert!(
+            cs.selection.is_some(),
+            "selection should be Some by default"
+        );
+
+        let cursor = cs.cursor.unwrap();
+        assert_eq!(cursor.text, "#282a36");
+        assert_eq!(cursor.cursor, "#f8f8f2");
+
+        let selection = cs.selection.unwrap();
+        assert_eq!(selection.text, "#f8f8f2");
+        assert_eq!(selection.background, "#44475a");
+    }
+
+    #[test]
+    fn ansi_colors_as_array() {
+        let cs = ColorScheme::default();
+        let normal = cs.normal.as_array();
+        assert_eq!(normal.len(), 8);
+        assert_eq!(normal[0], "#21222c", "black");
+        assert_eq!(normal[1], "#ff5555", "red");
+        assert_eq!(normal[2], "#50fa7b", "green");
+        assert_eq!(normal[3], "#f1fa8c", "yellow");
+        assert_eq!(normal[4], "#bd93f9", "blue");
+        assert_eq!(normal[5], "#ff79c6", "magenta");
+        assert_eq!(normal[6], "#8be9fd", "cyan");
+        assert_eq!(normal[7], "#f8f8f2", "white");
+    }
+
+    #[test]
+    fn deserialize_complete_alacritty_theme() {
+        let toml_str = r##"
+[colors.primary]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+
+[colors.normal]
+black   = "#45475a"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#bac2de"
+
+[colors.bright]
+black   = "#585b70"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#a6adc8"
+
+[colors.cursor]
+text   = "#1e1e2e"
+cursor = "#f5e0dc"
+
+[colors.selection]
+text       = "#1e1e2e"
+background = "#f5e0dc"
+"##;
+        let theme: AlacrittyThemeFile = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(theme.colors.primary.background, "#1e1e2e");
+        assert_eq!(theme.colors.primary.foreground, "#cdd6f4");
+        assert_eq!(theme.colors.normal.black, "#45475a");
+        assert_eq!(theme.colors.bright.white, "#a6adc8");
+        assert!(theme.colors.cursor.is_some());
+        assert!(theme.colors.selection.is_some());
+    }
+
+    #[test]
+    fn deserialize_missing_optional_fields() {
+        let toml_str = r##"
+[colors.primary]
+background = "#000000"
+foreground = "#ffffff"
+
+[colors.normal]
+black   = "#000000"
+red     = "#ff0000"
+green   = "#00ff00"
+yellow  = "#ffff00"
+blue    = "#0000ff"
+magenta = "#ff00ff"
+cyan    = "#00ffff"
+white   = "#ffffff"
+
+[colors.bright]
+black   = "#808080"
+red     = "#ff0000"
+green   = "#00ff00"
+yellow  = "#ffff00"
+blue    = "#0000ff"
+magenta = "#ff00ff"
+cyan    = "#00ffff"
+white   = "#ffffff"
+"##;
+        let theme: AlacrittyThemeFile = toml::from_str(toml_str).expect("valid TOML");
+        let cs = theme.colors;
+        assert!(cs.dim.is_none(), "dim should be None when absent from TOML");
+        assert!(
+            cs.cursor.is_none(),
+            "cursor should be None when absent from TOML"
+        );
+        assert!(
+            cs.selection.is_none(),
+            "selection should be None when absent from TOML"
+        );
+        assert!(
+            cs.primary.dim_foreground.is_none(),
+            "dim_foreground should be None when absent"
+        );
+        assert!(
+            cs.primary.bright_foreground.is_none(),
+            "bright_foreground should be None when absent"
+        );
+    }
+
+    #[test]
+    fn deserialize_with_dim_colors() {
+        let toml_str = r##"
+[colors.primary]
+background = "#000000"
+foreground = "#ffffff"
+dim_foreground = "#aaaaaa"
+
+[colors.normal]
+black = "#000"
+red = "#f00"
+green = "#0f0"
+yellow = "#ff0"
+blue = "#00f"
+magenta = "#f0f"
+cyan = "#0ff"
+white = "#fff"
+
+[colors.bright]
+black = "#888"
+red = "#f00"
+green = "#0f0"
+yellow = "#ff0"
+blue = "#00f"
+magenta = "#f0f"
+cyan = "#0ff"
+white = "#fff"
+
+[colors.dim]
+black = "#111"
+red = "#a00"
+green = "#0a0"
+yellow = "#aa0"
+blue = "#00a"
+magenta = "#a0a"
+cyan = "#0aa"
+white = "#aaa"
+"##;
+        let theme: AlacrittyThemeFile = toml::from_str(toml_str).expect("valid TOML");
+        let cs = theme.colors;
+        assert!(cs.dim.is_some(), "dim should be present");
+        let dim = cs.dim.unwrap();
+        assert_eq!(dim.black, "#111");
+        assert_eq!(dim.white, "#aaa");
+        assert_eq!(cs.primary.dim_foreground.as_deref(), Some("#aaaaaa"));
+    }
 }

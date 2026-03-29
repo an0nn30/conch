@@ -811,14 +811,51 @@
       padding: 24px; text-align: center; color: var(--dim-fg); font-size: 13px;
     }
     .terminal-pane {
+      position: relative;
+      min-width: 80px;
+      min-height: 80px;
+      overflow: hidden;
+      flex: 1;
+    }
+    /* --- Split pane layout --- */
+    .tab-tree-root {
       position: absolute;
       inset: 0;
-      width: 100%;
-      height: 100%;
       display: none;
     }
-    .terminal-pane.active {
-      display: block;
+    .tab-tree-root.active {
+      display: flex;
+    }
+    .split-container {
+      display: flex;
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .split-divider {
+      flex-shrink: 0;
+      background: var(--text-secondary);
+      opacity: 0.4;
+      z-index: 1;
+    }
+    .split-divider.vertical {
+      width: 6px;
+      cursor: col-resize;
+    }
+    .split-divider.horizontal {
+      height: 6px;
+      cursor: row-resize;
+    }
+    .split-divider:hover {
+      background: var(--blue);
+      opacity: 1;
+    }
+    .terminal-pane.focused {
+      border-top: 2px solid var(--blue);
+    }
+    .terminal-pane:not(.focused) {
+      border-top: 2px solid transparent;
     }
     #status {
       position: fixed;
@@ -1097,6 +1134,11 @@
       font: 11px/1.5 "JetBrains Mono", "Menlo", monospace;
       word-break: break-all; white-space: pre-wrap;
     }
+    #terminal-context-menu button:hover,
+    #tab-context-menu button:hover {
+      background: var(--blue);
+      color: #fff;
+    }
   </style>
 </head>
 <body>
@@ -1133,7 +1175,10 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
+  <!-- WebGL addon removed: system fonts don't reliably load in WebKit's
+       canvas context before the WebGL texture atlas is built, causing the
+       terminal to render with a fallback font.  The canvas renderer in
+       xterm.js 5.x is fast enough for interactive use. -->
   <script src="utils.js"></script>
   <script src="titlebar.js"></script>
   <script src="toast.js"></script>
@@ -1146,6 +1191,8 @@
   <script src="keygen.js"></script>
   <script src="ssh-panel.js"></script>
   <script src="tunnel-manager.js"></script>
+  <script src="split-tree.js"></script>
+  <script src="split-pane.js"></script>
   <script>
     const statusEl = document.getElementById('status');
     function showStatus(message) {
@@ -1323,6 +1370,43 @@
       let nextTabId = 1;
       let nextTabLabel = 1;
 
+      const panes = new Map();
+      let nextPaneId = 1;
+      let focusedPaneId = null;
+
+      function currentPane() {
+        return panes.get(focusedPaneId) || null;
+      }
+
+      function getTabForPane(paneId) {
+        const pane = panes.get(paneId);
+        return pane ? tabs.get(pane.tabId) : null;
+      }
+
+      function allPanesInTab(tabId) {
+        const tab = tabs.get(tabId);
+        if (!tab) return [];
+        return window.splitTree.allLeaves(tab.treeRoot);
+      }
+
+      function setFocusedPane(paneId) {
+        if (focusedPaneId === paneId) return;
+        if (focusedPaneId != null) {
+          const oldPane = panes.get(focusedPaneId);
+          if (oldPane && oldPane.root) oldPane.root.classList.remove('focused');
+        }
+        focusedPaneId = paneId;
+        const pane = panes.get(paneId);
+        if (pane && pane.root) {
+          pane.root.classList.add('focused');
+          pane.term.focus();
+          const tab = tabs.get(pane.tabId);
+          if (tab) tab.focusedPaneId = paneId;
+          // Notify files panel so SFTP routing follows the focused pane.
+          if (window.filesPanel) window.filesPanel.onTabChanged(pane);
+        }
+      }
+
       function terminalMouseModeIsActive(term) {
         const modes = term.modes;
         if (!modes || typeof modes.mouseTrackingMode !== 'string') {
@@ -1457,24 +1541,32 @@
         appEl.classList.toggle('tabs-visible', tabs.size > 1);
       }
 
+      function fitAndResizePane(pane) {
+        if (!pane || !pane.term || !pane.fitAddon || !pane.spawned) return;
+        const dims = pane.fitAddon.proposeDimensions();
+        if (!dims || !dims.cols || !dims.rows) return;
+        if (dims.cols === pane.lastCols && dims.rows === pane.lastRows) return;
+        pane.lastCols = dims.cols;
+        pane.lastRows = dims.rows;
+        pane.fitAddon.fit();
+        const cmd = pane.type === 'ssh' ? 'ssh_resize' : 'resize_pty';
+        invoke(cmd, { paneId: pane.paneId, cols: dims.cols, rows: dims.rows }).catch(() => {});
+      }
+
       function fitAndResizeTab(tab) {
-        if (!tab) {
-          return;
-        }
-        tab.fitAddon.fit();
-        if (!tab.spawned) {
-          return;
-        }
-        const dims = tab.fitAddon.proposeDimensions();
-        if (dims) {
-          // Skip if dimensions haven't changed (avoids redundant PTY resizes)
-          if (tab.lastCols === dims.cols && tab.lastRows === dims.rows) {
+        if (!tab) return;
+        const paneId = tab.focusedPaneId;
+        if (paneId != null) {
+          const pane = panes.get(paneId);
+          if (pane) {
+            fitAndResizePane(pane);
             return;
           }
-          tab.lastCols = dims.cols;
-          tab.lastRows = dims.rows;
-          const cmd = tab.type === 'ssh' ? 'ssh_resize' : 'resize_pty';
-          invoke(cmd, { tabId: tab.id, cols: dims.cols, rows: dims.rows }).catch(() => {});
+        }
+        // Fallback: fit all panes in the tab
+        for (const id of allPanesInTab(tab.id)) {
+          const p = panes.get(id);
+          if (p) fitAndResizePane(p);
         }
       }
 
@@ -1489,7 +1581,7 @@
       }
 
       // Create a Terminal with all addons loaded. Must be called after the
-      // root element is attached to the DOM (WebGL addon needs a live canvas).
+      // root element is attached to the DOM.
       function initTerminal(root) {
         const term = new Terminal({
           theme,
@@ -1514,9 +1606,6 @@
           term.unicode.activeVersion = '11';
         }
         term.open(root);
-        if (typeof WebglAddon !== 'undefined') {
-          try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
-        }
         return { term, fitAddon };
       }
 
@@ -1543,47 +1632,57 @@
       }
 
       function activateTab(tabId) {
-        if (!tabs.has(tabId)) {
-          return;
-        }
+        if (!tabs.has(tabId)) return;
         activeTabId = tabId;
         for (const tab of tabs.values()) {
           const active = tab.id === tabId;
           tab.button.classList.toggle('active', active);
-          tab.root.classList.toggle('active', active);
+          tab.containerEl.classList.toggle('active', active);
         }
 
         const tab = tabs.get(tabId);
+        // Restore focus to last-focused pane in this tab
+        if (tab.focusedPaneId != null) {
+          setFocusedPane(tab.focusedPaneId);
+        }
         fitAndResizeTab(tab);
-        tab.term.focus();
 
-        // Notify files panel of tab change
-        if (window.filesPanel) window.filesPanel.onTabChanged(tab);
+        if (window.filesPanel) {
+          const pane = panes.get(tab.focusedPaneId);
+          window.filesPanel.onTabChanged(pane || tab);
+        }
       }
 
       async function closeTab(tabId, options = {}) {
         const notifyBackend = options.notifyBackend !== false;
         const closeWindowWhenLast = options.closeWindowWhenLast !== false;
         const tab = tabs.get(tabId);
-        if (!tab) {
-          return;
+        if (!tab) return;
+
+        // Dispose all panes in this tab
+        const paneIds = allPanesInTab(tabId);
+        for (const pid of paneIds) {
+          const pane = panes.get(pid);
+          if (!pane) continue;
+          if (notifyBackend && pane.spawned) {
+            const cmd = pane.type === 'ssh' ? 'ssh_disconnect' : 'close_pty';
+            invoke(cmd, { paneId: pid }).catch(() => {});
+          }
+          if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
+          if (pane.resizeObserver) pane.resizeObserver.disconnect();
+          pane.term.dispose();
+          panes.delete(pid);
         }
 
         tabs.delete(tabId);
-        tab.cleanupMouseBridge();
-        tab.term.dispose();
         tab.button.remove();
-        tab.root.remove();
+        tab.containerEl.remove();
         renumberTabs();
         updateTabBarVisibility();
 
-        if (notifyBackend && tab.spawned) {
-          const cmd = tab.type === 'ssh' ? 'ssh_disconnect' : 'close_pty';
-          invoke(cmd, { tabId }).catch(() => {});
-        }
-
         if (activeTabId === tabId) {
           activeTabId = null;
+          focusedPaneId = null;
           const next = tabs.values().next();
           if (!next.done) {
             activateTab(next.value.id);
@@ -1594,9 +1693,6 @@
           const windowApi = tauri.window;
           if (windowApi && typeof windowApi.getCurrentWindow === 'function') {
             const win = windowApi.getCurrentWindow();
-            // Use destroy() instead of close() — there is nothing left to
-            // confirm and close() can silently fail on Windows when native
-            // decorations are disabled.
             win.destroy().catch((e) => {
               showStatus('Failed to close window: ' + String(e));
             });
@@ -1633,20 +1729,108 @@
         return button._labelSpan ? button._labelSpan.textContent : button.textContent;
       }
 
+      // ---- Tab rename ----
+      function renameActiveTab() {
+        if (activeTabId == null) return;
+        const tab = tabs.get(activeTabId);
+        if (!tab || !tab.button._labelSpan) return;
+        startTabRename(tab);
+      }
+
+      function startTabRename(tab) {
+        const labelSpan = tab.button._labelSpan;
+        const currentText = labelSpan.textContent;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = currentText;
+        input.className = 'tab-rename-input';
+        input.style.cssText = 'width:100%; border:none; outline:none; background:transparent; color:inherit; font:inherit; padding:0; margin:0;';
+
+        labelSpan.textContent = '';
+        labelSpan.appendChild(input);
+        input.focus();
+        input.select();
+
+        function commit() {
+          const newName = input.value.trim();
+          if (input.parentNode) {
+            labelSpan.removeChild(input);
+          }
+          if (newName && newName !== currentText) {
+            labelSpan.textContent = newName;
+            tab.label = newName;
+            tab.hasCustomTitle = true;
+            tab.button.title = newName;
+          } else {
+            labelSpan.textContent = currentText;
+          }
+          // Refocus the terminal
+          const pane = panes.get(tab.focusedPaneId);
+          if (pane) pane.term.focus();
+        }
+
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            labelSpan.textContent = currentText;
+            if (input.parentNode) labelSpan.removeChild(input);
+            const pane = panes.get(tab.focusedPaneId);
+            if (pane) pane.term.focus();
+          }
+          e.stopPropagation();
+        }, true);
+
+        input.addEventListener('blur', () => {
+          // Small delay to allow click handlers to fire first
+          setTimeout(() => {
+            if (input.parentNode) commit();
+          }, 50);
+        });
+      }
+
       async function createTab() {
         const tabId = nextTabId++;
+        const paneId = nextPaneId++;
         const label = 'Tab ' + nextTabLabel++;
 
         const button = makeTabButton(label, () => closeTab(tabId));
         button.classList.add('entering');
 
-        const root = document.createElement('div');
-        root.className = 'terminal-pane';
+        // Create tree root wrapper and pane element
+        const containerEl = document.createElement('div');
+        containerEl.className = 'tab-tree-root';
+
+        const paneEl = document.createElement('div');
+        paneEl.className = 'terminal-pane';
+        paneEl.dataset.paneId = paneId;
+        containerEl.appendChild(paneEl);
 
         tabBarEl.appendChild(button);
-        terminalHostEl.appendChild(root);
+        terminalHostEl.appendChild(containerEl);
 
-        const { term, fitAddon } = initTerminal(root);
+        const { term, fitAddon } = initTerminal(paneEl);
+
+        const pane = {
+          paneId,
+          tabId,
+          type: 'local',
+          connectionId: null,
+          term,
+          fitAddon,
+          root: paneEl,
+          spawned: false,
+          lastCols: 0,
+          lastRows: 0,
+          cleanupMouseBridge: setupTmuxRightClickBridge(term, paneEl),
+          resizeObserver: null,
+          debounceTimer: null,
+        };
+        panes.set(paneId, pane);
+        pane.resizeObserver = window.splitPane.createPaneResizeObserver(pane, fitAndResizePane);
 
         const tab = {
           id: tabId,
@@ -1654,13 +1838,16 @@
           type: 'local',
           hasCustomTitle: false,
           button,
-          root,
-          term,
-          fitAddon,
-          spawned: false,
-          cleanupMouseBridge: setupTmuxRightClickBridge(term, root),
+          containerEl,
+          treeRoot: window.splitTree.makeLeaf(paneId),
+          focusedPaneId: paneId,
         };
         tabs.set(tabId, tab);
+        window.splitPane.setupDividerDrag(
+          containerEl,
+          () => tab.treeRoot,
+          (newTree) => { tab.treeRoot = newTree; }
+        );
         updateTabBarVisibility();
 
         requestAnimationFrame(() => {
@@ -1677,14 +1864,15 @@
           tab.button.title = tabTitle;
         });
         term.onData((data) => {
-          if (!tab.spawned) {
-            return;
-          }
-          const cmd = tab.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
-          invoke(cmd, { tabId, data }).catch((e) => {
+          if (!pane.spawned) return;
+          const cmd = pane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+          invoke(cmd, { paneId, data }).catch((e) => {
             console.error(cmd + ' error:', e);
           });
         });
+
+        // Click-to-focus
+        paneEl.addEventListener('mousedown', () => setFocusedPane(paneId));
 
         activateTab(tabId);
         const dims = fitAddon.proposeDimensions();
@@ -1692,9 +1880,9 @@
         const rows = dims ? dims.rows : 24;
 
         try {
-          await invoke('spawn_shell', { tabId, cols, rows });
-          tab.spawned = true;
-          fitAndResizeTab(tab);
+          await invoke('spawn_shell', { paneId, cols, rows });
+          pane.spawned = true;
+          fitAndResizePane(pane);
         } catch (e) {
           term.writeln('\x1b[31mFailed to spawn shell: ' + e + '\x1b[0m');
           await closeTab(tabId, { notifyBackend: false, closeWindowWhenLast: false });
@@ -1705,31 +1893,59 @@
       async function createSshTab(opts) {
         // opts: { serverId } or { spec, password? }
         const tabId = nextTabId++;
+        const paneId = nextPaneId++;
         const label = opts.spec || 'SSH';
 
         const button = makeTabButton(label, () => closeTab(tabId));
         button.classList.add('entering');
 
-        const root = document.createElement('div');
-        root.className = 'terminal-pane';
+        const containerEl = document.createElement('div');
+        containerEl.className = 'tab-tree-root';
+
+        const paneEl = document.createElement('div');
+        paneEl.className = 'terminal-pane';
+        paneEl.dataset.paneId = paneId;
+        containerEl.appendChild(paneEl);
 
         tabBarEl.appendChild(button);
-        terminalHostEl.appendChild(root);
+        terminalHostEl.appendChild(containerEl);
 
-        const { term, fitAddon } = initTerminal(root);
+        const { term, fitAddon } = initTerminal(paneEl);
+
+        const pane = {
+          paneId,
+          tabId,
+          type: 'ssh',
+          connectionId: null,
+          term,
+          fitAddon,
+          root: paneEl,
+          spawned: false,
+          lastCols: 0,
+          lastRows: 0,
+          cleanupMouseBridge: setupTmuxRightClickBridge(term, paneEl),
+          resizeObserver: null,
+          debounceTimer: null,
+        };
+        panes.set(paneId, pane);
+        pane.resizeObserver = window.splitPane.createPaneResizeObserver(pane, fitAndResizePane);
 
         const tab = {
           id: tabId,
           label,
           type: 'ssh',
+          hasCustomTitle: false,
           button,
-          root,
-          term,
-          fitAddon,
-          spawned: false,
-          cleanupMouseBridge: setupTmuxRightClickBridge(term, root),
+          containerEl,
+          treeRoot: window.splitTree.makeLeaf(paneId),
+          focusedPaneId: paneId,
         };
         tabs.set(tabId, tab);
+        window.splitPane.setupDividerDrag(
+          containerEl,
+          () => tab.treeRoot,
+          (newTree) => { tab.treeRoot = newTree; }
+        );
         updateTabBarVisibility();
 
         requestAnimationFrame(() => {
@@ -1744,11 +1960,14 @@
           tab.button.title = tabTitle;
         });
         term.onData((data) => {
-          if (!tab.spawned) return;
-          invoke('ssh_write', { tabId, data }).catch((e) => {
+          if (!pane.spawned) return;
+          invoke('ssh_write', { paneId, data }).catch((e) => {
             console.error('ssh_write error:', e);
           });
         });
+
+        // Click-to-focus
+        paneEl.addEventListener('mousedown', () => setFocusedPane(paneId));
 
         activateTab(tabId);
         const dims = fitAddon.proposeDimensions();
@@ -1759,11 +1978,11 @@
           const doConnect = async () => {
             if (opts.serverId) {
               await invoke('ssh_connect', {
-                tabId, serverId: opts.serverId, cols, rows, password: opts.password || null,
+                paneId, serverId: opts.serverId, cols, rows, password: opts.password || null,
               });
             } else if (opts.spec) {
               await invoke('ssh_quick_connect', {
-                tabId, spec: opts.spec, cols, rows, password: opts.password || null,
+                paneId, spec: opts.spec, cols, rows, password: opts.password || null,
               });
             }
           };
@@ -1772,7 +1991,6 @@
             await doConnect();
           } catch (e) {
             if (String(e).includes('VAULT_LOCKED') && window.vault) {
-              // Vault is locked — prompt user to unlock, then retry.
               await new Promise((resolve, reject) => {
                 window.vault.ensureUnlocked(() => {
                   doConnect().then(resolve, reject);
@@ -1783,13 +2001,12 @@
             }
           }
 
-          tab.spawned = true;
+          pane.spawned = true;
+          pane.connectionId = 'conn:' + currentWindowLabel + ':' + paneId;
           tab.label = getTabLabel(button) || label;
-          fitAndResizeTab(tab);
-          // Refresh the SSH panel session list
+          fitAndResizePane(pane);
           if (window.sshPanel) window.sshPanel.refreshSessions();
-          // Notify files panel that this SSH tab is now connected
-          if (window.filesPanel) window.filesPanel.onTabChanged(tab);
+          if (window.filesPanel) window.filesPanel.onTabChanged(pane);
         } catch (e) {
           term.writeln('\x1b[31mSSH connection failed: ' + e + '\x1b[0m');
           term.writeln('\x1b[90mPress any key to close this tab.\x1b[0m');
@@ -1797,6 +2014,155 @@
             closeTab(tabId, { notifyBackend: false });
           });
         }
+      }
+
+      // ---- Split pane helpers ----
+
+      function rebuildTreeDOM(tab) {
+        const containerEl = tab.containerEl;
+        // Detach all children without destroying them.
+        while (containerEl.firstChild) {
+          containerEl.removeChild(containerEl.firstChild);
+        }
+        // Re-render from the tree, re-appending existing pane elements.
+        const rendered = window.splitPane.renderTree(tab.treeRoot, (id) => {
+          return panes.get(id).root;
+        });
+        containerEl.appendChild(rendered);
+      }
+
+      function closePane(paneId) {
+        const pane = panes.get(paneId);
+        if (!pane) return;
+
+        const tab = tabs.get(pane.tabId);
+        if (!tab) return;
+
+        // If this is the last pane in the tab, close the tab.
+        if (window.splitTree.leafCount(tab.treeRoot) <= 1) {
+          closeTab(tab.id);
+          return;
+        }
+
+        // Terminate the backend session (only if still running).
+        if (pane.spawned) {
+          if (pane.type === 'ssh') {
+            invoke('ssh_disconnect', { paneId }).catch(() => {});
+          } else {
+            invoke('close_pty', { paneId }).catch(() => {});
+          }
+        }
+
+        // Dispose xterm and observers.
+        if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
+        if (pane.resizeObserver) pane.resizeObserver.disconnect();
+        pane.term.dispose();
+        pane.root.remove();
+        panes.delete(paneId);
+
+        // Remove from tree and simplify.
+        tab.treeRoot = window.splitTree.removeLeaf(tab.treeRoot, paneId);
+
+        // Re-render (preserves existing pane elements).
+        rebuildTreeDOM(tab);
+
+        // Refocus — handle both active and background tab cases.
+        if (focusedPaneId === paneId) {
+          const firstId = window.splitTree.firstLeaf(tab.treeRoot);
+          setFocusedPane(firstId);
+        } else if (tab.focusedPaneId === paneId) {
+          // Background tab had this pane focused — update to a valid pane
+          // so activateTab doesn't restore a stale ID.
+          tab.focusedPaneId = window.splitTree.firstLeaf(tab.treeRoot);
+        }
+      }
+
+      async function splitPane(direction) {
+        const pane = currentPane();
+        if (!pane) return;
+
+        const tab = tabs.get(pane.tabId);
+        if (!tab) return;
+
+        const newPaneId = nextPaneId++;
+
+        // Update the tree data model.
+        tab.treeRoot = window.splitTree.splitLeaf(tab.treeRoot, pane.paneId, newPaneId, direction);
+
+        // Create the new pane's DOM element.
+        const newPaneEl = document.createElement('div');
+        newPaneEl.className = 'terminal-pane';
+        newPaneEl.dataset.paneId = newPaneId;
+
+        const { term, fitAddon } = initTerminal(newPaneEl);
+
+        const newPane = {
+          paneId: newPaneId,
+          tabId: tab.id,
+          type: pane.type,
+          connectionId: pane.connectionId || null,
+          term,
+          fitAddon,
+          root: newPaneEl,
+          spawned: false,
+          lastCols: 0,
+          lastRows: 0,
+          cleanupMouseBridge: setupTmuxRightClickBridge(term, newPaneEl),
+          resizeObserver: null,
+          debounceTimer: null,
+        };
+        panes.set(newPaneId, newPane);
+
+        // Re-render the tree DOM (preserves existing pane elements).
+        rebuildTreeDOM(tab);
+
+        // Set up per-pane ResizeObserver.
+        newPane.resizeObserver = window.splitPane.createPaneResizeObserver(newPane, fitAndResizePane);
+
+        // Click-to-focus on the new pane.
+        newPaneEl.addEventListener('mousedown', () => setFocusedPane(newPaneId));
+
+        // Spawn the new session.
+        const dims = fitAddon.proposeDimensions() || { cols: 80, rows: 24 };
+
+        if (pane.type === 'ssh' && pane.connectionId) {
+          // SSH: open a new channel on the existing connection.
+          try {
+            await invoke('ssh_open_channel', {
+              paneId: newPaneId,
+              connectionId: pane.connectionId,
+              cols: dims.cols,
+              rows: dims.rows,
+            });
+            newPane.spawned = true;
+          } catch (e) {
+            window.toast.error('Failed to open SSH channel: ' + e);
+          }
+        } else {
+          // Local shell.
+          try {
+            await invoke('spawn_shell', {
+              paneId: newPaneId,
+              cols: dims.cols,
+              rows: dims.rows,
+            });
+            newPane.spawned = true;
+          } catch (e) {
+            window.toast.error('Failed to spawn shell: ' + e);
+          }
+        }
+
+        // Wire up input handler.
+        term.onData((data) => {
+          if (!newPane.spawned) return;
+          const cmd = newPane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+          invoke(cmd, { paneId: newPaneId, data }).catch((e) => {
+            console.error(cmd + ' error:', e);
+          });
+        });
+
+        // Focus the new pane.
+        setFocusedPane(newPaneId);
       }
 
       // ---- Files panel init ----
@@ -1828,7 +2194,7 @@
           panelWrapEl: sshPanelWrapEl,
           resizeHandleEl: sshResizeEl,
           fitActiveTab: debouncedFitAndResize,
-          refocusTerminal: () => { const tab = currentTab(); if (tab) tab.term.focus(); },
+          refocusTerminal: () => { const pane = currentPane(); if (pane) pane.term.focus(); },
         });
       }
 
@@ -1881,10 +2247,10 @@
           invoke,
           listen: listenOnCurrentWindow,
           writeToActivePty: (data) => {
-            const tab = currentTab();
-            if (!tab || !tab.spawned) return;
-            const cmd = tab.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
-            invoke(cmd, { tabId: tab.id, data }).catch(() => {});
+            const pane = currentPane();
+            if (!pane || !pane.spawned) return;
+            const cmd = pane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+            invoke(cmd, { paneId: pane.paneId, data }).catch(() => {});
           },
         });
 
@@ -1929,15 +2295,18 @@
 
       // ---- Drag and drop ----
       // Prevent the webview from navigating on file drops.
+      // Use capture phase so we intercept drag events before xterm.js or
+      // child elements can swallow them.
       terminalHostEl.addEventListener('dragover', (e) => {
         e.preventDefault();
-        e.stopPropagation();
         terminalHostEl.classList.add('drag-over');
-      });
+      }, true);
       terminalHostEl.addEventListener('dragleave', (e) => {
-        e.preventDefault();
-        terminalHostEl.classList.remove('drag-over');
-      });
+        // Only remove drag-over when leaving terminalHostEl itself, not its children.
+        if (e.target === terminalHostEl || !terminalHostEl.contains(e.relatedTarget)) {
+          terminalHostEl.classList.remove('drag-over');
+        }
+      }, true);
       terminalHostEl.addEventListener('drop', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1954,7 +2323,7 @@
             writePathsToTerminal(paths);
           }
         }
-      });
+      }, true);
 
       // Tauri drag-drop event (provides real filesystem paths).
       if (currentWindow && typeof currentWindow.onDragDropEvent === 'function') {
@@ -1974,9 +2343,8 @@
       }
 
       function writePathsToTerminal(paths) {
-        const tab = currentTab();
-        if (!tab || !tab.spawned) return;
-        // Shell-escape paths with spaces by quoting them.
+        const pane = currentPane();
+        if (!pane || !pane.spawned) return;
         const escaped = paths.map((p) => {
           if (/[\s"'\\$`!#&|;()<>]/.test(p)) {
             return "'" + p.replace(/'/g, "'\\''") + "'";
@@ -1984,44 +2352,123 @@
           return p;
         });
         const text = escaped.join(' ');
-        const cmd = tab.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
-        invoke(cmd, { tabId: tab.id, data: text }).catch((e) => {
+        const cmd = pane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+        invoke(cmd, { paneId: pane.paneId, data: text }).catch((e) => {
           console.error('drag-drop write error:', e);
         });
       }
 
+      // ---- Terminal context menu ----
+      const termContextMenu = document.getElementById('terminal-context-menu');
+
+      terminalHostEl.addEventListener('contextmenu', (e) => {
+        // Find the pane element this right-click occurred in.
+        const paneEl = e.target.closest('.terminal-pane');
+        if (!paneEl) return;
+        const paneId = parseInt(paneEl.dataset.paneId, 10);
+        const pane = panes.get(paneId);
+        if (!pane) return;
+
+        // If terminal has mouse tracking active (tmux/vim), let the tmux bridge handle it.
+        if (terminalMouseModeIsActive(pane.term)) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Position the menu at cursor.
+        termContextMenu.style.left = e.clientX + 'px';
+        termContextMenu.style.top = e.clientY + 'px';
+        termContextMenu.style.display = 'block';
+
+        // Focus the pane that was right-clicked.
+        setFocusedPane(paneId);
+      });
+
+      // Handle context menu item clicks.
+      termContextMenu.addEventListener('click', (e) => {
+        const btn = e.target.closest('.context-item');
+        if (!btn) return;
+        termContextMenu.style.display = 'none';
+        const action = btn.dataset.action;
+        if (action === 'split-vertical') splitPane('vertical');
+        if (action === 'split-horizontal') splitPane('horizontal');
+      });
+
+      // ---- Tab context menu (right-click on tab button) ----
+      const tabContextMenu = document.getElementById('tab-context-menu');
+      let tabContextMenuTabId = null;
+
+      tabBarEl.addEventListener('contextmenu', (e) => {
+        const btn = e.target.closest('.tab-btn');
+        if (!btn) return;
+        e.preventDefault();
+        // Find the tab ID for this button.
+        for (const [id, tab] of tabs) {
+          if (tab.button === btn) {
+            tabContextMenuTabId = id;
+            break;
+          }
+        }
+        tabContextMenu.style.left = e.clientX + 'px';
+        tabContextMenu.style.top = e.clientY + 'px';
+        tabContextMenu.style.display = 'block';
+      });
+
+      tabContextMenu.addEventListener('click', (e) => {
+        const btn = e.target.closest('.context-item');
+        if (!btn) return;
+        tabContextMenu.style.display = 'none';
+        const action = btn.dataset.action;
+        if (action === 'rename-tab' && tabContextMenuTabId != null) {
+          const tab = tabs.get(tabContextMenuTabId);
+          if (tab) startTabRename(tab);
+        }
+        if (action === 'close-tab' && tabContextMenuTabId != null) {
+          closeTab(tabContextMenuTabId);
+        }
+        tabContextMenuTabId = null;
+      });
+
+      // Dismiss context menus on click outside or Escape.
+      document.addEventListener('mousedown', (e) => {
+        if (termContextMenu.style.display !== 'none' && !termContextMenu.contains(e.target)) {
+          termContextMenu.style.display = 'none';
+        }
+        if (tabContextMenu.style.display !== 'none' && !tabContextMenu.contains(e.target)) {
+          tabContextMenu.style.display = 'none';
+        }
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          if (termContextMenu.style.display !== 'none') termContextMenu.style.display = 'none';
+          if (tabContextMenu.style.display !== 'none') tabContextMenu.style.display = 'none';
+        }
+      }, true);
+
       await listenOnCurrentWindow('pty-output', (event) => {
         const payload = event.payload || {};
         const windowLabel = payload.window_label;
-        const tabId = payload.tab_id;
+        const paneId = payload.pane_id;
         const data = payload.data;
-        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
-          return;
-        }
-        if (typeof tabId !== 'number' || typeof data !== 'string') {
-          return;
-        }
-        const tab = tabs.get(tabId);
-        if (tab) {
-          tab.term.write(data);
-        }
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) return;
+        if (typeof paneId !== 'number' || typeof data !== 'string') return;
+        const pane = panes.get(paneId);
+        if (pane) pane.term.write(data);
       });
 
       await listenOnCurrentWindow('pty-exit', (event) => {
         const payload = event.payload || {};
         const windowLabel = payload.window_label;
-        const tabId = payload.tab_id;
-        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
-          return;
-        }
-        if (typeof tabId !== 'number') {
-          return;
-        }
-        closeTab(tabId, { notifyBackend: false }).then(() => {
-          if (window.sshPanel) window.sshPanel.refreshSessions();
-        }).catch((e) => {
-          console.error('closeTab after pty-exit failed:', e);
-        });
+        const paneId = payload.pane_id;
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) return;
+        if (typeof paneId !== 'number') return;
+        const pane = panes.get(paneId);
+        if (!pane) return;
+        // Mark as not spawned so closePane skips the redundant backend disconnect
+        // (backend already exited — that's why we received pty-exit).
+        pane.spawned = false;
+        closePane(paneId);
+        if (window.sshPanel) window.sshPanel.refreshSessions();
       });
 
       // Shared menu action handler — used by both the native menu event
@@ -2109,6 +2556,22 @@
         if (action === 'zoom-reset') {
           currentZoom = 1.0;
           invoke('set_zoom_level', { scaleFactor: 1.0 }).catch(() => {});
+          return;
+        }
+        if (action === 'split-vertical') {
+          splitPane('vertical').catch((e) => showStatus('Split failed: ' + String(e)));
+          return;
+        }
+        if (action === 'split-horizontal') {
+          splitPane('horizontal').catch((e) => showStatus('Split failed: ' + String(e)));
+          return;
+        }
+        if (action === 'close-pane' && focusedPaneId != null) {
+          closePane(focusedPaneId);
+          return;
+        }
+        if (action === 'rename-tab') {
+          renameActiveTab();
           return;
         }
         // Toggle bottom panel.
@@ -2364,9 +2827,9 @@
         }
 
         // No overlays open — refocus the active terminal.
-        const tab = currentTab();
-        if (tab) {
-          tab.term.focus();
+        const pane = currentPane();
+        if (pane) {
+          pane.term.focus();
         }
       }, true); // capture phase
 
@@ -2381,6 +2844,28 @@
           }
         }
       });
+
+      // Pane navigation: Cmd+Alt+Arrow (Mac) / Ctrl+Alt+Arrow (other) to move focus between split panes.
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.altKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+          e.preventDefault();
+          e.stopPropagation();
+          const dir = e.key.replace('Arrow', '').toLowerCase();
+          const tab = tabs.get(activeTabId);
+          if (!tab || focusedPaneId == null) return;
+          const adj = window.splitPane.findAdjacentPane(focusedPaneId, dir, tab.containerEl);
+          if (adj != null) setFocusedPane(adj);
+        }
+      }, true); // capture phase
+
+      // Rename tab: F2 (capture phase so it fires before xterm.js consumes it).
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'F2' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          renameActiveTab();
+        }
+      }, true);
 
       // Re-fetch theme when settings are applied.
       listenOnCurrentWindow('config-changed', async () => {
@@ -2419,8 +2904,8 @@
             brightCyan: tc.bright_cyan, brightWhite: tc.bright_white,
           };
           theme = newTheme;
-          for (const tab of tabs.values()) {
-            tab.term.options.theme = newTheme;
+          for (const pane of panes.values()) {
+            pane.term.options.theme = newTheme;
           }
           // Re-apply UI chrome font sizes.
           const appCfg = await invoke('get_app_config');
@@ -2446,11 +2931,6 @@
         }
       });
 
-      const resizeObserver = new ResizeObserver(() => {
-        debouncedFitAndResize();
-      });
-      resizeObserver.observe(terminalHostEl);
-
       // Preload the bundled Nerd Font so the canvas renderer can use it for
       // glyph fallback.  CSS @font-face is lazy — without this the browser
       // never downloads the font because no DOM text references it.
@@ -2468,5 +2948,13 @@
       await invoke('app_ready');
     })();
   </script>
+  <div id="terminal-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+    <button class="context-item" data-action="split-vertical" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Vertically</button>
+    <button class="context-item" data-action="split-horizontal" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Horizontally</button>
+  </div>
+  <div id="tab-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+    <button class="context-item" data-action="rename-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Rename Tab</button>
+    <button class="context-item" data-action="close-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Close Tab</button>
+  </div>
 </body>
 </html>

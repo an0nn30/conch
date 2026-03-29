@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_updater::UpdaterExt;
+use ts_rs::TS;
 
 // ---------------------------------------------------------------------------
 // Managed state
@@ -29,16 +30,20 @@ impl PendingUpdate {
 // ---------------------------------------------------------------------------
 
 /// Lightweight summary of an available update, safe to send to the frontend.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub(crate) struct UpdateInfo {
     pub version: String,
     pub body: Option<String>,
 }
 
 /// Progress payload emitted as `update-progress` events during download.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub(crate) struct DownloadProgress {
+    #[ts(as = "f64")]
     pub downloaded: u64,
+    #[ts(as = "Option<f64>")]
     pub total: Option<u64>,
 }
 
@@ -83,9 +88,7 @@ pub(crate) async fn check_for_update<R: Runtime>(
 /// frontend can show a progress indicator. Does **not** restart the app —
 /// call `restart_app` separately after informing the user.
 #[tauri::command]
-pub(crate) async fn install_update<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<(), String> {
+pub(crate) async fn install_update<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let update = {
         let state = app.state::<PendingUpdate>();
         state.0.lock().take()

@@ -28,6 +28,7 @@
           { type: 'separator' },
           { id: 'settings', label: 'Settings\u2026', shortcut: `${ctrl}+,` },
           { type: 'separator' },
+          { id: 'rename-tab', label: 'Rename Tab', shortcut: shortcuts.rename_tab || 'F2' },
           { id: 'close-tab', label: 'Close Tab', shortcut: `${ctrl}+W` },
           { id: 'close-window', label: 'Close Window' },
         ]
@@ -45,6 +46,10 @@
           { id: 'toggle-left-panel', label: 'Toggle File Explorer', shortcut: shortcuts.toggle_left_panel || '' },
           { id: 'toggle-right-panel', label: 'Toggle Sessions Panel', shortcut: shortcuts.toggle_right_panel || '' },
           { id: 'toggle-bottom-panel', label: 'Toggle Bottom Panel', shortcut: shortcuts.toggle_bottom_panel || '' },
+          { type: 'separator' },
+          { id: 'split-vertical', label: 'Split Pane Vertically', shortcut: shortcuts.split_vertical || `${ctrl}+D` },
+          { id: 'split-horizontal', label: 'Split Pane Horizontally', shortcut: shortcuts.split_horizontal || `${ctrl}+Shift+D` },
+          { id: 'close-pane', label: 'Close Pane', shortcut: shortcuts.close_pane || `${ctrl}+Shift+W` },
           { type: 'separator' },
           { id: 'focus-sessions', label: 'Toggle & Focus Sessions', shortcut: `${ctrl}+/` },
           { id: 'zen-mode', label: 'Zen Mode', shortcut: shortcuts.zen_mode || '' },

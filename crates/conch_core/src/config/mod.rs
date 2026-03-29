@@ -19,10 +19,38 @@ pub use terminal::*;
 pub use window::*;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Atomic write utility
+// ---------------------------------------------------------------------------
+
+/// Write data to a file atomically: write to a temporary file first,
+/// then rename to the target path. This prevents corruption from
+/// partial writes due to crashes or power loss.
+///
+/// If the target file already exists, its permissions are copied to the
+/// temporary file before the rename so that restricted modes (e.g. 0600)
+/// are preserved.
+pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, data)?;
+
+    // Preserve permissions from the existing file if present.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp, meta.permissions());
+        }
+    }
+
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // UserConfig — ~/.config/conch/config.toml
@@ -95,8 +123,12 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
-pub fn config_path() -> PathBuf { config_dir().join("config.toml") }
-fn state_path() -> PathBuf { config_dir().join("state.toml") }
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+fn state_path() -> PathBuf {
+    config_dir().join("state.toml")
+}
 
 // ---------------------------------------------------------------------------
 // Load / Save — UserConfig
@@ -108,18 +140,21 @@ pub fn load_user_config() -> Result<UserConfig> {
         log::info!("No config.toml at {}, using defaults", path.display());
         return Ok(UserConfig::default());
     }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let config: UserConfig = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let config: UserConfig =
+        toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(config)
 }
 
 pub fn save_user_config(config: &UserConfig) -> Result<()> {
     let dir = config_dir();
-    if !dir.exists() { fs::create_dir_all(&dir)?; }
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
     let contents = toml::to_string_pretty(config).context("Failed to serialize config")?;
-    fs::write(config_path(), contents)?;
+    atomic_write(&config_path(), contents.as_bytes())
+        .context("Failed to write config.toml atomically")?;
     Ok(())
 }
 
@@ -133,18 +168,21 @@ pub fn load_persistent_state() -> Result<PersistentState> {
         log::info!("No state.toml at {}, using defaults", path.display());
         return Ok(PersistentState::default());
     }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let state: PersistentState = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let state: PersistentState =
+        toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(state)
 }
 
 pub fn save_persistent_state(state: &PersistentState) -> Result<()> {
     let dir = config_dir();
-    if !dir.exists() { fs::create_dir_all(&dir)?; }
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
     let contents = toml::to_string_pretty(state).context("Failed to serialize state")?;
-    fs::write(state_path(), contents)?;
+    atomic_write(&state_path(), contents.as_bytes())
+        .context("Failed to write state.toml atomically")?;
     Ok(())
 }
 
@@ -178,7 +216,10 @@ mod tests {
     #[test]
     fn default_font_when_neither_set() {
         let cfg = UserConfig::default();
-        assert_eq!(cfg.resolved_terminal_font().size, FontConfig::default().size);
+        assert_eq!(
+            cfg.resolved_terminal_font().size,
+            FontConfig::default().size
+        );
     }
 
     #[test]
@@ -191,6 +232,44 @@ mod tests {
             !toml_str.contains("\n[font]\n"),
             "Legacy [font] section should not appear in serialized output, got:\n{toml_str}"
         );
+    }
+
+    #[test]
+    fn atomic_write_creates_file_with_correct_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        atomic_write(&path, b"hello world").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        atomic_write(&path, b"{\"key\": \"value\"}").unwrap();
+        let tmp = path.with_extension("tmp");
+        assert!(
+            !tmp.exists(),
+            ".tmp file should not remain after successful write"
+        );
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        std::fs::write(&path, "old content").unwrap();
+        atomic_write(&path, b"new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+    }
+
+    #[test]
+    fn atomic_write_empty_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.toml");
+        atomic_write(&path, b"").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert!(!path.with_extension("tmp").exists());
     }
 
     #[test]

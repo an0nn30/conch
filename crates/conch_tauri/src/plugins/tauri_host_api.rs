@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use conch_plugin::HostApi;
 use conch_plugin::bus::PluginBus;
 use conch_plugin_sdk::PanelLocation;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -23,8 +23,8 @@ pub(crate) struct TauriHostApi {
     pub name: String,
     pub app_handle: tauri::AppHandle,
     pub bus: std::sync::Arc<PluginBus>,
-    pub panels: std::sync::Arc<Mutex<HashMap<u64, PanelInfo>>>,
-    pub menu_items: std::sync::Arc<Mutex<Vec<PluginMenuItem>>>,
+    pub panels: std::sync::Arc<RwLock<HashMap<u64, PanelInfo>>>,
+    pub menu_items: std::sync::Arc<RwLock<Vec<PluginMenuItem>>>,
     pub pending_dialogs: std::sync::Arc<Mutex<PendingDialogs>>,
 }
 
@@ -81,35 +81,44 @@ impl HostApi for TauriHostApi {
             _ => "right",
         };
 
-        self.panels.lock().insert(handle, PanelInfo {
-            plugin_name: self.name.clone(),
-            panel_name: name.to_string(),
-            location: loc_str.to_string(),
-            icon: icon.map(String::from),
-            widgets_json: "[]".to_string(),
-        });
-
-        let _ = self.app_handle.emit("plugin-panel-registered", PluginPanelRegistered {
+        self.panels.write().insert(
             handle,
-            plugin: self.name.clone(),
-            name: name.to_string(),
-            location: loc_str.to_string(),
-            icon: icon.map(String::from),
-        });
+            PanelInfo {
+                plugin_name: self.name.clone(),
+                panel_name: name.to_string(),
+                location: loc_str.to_string(),
+                icon: icon.map(String::from),
+                widgets_json: "[]".to_string(),
+            },
+        );
+
+        let _ = self.app_handle.emit(
+            "plugin-panel-registered",
+            PluginPanelRegistered {
+                handle,
+                plugin: self.name.clone(),
+                name: name.to_string(),
+                location: loc_str.to_string(),
+                icon: icon.map(String::from),
+            },
+        );
 
         handle
     }
 
     fn set_widgets(&self, handle: u64, widgets_json: &str) {
-        if let Some(panel) = self.panels.lock().get_mut(&handle) {
+        if let Some(panel) = self.panels.write().get_mut(&handle) {
             panel.widgets_json = widgets_json.to_string();
         }
 
-        let _ = self.app_handle.emit("plugin-widgets-updated", PluginWidgetsUpdated {
-            handle,
-            plugin: self.name.clone(),
-            widgets_json: widgets_json.to_string(),
-        });
+        let _ = self.app_handle.emit(
+            "plugin-widgets-updated",
+            PluginWidgetsUpdated {
+                handle,
+                plugin: self.name.clone(),
+                widgets_json: widgets_json.to_string(),
+            },
+        );
     }
 
     fn log(&self, level: u8, msg: &str) {
@@ -135,19 +144,25 @@ impl HostApi for TauriHostApi {
     }
 
     fn notify(&self, json: &str) {
-        let _ = self.app_handle.emit("plugin-notification", PluginNotification {
-            plugin: self.name.clone(),
-            json: json.to_string(),
-        });
+        let _ = self.app_handle.emit(
+            "plugin-notification",
+            PluginNotification {
+                plugin: self.name.clone(),
+                json: json.to_string(),
+            },
+        );
     }
 
     fn set_status(&self, text: Option<&str>, level: u8, progress: f32) {
-        let _ = self.app_handle.emit("plugin-status", PluginStatusUpdate {
-            plugin: self.name.clone(),
-            text: text.map(String::from),
-            level,
-            progress,
-        });
+        let _ = self.app_handle.emit(
+            "plugin-status",
+            PluginStatusUpdate {
+                plugin: self.name.clone(),
+                text: text.map(String::from),
+                level,
+                progress,
+            },
+        );
     }
 
     fn publish_event(&self, event_type: &str, data_json: &str) {
@@ -164,17 +179,21 @@ impl HostApi for TauriHostApi {
         let args: serde_json::Value =
             serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
         match self.bus.query_blocking(target, method, args, &self.name) {
-            Ok(resp) => {
-                match resp.result {
-                    Ok(val) => Some(serde_json::to_string(&val).unwrap_or_else(|_| "null".into())),
-                    Err(e) => {
-                        log::warn!("[plugin:{}] query_plugin({target}, {method}) error: {e}", self.name);
-                        None
-                    }
+            Ok(resp) => match resp.result {
+                Ok(val) => Some(serde_json::to_string(&val).unwrap_or_else(|_| "null".into())),
+                Err(e) => {
+                    log::warn!(
+                        "[plugin:{}] query_plugin({target}, {method}) error: {e}",
+                        self.name
+                    );
+                    None
                 }
-            }
+            },
             Err(e) => {
-                log::warn!("[plugin:{}] query_plugin({target}, {method}) failed: {e}", self.name);
+                log::warn!(
+                    "[plugin:{}] query_plugin({target}, {method}) failed: {e}",
+                    self.name
+                );
                 None
             }
         }
@@ -198,7 +217,12 @@ impl HostApi for TauriHostApi {
             .join(&self.name);
         let _ = fs::create_dir_all(&dir);
         let path = dir.join(format!("{key}.json"));
-        let _ = fs::write(&path, value);
+        if let Err(e) = conch_core::config::atomic_write(&path, value.as_bytes()) {
+            log::error!(
+                "[plugin:{}] Failed to save config key '{key}' atomically: {e}",
+                self.name
+            );
+        }
     }
 
     fn clipboard_set(&self, text: &str) {
@@ -224,19 +248,16 @@ impl HostApi for TauriHostApi {
 
     fn get_theme(&self) -> Option<String> {
         // Return a basic theme descriptor. Can be expanded later.
-        Some(serde_json::json!({
-            "dark_mode": true,
-            "name": "dracula",
-        }).to_string())
+        Some(
+            serde_json::json!({
+                "dark_mode": true,
+                "name": "dracula",
+            })
+            .to_string(),
+        )
     }
 
-    fn register_menu_item(
-        &self,
-        menu: &str,
-        label: &str,
-        action: &str,
-        keybind: Option<&str>,
-    ) {
+    fn register_menu_item(&self, menu: &str, label: &str, action: &str, keybind: Option<&str>) {
         let item = PluginMenuItem {
             plugin: self.name.clone(),
             menu: menu.to_string(),
@@ -244,70 +265,96 @@ impl HostApi for TauriHostApi {
             action: action.to_string(),
             keybind: keybind.map(String::from),
         };
-        self.menu_items.lock().push(item.clone());
+        self.menu_items.write().push(item.clone());
 
         // Also emit to frontend for immediate update.
         let _ = self.app_handle.emit("plugin-menu-item", &item);
     }
 
     fn show_form(&self, json: &str) -> Option<String> {
-        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let prompt_id = format!("{}\0{}", self.name, uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_dialogs.lock().forms.insert(prompt_id.clone(), tx);
-        let _ = self.app_handle.emit("plugin-form-dialog", serde_json::json!({
-            "prompt_id": prompt_id,
-            "json": json,
-        }));
+        self.pending_dialogs
+            .lock()
+            .forms
+            .insert(prompt_id.clone(), tx);
+        let _ = self.app_handle.emit(
+            "plugin-form-dialog",
+            serde_json::json!({
+                "prompt_id": prompt_id,
+                "json": json,
+            }),
+        );
         // Block the plugin thread until the frontend responds.
         rx.blocking_recv().unwrap_or(None)
     }
 
     fn show_confirm(&self, msg: &str) -> bool {
-        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let prompt_id = format!("{}\0{}", self.name, uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_dialogs.lock().confirms.insert(prompt_id.clone(), tx);
-        let _ = self.app_handle.emit("plugin-confirm-dialog", serde_json::json!({
-            "prompt_id": prompt_id,
-            "message": msg,
-        }));
+        self.pending_dialogs
+            .lock()
+            .confirms
+            .insert(prompt_id.clone(), tx);
+        let _ = self.app_handle.emit(
+            "plugin-confirm-dialog",
+            serde_json::json!({
+                "prompt_id": prompt_id,
+                "message": msg,
+            }),
+        );
         rx.blocking_recv().unwrap_or(false)
     }
 
     fn show_prompt(&self, msg: &str, default_value: &str) -> Option<String> {
-        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let prompt_id = format!("{}\0{}", self.name, uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_dialogs.lock().prompts.insert(prompt_id.clone(), tx);
-        let _ = self.app_handle.emit("plugin-prompt-dialog", serde_json::json!({
-            "prompt_id": prompt_id,
-            "message": msg,
-            "default_value": default_value,
-        }));
+        self.pending_dialogs
+            .lock()
+            .prompts
+            .insert(prompt_id.clone(), tx);
+        let _ = self.app_handle.emit(
+            "plugin-prompt-dialog",
+            serde_json::json!({
+                "prompt_id": prompt_id,
+                "message": msg,
+                "default_value": default_value,
+            }),
+        );
         rx.blocking_recv().unwrap_or(None)
     }
 
     fn show_alert(&self, title: &str, msg: &str) {
         // Use the toast notification system.
-        let _ = self.app_handle.emit("plugin-notification", PluginNotification {
-            plugin: self.name.clone(),
-            json: serde_json::json!({
-                "title": title,
-                "body": msg,
-                "level": "info",
-                "duration_ms": 4000,
-            }).to_string(),
-        });
+        let _ = self.app_handle.emit(
+            "plugin-notification",
+            PluginNotification {
+                plugin: self.name.clone(),
+                json: serde_json::json!({
+                    "title": title,
+                    "body": msg,
+                    "level": "info",
+                    "duration_ms": 4000,
+                })
+                .to_string(),
+            },
+        );
     }
 
     fn show_error(&self, title: &str, msg: &str) {
-        let _ = self.app_handle.emit("plugin-notification", PluginNotification {
-            plugin: self.name.clone(),
-            json: serde_json::json!({
-                "title": title,
-                "body": msg,
-                "level": "error",
-                "duration_ms": 6000,
-            }).to_string(),
-        });
+        let _ = self.app_handle.emit(
+            "plugin-notification",
+            PluginNotification {
+                plugin: self.name.clone(),
+                json: serde_json::json!({
+                    "title": title,
+                    "body": msg,
+                    "level": "error",
+                    "duration_ms": 6000,
+                })
+                .to_string(),
+            },
+        );
     }
 
     fn show_context_menu(&self, _json: &str) -> Option<String> {
@@ -321,9 +368,12 @@ impl HostApi for TauriHostApi {
     }
 
     fn new_tab(&self, command: Option<&str>, _plain: bool) {
-        let _ = self.app_handle.emit("plugin-new-tab", serde_json::json!({
-            "command": command,
-        }));
+        let _ = self.app_handle.emit(
+            "plugin-new-tab",
+            serde_json::json!({
+                "command": command,
+            }),
+        );
     }
 
     fn open_session(&self, _meta_json: &str) -> u64 {
@@ -333,7 +383,13 @@ impl HostApi for TauriHostApi {
 
     fn close_session(&self, _handle: u64) {}
     fn set_session_status(&self, _handle: u64, _status: u8, _detail: Option<&str>) {}
-    fn session_prompt(&self, _handle: u64, _prompt_type: u8, _msg: &str, _detail: Option<&str>) -> Option<String> {
+    fn session_prompt(
+        &self,
+        _handle: u64,
+        _prompt_type: u8,
+        _msg: &str,
+        _detail: Option<&str>,
+    ) -> Option<String> {
         None
     }
 }

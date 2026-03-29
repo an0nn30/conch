@@ -9,8 +9,8 @@ use jni::sys::{jboolean, jfloat, jint, jobject};
 use jni::{InitArgsBuilder, JNIEnv, JavaVM, NativeMethod};
 use tokio::sync::mpsc;
 
-use crate::bus::{PluginBus, PluginMail, QueryResponse};
 use crate::HostApi;
+use crate::bus::{PluginBus, PluginMail, QueryResponse};
 
 // Types previously in `native/` — inlined here since native plugins were removed.
 
@@ -93,8 +93,8 @@ impl JavaPluginManager {
 
     /// Lazily create the JVM with the embedded SDK JAR on the classpath.
     fn ensure_jvm(&mut self) -> Result<&JavaVM, LoadError> {
-        if self.jvm.is_some() {
-            return Ok(self.jvm.as_ref().unwrap());
+        if let Some(ref jvm) = self.jvm {
+            return Ok(jvm);
         }
 
         // Write the embedded SDK JAR to a temp file.
@@ -108,16 +108,22 @@ impl JavaPluginManager {
         tmpfile.flush().map_err(LoadError::Io)?;
 
         let classpath = format!("-Djava.class.path={}", tmpfile.path().display());
-        log::info!("jvm: starting JVM with embedded SDK JAR ({} bytes) at {}", SDK_JAR_BYTES.len(), tmpfile.path().display());
+        log::info!(
+            "jvm: starting JVM with embedded SDK JAR ({} bytes) at {}",
+            SDK_JAR_BYTES.len(),
+            tmpfile.path().display()
+        );
 
         let jvm_args = InitArgsBuilder::new()
             .version(jni::JNIVersion::V8)
             .option(&classpath)
             .build()
-            .map_err(|e| LoadError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("JVM init args: {e}"),
-            )))?;
+            .map_err(|e| {
+                LoadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("JVM init args: {e}"),
+                ))
+            })?;
 
         let jvm = JavaVM::new(jvm_args).map_err(|e| {
             LoadError::Io(std::io::Error::new(
@@ -140,7 +146,12 @@ impl JavaPluginManager {
         log::info!("jvm: JVM started successfully");
         self._sdk_jar_tempfile = Some(tmpfile);
         self.jvm = Some(jvm);
-        Ok(self.jvm.as_ref().unwrap())
+        self.jvm.as_ref().ok_or_else(|| {
+            LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "JVM initialization failed unexpectedly",
+            ))
+        })
     }
 
     /// Scan a directory for `.jar` files and probe their metadata.
@@ -156,13 +167,13 @@ impl JavaPluginManager {
             if path.extension().and_then(|e| e.to_str()) != Some("jar") {
                 continue;
             }
-            eprintln!("[jvm] probing JAR: {}", path.display());
+            log::debug!("[jvm] probing JAR: {}", path.display());
             match self.probe_jar_metadata(&path) {
                 Ok(meta) => {
-                    eprintln!("[jvm] found plugin: {} v{}", meta.name, meta.version);
+                    log::debug!("[jvm] found plugin: {} v{}", meta.name, meta.version);
                     found.push((path, meta));
                 }
-                Err(e) => eprintln!("[jvm] FAILED to probe {}: {e}", path.display()),
+                Err(e) => log::warn!("[jvm] FAILED to probe {}: {e}", path.display()),
             }
         }
         found
@@ -179,7 +190,10 @@ impl JavaPluginManager {
 
         let jvm = self.ensure_jvm()?;
         let mut env = jvm.attach_current_thread().map_err(|e| {
-            LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("JNI attach: {e}")))
+            LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("JNI attach: {e}"),
+            ))
         })?;
 
         // Clear any pending exception from a previous probe.
@@ -202,19 +216,20 @@ impl JavaPluginManager {
         };
 
         // Call getInfo().
-        let info_obj = match env.call_method(&plugin_obj, "getInfo", "()Lconch/plugin/PluginInfo;", &[]) {
-            Ok(v) => match v.l() {
-                Ok(o) => o,
+        let info_obj =
+            match env.call_method(&plugin_obj, "getInfo", "()Lconch/plugin/PluginInfo;", &[]) {
+                Ok(v) => match v.l() {
+                    Ok(o) => o,
+                    Err(e) => {
+                        describe_java_exception(&mut env);
+                        return Err(jni_err(format!("getInfo obj: {e}")));
+                    }
+                },
                 Err(e) => {
                     describe_java_exception(&mut env);
-                    return Err(jni_err(format!("getInfo obj: {e}")));
+                    return Err(jni_err(format!("getInfo: {e}")));
                 }
-            },
-            Err(e) => {
-                describe_java_exception(&mut env);
-                return Err(jni_err(format!("getInfo: {e}")));
-            }
-        };
+            };
 
         let meta = read_plugin_info(&mut env, &info_obj)?;
         Ok(meta)
@@ -231,23 +246,39 @@ impl JavaPluginManager {
         }
 
         self.ensure_jvm()?;
-        let jvm = self.jvm.as_ref().unwrap();
+        let jvm = self.jvm.as_ref().ok_or_else(|| {
+            LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "JVM not available after ensure_jvm",
+            ))
+        })?;
 
         // Create the plugin object on this thread, convert to GlobalRef for the plugin thread.
         let plugin_global = {
             let mut env = jvm.attach_current_thread().map_err(|e| {
-                LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("JNI attach: {e}")))
+                LoadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("JNI attach: {e}"),
+                ))
             })?;
             let loader = create_url_classloader(&mut env, jar_path)?;
             let plugin_obj = instantiate_plugin(&mut env, &loader, &class_name)?;
             env.new_global_ref(&plugin_obj).map_err(|e| {
-                LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("global ref: {e}")))
+                LoadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("global ref: {e}"),
+                ))
             })?
         };
 
         // Register on the bus.
         let mailbox_rx = self.bus.register_plugin(&name);
-        let sender = self.bus.sender_for(&name).unwrap();
+        let sender = self.bus.sender_for(&name).ok_or_else(|| {
+            LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("bus sender not found for plugin '{name}'"),
+            ))
+        })?;
 
         let jvm_ptr = jvm as *const JavaVM as usize;
         let thread_name = name.clone();
@@ -258,7 +289,13 @@ impl JavaPluginManager {
             .name(format!("plugin:{thread_name}"))
             .spawn(move || {
                 let jvm = unsafe { &*(jvm_ptr as *const JavaVM) };
-                java_plugin_thread(jvm, plugin_global, mailbox_rx, thread_plugin_name, &thread_meta);
+                java_plugin_thread(
+                    jvm,
+                    plugin_global,
+                    mailbox_rx,
+                    thread_plugin_name,
+                    &thread_meta,
+                );
             })
             .map_err(LoadError::Io)?;
 
@@ -344,7 +381,10 @@ fn java_plugin_thread(
     if meta.plugin_type == conch_plugin_sdk::PluginType::Panel {
         if let Some(api) = TRAIT_HOST_API.get() {
             api.register_panel(meta.panel_location, &meta.name, None);
-            log::info!("jvm [{plugin_name}]: registered panel at {:?}", meta.panel_location);
+            log::info!(
+                "jvm [{plugin_name}]: registered panel at {:?}",
+                meta.panel_location
+            );
         }
     }
 
@@ -425,7 +465,12 @@ fn call_on_event(env: &mut JNIEnv, plugin: &GlobalRef, json: &str, plugin_name: 
             return;
         }
     };
-    if let Err(e) = env.call_method(plugin, "onEvent", "(Ljava/lang/String;)V", &[JValue::Object(&jstr)]) {
+    if let Err(e) = env.call_method(
+        plugin,
+        "onEvent",
+        "(Ljava/lang/String;)V",
+        &[JValue::Object(&jstr)],
+    ) {
         log::warn!("jvm [{plugin_name}]: onEvent failed: {e}");
         describe_java_exception(env);
     }
@@ -437,20 +482,22 @@ fn call_on_event(env: &mut JNIEnv, plugin: &GlobalRef, json: &str, plugin_name: 
 
 /// Read `Plugin-Class` from a JAR's META-INF/MANIFEST.MF.
 fn read_plugin_class_from_jar(jar_path: &Path) -> Result<String, LoadError> {
-    let file = std::fs::File::open(jar_path)
-        .map_err(|e| LoadError::Io(e))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| LoadError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())))?;
+    let file = std::fs::File::open(jar_path).map_err(|e| LoadError::Io(e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+        LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            e.to_string(),
+        ))
+    })?;
 
-    let manifest = archive
-        .by_name("META-INF/MANIFEST.MF")
-        .map_err(|_| LoadError::Io(std::io::Error::new(
+    let manifest = archive.by_name("META-INF/MANIFEST.MF").map_err(|_| {
+        LoadError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "JAR missing META-INF/MANIFEST.MF",
-        )))?;
+        ))
+    })?;
 
-    let content = std::io::read_to_string(manifest)
-        .map_err(|e| LoadError::Io(e))?;
+    let content = std::io::read_to_string(manifest).map_err(|e| LoadError::Io(e))?;
 
     for line in content.lines() {
         if let Some(class) = line.strip_prefix("Plugin-Class:") {
@@ -475,7 +522,11 @@ fn create_url_classloader<'a>(
     // new java.net.URL(uriStr)
     let url_str = env.new_string(&uri_str).map_err(jni_err)?;
     let url = env
-        .new_object("java/net/URL", "(Ljava/lang/String;)V", &[JValue::Object(&url_str)])
+        .new_object(
+            "java/net/URL",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&url_str)],
+        )
         .map_err(jni_err)?;
 
     // Create URL[] { url }
@@ -602,7 +653,8 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
         },
         NativeMethod {
             name: "registerMenuItemWithKeybind".into(),
-            sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V".into(),
+            sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"
+                .into(),
             fn_ptr: native_host_register_menu_item_keybind as *mut std::ffi::c_void,
         },
         NativeMethod {
@@ -682,7 +734,8 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
         },
     ];
 
-    env.register_native_methods(class, methods).map_err(jni_err)?;
+    env.register_native_methods(class, methods)
+        .map_err(jni_err)?;
     log::info!("jvm: registered HostApi native methods");
     Ok(())
 }
@@ -694,43 +747,75 @@ fn get_api() -> Option<&'static Arc<dyn HostApi>> {
 
 /// Helper to extract a Java string, returning None on failure.
 fn jstr(env: &mut JNIEnv, s: &JString) -> Option<String> {
-    env.get_string(s).ok().map(|s| s.to_string_lossy().into_owned())
+    env.get_string(s)
+        .ok()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
 /// JNI implementation of `HostApi.log(int level, String message)`.
 extern "system" fn native_host_log(mut env: JNIEnv, _class: JClass, level: jint, message: JString) {
     let Some(api) = get_api() else { return };
-    let Some(msg) = jstr(&mut env, &message) else { return };
+    let Some(msg) = jstr(&mut env, &message) else {
+        return;
+    };
     api.log(level as u8, &msg);
 }
 
 extern "system" fn native_host_register_menu_item(
-    mut env: JNIEnv, _class: JClass, menu: JString, label: JString, action: JString,
+    mut env: JNIEnv,
+    _class: JClass,
+    menu: JString,
+    label: JString,
+    action: JString,
 ) {
     let Some(api) = get_api() else { return };
-    let Some(m) = jstr(&mut env, &menu) else { return };
-    let Some(l) = jstr(&mut env, &label) else { return };
-    let Some(a) = jstr(&mut env, &action) else { return };
+    let Some(m) = jstr(&mut env, &menu) else {
+        return;
+    };
+    let Some(l) = jstr(&mut env, &label) else {
+        return;
+    };
+    let Some(a) = jstr(&mut env, &action) else {
+        return;
+    };
     api.register_menu_item(&m, &l, &a, None);
 }
 
 extern "system" fn native_host_register_menu_item_keybind(
-    mut env: JNIEnv, _class: JClass, menu: JString, label: JString, action: JString, keybind: JString,
+    mut env: JNIEnv,
+    _class: JClass,
+    menu: JString,
+    label: JString,
+    action: JString,
+    keybind: JString,
 ) {
     let Some(api) = get_api() else { return };
-    let Some(m) = jstr(&mut env, &menu) else { return };
-    let Some(l) = jstr(&mut env, &label) else { return };
-    let Some(a) = jstr(&mut env, &action) else { return };
+    let Some(m) = jstr(&mut env, &menu) else {
+        return;
+    };
+    let Some(l) = jstr(&mut env, &label) else {
+        return;
+    };
+    let Some(a) = jstr(&mut env, &action) else {
+        return;
+    };
     let kb = jstr(&mut env, &keybind);
     api.register_menu_item(&m, &l, &a, kb.as_deref());
 }
 
 extern "system" fn native_host_notify(
-    mut env: JNIEnv, _class: JClass, title: JString, body: JString, level: JString, duration_ms: jint,
+    mut env: JNIEnv,
+    _class: JClass,
+    title: JString,
+    body: JString,
+    level: JString,
+    duration_ms: jint,
 ) {
     let Some(api) = get_api() else { return };
     let title_str = jstr(&mut env, &title).unwrap_or_default();
-    let Some(body_str) = jstr(&mut env, &body) else { return };
+    let Some(body_str) = jstr(&mut env, &body) else {
+        return;
+    };
     let level_str = jstr(&mut env, &level).unwrap_or_else(|| "info".into());
     let json = serde_json::json!({
         "title": title_str,
@@ -742,7 +827,11 @@ extern "system" fn native_host_notify(
 }
 
 extern "system" fn native_host_set_status(
-    mut env: JNIEnv, _class: JClass, text: JString, level: jint, progress: jfloat,
+    mut env: JNIEnv,
+    _class: JClass,
+    text: JString,
+    level: jint,
+    progress: jfloat,
 ) {
     let Some(api) = get_api() else { return };
     let text_str = jstr(&mut env, &text);
@@ -751,95 +840,191 @@ extern "system" fn native_host_set_status(
 
 extern "system" fn native_host_clipboard_set(mut env: JNIEnv, _class: JClass, text: JString) {
     let Some(api) = get_api() else { return };
-    let Some(t) = jstr(&mut env, &text) else { return };
+    let Some(t) = jstr(&mut env, &text) else {
+        return;
+    };
     api.clipboard_set(&t);
 }
 
 extern "system" fn native_host_clipboard_get(mut env: JNIEnv, _class: JClass) -> jobject {
-    let Some(api) = get_api() else { return std::ptr::null_mut() };
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
     match api.clipboard_get() {
-        Some(s) => env.new_string(&s).map(|js| js.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
         None => std::ptr::null_mut(),
     }
 }
 
-extern "system" fn native_host_get_config(mut env: JNIEnv, _class: JClass, key: JString) -> jobject {
-    let Some(api) = get_api() else { return std::ptr::null_mut() };
-    let Some(k) = jstr(&mut env, &key) else { return std::ptr::null_mut() };
+extern "system" fn native_host_get_config(
+    mut env: JNIEnv,
+    _class: JClass,
+    key: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(k) = jstr(&mut env, &key) else {
+        return std::ptr::null_mut();
+    };
     match api.get_config(&k) {
-        Some(s) => env.new_string(&s).map(|js| js.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
         None => std::ptr::null_mut(),
     }
 }
 
-extern "system" fn native_host_set_config(mut env: JNIEnv, _class: JClass, key: JString, value: JString) {
+extern "system" fn native_host_set_config(
+    mut env: JNIEnv,
+    _class: JClass,
+    key: JString,
+    value: JString,
+) {
     let Some(api) = get_api() else { return };
-    let Some(k) = jstr(&mut env, &key) else { return };
-    let Some(v) = jstr(&mut env, &value) else { return };
+    let Some(k) = jstr(&mut env, &key) else {
+        return;
+    };
+    let Some(v) = jstr(&mut env, &value) else {
+        return;
+    };
     api.set_config(&k, &v);
 }
 
-extern "system" fn native_host_show_form(mut env: JNIEnv, _class: JClass, form_json: JString) -> jobject {
-    let Some(api) = get_api() else { return std::ptr::null_mut() };
-    let Some(json) = jstr(&mut env, &form_json) else { return std::ptr::null_mut() };
+extern "system" fn native_host_show_form(
+    mut env: JNIEnv,
+    _class: JClass,
+    form_json: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(json) = jstr(&mut env, &form_json) else {
+        return std::ptr::null_mut();
+    };
     match api.show_form(&json) {
-        Some(s) => env.new_string(&s).map(|js| js.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
         None => std::ptr::null_mut(),
     }
 }
 
-extern "system" fn native_host_prompt(mut env: JNIEnv, _class: JClass, message: JString, default_value: JString) -> jobject {
-    let Some(api) = get_api() else { return std::ptr::null_mut() };
-    let Some(msg) = jstr(&mut env, &message) else { return std::ptr::null_mut() };
+extern "system" fn native_host_prompt(
+    mut env: JNIEnv,
+    _class: JClass,
+    message: JString,
+    default_value: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(msg) = jstr(&mut env, &message) else {
+        return std::ptr::null_mut();
+    };
     let default = jstr(&mut env, &default_value).unwrap_or_default();
     match api.show_prompt(&msg, &default) {
-        Some(s) => env.new_string(&s).map(|js| js.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
         None => std::ptr::null_mut(),
     }
 }
 
-extern "system" fn native_host_confirm(mut env: JNIEnv, _class: JClass, message: JString) -> jboolean {
+extern "system" fn native_host_confirm(
+    mut env: JNIEnv,
+    _class: JClass,
+    message: JString,
+) -> jboolean {
     let Some(api) = get_api() else { return 0 };
-    let Some(msg) = jstr(&mut env, &message) else { return 0 };
+    let Some(msg) = jstr(&mut env, &message) else {
+        return 0;
+    };
     if api.show_confirm(&msg) { 1 } else { 0 }
 }
 
-extern "system" fn native_host_alert(mut env: JNIEnv, _class: JClass, title: JString, message: JString) {
+extern "system" fn native_host_alert(
+    mut env: JNIEnv,
+    _class: JClass,
+    title: JString,
+    message: JString,
+) {
     let Some(api) = get_api() else { return };
-    let Some(t) = jstr(&mut env, &title) else { return };
-    let Some(m) = jstr(&mut env, &message) else { return };
+    let Some(t) = jstr(&mut env, &title) else {
+        return;
+    };
+    let Some(m) = jstr(&mut env, &message) else {
+        return;
+    };
     api.show_alert(&t, &m);
 }
 
-extern "system" fn native_host_show_error(mut env: JNIEnv, _class: JClass, title: JString, message: JString) {
+extern "system" fn native_host_show_error(
+    mut env: JNIEnv,
+    _class: JClass,
+    title: JString,
+    message: JString,
+) {
     let Some(api) = get_api() else { return };
-    let Some(t) = jstr(&mut env, &title) else { return };
-    let Some(m) = jstr(&mut env, &message) else { return };
+    let Some(t) = jstr(&mut env, &title) else {
+        return;
+    };
+    let Some(m) = jstr(&mut env, &message) else {
+        return;
+    };
     api.show_error(&t, &m);
 }
 
 extern "system" fn native_host_subscribe(mut env: JNIEnv, _class: JClass, event_type: JString) {
     let Some(api) = get_api() else { return };
-    let Some(et) = jstr(&mut env, &event_type) else { return };
+    let Some(et) = jstr(&mut env, &event_type) else {
+        return;
+    };
     api.subscribe(&et);
 }
 
-extern "system" fn native_host_publish_event(mut env: JNIEnv, _class: JClass, event_type: JString, data_json: JString) {
+extern "system" fn native_host_publish_event(
+    mut env: JNIEnv,
+    _class: JClass,
+    event_type: JString,
+    data_json: JString,
+) {
     let Some(api) = get_api() else { return };
-    let Some(et) = jstr(&mut env, &event_type) else { return };
-    let Some(data) = jstr(&mut env, &data_json) else { return };
+    let Some(et) = jstr(&mut env, &event_type) else {
+        return;
+    };
+    let Some(data) = jstr(&mut env, &data_json) else {
+        return;
+    };
     api.publish_event(&et, &data);
 }
 
 extern "system" fn native_host_write_to_pty(mut env: JNIEnv, _class: JClass, text: JString) {
     let Some(api) = get_api() else { return };
-    let Some(t) = jstr(&mut env, &text) else { return };
+    let Some(t) = jstr(&mut env, &text) else {
+        return;
+    };
     api.write_to_pty(t.as_bytes());
 }
 
-extern "system" fn native_host_new_tab(mut env: JNIEnv, _class: JClass, command: JString, plain: jboolean) {
+extern "system" fn native_host_new_tab(
+    mut env: JNIEnv,
+    _class: JClass,
+    command: JString,
+    plain: jboolean,
+) {
     let Some(api) = get_api() else { return };
-    let cmd = if command.is_null() { None } else { jstr(&mut env, &command) };
+    let cmd = if command.is_null() {
+        None
+    } else {
+        jstr(&mut env, &command)
+    };
     api.new_tab(cmd.as_deref(), plain != 0);
 }
 
@@ -879,7 +1064,10 @@ fn describe_java_exception(env: &mut JNIEnv) {
 }
 
 fn jni_err<E: std::fmt::Display>(e: E) -> LoadError {
-    LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    LoadError::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        e.to_string(),
+    ))
 }
 
 #[cfg(test)]

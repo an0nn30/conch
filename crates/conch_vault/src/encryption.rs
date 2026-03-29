@@ -2,8 +2,8 @@ use crate::error::VaultError;
 use crate::model::{Vault, VaultAccount, VaultSettings};
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use argon2::Argon2;
 use rand::RngCore;
@@ -35,13 +35,13 @@ pub fn encrypt_vault(vault: &Vault, password: &[u8]) -> Result<Vec<u8>, VaultErr
     let mut salt = [0u8; SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
     let key = derive_key(password, &salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| VaultError::Encryption(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| VaultError::Encryption(e.to_string()))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let payload = bincode::serialize(vault)
-        .map_err(|e| VaultError::Serialization(e.to_string()))?;
+    let payload =
+        bincode::serialize(vault).map_err(|e| VaultError::Serialization(e.to_string()))?;
     let ciphertext = cipher
         .encrypt(nonce, payload.as_ref())
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
@@ -62,16 +62,22 @@ pub fn decrypt_vault(data: &[u8], password: &[u8]) -> Result<Vault, VaultError> 
     if &data[..8] != MAGIC {
         return Err(VaultError::Corrupted("invalid magic bytes".into()));
     }
-    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let version = u32::from_le_bytes(
+        data[8..12]
+            .try_into()
+            .map_err(|_| VaultError::Corrupted("invalid version header".into()))?,
+    );
     if version != FORMAT_VERSION {
-        return Err(VaultError::Corrupted(format!("unsupported version: {version}")));
+        return Err(VaultError::Corrupted(format!(
+            "unsupported version: {version}"
+        )));
     }
     let salt = &data[12..12 + SALT_LEN];
     let nonce_bytes = &data[12 + SALT_LEN..12 + SALT_LEN + NONCE_LEN];
     let ciphertext = &data[header_len..];
     let key = derive_key(password, salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| VaultError::Encryption(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| VaultError::Encryption(e.to_string()))?;
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
@@ -102,15 +108,20 @@ pub struct CachedKey {
     pub salt: [u8; SALT_LEN],
 }
 
-pub fn save_vault_file_with_key(path: &Path, vault: &Vault, cached: &CachedKey) -> Result<(), VaultError> {
+pub fn save_vault_file_with_key(
+    path: &Path,
+    vault: &Vault,
+    cached: &CachedKey,
+) -> Result<(), VaultError> {
     let cipher = Aes256Gcm::new_from_slice(&cached.derived_key)
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let payload = bincode::serialize(vault)
-        .map_err(|e| VaultError::Serialization(e.to_string()))?;
-    let ciphertext = cipher.encrypt(nonce, payload.as_ref())
+    let payload =
+        bincode::serialize(vault).map_err(|e| VaultError::Serialization(e.to_string()))?;
+    let ciphertext = cipher
+        .encrypt(nonce, payload.as_ref())
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
     let mut output = Vec::new();
     output.extend_from_slice(MAGIC);
@@ -139,9 +150,15 @@ pub fn load_vault_file(path: &Path, password: &[u8]) -> Result<(Vault, CachedKey
     if &data[..8] != MAGIC {
         return Err(VaultError::Corrupted("invalid magic bytes".into()));
     }
-    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let version = u32::from_le_bytes(
+        data[8..12]
+            .try_into()
+            .map_err(|_| VaultError::Corrupted("invalid version header".into()))?,
+    );
     if version != FORMAT_VERSION {
-        return Err(VaultError::Corrupted(format!("unsupported version: {version}")));
+        return Err(VaultError::Corrupted(format!(
+            "unsupported version: {version}"
+        )));
     }
     let mut salt = [0u8; SALT_LEN];
     salt.copy_from_slice(&data[12..12 + SALT_LEN]);
@@ -151,7 +168,8 @@ pub fn load_vault_file(path: &Path, password: &[u8]) -> Result<(Vault, CachedKey
     let cipher = Aes256Gcm::new_from_slice(&derived_key)
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
     let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, ciphertext)
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
         .map_err(|_| VaultError::WrongPassword)?;
     let vault = deserialize_vault(&plaintext)?;
     Ok((vault, CachedKey { derived_key, salt }))
@@ -250,13 +268,9 @@ fn deserialize_vault(plaintext: &[u8]) -> Result<Vault, VaultError> {
     }
     bincode::deserialize::<LegacyVaultWithKeychain>(plaintext)
         .map(Vault::from)
+        .or_else(|_| bincode::deserialize::<LegacyVault>(plaintext).map(Vault::from))
         .or_else(|_| {
-            bincode::deserialize::<LegacyVault>(plaintext)
-                .map(Vault::from)
-        })
-        .or_else(|_| {
-            bincode::deserialize::<LegacyVaultNoKeysWithKeychain>(plaintext)
-                .map(Vault::from)
+            bincode::deserialize::<LegacyVaultNoKeysWithKeychain>(plaintext).map(Vault::from)
         })
         .map_err(|e| VaultError::Serialization(e.to_string()))
 }
@@ -430,7 +444,10 @@ mod tests {
         let mut cached = CachedKey { derived_key, salt };
         // Manually zeroize and verify fields are zeroed
         cached.zeroize();
-        assert_eq!(cached.derived_key, [0u8; KEY_LEN], "derived_key should be zeroed");
+        assert_eq!(
+            cached.derived_key, [0u8; KEY_LEN],
+            "derived_key should be zeroed"
+        );
         assert_eq!(cached.salt, [0u8; SALT_LEN], "salt should be zeroed");
     }
 
@@ -465,9 +482,15 @@ mod tests {
         let path2 = dir.path().join("vault2.enc");
         save_vault_file_with_key(&path2, &loaded, &cached).unwrap();
 
-        assert!(path2.exists(), "vault file should exist after save_with_key");
+        assert!(
+            path2.exists(),
+            "vault file should exist after save_with_key"
+        );
         let tmp2 = path2.with_extension("enc.tmp");
-        assert!(!tmp2.exists(), "temp file should not remain after save_with_key");
+        assert!(
+            !tmp2.exists(),
+            "temp file should not remain after save_with_key"
+        );
 
         // Verify the saved file is loadable
         let (reloaded, _) = load_vault_file(&path2, password).unwrap();

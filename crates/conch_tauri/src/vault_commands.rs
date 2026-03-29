@@ -1,9 +1,10 @@
+use conch_vault::keygen::{KeyGenOptions, KeyType, generate_key, save_key_to_disk};
 use conch_vault::{AuthMethod, GeneratedKeyEntry, VaultAccount, VaultManager, VaultSettings};
-use conch_vault::keygen::{generate_key, save_key_to_disk, KeyGenOptions, KeyType};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::Mutex;
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::remote::RemoteState;
@@ -22,14 +23,17 @@ pub(crate) struct UnlockVaultRequest {
     pub password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub(crate) struct VaultStatusResponse {
     pub exists: bool,
     pub locked: bool,
+    #[ts(as = "f64")]
     pub seconds_remaining: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub(crate) struct AccountResponse {
     pub id: Uuid,
     pub display_name: String,
@@ -45,9 +49,10 @@ impl From<VaultAccount> for AccountResponse {
         let (auth_type, key_path) = match &a.auth {
             AuthMethod::Password(_) => ("password".into(), None),
             AuthMethod::Key { path, .. } => ("key".into(), Some(path.display().to_string())),
-            AuthMethod::KeyAndPassword { key_path, .. } => {
-                ("key_and_password".into(), Some(key_path.display().to_string()))
-            }
+            AuthMethod::KeyAndPassword { key_path, .. } => (
+                "key_and_password".into(),
+                Some(key_path.display().to_string()),
+            ),
         };
         Self {
             id: a.id,
@@ -90,7 +95,8 @@ pub(crate) struct KeyGenRequest {
     pub save_path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub(crate) struct KeyGenResponse {
     pub fingerprint: String,
     pub public_key: String,
@@ -120,7 +126,8 @@ pub(crate) async fn vault_create(
     let vault = vault.inner().clone();
     tokio::task::spawn_blocking(move || {
         let mgr = vault.lock();
-        mgr.create(request.password.as_bytes()).map_err(|e| e.to_string())
+        mgr.create(request.password.as_bytes())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -134,7 +141,8 @@ pub(crate) async fn vault_unlock(
     let vault = vault.inner().clone();
     tokio::task::spawn_blocking(move || {
         let mgr = vault.lock();
-        mgr.unlock(request.password.as_bytes()).map_err(|e| e.to_string())
+        mgr.unlock(request.password.as_bytes())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -142,7 +150,7 @@ pub(crate) async fn vault_unlock(
 
 #[tauri::command]
 pub(crate) fn vault_lock(vault: tauri::State<'_, VaultState>) {
-    vault.lock().lock();
+    vault.lock().seal();
 }
 
 #[tauri::command]
@@ -176,7 +184,8 @@ pub(crate) fn vault_add_account(
         request.passphrase.as_deref(),
     )?;
     let mgr = vault.lock();
-    let id = mgr.add_account(request.display_name, request.username, auth)
+    let id = mgr
+        .add_account(request.display_name, request.username, auth)
         .map_err(|e| e.to_string())?;
     mgr.save().map_err(|e| e.to_string())?;
     Ok(id)
@@ -187,14 +196,19 @@ pub(crate) fn vault_update_account(
     vault: tauri::State<'_, VaultState>,
     request: UpdateAccountRequest,
 ) -> Result<(), String> {
-    let auth = request.auth_type.as_ref().map(|at| {
-        parse_auth_method(
-            at,
-            request.password.as_deref(),
-            request.key_path.as_deref(),
-            request.passphrase.as_deref(),
-        )
-    }).transpose().map_err(|e: String| e)?;
+    let auth = request
+        .auth_type
+        .as_ref()
+        .map(|at| {
+            parse_auth_method(
+                at,
+                request.password.as_deref(),
+                request.key_path.as_deref(),
+                request.passphrase.as_deref(),
+            )
+        })
+        .transpose()
+        .map_err(|e: String| e)?;
 
     let mgr = vault.lock();
     mgr.update_account(request.id, request.display_name, request.username, auth)
@@ -234,9 +248,7 @@ pub(crate) fn vault_update_settings(
 }
 
 #[tauri::command]
-pub(crate) async fn vault_pick_key_file(
-    app: tauri::AppHandle,
-) -> Result<Option<String>, String> {
+pub(crate) async fn vault_pick_key_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog().file().pick_file(move |path| {
@@ -306,7 +318,8 @@ pub(crate) fn vault_generate_key(
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub(crate) struct GeneratedKeyResponse {
     pub id: Uuid,
     pub algorithm: String,
@@ -403,7 +416,9 @@ pub(crate) fn vault_migrate_legacy(
         cred_to_uuid.insert((user.clone(), key_path.clone()), id);
     }
     // Save after all accounts are written.
-    vault_mgr.save().map_err(|e| format!("failed to save vault: {e}"))?;
+    vault_mgr
+        .save()
+        .map_err(|e| format!("failed to save vault: {e}"))?;
     drop(vault_mgr);
 
     // Link each legacy server entry to its vault account and clear legacy fields.
@@ -521,9 +536,13 @@ mod tests {
 
     #[test]
     fn parse_auth_method_key() {
-        let auth = parse_auth_method("key", None, Some("/home/user/.ssh/id_ed25519"), None).unwrap();
+        let auth =
+            parse_auth_method("key", None, Some("/home/user/.ssh/id_ed25519"), None).unwrap();
         match auth {
-            AuthMethod::Key { ref path, ref passphrase } => {
+            AuthMethod::Key {
+                ref path,
+                ref passphrase,
+            } => {
                 assert_eq!(path.to_str().unwrap(), "/home/user/.ssh/id_ed25519");
                 assert!(passphrase.is_none());
             }
@@ -545,9 +564,14 @@ mod tests {
             Some("serverpass"),
             Some("/home/user/.ssh/id_rsa"),
             Some("keypass"),
-        ).unwrap();
+        )
+        .unwrap();
         match auth {
-            AuthMethod::KeyAndPassword { ref key_path, ref passphrase, ref password } => {
+            AuthMethod::KeyAndPassword {
+                ref key_path,
+                ref passphrase,
+                ref password,
+            } => {
                 assert_eq!(key_path.to_str().unwrap(), "/home/user/.ssh/id_rsa");
                 assert_eq!(passphrase.as_deref().unwrap(), "keypass");
                 assert_eq!(password, "serverpass");
@@ -571,17 +595,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = VaultManager::new(dir.path().join("vault.enc"));
         mgr.create(b"test").unwrap();
-        let id = mgr.add_account(display_name.into(), username.into(), auth).unwrap();
+        let id = mgr
+            .add_account(display_name.into(), username.into(), auth)
+            .unwrap();
         mgr.get_account(id).unwrap()
     }
 
     #[test]
     fn account_response_from_password_account() {
-        let account = make_account_via_manager(
-            "My Server",
-            "root",
-            AuthMethod::Password("pass".into()),
-        );
+        let account =
+            make_account_via_manager("My Server", "root", AuthMethod::Password("pass".into()));
         let resp = AccountResponse::from(account);
         assert_eq!(resp.auth_type, "password");
         assert!(resp.key_path.is_none());
@@ -600,7 +623,10 @@ mod tests {
         );
         let resp = AccountResponse::from(account);
         assert_eq!(resp.auth_type, "key");
-        assert_eq!(resp.key_path.as_deref().unwrap(), "/home/deploy/.ssh/id_ed25519");
+        assert_eq!(
+            resp.key_path.as_deref().unwrap(),
+            "/home/deploy/.ssh/id_ed25519"
+        );
     }
 
     #[test]

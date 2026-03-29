@@ -1,10 +1,12 @@
 //! Color theme loading — converts Alacritty .toml themes to CSS-compatible values.
 
 use serde::Serialize;
+use ts_rs::TS;
 
 use conch_core::config::UserConfig;
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub(crate) struct ThemeColors {
     pub background: String,
     pub foreground: String,
@@ -12,10 +14,22 @@ pub(crate) struct ThemeColors {
     pub cursor_color: String,
     pub selection_text: String,
     pub selection_bg: String,
-    pub black: String, pub red: String, pub green: String, pub yellow: String,
-    pub blue: String, pub magenta: String, pub cyan: String, pub white: String,
-    pub bright_black: String, pub bright_red: String, pub bright_green: String, pub bright_yellow: String,
-    pub bright_blue: String, pub bright_magenta: String, pub bright_cyan: String, pub bright_white: String,
+    pub black: String,
+    pub red: String,
+    pub green: String,
+    pub yellow: String,
+    pub blue: String,
+    pub magenta: String,
+    pub cyan: String,
+    pub white: String,
+    pub bright_black: String,
+    pub bright_red: String,
+    pub bright_green: String,
+    pub bright_yellow: String,
+    pub bright_blue: String,
+    pub bright_magenta: String,
+    pub bright_cyan: String,
+    pub bright_white: String,
     pub dim_fg: String,
     pub panel_bg: String,
     pub tab_bar_bg: String,
@@ -43,10 +57,12 @@ fn darken(hex: &str, amount: i32) -> String {
     let r = i32::from_str_radix(&hex[0..2], 16).unwrap_or(0);
     let g = i32::from_str_radix(&hex[2..4], 16).unwrap_or(0);
     let b = i32::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-    format!("#{:02x}{:02x}{:02x}",
+    format!(
+        "#{:02x}{:02x}{:02x}",
         (r - amount).clamp(0, 255),
         (g - amount).clamp(0, 255),
-        (b - amount).clamp(0, 255))
+        (b - amount).clamp(0, 255)
+    )
 }
 
 fn lighten(hex: &str, amount: i32) -> String {
@@ -56,7 +72,9 @@ fn lighten(hex: &str, amount: i32) -> String {
 /// Compute relative luminance (0.0 = black, 1.0 = white) of a hex color.
 fn luminance(hex: &str) -> f64 {
     let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 { return 0.5; }
+    if hex.len() < 6 {
+        return 0.5;
+    }
     let r = i32::from_str_radix(&hex[0..2], 16).unwrap_or(128) as f64 / 255.0;
     let g = i32::from_str_radix(&hex[2..4], 16).unwrap_or(128) as f64 / 255.0;
     let b = i32::from_str_radix(&hex[4..6], 16).unwrap_or(128) as f64 / 255.0;
@@ -67,21 +85,27 @@ fn luminance(hex: &str) -> f64 {
 fn blend(source: &str, target: &str, frac: f64) -> String {
     let s = source.trim_start_matches('#');
     let t = target.trim_start_matches('#');
-    if s.len() < 6 || t.len() < 6 { return format!("#{s}"); }
+    if s.len() < 6 || t.len() < 6 {
+        return format!("#{s}");
+    }
     let sr = i32::from_str_radix(&s[0..2], 16).unwrap_or(0) as f64;
     let sg = i32::from_str_radix(&s[2..4], 16).unwrap_or(0) as f64;
     let sb = i32::from_str_radix(&s[4..6], 16).unwrap_or(0) as f64;
     let tr = i32::from_str_radix(&t[0..2], 16).unwrap_or(0) as f64;
     let tg = i32::from_str_radix(&t[2..4], 16).unwrap_or(0) as f64;
     let tb = i32::from_str_radix(&t[4..6], 16).unwrap_or(0) as f64;
-    format!("#{:02x}{:02x}{:02x}",
+    format!(
+        "#{:02x}{:02x}{:02x}",
         (sr + (tr - sr) * frac).round().clamp(0.0, 255.0) as u8,
         (sg + (tg - sg) * frac).round().clamp(0.0, 255.0) as u8,
-        (sb + (tb - sb) * frac).round().clamp(0.0, 255.0) as u8)
+        (sb + (tb - sb) * frac).round().clamp(0.0, 255.0) as u8
+    )
 }
 
 /// Resolve theme colors from a pre-loaded ColorScheme (no config needed).
-pub(crate) fn resolve_theme_colors_from_scheme(scheme: &conch_core::color_scheme::ColorScheme) -> ThemeColors {
+pub(crate) fn resolve_theme_colors_from_scheme(
+    scheme: &conch_core::color_scheme::ColorScheme,
+) -> ThemeColors {
     let bg = &scheme.primary.background;
     let fg = &scheme.primary.foreground;
     let cursor = scheme.cursor.as_ref();
@@ -91,9 +115,15 @@ pub(crate) fn resolve_theme_colors_from_scheme(scheme: &conch_core::color_scheme
         background: bg.clone(),
         foreground: fg.clone(),
         cursor_text: cursor.map(|c| c.text.clone()).unwrap_or_else(|| bg.clone()),
-        cursor_color: cursor.map(|c| c.cursor.clone()).unwrap_or_else(|| fg.clone()),
-        selection_text: selection.map(|s| s.text.clone()).unwrap_or_else(|| fg.clone()),
-        selection_bg: selection.map(|s| s.background.clone()).unwrap_or_else(|| lighten(bg, 30)),
+        cursor_color: cursor
+            .map(|c| c.cursor.clone())
+            .unwrap_or_else(|| fg.clone()),
+        selection_text: selection
+            .map(|s| s.text.clone())
+            .unwrap_or_else(|| fg.clone()),
+        selection_bg: selection
+            .map(|s| s.background.clone())
+            .unwrap_or_else(|| lighten(bg, 30)),
         black: scheme.normal.black.clone(),
         red: scheme.normal.red.clone(),
         green: scheme.normal.green.clone(),
@@ -111,12 +141,36 @@ pub(crate) fn resolve_theme_colors_from_scheme(scheme: &conch_core::color_scheme
         bright_cyan: scheme.bright.cyan.clone(),
         bright_white: scheme.bright.white.clone(),
         // Detect dark vs light theme: dark bg = lighten toward white, light bg = darken toward black.
-        dim_fg: scheme.primary.dim_foreground.clone().unwrap_or_else(|| blend(fg, bg, 0.50)),
-        panel_bg: if luminance(bg) < 0.5 { darken(bg, 8) } else { lighten(bg, 8) },
-        tab_bar_bg: if luminance(bg) < 0.5 { darken(bg, 14) } else { lighten(bg, 14) },
-        tab_border: if luminance(bg) < 0.5 { lighten(bg, 18) } else { darken(bg, 18) },
-        input_bg: if luminance(bg) < 0.5 { lighten(bg, 10) } else { darken(bg, 10) },
-        active_highlight: if luminance(bg) < 0.5 { lighten(bg, 28) } else { darken(bg, 28) },
+        dim_fg: scheme
+            .primary
+            .dim_foreground
+            .clone()
+            .unwrap_or_else(|| blend(fg, bg, 0.50)),
+        panel_bg: if luminance(bg) < 0.5 {
+            darken(bg, 8)
+        } else {
+            lighten(bg, 8)
+        },
+        tab_bar_bg: if luminance(bg) < 0.5 {
+            darken(bg, 14)
+        } else {
+            lighten(bg, 14)
+        },
+        tab_border: if luminance(bg) < 0.5 {
+            lighten(bg, 18)
+        } else {
+            darken(bg, 18)
+        },
+        input_bg: if luminance(bg) < 0.5 {
+            lighten(bg, 10)
+        } else {
+            darken(bg, 10)
+        },
+        active_highlight: if luminance(bg) < 0.5 {
+            lighten(bg, 28)
+        } else {
+            darken(bg, 28)
+        },
         // Derive text colors by blending fg toward bg for reduced emphasis.
         text_secondary: blend(fg, bg, 0.25),
         text_muted: blend(fg, bg, 0.50),

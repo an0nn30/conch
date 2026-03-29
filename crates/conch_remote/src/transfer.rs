@@ -3,13 +3,15 @@
 //! Uses SFTP for transfers. Future: rsync detection and fallback.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::mpsc;
+use ts_rs::TS;
 
+use crate::error::RemoteError;
 use crate::handler::ConchSshHandler;
 use crate::sftp;
 use crate::sftp::open_sftp;
@@ -18,14 +20,16 @@ use crate::sftp::open_sftp;
 // Transfer types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferKind {
     Download,
     Upload,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferStatus {
     Pending,
@@ -35,12 +39,15 @@ pub enum TransferStatus {
     Cancelled,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
 pub struct TransferProgress {
     pub transfer_id: String,
     pub kind: TransferKind,
     pub status: TransferStatus,
+    #[ts(as = "f64")]
     pub bytes_transferred: u64,
+    #[ts(as = "f64")]
     pub total_bytes: u64,
     pub file_name: String,
     pub error: Option<String>,
@@ -130,7 +137,8 @@ pub fn start_download(
             &file_name,
             &progress_tx,
         )
-        .await;
+        .await
+        .map_err(|e| e.to_string());
 
         let status = if cancelled_clone.load(Ordering::Relaxed) {
             TransferStatus::Cancelled
@@ -157,7 +165,10 @@ pub fn start_download(
         cancelled,
         abort_handle: task.abort_handle(),
     };
-    registry.lock().transfers.insert(transfer_id.clone(), handle);
+    registry
+        .lock()
+        .transfers
+        .insert(transfer_id.clone(), handle);
 
     transfer_id
 }
@@ -171,7 +182,7 @@ async fn download_file(
     transfer_id: &str,
     file_name: &str,
     progress_tx: &mpsc::UnboundedSender<TransferProgress>,
-) -> Result<u64, String> {
+) -> Result<u64, RemoteError> {
     use std::time::Instant;
     use tokio::io::AsyncReadExt;
 
@@ -182,10 +193,9 @@ async fn download_file(
     let mut remote_file = sftp_session
         .open(remote_path)
         .await
-        .map_err(|e| format!("open failed: {e}"))?;
+        .map_err(|e| RemoteError::Transfer(format!("open failed: {e}")))?;
 
-    let mut local_file =
-        std::fs::File::create(local_path).map_err(|e| format!("create local file: {e}"))?;
+    let mut local_file = std::fs::File::create(local_path)?;
 
     let mut bytes_transferred: u64 = 0;
     let chunk_size = 256 * 1024;
@@ -195,20 +205,19 @@ async fn download_file(
 
     loop {
         if cancelled.load(Ordering::Relaxed) {
-            return Err("Transfer cancelled".to_string());
+            return Err(RemoteError::Transfer("Transfer cancelled".into()));
         }
 
         let n = remote_file
             .read(&mut buf)
             .await
-            .map_err(|e| format!("read failed: {e}"))?;
+            .map_err(|e| RemoteError::Transfer(format!("read failed: {e}")))?;
 
         if n == 0 {
             break;
         }
 
-        std::io::Write::write_all(&mut local_file, &buf[..n])
-            .map_err(|e| format!("write local file: {e}"))?;
+        std::io::Write::write_all(&mut local_file, &buf[..n])?;
 
         bytes_transferred += n as u64;
 
@@ -275,7 +284,8 @@ pub fn start_upload(
             &file_name,
             &progress_tx,
         )
-        .await;
+        .await
+        .map_err(|e| e.to_string());
 
         let status = if cancelled_clone.load(Ordering::Relaxed) {
             TransferStatus::Cancelled
@@ -302,7 +312,10 @@ pub fn start_upload(
         cancelled,
         abort_handle: task.abort_handle(),
     };
-    registry.lock().transfers.insert(transfer_id.clone(), handle);
+    registry
+        .lock()
+        .transfers
+        .insert(transfer_id.clone(), handle);
 
     transfer_id
 }
@@ -316,22 +329,20 @@ async fn upload_file(
     transfer_id: &str,
     file_name: &str,
     progress_tx: &mpsc::UnboundedSender<TransferProgress>,
-) -> Result<u64, String> {
+) -> Result<u64, RemoteError> {
     use std::time::Instant;
     use tokio::io::AsyncWriteExt;
 
-    let local_meta =
-        std::fs::metadata(local_path).map_err(|e| format!("stat local file: {e}"))?;
+    let local_meta = std::fs::metadata(local_path)?;
     let total_bytes = local_meta.len();
 
-    let mut local_file =
-        std::fs::File::open(local_path).map_err(|e| format!("open local file: {e}"))?;
+    let mut local_file = std::fs::File::open(local_path)?;
 
     let sftp_session = open_sftp(ssh).await?;
     let mut remote_file = sftp_session
         .create(remote_path)
         .await
-        .map_err(|e| format!("create remote file: {e}"))?;
+        .map_err(|e| RemoteError::Transfer(format!("create remote file: {e}")))?;
 
     let mut bytes_transferred: u64 = 0;
     let chunk_size = 256 * 1024;
@@ -341,11 +352,10 @@ async fn upload_file(
 
     loop {
         if cancelled.load(Ordering::Relaxed) {
-            return Err("Transfer cancelled".to_string());
+            return Err(RemoteError::Transfer("Transfer cancelled".into()));
         }
 
-        let n = std::io::Read::read(&mut local_file, &mut buf)
-            .map_err(|e| format!("read local file: {e}"))?;
+        let n = std::io::Read::read(&mut local_file, &mut buf)?;
 
         if n == 0 {
             break;
@@ -354,7 +364,7 @@ async fn upload_file(
         remote_file
             .write_all(&buf[..n])
             .await
-            .map_err(|e| format!("write remote file: {e}"))?;
+            .map_err(|e| RemoteError::Transfer(format!("write remote file: {e}")))?;
 
         bytes_transferred += n as u64;
 

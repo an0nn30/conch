@@ -67,7 +67,9 @@ fn set_ssh_auth_sock() {
 fn set_locale() {
     use std::ffi::{CStr, CString};
 
-    let env_locale_c = CString::new("").unwrap();
+    let Ok(env_locale_c) = CString::new("") else {
+        return;
+    };
     let env_locale_ptr = unsafe { libc::setlocale(libc::LC_ALL, env_locale_c.as_ptr()) };
     if !env_locale_ptr.is_null() {
         let env_locale = unsafe { CStr::from_ptr(env_locale_ptr).to_string_lossy() };
@@ -84,7 +86,9 @@ fn set_locale() {
 
     if lc_all.is_null() {
         log::debug!("Using fallback locale: UTF-8");
-        let fallback = CString::new("UTF-8").unwrap();
+        let Ok(fallback) = CString::new("UTF-8") else {
+            return;
+        };
         unsafe { libc::setlocale(libc::LC_CTYPE, fallback.as_ptr()) };
         unsafe { std::env::set_var("LC_CTYPE", "UTF-8") };
     } else {
@@ -139,7 +143,10 @@ fn fix_path() {
         if out.status.success() {
             let full_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !full_path.is_empty() {
-                log::debug!("Expanded PATH from login shell: {}", &full_path[..full_path.len().min(200)]);
+                log::debug!(
+                    "Expanded PATH from login shell: {}",
+                    &full_path[..full_path.len().min(200)]
+                );
                 unsafe { std::env::set_var("PATH", &full_path) };
             }
         }

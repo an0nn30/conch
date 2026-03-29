@@ -20,6 +20,9 @@ russh = "0.48"
 russh-keys = "0.48"
 russh-sftp = "2.1"
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256"] }
+thiserror = "2"
+zeroize = "1"
+ts-rs = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

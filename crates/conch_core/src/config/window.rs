@@ -37,7 +37,10 @@ pub struct WindowDimensions {
 
 impl Default for WindowDimensions {
     fn default() -> Self {
-        Self { columns: 150, lines: 50 }
+        Self {
+            columns: 150,
+            lines: 50,
+        }
     }
 }
 
@@ -78,23 +81,38 @@ mod tests {
 
     #[test]
     fn decorations_deserialize_full() {
-        assert_eq!(parse_dec(r#"decorations = "Full""#).unwrap(), WindowDecorations::Full);
+        assert_eq!(
+            parse_dec(r#"decorations = "Full""#).unwrap(),
+            WindowDecorations::Full
+        );
     }
 
     #[test]
     fn decorations_deserialize_case_insensitive() {
-        assert_eq!(parse_dec(r#"decorations = "transparent""#).unwrap(), WindowDecorations::Transparent);
-        assert_eq!(parse_dec(r#"decorations = "BUTTONLESS""#).unwrap(), WindowDecorations::Buttonless);
+        assert_eq!(
+            parse_dec(r#"decorations = "transparent""#).unwrap(),
+            WindowDecorations::Transparent
+        );
+        assert_eq!(
+            parse_dec(r#"decorations = "BUTTONLESS""#).unwrap(),
+            WindowDecorations::Buttonless
+        );
     }
 
     #[test]
     fn decorations_deserialize_none() {
-        assert_eq!(parse_dec(r#"decorations = "none""#).unwrap(), WindowDecorations::None);
+        assert_eq!(
+            parse_dec(r#"decorations = "none""#).unwrap(),
+            WindowDecorations::None
+        );
     }
 
     #[test]
     fn decorations_deserialize_buttonless() {
-        assert_eq!(parse_dec(r#"decorations = "buttonless""#).unwrap(), WindowDecorations::Buttonless);
+        assert_eq!(
+            parse_dec(r#"decorations = "buttonless""#).unwrap(),
+            WindowDecorations::Buttonless
+        );
     }
 
     #[test]

@@ -36,6 +36,8 @@ env_logger = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
 arboard = "3"
+font-kit = "0.14"
+ts-rs = { workspace = true }
 
 # SSH (via conch_remote, only async-trait needed locally for TauriRemoteCallbacks)
 async-trait = "0.1"

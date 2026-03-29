@@ -89,6 +89,14 @@ pub struct KeyboardConfig {
     pub toggle_left_panel: String,
     pub toggle_right_panel: String,
     pub toggle_bottom_panel: String,
+    pub split_vertical: String,
+    pub split_horizontal: String,
+    pub close_pane: String,
+    pub navigate_pane_up: String,
+    pub navigate_pane_down: String,
+    pub navigate_pane_left: String,
+    pub navigate_pane_right: String,
+    pub rename_tab: String,
 }
 
 impl Default for KeyboardConfig {
@@ -102,6 +110,14 @@ impl Default for KeyboardConfig {
             toggle_left_panel: "cmd+shift+e".into(),
             toggle_right_panel: "cmd+shift+r".into(),
             toggle_bottom_panel: "cmd+shift+j".into(),
+            split_vertical: "cmd+d".into(),
+            split_horizontal: "cmd+shift+d".into(),
+            close_pane: "cmd+shift+w".into(),
+            navigate_pane_up: "cmd+alt+up".into(),
+            navigate_pane_down: "cmd+alt+down".into(),
+            navigate_pane_left: "cmd+alt+left".into(),
+            navigate_pane_right: "cmd+alt+right".into(),
+            rename_tab: "F2".into(),
         }
     }
 }
@@ -174,7 +190,10 @@ mod tests {
 
     #[test]
     fn plugins_disabled_master_switch() {
-        let cfg = PluginsConfig { enabled: false, ..Default::default() };
+        let cfg = PluginsConfig {
+            enabled: false,
+            ..Default::default()
+        };
         assert!(!cfg.any_enabled());
     }
 
@@ -256,7 +275,7 @@ mod tests {
         let toml_str = r#"small = 10.0"#;
         let f: UiFontConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(f.small, 10.0);
-        assert_eq!(f.list, 14.0);  // default
+        assert_eq!(f.list, 14.0); // default
         assert_eq!(f.normal, 14.0); // default
     }
 
@@ -323,4 +342,23 @@ mod tests {
         assert!(parsed.check_for_updates);
     }
 
+    #[test]
+    fn keyboard_config_split_pane_defaults() {
+        let cfg = KeyboardConfig::default();
+        assert_eq!(cfg.split_vertical, "cmd+d");
+        assert_eq!(cfg.split_horizontal, "cmd+shift+d");
+        assert_eq!(cfg.close_pane, "cmd+shift+w");
+        assert_eq!(cfg.navigate_pane_up, "cmd+alt+up");
+        assert_eq!(cfg.navigate_pane_down, "cmd+alt+down");
+        assert_eq!(cfg.navigate_pane_left, "cmd+alt+left");
+        assert_eq!(cfg.navigate_pane_right, "cmd+alt+right");
+    }
+
+    #[test]
+    fn keyboard_config_serde_default_fills_split_pane_fields() {
+        let toml_str = r#"new_tab = "cmd+t""#;
+        let cfg: KeyboardConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.split_vertical, "cmd+d");
+        assert_eq!(cfg.close_pane, "cmd+shift+w");
+    }
 }

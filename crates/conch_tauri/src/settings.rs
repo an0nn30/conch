@@ -3,18 +3,20 @@
 use conch_core::config::{self, UserConfig};
 use serde::Serialize;
 use tauri::Emitter;
+use ts_rs::TS;
 
-use crate::theme;
 use crate::TauriState;
+use crate::theme;
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub(crate) struct SaveSettingsResult {
     restart_required: bool,
 }
 
 #[tauri::command]
 pub(crate) fn get_all_settings(state: tauri::State<'_, TauriState>) -> serde_json::Value {
-    let cfg = state.config.lock();
+    let cfg = state.config.read();
     serde_json::to_value(&*cfg).unwrap_or_default()
 }
 
@@ -47,13 +49,13 @@ pub(crate) fn save_settings(
         serde_json::from_value(settings).map_err(|e| format!("Invalid settings: {e}"))?;
 
     let restart_required = {
-        let old_config = state.config.lock();
+        let old_config = state.config.read();
         needs_restart(&old_config, &new_config)
     };
 
     // Update in-memory config before disk write.
     {
-        let mut cfg = state.config.lock();
+        let mut cfg = state.config.write();
         *cfg = new_config.clone();
     }
 
@@ -63,7 +65,7 @@ pub(crate) fn save_settings(
 
     // Rebuild menu to pick up keyboard shortcut changes.
     let kb = &new_config.conch.keyboard;
-    if let Ok(menu) = crate::build_app_menu(&app, kb) {
+    if let Ok(menu) = crate::menu::build_app_menu(&app, kb) {
         let _ = app.set_menu(menu);
     }
 

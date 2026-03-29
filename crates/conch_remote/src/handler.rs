@@ -36,7 +36,11 @@ impl client::Handler for ConchSshHandler {
 
         match check {
             Some(true) => {
-                log::debug!("Host key for {}:{} matches known_hosts", self.host, self.port);
+                log::debug!(
+                    "Host key for {}:{} matches known_hosts",
+                    self.host,
+                    self.port
+                );
                 return Ok(true);
             }
             Some(false) => {
@@ -47,10 +51,7 @@ impl client::Handler for ConchSshHandler {
                      It is also possible that the host key has just been changed.",
                     self.host, self.port
                 );
-                let fp_str = format!(
-                    "{}\n{fingerprint}",
-                    server_public_key.algorithm().as_str(),
-                );
+                let fp_str = format!("{}\n{fingerprint}", server_public_key.algorithm().as_str(),);
                 let accepted = self.callbacks.verify_host_key(&message, &fp_str).await;
                 return Ok(accepted);
             }
@@ -60,7 +61,7 @@ impl client::Handler for ConchSshHandler {
         }
 
         let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
-        let host_display = if self.port != 22 {
+        let host_display = if self.port != crate::SSH_DEFAULT_PORT {
             format!("[{}]:{}", self.host, self.port)
         } else {
             self.host.clone()
@@ -141,8 +142,8 @@ mod tests {
             callbacks: Arc::new(AcceptAllCallbacks),
         };
         assert_eq!(handler.port, 2222);
-        // Verify host_display formatting would use bracket notation for non-22 port
-        let host_display = if handler.port != 22 {
+        // Verify host_display formatting would use bracket notation for non-default port
+        let host_display = if handler.port != crate::SSH_DEFAULT_PORT {
             format!("[{}]:{}", handler.host, handler.port)
         } else {
             handler.host.clone()
@@ -158,7 +159,7 @@ mod tests {
             known_hosts_file: PathBuf::from("/tmp/known_hosts"),
             callbacks: Arc::new(RejectAllCallbacks),
         };
-        let host_display = if handler.port != 22 {
+        let host_display = if handler.port != crate::SSH_DEFAULT_PORT {
             format!("[{}]:{}", handler.host, handler.port)
         } else {
             handler.host.clone()

@@ -10,17 +10,20 @@ use russh::client;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::callbacks::{RemoteCallbacks, RemotePaths};
 use crate::config::ServerEntry;
+use crate::error::RemoteError;
 use crate::handler::ConchSshHandler;
 
 // ---------------------------------------------------------------------------
 // Tunnel status
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelStatus {
     Connecting,
@@ -28,7 +31,8 @@ pub enum TunnelStatus {
     Error(String),
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub struct TunnelInfo {
     pub id: String,
     pub status: TunnelStatus,
@@ -100,11 +104,13 @@ impl TunnelManager {
         remote_port: u16,
         callbacks: Arc<dyn RemoteCallbacks>,
         paths: &RemotePaths,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteError> {
         // Bind local port first for fast failure.
         let listener = TcpListener::bind(format!("127.0.0.1:{local_port}"))
             .await
-            .map_err(|e| format!("Failed to bind local port {local_port}: {e}"))?;
+            .map_err(|e| {
+                RemoteError::Tunnel(format!("Failed to bind local port {local_port}: {e}"))
+            })?;
 
         log::info!("tunnel[{id}]: listening on 127.0.0.1:{local_port}");
 
@@ -134,8 +140,7 @@ impl TunnelManager {
                     Ok(ch) => ch,
                     Err(e) => {
                         log::error!("tunnel[{id}]: direct-tcpip failed: {e}");
-                        if e.to_string().contains("disconnect")
-                            || e.to_string().contains("closed")
+                        if e.to_string().contains("disconnect") || e.to_string().contains("closed")
                         {
                             break;
                         }
@@ -222,7 +227,7 @@ async fn connect_for_tunnel(
     credentials: &crate::ssh::SshCredentials,
     callbacks: Arc<dyn RemoteCallbacks>,
     paths: &RemotePaths,
-) -> Result<client::Handle<ConchSshHandler>, String> {
+) -> Result<client::Handle<ConchSshHandler>, RemoteError> {
     let config = Arc::new(client::Config::default());
     let handler = ConchSshHandler {
         host: server.host.clone(),
@@ -233,15 +238,12 @@ async fn connect_for_tunnel(
 
     // Proxy: desktop-only
     #[cfg(not(target_os = "ios"))]
-    let effective_proxy = server
-        .proxy_command
-        .clone()
-        .or_else(|| {
-            server
-                .proxy_jump
-                .as_ref()
-                .map(|j| format!("ssh -W %h:%p {j}"))
-        });
+    let effective_proxy = server.proxy_command.clone().or_else(|| {
+        server
+            .proxy_jump
+            .as_ref()
+            .map(|j| format!("ssh -W %h:%p {j}"))
+    });
     #[cfg(target_os = "ios")]
     let effective_proxy: Option<String> = None;
 
@@ -254,13 +256,15 @@ async fn connect_for_tunnel(
         #[cfg(target_os = "ios")]
         {
             let _ = proxy_cmd;
-            return Err("Proxy connections are not supported on iOS".to_string());
+            return Err(RemoteError::Connection(
+                "Proxy connections are not supported on iOS".into(),
+            ));
         }
     } else {
         let addr = format!("{}:{}", server.host, server.port);
         client::connect(config, &addr, handler)
             .await
-            .map_err(|e| format!("Connection failed: {e}"))?
+            .map_err(|e| RemoteError::Connection(format!("{e}")))?
     };
 
     // Auth
@@ -282,8 +286,8 @@ async fn connect_for_tunnel(
             Some(pw) => session
                 .authenticate_password(&credentials.username, &pw)
                 .await
-                .map_err(|e| format!("Auth failed: {e}"))?,
-            None => return Err("Password entry cancelled".to_string()),
+                .map_err(|e| RemoteError::Auth(format!("{e}")))?,
+            None => return Err(RemoteError::Auth("Password entry cancelled".into())),
         }
     } else if credentials.auth_method == "key_and_password" {
         // Try key first; fall back to password if key fails (see ssh.rs).
@@ -320,8 +324,8 @@ async fn connect_for_tunnel(
                 Some(pw) => session
                     .authenticate_password(&credentials.username, &pw)
                     .await
-                    .map_err(|e| format!("Auth failed: {e}"))?,
-                None => return Err("Password entry cancelled".to_string()),
+                    .map_err(|e| RemoteError::Auth(format!("{e}")))?,
+                None => return Err(RemoteError::Auth("Password entry cancelled".into())),
             }
         }
     } else {
@@ -336,10 +340,10 @@ async fn connect_for_tunnel(
     };
 
     if !authenticated {
-        return Err(format!(
+        return Err(RemoteError::Auth(format!(
             "Authentication failed for {}@{}",
             credentials.username, server.host
-        ));
+        )));
     }
 
     Ok(session)
@@ -459,7 +463,10 @@ mod tests {
         ));
 
         mgr.clear_error(&id).await;
-        assert!(mgr.status(&id).await.is_none(), "error state should be removed");
+        assert!(
+            mgr.status(&id).await.is_none(),
+            "error state should be removed"
+        );
     }
 
     #[tokio::test]
@@ -478,6 +485,9 @@ mod tests {
 
         mgr.clear_error(&id).await;
         // Active state should NOT be removed by clear_error
-        assert!(mgr.is_active(&id).await, "active tunnel should not be cleared");
+        assert!(
+            mgr.is_active(&id).await,
+            "active tunnel should not be cleared"
+        );
     }
 }

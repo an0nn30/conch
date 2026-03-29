@@ -14,10 +14,15 @@
 //! shutdown signals. This lets the plugin thread drain a single receiver.
 
 use std::collections::HashMap;
+use std::sync::mpsc as std_mpsc;
+use std::time::Duration;
 
 use parking_lot::RwLock;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
+
+/// Default timeout for blocking cross-plugin queries.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Capacity of each plugin's mailbox channel.
 const MAILBOX_CAPACITY: usize = 256;
@@ -45,8 +50,8 @@ pub struct QueryRequest {
     pub method: String,
     /// JSON arguments.
     pub args: Value,
-    /// Channel for the response.
-    pub reply: oneshot::Sender<QueryResponse>,
+    /// Channel for the response (std sync channel for timeout support).
+    pub reply: std_mpsc::SyncSender<QueryResponse>,
 }
 
 /// Response to a [`QueryRequest`].
@@ -65,9 +70,7 @@ pub enum PluginMail {
     /// A direct query from another plugin (or the host).
     BusQuery(QueryRequest),
     /// Host requests the plugin to render its widget tree.
-    RenderRequest {
-        reply: oneshot::Sender<String>,
-    },
+    RenderRequest { reply: oneshot::Sender<String> },
     /// A widget interaction event (button click, text input, etc.).
     /// JSON-encoded `PluginEvent::Widget(...)`.
     WidgetEvent { json: String },
@@ -89,6 +92,8 @@ pub enum BusError {
     ChannelClosed,
     /// The query response channel was dropped before a response arrived.
     ResponseDropped,
+    /// The query timed out waiting for a response.
+    QueryTimeout,
 }
 
 impl std::fmt::Display for BusError {
@@ -98,6 +103,7 @@ impl std::fmt::Display for BusError {
             Self::ServiceNotFound(n) => write!(f, "service not found: {n}"),
             Self::ChannelClosed => write!(f, "plugin mailbox closed"),
             Self::ResponseDropped => write!(f, "query response channel dropped"),
+            Self::QueryTimeout => write!(f, "query timed out waiting for response"),
         }
     }
 }
@@ -135,9 +141,7 @@ impl PluginBus {
     /// [`sender_for`](Self::sender_for)) can send messages through it.
     pub fn register_plugin(&self, name: &str) -> mpsc::Receiver<PluginMail> {
         let (tx, rx) = mpsc::channel(MAILBOX_CAPACITY);
-        self.plugin_senders
-            .write()
-            .insert(name.to_string(), tx);
+        self.plugin_senders.write().insert(name.to_string(), tx);
         rx
     }
 
@@ -221,8 +225,11 @@ impl PluginBus {
 
     /// Send a query to a plugin and block until the response arrives.
     ///
+    /// Times out after 5 seconds and returns [`BusError::QueryTimeout`] if no
+    /// response is received — this prevents the caller from blocking forever
+    /// when the target plugin crashes or hangs.
+    ///
     /// Intended for use on plain OS threads (plugin threads calling via HostApi).
-    /// **Panics** if called from inside a tokio async context.
     pub fn query_blocking(
         &self,
         target: &str,
@@ -237,7 +244,7 @@ impl PluginBus {
             .cloned()
             .ok_or_else(|| BusError::PluginNotFound(target.to_string()))?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = std_mpsc::sync_channel(1);
         let req = PluginMail::BusQuery(QueryRequest {
             source: source.to_string(),
             method: method.to_string(),
@@ -249,12 +256,31 @@ impl PluginBus {
             .blocking_send(req)
             .map_err(|_| BusError::ChannelClosed)?;
 
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| BusError::ResponseDropped)
+        match reply_rx.recv_timeout(QUERY_TIMEOUT) {
+            Ok(resp) => Ok(resp),
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                log::warn!(
+                    "bus: query to '{target}' method '{method}' from '{source}' timed out \
+                     after {}s",
+                    QUERY_TIMEOUT.as_secs()
+                );
+                Err(BusError::QueryTimeout)
+            }
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => Err(BusError::ResponseDropped),
+        }
     }
 
     /// Send a query to a plugin (async version).
+    ///
+    /// Times out after 5 seconds, matching the blocking variant.
+    ///
+    /// # Runtime requirement
+    ///
+    /// This method uses [`tokio::task::spawn_blocking`] internally to avoid
+    /// blocking the async executor while waiting for the response. It must
+    /// be called from within a Tokio runtime — calling it from a non-Tokio
+    /// async executor will panic. For non-async (blocking) contexts, use
+    /// [`query_blocking`](Self::query_blocking) instead.
     pub async fn query(
         &self,
         target: &str,
@@ -269,7 +295,7 @@ impl PluginBus {
             .cloned()
             .ok_or_else(|| BusError::PluginNotFound(target.to_string()))?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = std_mpsc::sync_channel(1);
         let req = PluginMail::BusQuery(QueryRequest {
             source: source.to_string(),
             method: method.to_string(),
@@ -277,9 +303,25 @@ impl PluginBus {
             reply: reply_tx,
         });
 
-        sender.send(req).await.map_err(|_| BusError::ChannelClosed)?;
+        sender
+            .send(req)
+            .await
+            .map_err(|_| BusError::ChannelClosed)?;
 
-        reply_rx.await.map_err(|_| BusError::ResponseDropped)
+        let timeout = QUERY_TIMEOUT;
+        match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(timeout)).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(std_mpsc::RecvTimeoutError::Timeout)) => {
+                log::warn!(
+                    "bus: async query to '{target}' method '{method}' from '{source}' \
+                     timed out after {}s",
+                    QUERY_TIMEOUT.as_secs()
+                );
+                Err(BusError::QueryTimeout)
+            }
+            Ok(Err(std_mpsc::RecvTimeoutError::Disconnected)) => Err(BusError::ResponseDropped),
+            Err(_join_err) => Err(BusError::ResponseDropped),
+        }
     }
 }
 
@@ -395,7 +437,10 @@ mod tests {
             }
         });
 
-        let resp = bus.query("target", "ping", json!(null), "caller").await.unwrap();
+        let resp = bus
+            .query("target", "ping", json!(null), "caller")
+            .await
+            .unwrap();
         assert_eq!(resp.result.unwrap(), json!("pong"));
         handle.await.unwrap();
     }
@@ -403,7 +448,10 @@ mod tests {
     #[tokio::test]
     async fn query_missing_plugin_returns_error() {
         let bus = PluginBus::new();
-        let err = bus.query("ghost", "method", json!(null), "src").await.unwrap_err();
+        let err = bus
+            .query("ghost", "method", json!(null), "src")
+            .await
+            .unwrap_err();
         assert!(matches!(err, BusError::PluginNotFound(_)));
     }
 
@@ -436,5 +484,61 @@ mod tests {
 
         sender.try_send(PluginMail::Shutdown).unwrap();
         assert!(matches!(rx.try_recv().unwrap(), PluginMail::Shutdown));
+    }
+
+    #[test]
+    fn query_blocking_returns_none_on_timeout() {
+        let bus = PluginBus::new();
+        // Register target but never respond to queries — the receiver is
+        // held open so the channel is not dropped, simulating a hung plugin.
+        let _rx = bus.register_plugin("hung");
+
+        // Use a short timeout by calling the internal pieces directly so
+        // we don't wait the full 5 seconds in tests. Instead, we verify
+        // the mechanism works via the public API (which uses QUERY_TIMEOUT).
+        // For a fast test, we manually replicate query_blocking with a
+        // short timeout.
+        let sender = bus.sender_for("hung").unwrap();
+        let (reply_tx, reply_rx) = std_mpsc::sync_channel(1);
+        let req = PluginMail::BusQuery(QueryRequest {
+            source: "caller".into(),
+            method: "ping".into(),
+            args: json!(null),
+            reply: reply_tx,
+        });
+        sender.blocking_send(req).unwrap();
+
+        let result = reply_rx.recv_timeout(Duration::from_millis(50));
+        assert!(
+            result.is_err(),
+            "expected timeout when target never responds"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            std_mpsc::RecvTimeoutError::Timeout
+        ));
+    }
+
+    #[test]
+    fn query_blocking_returns_response_dropped_when_sender_gone() {
+        let bus = PluginBus::new();
+        let mut rx = bus.register_plugin("dropper");
+
+        // Spawn a thread that receives the query but drops the reply sender.
+        let handle = std::thread::spawn(move || {
+            if let Some(PluginMail::BusQuery(_req)) = rx.blocking_recv() {
+                // Drop req (and its reply sender) without responding.
+            }
+        });
+
+        let err = bus
+            .query_blocking("dropper", "ping", json!(null), "caller")
+            .unwrap_err();
+        // Should get either ResponseDropped (channel closed) or QueryTimeout.
+        assert!(
+            matches!(err, BusError::ResponseDropped | BusError::QueryTimeout),
+            "expected ResponseDropped or QueryTimeout, got {err:?}"
+        );
+        handle.join().unwrap();
     }
 }

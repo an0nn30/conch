@@ -6,9 +6,31 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Write data to a file atomically: write to a temporary file first,
+/// then rename to the target path. This prevents corruption from
+/// partial writes due to crashes or power loss.
+fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, data)?;
+
+    // Preserve permissions from the existing file if present.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp, meta.permissions());
+        }
+    }
+
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ServerEntry {
     pub id: String,
     pub label: String,
@@ -34,7 +56,8 @@ pub struct ServerEntry {
     pub proxy_jump: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ServerFolder {
     pub id: String,
     pub name: String,
@@ -42,7 +65,8 @@ pub struct ServerFolder {
     pub entries: Vec<ServerEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct SavedTunnel {
     pub id: Uuid,
     pub label: String,
@@ -82,15 +106,12 @@ pub struct SshConfig {
 
 impl SshConfig {
     pub fn find_server(&self, id: &str) -> Option<&ServerEntry> {
-        self.ungrouped
-            .iter()
-            .find(|s| s.id == id)
-            .or_else(|| {
-                self.folders
-                    .iter()
-                    .flat_map(|f| f.entries.iter())
-                    .find(|s| s.id == id)
-            })
+        self.ungrouped.iter().find(|s| s.id == id).or_else(|| {
+            self.folders
+                .iter()
+                .flat_map(|f| f.entries.iter())
+                .find(|s| s.id == id)
+        })
     }
 
     pub fn find_server_by_label(&self, label: &str) -> Option<&ServerEntry> {
@@ -222,10 +243,14 @@ pub fn load_config(config_dir: &Path) -> SshConfig {
 
 /// Persist the SSH config to `config_dir/servers.json`.
 /// Creates `config_dir` if it does not exist.
+/// Uses atomic writes (tmp + rename) to prevent corruption.
 pub fn save_config(config_dir: &Path, config: &SshConfig) {
     let _ = fs::create_dir_all(config_dir);
     if let Ok(json) = serde_json::to_string_pretty(config) {
-        let _ = fs::write(config_dir.join("servers.json"), json);
+        let path = config_dir.join("servers.json");
+        if let Err(e) = atomic_write(&path, json.as_bytes()) {
+            log::error!("Failed to save servers.json atomically: {e}");
+        }
     }
 }
 
@@ -235,7 +260,8 @@ pub fn save_config(config_dir: &Path, config: &SshConfig) {
 
 /// Portable export format — contains servers (with folders) and tunnels.
 /// Passwords and absolute key paths are intentionally excluded.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ExportPayload {
     pub version: u32,
     pub folders: Vec<ServerFolder>,
@@ -467,9 +493,7 @@ struct PartialEntry {
 impl PartialEntry {
     fn into_server_entry(self) -> Option<ServerEntry> {
         let host = self.hostname.unwrap_or_else(|| self.alias.clone());
-        let user = self.user.or_else(|| {
-            std::env::var("USER").ok()
-        });
+        let user = self.user.or_else(|| std::env::var("USER").ok());
 
         Some(ServerEntry {
             id: format!("sshconfig_{}", self.alias),
@@ -672,6 +696,37 @@ Host bastion-target
     }
 
     #[test]
+    fn save_config_leaves_no_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SshConfig::default();
+        cfg.add_server(make_entry("s1", "host1"));
+        save_config(dir.path(), &cfg);
+        let tmp = dir.path().join("servers.tmp");
+        assert!(
+            !tmp.exists(),
+            ".tmp file should not remain after atomic save"
+        );
+    }
+
+    #[test]
+    fn atomic_write_creates_file_with_correct_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.json");
+        atomic_write(&path, b"{\"ok\": true}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"ok\": true}");
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, "old").unwrap();
+        atomic_write(&path, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[test]
     fn legacy_server_entry_deserializes_with_vault_account_id_none() {
         let json = r#"{
             "id": "s1",
@@ -752,7 +807,11 @@ Host bastion-target
         }"#;
         let cfg: SshConfig = serde_json::from_str(json).unwrap();
         let creds = cfg.collect_unique_credentials();
-        assert_eq!(creds.len(), 2, "deploy+/k1 and root+password should be 2 unique credentials");
+        assert_eq!(
+            creds.len(),
+            2,
+            "deploy+/k1 and root+password should be 2 unique credentials"
+        );
     }
 
     #[test]

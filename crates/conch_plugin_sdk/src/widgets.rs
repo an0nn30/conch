@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Widget {
     // -- Layout Containers -------------------------------------------------
-
     /// Horizontal row of child widgets.
     Horizontal {
         id: Option<String>,
@@ -65,11 +64,8 @@ pub enum Widget {
     },
 
     // -- Data Display ------------------------------------------------------
-
     /// Section heading (larger, bold text).
-    Heading {
-        text: String,
-    },
+    Heading { text: String },
 
     /// Standard label text.
     Label {
@@ -79,9 +75,7 @@ pub enum Widget {
     },
 
     /// Monospace text (for code, paths, log output).
-    Text {
-        text: String,
-    },
+    Text { text: String },
 
     /// Scrollable monospace text area that sticks to the bottom.
     /// Useful for live log output.
@@ -93,10 +87,7 @@ pub enum Widget {
     },
 
     /// Key-value pair display (label on left, value on right).
-    KeyValue {
-        key: String,
-        value: String,
-    },
+    KeyValue { key: String, value: String },
 
     /// Visual separator line.
     Separator,
@@ -143,7 +134,6 @@ pub enum Widget {
     },
 
     // -- Interactive Widgets -----------------------------------------------
-
     /// Clickable button.
     Button {
         id: String,
@@ -193,7 +183,6 @@ pub enum Widget {
     },
 
     // -- Complex Widgets ---------------------------------------------------
-
     /// Horizontal button/icon toolbar.
     Toolbar {
         id: Option<String>,
@@ -439,10 +428,7 @@ pub enum WidgetEvent {
     },
 
     /// A right-click on a table column header (for column visibility toggles, etc.).
-    TableHeaderContextMenu {
-        id: String,
-        column: String,
-    },
+    TableHeaderContextMenu { id: String, column: String },
 
     /// A tab was switched.
     TabChanged { id: String, active: usize },
@@ -612,7 +598,10 @@ mod tests {
 
     #[test]
     fn widget_label_roundtrip() {
-        let w = Widget::Label { text: "test".into(), style: Some(TextStyle::Accent) };
+        let w = Widget::Label {
+            text: "test".into(),
+            style: Some(TextStyle::Accent),
+        };
         if let Widget::Label { text, style } = roundtrip(&w) {
             assert_eq!(text, "test");
             assert!(matches!(style, Some(TextStyle::Accent)));
@@ -623,7 +612,9 @@ mod tests {
 
     #[test]
     fn widget_text_roundtrip() {
-        let w = Widget::Text { text: "monospace".into() };
+        let w = Widget::Text {
+            text: "monospace".into(),
+        };
         if let Widget::Text { text } = roundtrip(&w) {
             assert_eq!(text, "monospace");
         } else {
@@ -639,7 +630,13 @@ mod tests {
             icon: Some("plus".into()),
             enabled: Some(false),
         };
-        if let Widget::Button { id, label, icon, enabled } = roundtrip(&w) {
+        if let Widget::Button {
+            id,
+            label,
+            icon,
+            enabled,
+        } = roundtrip(&w)
+        {
             assert_eq!(id, "btn");
             assert_eq!(label, "Click");
             assert_eq!(icon.as_deref(), Some("plus"));
@@ -658,7 +655,14 @@ mod tests {
             submit_on_enter: Some(true),
             request_focus: None,
         };
-        if let Widget::TextInput { id, value, hint, submit_on_enter, .. } = roundtrip(&w) {
+        if let Widget::TextInput {
+            id,
+            value,
+            hint,
+            submit_on_enter,
+            ..
+        } = roundtrip(&w)
+        {
             assert_eq!(id, "search");
             assert_eq!(value, "foo");
             assert_eq!(hint.as_deref(), Some("Search..."));
@@ -670,7 +674,11 @@ mod tests {
 
     #[test]
     fn widget_checkbox_roundtrip() {
-        let w = Widget::Checkbox { id: "cb".into(), label: "Enable".into(), checked: true };
+        let w = Widget::Checkbox {
+            id: "cb".into(),
+            label: "Enable".into(),
+            checked: true,
+        };
         if let Widget::Checkbox { id, checked, .. } = roundtrip(&w) {
             assert_eq!(id, "cb");
             assert!(checked);
@@ -681,7 +689,11 @@ mod tests {
 
     #[test]
     fn widget_progress_roundtrip() {
-        let w = Widget::Progress { id: "p".into(), fraction: 0.75, label: Some("75%".into()) };
+        let w = Widget::Progress {
+            id: "p".into(),
+            fraction: 0.75,
+            label: Some("75%".into()),
+        };
         if let Widget::Progress { fraction, .. } = roundtrip(&w) {
             assert!((fraction - 0.75).abs() < 0.001);
         } else {
@@ -717,42 +729,41 @@ mod tests {
     fn widget_tree_view_roundtrip() {
         let w = Widget::TreeView {
             id: "tree".into(),
-            nodes: vec![
-                TreeNode {
-                    id: "root".into(),
-                    label: "Root".into(),
-                    icon: Some("folder".into()),
+            nodes: vec![TreeNode {
+                id: "root".into(),
+                label: "Root".into(),
+                icon: Some("folder".into()),
+                icon_color: None,
+                bold: None,
+                badge: None,
+                expanded: Some(true),
+                children: vec![TreeNode {
+                    id: "child".into(),
+                    label: "Child".into(),
+                    icon: None,
                     icon_color: None,
                     bold: None,
-                    badge: None,
-                    expanded: Some(true),
-                    children: vec![
-                        TreeNode {
-                            id: "child".into(),
-                            label: "Child".into(),
-                            icon: None,
-                            icon_color: None,
-                            bold: None,
-                            badge: Some("new".into()),
-                            expanded: None,
-                            children: vec![],
-                            context_menu: None,
-                        },
-                    ],
-                    context_menu: Some(vec![
-                        ContextMenuItem {
-                            id: "delete".into(),
-                            label: "Delete".into(),
-                            icon: None,
-                            enabled: Some(true),
-                            shortcut: None,
-                        },
-                    ]),
-                },
-            ],
+                    badge: Some("new".into()),
+                    expanded: None,
+                    children: vec![],
+                    context_menu: None,
+                }],
+                context_menu: Some(vec![ContextMenuItem {
+                    id: "delete".into(),
+                    label: "Delete".into(),
+                    icon: None,
+                    enabled: Some(true),
+                    shortcut: None,
+                }]),
+            }],
             selected: Some("child".into()),
         };
-        if let Widget::TreeView { id, nodes, selected } = roundtrip(&w) {
+        if let Widget::TreeView {
+            id,
+            nodes,
+            selected,
+        } = roundtrip(&w)
+        {
             assert_eq!(id, "tree");
             assert_eq!(nodes.len(), 1);
             assert_eq!(nodes[0].children.len(), 1);
@@ -768,24 +779,44 @@ mod tests {
         let w = Widget::Table {
             id: "files".into(),
             columns: vec![
-                TableColumn { id: "name".into(), label: "Name".into(), sortable: Some(true), width: None, visible: None },
-                TableColumn { id: "size".into(), label: "Size".into(), sortable: Some(true), width: Some(80.0), visible: None },
-            ],
-            rows: vec![
-                TableRow {
-                    id: "r1".into(),
-                    cells: vec![
-                        TableCell::Text("file.txt".into()),
-                        TableCell::Rich { text: "1.2 KB".into(), icon: None, badge: None },
-                    ],
-                    context_menu: None,
+                TableColumn {
+                    id: "name".into(),
+                    label: "Name".into(),
+                    sortable: Some(true),
+                    width: None,
+                    visible: None,
+                },
+                TableColumn {
+                    id: "size".into(),
+                    label: "Size".into(),
+                    sortable: Some(true),
+                    width: Some(80.0),
+                    visible: None,
                 },
             ],
+            rows: vec![TableRow {
+                id: "r1".into(),
+                cells: vec![
+                    TableCell::Text("file.txt".into()),
+                    TableCell::Rich {
+                        text: "1.2 KB".into(),
+                        icon: None,
+                        badge: None,
+                    },
+                ],
+                context_menu: None,
+            }],
             sort_column: Some("name".into()),
             sort_ascending: Some(true),
             selected_row: None,
         };
-        if let Widget::Table { columns, rows, sort_column, .. } = roundtrip(&w) {
+        if let Widget::Table {
+            columns,
+            rows,
+            sort_column,
+            ..
+        } = roundtrip(&w)
+        {
             assert_eq!(columns.len(), 2);
             assert_eq!(rows.len(), 1);
             assert_eq!(sort_column.as_deref(), Some("name"));
@@ -804,7 +835,13 @@ mod tests {
             left: Box::new(Widget::label("Left")),
             right: Box::new(Widget::label("Right")),
         };
-        if let Widget::SplitPane { ratio, resizable, direction, .. } = roundtrip(&w) {
+        if let Widget::SplitPane {
+            ratio,
+            resizable,
+            direction,
+            ..
+        } = roundtrip(&w)
+        {
             assert!((ratio - 0.3).abs() < 0.001);
             assert!(resizable);
             assert!(matches!(direction, SplitDirection::Horizontal));
@@ -819,8 +856,16 @@ mod tests {
             id: "tabs".into(),
             active: 1,
             tabs: vec![
-                TabPane { label: "Tab A".into(), icon: None, children: vec![Widget::label("A")] },
-                TabPane { label: "Tab B".into(), icon: Some("star".into()), children: vec![] },
+                TabPane {
+                    label: "Tab A".into(),
+                    icon: None,
+                    children: vec![Widget::label("A")],
+                },
+                TabPane {
+                    label: "Tab B".into(),
+                    icon: Some("star".into()),
+                    children: vec![],
+                },
             ],
         };
         if let Widget::Tabs { active, tabs, .. } = roundtrip(&w) {
@@ -838,13 +883,18 @@ mod tests {
             id: Some("tb".into()),
             items: vec![
                 ToolbarItem::Button {
-                    id: "add".into(), icon: Some("plus".into()),
-                    label: None, tooltip: Some("Add".into()), enabled: None,
+                    id: "add".into(),
+                    icon: Some("plus".into()),
+                    label: None,
+                    tooltip: Some("Add".into()),
+                    enabled: None,
                 },
                 ToolbarItem::Separator,
                 ToolbarItem::Spacer,
                 ToolbarItem::TextInput {
-                    id: "search".into(), value: "".into(), hint: Some("Search".into()),
+                    id: "search".into(),
+                    value: "".into(),
+                    hint: Some("Search".into()),
                 },
             ],
         };
@@ -861,11 +911,20 @@ mod tests {
             id: "sort".into(),
             selected: "name".into(),
             options: vec![
-                ComboBoxOption { value: "name".into(), label: "Name".into() },
-                ComboBoxOption { value: "size".into(), label: "Size".into() },
+                ComboBoxOption {
+                    value: "name".into(),
+                    label: "Name".into(),
+                },
+                ComboBoxOption {
+                    value: "size".into(),
+                    label: "Size".into(),
+                },
             ],
         };
-        if let Widget::ComboBox { selected, options, .. } = roundtrip(&w) {
+        if let Widget::ComboBox {
+            selected, options, ..
+        } = roundtrip(&w)
+        {
             assert_eq!(selected, "name");
             assert_eq!(options.len(), 2);
         } else {
@@ -888,7 +947,10 @@ mod tests {
 
     #[test]
     fn widget_badge_roundtrip() {
-        let w = Widget::Badge { text: "ok".into(), variant: BadgeVariant::Success };
+        let w = Widget::Badge {
+            text: "ok".into(),
+            variant: BadgeVariant::Success,
+        };
         if let Widget::Badge { text, variant } = roundtrip(&w) {
             assert_eq!(text, "ok");
             assert!(matches!(variant, BadgeVariant::Success));
@@ -909,7 +971,10 @@ mod tests {
 
     #[test]
     fn widget_key_value_roundtrip() {
-        let w = Widget::KeyValue { key: "Host".into(), value: "example.com".into() };
+        let w = Widget::KeyValue {
+            key: "Host".into(),
+            value: "example.com".into(),
+        };
         if let Widget::KeyValue { key, value } = roundtrip(&w) {
             assert_eq!(key, "Host");
             assert_eq!(value, "example.com");
@@ -925,7 +990,12 @@ mod tests {
             max_height: Some(200.0),
             children: vec![Widget::label("item")],
         };
-        if let Widget::ScrollArea { max_height, children, .. } = roundtrip(&w) {
+        if let Widget::ScrollArea {
+            max_height,
+            children,
+            ..
+        } = roundtrip(&w)
+        {
             assert_eq!(max_height, Some(200.0));
             assert_eq!(children.len(), 1);
         } else {
@@ -951,12 +1021,13 @@ mod tests {
     fn widget_context_menu_roundtrip() {
         let w = Widget::ContextMenu {
             child: Box::new(Widget::label("Right-click me")),
-            items: vec![
-                ContextMenuItem {
-                    id: "copy".into(), label: "Copy".into(),
-                    icon: None, enabled: None, shortcut: Some("Cmd+C".into()),
-                },
-            ],
+            items: vec![ContextMenuItem {
+                id: "copy".into(),
+                label: "Copy".into(),
+                icon: None,
+                enabled: None,
+                shortcut: Some("Cmd+C".into()),
+            }],
         };
         if let Widget::ContextMenu { items, .. } = roundtrip(&w) {
             assert_eq!(items.len(), 1);
@@ -994,7 +1065,10 @@ mod tests {
 
     #[test]
     fn event_tree_select() {
-        let e = WidgetEvent::TreeSelect { id: "tree".into(), node_id: "n1".into() };
+        let e = WidgetEvent::TreeSelect {
+            id: "tree".into(),
+            node_id: "n1".into(),
+        };
         if let WidgetEvent::TreeSelect { node_id, .. } = roundtrip_event(&e) {
             assert_eq!(node_id, "n1");
         } else {
@@ -1005,7 +1079,9 @@ mod tests {
     #[test]
     fn event_tree_context_menu() {
         let e = WidgetEvent::TreeContextMenu {
-            id: "tree".into(), node_id: "n1".into(), action: "delete".into(),
+            id: "tree".into(),
+            node_id: "n1".into(),
+            action: "delete".into(),
         };
         if let WidgetEvent::TreeContextMenu { action, .. } = roundtrip_event(&e) {
             assert_eq!(action, "delete");
@@ -1016,7 +1092,10 @@ mod tests {
 
     #[test]
     fn event_text_input_submit() {
-        let e = WidgetEvent::TextInputSubmit { id: "search".into(), value: "query".into() };
+        let e = WidgetEvent::TextInputSubmit {
+            id: "search".into(),
+            value: "query".into(),
+        };
         if let WidgetEvent::TextInputSubmit { value, .. } = roundtrip_event(&e) {
             assert_eq!(value, "query");
         } else {
@@ -1026,7 +1105,10 @@ mod tests {
 
     #[test]
     fn event_table_header_context_menu() {
-        let e = WidgetEvent::TableHeaderContextMenu { id: "files".into(), column: "ext".into() };
+        let e = WidgetEvent::TableHeaderContextMenu {
+            id: "files".into(),
+            column: "ext".into(),
+        };
         if let WidgetEvent::TableHeaderContextMenu { id, column } = roundtrip_event(&e) {
             assert_eq!(id, "files");
             assert_eq!(column, "ext");
@@ -1037,8 +1119,15 @@ mod tests {
 
     #[test]
     fn event_table_sort() {
-        let e = WidgetEvent::TableSort { id: "files".into(), column: "size".into(), ascending: false };
-        if let WidgetEvent::TableSort { column, ascending, .. } = roundtrip_event(&e) {
+        let e = WidgetEvent::TableSort {
+            id: "files".into(),
+            column: "size".into(),
+            ascending: false,
+        };
+        if let WidgetEvent::TableSort {
+            column, ascending, ..
+        } = roundtrip_event(&e)
+        {
             assert_eq!(column, "size");
             assert!(!ascending);
         } else {
@@ -1048,7 +1137,10 @@ mod tests {
 
     #[test]
     fn event_checkbox_changed() {
-        let e = WidgetEvent::CheckboxChanged { id: "cb".into(), checked: true };
+        let e = WidgetEvent::CheckboxChanged {
+            id: "cb".into(),
+            checked: true,
+        };
         if let WidgetEvent::CheckboxChanged { checked, .. } = roundtrip_event(&e) {
             assert!(checked);
         } else {
@@ -1058,7 +1150,10 @@ mod tests {
 
     #[test]
     fn event_combobox_changed() {
-        let e = WidgetEvent::ComboBoxChanged { id: "sort".into(), value: "size".into() };
+        let e = WidgetEvent::ComboBoxChanged {
+            id: "sort".into(),
+            value: "size".into(),
+        };
         if let WidgetEvent::ComboBoxChanged { value, .. } = roundtrip_event(&e) {
             assert_eq!(value, "size");
         } else {
@@ -1068,7 +1163,10 @@ mod tests {
 
     #[test]
     fn event_tab_changed() {
-        let e = WidgetEvent::TabChanged { id: "tabs".into(), active: 2 };
+        let e = WidgetEvent::TabChanged {
+            id: "tabs".into(),
+            active: 2,
+        };
         if let WidgetEvent::TabChanged { active, .. } = roundtrip_event(&e) {
             assert_eq!(active, 2);
         } else {
@@ -1078,7 +1176,10 @@ mod tests {
 
     #[test]
     fn event_path_bar_navigate() {
-        let e = WidgetEvent::PathBarNavigate { id: "path".into(), segment_index: 1 };
+        let e = WidgetEvent::PathBarNavigate {
+            id: "path".into(),
+            segment_index: 1,
+        };
         if let WidgetEvent::PathBarNavigate { segment_index, .. } = roundtrip_event(&e) {
             assert_eq!(segment_index, 1);
         } else {
@@ -1105,11 +1206,19 @@ mod tests {
 
     #[test]
     fn plugin_event_widget_roundtrip() {
-        let e = PluginEvent::Widget(WidgetEvent::ButtonClick { id: "add_server".into() });
+        let e = PluginEvent::Widget(WidgetEvent::ButtonClick {
+            id: "add_server".into(),
+        });
         let json = serde_json::to_string(&e).unwrap();
         // Verify no "type" collision — "kind" tags the outer, "type" tags the inner.
-        assert!(json.contains("\"kind\":\"widget\""), "expected kind tag, got: {json}");
-        assert!(json.contains("\"type\":\"button_click\""), "expected type tag, got: {json}");
+        assert!(
+            json.contains("\"kind\":\"widget\""),
+            "expected kind tag, got: {json}"
+        );
+        assert!(
+            json.contains("\"type\":\"button_click\""),
+            "expected type tag, got: {json}"
+        );
         if let PluginEvent::Widget(WidgetEvent::ButtonClick { id }) = roundtrip_plugin_event(&e) {
             assert_eq!(id, "add_server");
         } else {
@@ -1119,7 +1228,9 @@ mod tests {
 
     #[test]
     fn plugin_event_menu_action() {
-        let e = PluginEvent::MenuAction { action: "ssh.connect".into() };
+        let e = PluginEvent::MenuAction {
+            action: "ssh.connect".into(),
+        };
         if let PluginEvent::MenuAction { action } = roundtrip_plugin_event(&e) {
             assert_eq!(action, "ssh.connect");
         } else {
@@ -1166,7 +1277,9 @@ mod tests {
 
     #[test]
     fn plugin_event_theme_changed() {
-        let e = PluginEvent::ThemeChanged { theme_json: "{}".into() };
+        let e = PluginEvent::ThemeChanged {
+            theme_json: "{}".into(),
+        };
         if let PluginEvent::ThemeChanged { theme_json } = roundtrip_plugin_event(&e) {
             assert_eq!(theme_json, "{}");
         } else {
@@ -1205,7 +1318,13 @@ mod tests {
 
     #[test]
     fn builder_button() {
-        if let Widget::Button { id, label, icon, enabled } = Widget::button("ok", "OK") {
+        if let Widget::Button {
+            id,
+            label,
+            icon,
+            enabled,
+        } = Widget::button("ok", "OK")
+        {
             assert_eq!(id, "ok");
             assert_eq!(label, "OK");
             assert!(icon.is_none());
@@ -1217,7 +1336,10 @@ mod tests {
 
     #[test]
     fn builder_text_input() {
-        if let Widget::TextInput { submit_on_enter, .. } = Widget::text_input("s", "") {
+        if let Widget::TextInput {
+            submit_on_enter, ..
+        } = Widget::text_input("s", "")
+        {
             assert_eq!(submit_on_enter, Some(true));
         } else {
             panic!("Wrong variant");

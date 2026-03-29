@@ -19,7 +19,7 @@
   // Pane state
   const localPane = createPaneState('local', true);
   const remotePane = createPaneState('remote', false);
-  let activeRemoteTabId = null;
+  let activeRemotePaneId = null;
 
   function createPaneState(prefix, isLocal) {
     return {
@@ -156,7 +156,7 @@
 
   async function onTabChanged(tab) {
     if (!tab || tab.type !== 'ssh' || !tab.spawned) {
-      activeRemoteTabId = null;
+      activeRemotePaneId = null;
       remotePane.entries = [];
       remotePane.currentPath = '';
       remotePane.error = null;
@@ -164,11 +164,13 @@
       renderPane(remotePane, panelEl.querySelector('#fp-remote'));
       return;
     }
-    if (activeRemoteTabId === tab.id) return;
-    activeRemoteTabId = tab.id;
+    // Accept either a pane object (with .paneId) or a tab object (with .id).
+    const id = tab.paneId != null ? tab.paneId : tab.id;
+    if (activeRemotePaneId === id) return;
+    activeRemotePaneId = id;
 
     try {
-      const path = await invoke('sftp_realpath', { tabId: tab.id, path: '.' });
+      const path = await invoke('sftp_realpath', { paneId: id, path: '.' });
       remotePane.currentPath = path;
       remotePane.pathInput = path;
       remotePane.backStack = [];
@@ -195,13 +197,13 @@
       if (pane.isLocal) {
         entries = await invoke('local_list_dir', { path: pane.currentPath });
       } else {
-        if (!activeRemoteTabId) {
+        if (!activeRemotePaneId) {
           pane.entries = [];
           pane.loading = false;
           renderPane(pane, el);
           return;
         }
-        entries = await invoke('sftp_list_dir', { tabId: activeRemoteTabId, path: pane.currentPath });
+        entries = await invoke('sftp_list_dir', { paneId: activeRemotePaneId, path: pane.currentPath });
       }
       pane.entries = entries;
       sortEntries(pane);
@@ -291,7 +293,7 @@
   function renderPane(pane, el) {
     if (!el) return;
     const isRemote = !pane.isLocal;
-    const noSession = isRemote && !activeRemoteTabId;
+    const noSession = isRemote && !activeRemotePaneId;
     const label = isRemote
       ? (noSession ? 'Remote — No SSH session' : 'Remote')
       : 'Local';
@@ -445,7 +447,7 @@
 
   async function doDownload() {
     const entry = getSelectedEntry(remotePane);
-    if (!entry || !activeRemoteTabId) return;
+    if (!entry || !activeRemotePaneId) return;
     if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
 
     const remotePath = remotePane.currentPath + '/' + entry.name;
@@ -453,7 +455,7 @@
 
     try {
       const transferId = await invoke('transfer_download', {
-        tabId: activeRemoteTabId,
+        paneId: activeRemotePaneId,
         remotePath,
         localPath,
       });
@@ -466,7 +468,7 @@
 
   async function doUpload() {
     const entry = getSelectedEntry(localPane);
-    if (!entry || !activeRemoteTabId) return;
+    if (!entry || !activeRemotePaneId) return;
     if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory upload not yet supported.'); return; }
 
     const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
@@ -474,7 +476,7 @@
 
     try {
       const transferId = await invoke('transfer_upload', {
-        tabId: activeRemoteTabId,
+        paneId: activeRemotePaneId,
         localPath,
         remotePath,
       });
