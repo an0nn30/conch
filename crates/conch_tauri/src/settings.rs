@@ -85,21 +85,9 @@ pub(crate) fn needs_restart(old: &UserConfig, new: &UserConfig) -> bool {
         return true;
     }
 
-    // Terminal font
-    let old_font = old.resolved_terminal_font();
-    let new_font = new.resolved_terminal_font();
-    if old_font.normal.family != new_font.normal.family {
-        return true;
-    }
-    if old_font.size != new_font.size {
-        return true;
-    }
-    if old_font.offset.x != new_font.offset.x {
-        return true;
-    }
-    if old_font.offset.y != new_font.offset.y {
-        return true;
-    }
+    // Terminal font — hot-reloaded via config-changed event, no restart needed.
+
+    // Scroll sensitivity
     if old.terminal.scroll_sensitivity != new.terminal.scroll_sensitivity {
         return true;
     }
@@ -170,11 +158,14 @@ mod tests {
     }
 
     #[test]
-    fn changed_terminal_font_needs_restart() {
+    fn changed_terminal_font_no_restart() {
         let a = UserConfig::default();
         let mut b = UserConfig::default();
         b.terminal.font.size = 18.0;
-        assert!(needs_restart(&a, &b));
+        assert!(
+            !needs_restart(&a, &b),
+            "Terminal font is hot-reloadable, should not require restart"
+        );
     }
 
     #[test]

@@ -2919,6 +2919,31 @@
             document.body.style.fontSize = appCfg.ui_font_size + 'px';
           }
 
+          // Re-apply terminal font/size to all open panes.
+          try {
+            const termCfg = await invoke('get_terminal_config');
+            let newTermFont = '"JetBrains Mono", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
+            if (termCfg.font_family) {
+              newTermFont = '"' + termCfg.font_family + '", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
+            }
+            termFontFamily = newTermFont;
+            const newTermSize = termCfg.font_size > 0 ? termCfg.font_size : 14;
+            termFontSize = newTermSize;
+            for (const pane of panes.values()) {
+              pane.term.options.fontFamily = newTermFont;
+              pane.term.options.fontSize = newTermSize;
+            }
+            // Allow the browser to load/measure the new font before re-fitting.
+            requestAnimationFrame(() => {
+              for (const pane of panes.values()) {
+                if (pane.fitAddon) pane.fitAddon.fit();
+                pane.term.refresh(0, pane.term.rows - 1);
+              }
+            });
+          } catch (e) {
+            console.warn('Failed to reload terminal font:', e);
+          }
+
           // Re-apply notification settings.
           if (window.toast && window.toast.configure) {
             window.toast.configure({
