@@ -403,6 +403,14 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 let label = window.label().to_string();
                 log::info!("Window '{label}' destroyed — starting cleanup");
 
+                // When the main window closes, also close child windows
+                // (settings, etc.) so they don't linger as orphans.
+                if label == "main" {
+                    if let Some(settings_win) = window.app_handle().get_webview_window("settings") {
+                        let _ = settings_win.close();
+                    }
+                }
+
                 // Clean up PTY sessions for this window.
                 if let Some(state) = window.try_state::<TauriState>() {
                     let pty_count = cleanup::cleanup_ptys(&state.ptys, &label);
