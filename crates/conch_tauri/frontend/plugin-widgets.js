@@ -621,11 +621,17 @@
 
   function handleFormDialog(event) {
     const { prompt_id, json } = event.payload;
+    const pluginName = prompt_id.split('\0')[0];
+    if (document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+      invoke('dialog_respond_form', { promptId: prompt_id, result: null }).catch(() => {});
+      return;
+    }
     let desc;
     try { desc = typeof json === 'string' ? JSON.parse(json) : json; } catch (_) { desc = {}; }
 
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
+    overlay.setAttribute('data-plugin-dialog', pluginName);
     overlay.style.zIndex = '4000';
 
     const title = desc.title || 'Form';
@@ -708,8 +714,14 @@
 
   function handlePromptDialog(event) {
     const { prompt_id, message, default_value } = event.payload;
+    const pluginName = prompt_id.split('\0')[0];
+    if (document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+      invoke('dialog_respond_prompt', { promptId: prompt_id, value: null }).catch(() => {});
+      return;
+    }
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
+    overlay.setAttribute('data-plugin-dialog', pluginName);
     overlay.style.zIndex = '4000';
     overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Prompt</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div><input class="pw-text-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false"></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="pd-cancel">Cancel</button><button class="ssh-form-btn primary" id="pd-ok">OK</button></div></div>`;
     document.body.appendChild(overlay);
@@ -730,8 +742,14 @@
 
   function handleConfirmDialog(event) {
     const { prompt_id, message } = event.payload;
+    const pluginName = prompt_id.split('\0')[0];
+    if (document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+      invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: false }).catch(() => {});
+      return;
+    }
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
+    overlay.setAttribute('data-plugin-dialog', pluginName);
     overlay.style.zIndex = '4000';
     overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Confirm</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="cd-no">No</button><button class="ssh-form-btn primary" id="cd-yes">Yes</button></div></div>`;
     document.body.appendChild(overlay);

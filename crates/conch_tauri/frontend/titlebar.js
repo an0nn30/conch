@@ -419,13 +419,27 @@
     return combo.key ? combo : null;
   }
 
+  // Map e.code (physical key) to a plain key name so that Shift+digit
+  // combos resolve to the digit rather than the shifted character.
+  function codeToKey(code) {
+    if (!code) return '';
+    if (/^Digit([0-9])$/.test(code)) return code[5];
+    if (/^Key([A-Z])$/.test(code)) return code.slice(3).toLowerCase();
+    const map = {
+      Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[',
+      BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'",
+      Comma: ',', Period: '.', Slash: '/',
+    };
+    return map[code] || '';
+  }
+
   function matchesEvent(combo, e) {
     if (!combo) return false;
     if (combo.ctrl !== (e.ctrlKey || e.metaKey)) return false;
     if (combo.shift !== e.shiftKey) return false;
     if (combo.alt !== e.altKey) return false;
-    // Normalize key comparison
-    const eKey = e.key.toLowerCase();
+    // Use e.code (physical key) so Shift+9 matches '9' not '('.
+    const eKey = codeToKey(e.code) || e.key.toLowerCase();
     const cKey = combo.key;
     // Handle special names
     if (cKey === '/' && eKey === '/') return true;
