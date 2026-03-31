@@ -8,6 +8,8 @@
   let listen = null;
   const pluginMenuItems = [];
   const dockedViewRefreshTimers = new Map();
+  // Tracks plugins whose dialog was recently dismissed to reject queued duplicates.
+  const _dialogCooldown = new Set();
   // Tracks handles for panels registered at the bottom location.
   // Maps handle (number) → plugin name (string).
   const bottomPanelHandles = new Map();
@@ -622,7 +624,8 @@
   function handleFormDialog(event) {
     const { prompt_id, json } = event.payload;
     const pluginName = prompt_id.split('\0')[0];
-    if (document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+    if (_dialogCooldown.has(pluginName) ||
+        document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
       invoke('dialog_respond_form', { promptId: prompt_id, result: null }).catch(() => {});
       return;
     }
@@ -688,6 +691,8 @@
     }, 30);
 
     const dismiss = (result) => {
+      _dialogCooldown.add(pluginName);
+      setTimeout(() => _dialogCooldown.delete(pluginName), 600);
       overlay.remove();
       invoke('dialog_respond_form', { promptId: prompt_id, result }).catch(() => {});
     };
@@ -715,7 +720,8 @@
   function handlePromptDialog(event) {
     const { prompt_id, message, default_value } = event.payload;
     const pluginName = prompt_id.split('\0')[0];
-    if (document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+    if (_dialogCooldown.has(pluginName) ||
+        document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
       invoke('dialog_respond_prompt', { promptId: prompt_id, value: null }).catch(() => {});
       return;
     }
@@ -728,6 +734,8 @@
     setTimeout(() => overlay.querySelector('#pd-input').focus(), 50);
 
     const dismiss = (val) => {
+      _dialogCooldown.add(pluginName);
+      setTimeout(() => _dialogCooldown.delete(pluginName), 600);
       overlay.remove();
       invoke('dialog_respond_prompt', { promptId: prompt_id, value: val }).catch(() => {});
     };
@@ -743,7 +751,8 @@
   function handleConfirmDialog(event) {
     const { prompt_id, message } = event.payload;
     const pluginName = prompt_id.split('\0')[0];
-    if (document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+    if (_dialogCooldown.has(pluginName) ||
+        document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
       invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: false }).catch(() => {});
       return;
     }
@@ -755,6 +764,8 @@
     document.body.appendChild(overlay);
 
     const dismiss = (val) => {
+      _dialogCooldown.add(pluginName);
+      setTimeout(() => _dialogCooldown.delete(pluginName), 600);
       overlay.remove();
       invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: val }).catch(() => {});
     };
