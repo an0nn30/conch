@@ -3973,6 +3973,7 @@
       const isMacPlatform = /mac/i.test(navigator.platform || '');
       const shortcutDebugEnabled = true;
       let pluginCtrlAltShortcutFallbacks = [];
+      let pluginAllShortcutFallbacks = [];
       let functionKeyShortcutFallbacks = [];
       const coreShortcutActionByKey = {
         new_tab: 'new-tab',
@@ -4031,13 +4032,28 @@
         return e.altKey || e.ctrlKey || e.metaKey || key.startsWith('Arrow') || key === 'Escape' || /^F\d{1,2}$/.test(key);
       }
 
+      function codeToKey(code) {
+        if (!code) return '';
+        if (/^Digit([0-9])$/.test(code)) return code[5];
+        if (/^Key([A-Z])$/.test(code)) return code.slice(3).toLowerCase();
+        const map = {
+          Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[',
+          BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'",
+          Comma: ',', Period: '.', Slash: '/',
+        };
+        if (map[code]) return map[code];
+        // Function keys, arrows, etc. — fall back to e.key
+        return '';
+      }
+
       function normalizeShortcutEventForPluginFallback(e) {
         const parts = [];
         if (e.metaKey) parts.push('cmd');
         if (e.ctrlKey) parts.push('ctrl');
         if (e.altKey) parts.push('alt');
         if (e.shiftKey) parts.push('shift');
-        const key = String(e.key || '').toLowerCase();
+        // Use e.code (physical key) so Shift+9 yields '9', not '('.
+        const key = codeToKey(e.code) || String(e.key || '').toLowerCase();
         if (!key || ['meta', 'control', 'alt', 'shift'].includes(key)) return null;
         parts.push(key);
         return parts.join('+');
@@ -4080,6 +4096,7 @@
           const overrides = settings?.conch?.keyboard?.plugin_shortcuts || {};
           const keyboard = settings?.conch?.keyboard || {};
           const pluginCtrlAltNext = [];
+          const pluginAllNext = [];
           const functionKeyNext = [];
 
           for (const [settingsKey, action] of Object.entries(coreShortcutActionByKey)) {
@@ -4117,12 +4134,18 @@
             if (isMacPlatform && combo.includes('ctrl') && combo.includes('alt') && !combo.includes('cmd')) {
               pluginCtrlAltNext.push({ combo, plugin: item.plugin, action: item.action });
             }
+            // General fallback for ALL plugin shortcuts so combos like
+            // cmd+shift+<digit> work even when the native menu accelerator
+            // doesn't fire (Shift+digit produces a shifted char in e.key).
+            pluginAllNext.push({ combo, plugin: item.plugin, action: item.action });
           }
 
           pluginCtrlAltShortcutFallbacks = pluginCtrlAltNext;
+          pluginAllShortcutFallbacks = pluginAllNext;
           functionKeyShortcutFallbacks = functionKeyNext;
         } catch (_) {
           pluginCtrlAltShortcutFallbacks = [];
+          pluginAllShortcutFallbacks = [];
           functionKeyShortcutFallbacks = [];
         }
       }
@@ -4137,7 +4160,7 @@
       }, true);
 
       // Fallback shortcuts for cases where native menu accelerators are inconsistent
-      // (notably function keys and some macOS ctrl+option plugin combos).
+      // (notably function keys, macOS ctrl+option combos, and shift+digit combos).
       document.addEventListener('keydown', (e) => {
         if (isTextInputTarget(e.target)) return;
         const combo = normalizeShortcutEventForPluginFallback(e);
@@ -4156,7 +4179,21 @@
           }
           return;
         }
-        if (!isMacPlatform || !e.ctrlKey || !e.altKey || e.metaKey) return;
+        if (!isMacPlatform || !e.ctrlKey || !e.altKey || e.metaKey) {
+          // General plugin shortcut fallback — covers combos the native
+          // menu may not handle (e.g. cmd+shift+9 where the accelerator
+          // doesn't fire because macOS/muda mismatches shifted digits).
+          const allHit = pluginAllShortcutFallbacks.find((s) => s.combo === combo);
+          if (allHit) {
+            e.preventDefault();
+            e.stopPropagation();
+            invoke('trigger_plugin_menu_action', {
+              pluginName: allHit.plugin,
+              action: allHit.action,
+            }).catch(() => {});
+          }
+          return;
+        }
         const hit = pluginCtrlAltShortcutFallbacks.find((s) => s.combo === combo);
         if (!hit) return;
         e.preventDefault();

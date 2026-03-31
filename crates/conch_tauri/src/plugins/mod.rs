@@ -844,11 +844,35 @@ pub(crate) fn trigger_plugin_menu_action(
     plugin_name: String,
     action: String,
 ) {
-    let bus = Arc::clone(&state.lock().bus);
-    if let Some(sender) = bus.sender_for(&plugin_name) {
-        let event = conch_plugin_sdk::PluginEvent::MenuAction { action };
-        let json = serde_json::to_string(&event).unwrap_or_default();
-        let _ = sender.blocking_send(conch_plugin::bus::PluginMail::WidgetEvent { json });
+    let ps = state.lock();
+    let bus = Arc::clone(&ps.bus);
+    let event = conch_plugin_sdk::PluginEvent::MenuAction {
+        action: action.clone(),
+    };
+    let json = serde_json::to_string(&event).unwrap_or_default();
+
+    let sent = if let Some(sender) = bus.sender_for(&plugin_name) {
+        sender
+            .blocking_send(conch_plugin::bus::PluginMail::WidgetEvent { json: json.clone() })
+            .is_ok()
+    } else {
+        false
+    };
+
+    // For Java plugins: the shared TauriHostApi registers menu items under
+    // a generic name ("java") while each plugin registers on the bus with
+    // its real name. Broadcast to all loaded Java plugins so the right one
+    // picks it up via its action filter.
+    if !sent {
+        if let Some(ref mgr) = ps.java_mgr {
+            for meta in mgr.loaded_plugins() {
+                if let Some(sender) = bus.sender_for(&meta.name) {
+                    let _ = sender.blocking_send(conch_plugin::bus::PluginMail::WidgetEvent {
+                        json: json.clone(),
+                    });
+                }
+            }
+        }
     }
 }
 

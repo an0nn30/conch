@@ -535,8 +535,19 @@ impl HostApi for TauriHostApi {
     }
 
     fn register_menu_item(&self, menu: &str, label: &str, action: &str, keybind: Option<&str>) {
+        self.register_menu_item_as(&self.name, menu, label, action, keybind);
+    }
+
+    fn register_menu_item_as(
+        &self,
+        plugin_name: &str,
+        menu: &str,
+        label: &str,
+        action: &str,
+        keybind: Option<&str>,
+    ) {
         let item = PluginMenuItem {
-            plugin: self.name.clone(),
+            plugin: plugin_name.to_string(),
             menu: menu.to_string(),
             label: label.to_string(),
             action: action.to_string(),

@@ -52,6 +52,22 @@ pub trait HostApi: Send + Sync {
     // -- Menu --
     fn register_menu_item(&self, menu: &str, label: &str, action: &str, keybind: Option<&str>);
 
+    /// Like `register_menu_item` but allows the caller to specify the plugin
+    /// name that the item is filed under.  The default implementation ignores
+    /// `plugin_name` and delegates to `register_menu_item`.  TauriHostApi
+    /// overrides this to use the provided name, which is important for Java
+    /// plugins where a single shared HostApi serves all plugins.
+    fn register_menu_item_as(
+        &self,
+        _plugin_name: &str,
+        menu: &str,
+        label: &str,
+        action: &str,
+        keybind: Option<&str>,
+    ) {
+        self.register_menu_item(menu, label, action, keybind);
+    }
+
     // -- Dialogs (blocking — called from plugin thread) --
     fn show_form(&self, json: &str) -> Option<String>;
     fn show_confirm(&self, msg: &str) -> bool;

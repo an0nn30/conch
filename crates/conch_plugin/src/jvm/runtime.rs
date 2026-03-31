@@ -1,5 +1,6 @@
 //! JVM plugin manager — discovery, loading, and lifecycle for `.jar` plugins.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -64,6 +65,13 @@ impl LoadedPlugin {
 /// Global trait-based HostApi. Set once by `JavaPluginManager::new()`.
 /// JNI native methods call trait methods through this.
 static TRAIT_HOST_API: OnceLock<Arc<dyn HostApi>> = OnceLock::new();
+
+/// Per-thread plugin name so JNI native methods can attribute actions
+/// (e.g. menu item registration) to the correct plugin instead of the
+/// shared "java" HostApi name.
+thread_local! {
+    static CURRENT_PLUGIN_NAME: RefCell<String> = const { RefCell::new(String::new()) };
+}
 
 /// The SDK JAR is embedded in the binary at compile time.
 /// It's written to a temp file on first JVM startup.
@@ -398,6 +406,11 @@ fn java_plugin_thread(
             return;
         }
     };
+
+    // Store the real plugin name so JNI native methods attribute actions
+    // (menu items, notifications, etc.) to this plugin, not the shared
+    // "java" HostApi name.
+    CURRENT_PLUGIN_NAME.with(|n| *n.borrow_mut() = plugin_name.clone());
 
     // Auto-register panel if this is a panel plugin.
     if meta.plugin_type == conch_plugin_sdk::PluginType::Panel {
@@ -935,6 +948,11 @@ extern "system" fn native_host_check_permission(
     if api.check_permission(&cap) { 1 } else { 0 }
 }
 
+/// Read the current plugin name from the thread-local (set in java_plugin_thread).
+fn current_plugin_name() -> String {
+    CURRENT_PLUGIN_NAME.with(|n| n.borrow().clone())
+}
+
 extern "system" fn native_host_register_menu_item(
     mut env: JNIEnv,
     _class: JClass,
@@ -952,7 +970,12 @@ extern "system" fn native_host_register_menu_item(
     let Some(a) = jstr(&mut env, &action) else {
         return;
     };
-    api.register_menu_item(&m, &l, &a, None);
+    let name = current_plugin_name();
+    if name.is_empty() {
+        api.register_menu_item(&m, &l, &a, None);
+    } else {
+        api.register_menu_item_as(&name, &m, &l, &a, None);
+    }
 }
 
 extern "system" fn native_host_register_menu_item_keybind(
@@ -974,7 +997,12 @@ extern "system" fn native_host_register_menu_item_keybind(
         return;
     };
     let kb = jstr(&mut env, &keybind);
-    api.register_menu_item(&m, &l, &a, kb.as_deref());
+    let name = current_plugin_name();
+    if name.is_empty() {
+        api.register_menu_item(&m, &l, &a, kb.as_deref());
+    } else {
+        api.register_menu_item_as(&name, &m, &l, &a, kb.as_deref());
+    }
 }
 
 extern "system" fn native_host_notify(
