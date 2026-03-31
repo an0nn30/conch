@@ -625,11 +625,27 @@
       flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .ssh-tunnel-btn {
-      margin-left: auto; flex-shrink: 0;
+      flex-shrink: 0;
       padding: 1px 8px; border: 1px solid var(--active-highlight); border-radius: 3px;
       background: transparent; color: var(--text-secondary); cursor: pointer;
       font-size: var(--ui-font-small); line-height: 1.5; white-space: nowrap;
       transition: background 100ms, border-color 100ms;
+    }
+    .ssh-tunnel-action-btn { margin-left: auto; }
+    .ssh-tunnel-error-indicator {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      line-height: 14px;
+      text-align: center;
+      border-radius: 50%;
+      background: var(--active-highlight);
+      color: var(--red);
+      font-size: 10px;
+      font-weight: 700;
+      cursor: default;
+      user-select: none;
+      flex-shrink: 0;
     }
     .ssh-tunnel-btn:hover { border-color: var(--dim-fg); background: var(--input-bg); }
     .ssh-tunnel-btn:active { background: var(--tab-border); }
@@ -662,7 +678,7 @@
     }
     .ssh-server-detail { font-size: var(--ui-font-small); color: var(--dim-fg); flex-shrink: 0; }
     .ssh-context-menu {
-      position: fixed; z-index: 2000; background: var(--input-bg); border: 1px solid var(--active-highlight);
+      position: fixed; z-index: 3200; background: var(--input-bg); border: 1px solid var(--active-highlight);
       border-radius: 6px; padding: 4px 0; min-width: 140px;
       box-shadow: 0 4px 16px rgba(0,0,0,0.4);
     }
@@ -782,8 +798,10 @@
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       max-width: 160px;
     }
+    .tunnel-row { cursor: pointer; }
     .tunnel-row:hover td { background: var(--input-bg); }
     .tunnel-col-status { width: 100px; }
+    .tunnel-col-actions { width: 1%; }
     .tunnel-mono { font-family: "JetBrains Mono", monospace; font-size: var(--ui-font-small); }
     .tunnel-dot {
       display: inline-block; width: 7px; height: 7px;
@@ -793,11 +811,63 @@
     .tunnel-dot.connecting { background: var(--yellow); }
     .tunnel-dot.error { background: var(--red); }
     .tunnel-dot.inactive { background: var(--dim-fg); }
+    .tunnel-status-chip {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 10px;
+      line-height: 1.4;
+      border: 1px solid var(--tab-border);
+      color: var(--text-secondary);
+      background: var(--input-bg);
+      vertical-align: middle;
+    }
+    .tunnel-status-chip.active { color: var(--green); border-color: rgba(80, 250, 123, 0.4); }
+    .tunnel-status-chip.connecting { color: var(--yellow); border-color: rgba(241, 250, 140, 0.4); }
+    .tunnel-status-chip.error { color: var(--red); border-color: rgba(255, 85, 85, 0.45); }
+    .tunnel-status-chip.inactive { color: var(--dim-fg); }
+    .tunnel-label {
+      color: var(--fg);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      line-height: 1.25;
+    }
+    .tunnel-error-inline {
+      margin-top: 2px;
+      color: var(--red);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .tunnel-actions { white-space: nowrap; text-align: right; width: 1%; }
     .tunnel-action-btn {
       padding: 3px 10px; margin-left: 4px; border: 1px solid var(--tab-border);
       border-radius: 4px; background: var(--input-bg); color: var(--text-secondary);
       cursor: pointer; font-size: var(--ui-font-small);
+    }
+    .tunnel-action-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      margin-left: 4px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 3px;
+      transition: color 100ms, background 100ms;
+      user-select: none;
+    }
+    .tunnel-action-icon:hover { color: var(--fg); background: var(--input-bg); }
+    .tunnel-action-icon:focus-visible { outline: 1px solid var(--dim-fg); outline-offset: 1px; }
+    .tunnel-action-icon.disabled { opacity: 0.5; cursor: default; }
+    .tunnel-action-more {
+      width: 28px;
+      padding: 3px 0;
+      font-weight: 700;
+      letter-spacing: 1px;
     }
     .tunnel-action-btn:hover { background: var(--tab-border); color: var(--fg); }
     .tunnel-action-btn.danger { color: var(--red); }
@@ -876,7 +946,12 @@
     }
 
     /* -- Settings dialog -- */
-    .settings-dialog { width: 750px; max-width: 95vw; max-height: 80vh; display: flex; flex-direction: column; }
+    .settings-dialog {
+      width: min(750px, 95vw);
+      height: min(560px, 80vh);
+      display: flex;
+      flex-direction: column;
+    }
     .settings-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
     .settings-sidebar {
       width: 180px; border-right: 1px solid var(--tab-border);
@@ -2241,7 +2316,7 @@
       if (window.settings) {
         window.settings.init({ invoke, listen: listenOnCurrentWindow });
       }
-      // Listen for restart-required from the settings window.
+      // Listen for restart-required from the settings dialog.
       listenOnCurrentWindow('settings-restart-required', () => {
         if (window.toast) window.toast.warn('Restart Required', 'Some changes require a restart to take effect.');
       });
@@ -2524,10 +2599,7 @@
           return;
         }
         if (action === 'settings') {
-          invoke('open_settings_window').catch(() => {
-            // Fallback to overlay if window creation fails.
-            if (window.settings) window.settings.open();
-          });
+          if (window.settings) window.settings.open();
           return;
         }
         if (action === 'manage-tunnels' && window.tunnelManager) {

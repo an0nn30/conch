@@ -719,23 +719,22 @@
     const btnIcon = isConnected
       ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="M 2 2 v 12 h 12 v -12 z"/></svg>'
       : '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="M 3 2 v 12 l 11 -6 z"/></svg>';
-    const btnTitle = isConnected ? 'Disconnect' : 'Connect';
+    const btnTitle = isConnected ? 'Disconnect' : (errorMsg ? 'Retry' : 'Connect');
 
     el.innerHTML =
       `<span class="tunnel-dot ${dotClass}"></span>` +
       `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>` +
-      (errorMsg ? `<button class="ssh-tunnel-btn ssh-tunnel-edit-btn">Edit</button>` : '') +
-      `<button class="ssh-tunnel-btn" title="${btnTitle}">${errorMsg ? 'Error' : btnIcon}</button>`;
+      (errorMsg ? `<span class="ssh-tunnel-error-indicator" title="Error: ${attr(errorMsg)}">!</span>` : '') +
+      `<button class="ssh-tunnel-btn ssh-tunnel-edit-btn" title="Edit tunnel">Edit</button>` +
+      `<button class="ssh-tunnel-btn ssh-tunnel-action-btn" title="${btnTitle}">${errorMsg ? 'Retry' : btnIcon}</button>`;
 
-    if (errorMsg) {
-      el.title = 'Error: ' + errorMsg;
-      el.querySelector('.ssh-tunnel-edit-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (window.tunnelManager) window.tunnelManager.showEdit(tunnel);
-      });
-    }
+    if (errorMsg) el.title = 'Error: ' + errorMsg;
+    el.querySelector('.ssh-tunnel-edit-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (window.tunnelManager) window.tunnelManager.showEdit(tunnel);
+    });
 
-    const btn = el.querySelector('.ssh-tunnel-btn:last-child');
+    const btn = el.querySelector('.ssh-tunnel-action-btn');
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       btn.disabled = true;

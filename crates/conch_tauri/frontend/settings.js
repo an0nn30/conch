@@ -1223,20 +1223,31 @@
     installedLabel.textContent = 'Installed Plugins';
     installedHeader.appendChild(installedLabel);
 
-    const rescanBtn = document.createElement('button');
-    rescanBtn.className = 'ssh-form-btn';
-    rescanBtn.textContent = 'Rescan';
-    rescanBtn.addEventListener('click', async () => {
-      rescanBtn.disabled = true;
+    const rescanLabel = document.createElement('span');
+    rescanLabel.textContent = 'Rescan';
+    rescanLabel.setAttribute('role', 'button');
+    rescanLabel.setAttribute('tabindex', '0');
+    rescanLabel.style.cssText = 'font-size:12px; color:var(--blue, #7aa2f7); cursor:pointer; user-select:none;';
+    const handleRescan = async () => {
+      rescanLabel.style.pointerEvents = 'none';
+      rescanLabel.style.opacity = '0.6';
       try {
         cachedPlugins = await invoke('scan_plugins');
       } catch (e) {
         if (window.toast) window.toast.error('Plugin Scan Failed', String(e));
       }
-      rescanBtn.disabled = false;
+      rescanLabel.style.pointerEvents = 'auto';
+      rescanLabel.style.opacity = '1';
       renderPluginList();
+    };
+    rescanLabel.addEventListener('click', handleRescan);
+    rescanLabel.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleRescan();
+      }
     });
-    installedHeader.appendChild(rescanBtn);
+    installedHeader.appendChild(rescanLabel);
     c.appendChild(installedHeader);
 
     const pluginListContainer = document.createElement('div');
@@ -1286,15 +1297,17 @@
 
         row.appendChild(left);
 
-        // Enable/Disable button
-        const actionBtn = document.createElement('button');
-        actionBtn.className = 'ssh-form-btn';
-        actionBtn.style.cssText = 'flex-shrink:0; margin-left:8px;';
-        actionBtn.textContent = plugin.loaded ? 'Disable' : 'Enable';
-        actionBtn.addEventListener('click', async () => {
-          actionBtn.disabled = true;
+        // Enable/disable checkbox
+        const toggle = document.createElement('input');
+        toggle.type = 'checkbox';
+        toggle.checked = !!plugin.loaded;
+        toggle.style.cssText = 'flex-shrink:0; margin-left:8px;';
+        toggle.setAttribute('aria-label', `${plugin.loaded ? 'Disable' : 'Enable'} ${plugin.name}`);
+        toggle.addEventListener('change', async () => {
+          const nextLoaded = toggle.checked;
+          toggle.disabled = true;
           try {
-            if (plugin.loaded) {
+            if (!nextLoaded) {
               await invoke('disable_plugin', { name: plugin.name, source: plugin.source });
               await invoke('rebuild_menu').catch(() => {});
               if (window.toast) window.toast.info('Plugin Disabled', plugin.name);
@@ -1305,12 +1318,13 @@
             }
             cachedPlugins = await invoke('scan_plugins');
           } catch (e) {
+            toggle.checked = !!plugin.loaded;
             if (window.toast) window.toast.error('Plugin Action Failed', String(e));
           }
-          actionBtn.disabled = false;
+          toggle.disabled = false;
           renderPluginList();
         });
-        row.appendChild(actionBtn);
+        row.appendChild(toggle);
 
         pluginListContainer.appendChild(row);
       }

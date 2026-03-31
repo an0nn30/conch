@@ -52,6 +52,7 @@
                   <th>Local</th>
                   <th>Remote</th>
                   <th>Via</th>
+                  <th class="tunnel-col-actions"></th>
                 </tr>
               </thead>
               <tbody id="tunnel-tbody"></tbody>
@@ -89,74 +90,103 @@
     tr.className = 'tunnel-row';
 
     const status = tunnel.status || 'inactive';
-    let statusDot = '';
-    let statusLabel = '';
+    let statusDotClass = 'inactive';
+    let statusLabel = 'Inactive';
+    let statusChipClass = 'inactive';
     let errorMsg = null;
     if (status === 'active') {
-      statusDot = '<span class="tunnel-dot active"></span>';
       statusLabel = 'Active';
+      statusDotClass = 'active';
+      statusChipClass = 'active';
     } else if (status === 'connecting') {
-      statusDot = '<span class="tunnel-dot connecting"></span>';
       statusLabel = 'Connecting\u2026';
+      statusDotClass = 'connecting';
+      statusChipClass = 'connecting';
     } else if (status.startsWith('error')) {
-      statusDot = '<span class="tunnel-dot error"></span>';
       errorMsg = status.replace(/^error:\s*/, '');
-      statusLabel = 'Error';
-    } else {
-      statusDot = '<span class="tunnel-dot inactive"></span>';
-      statusLabel = 'Inactive';
+      statusLabel = 'Needs Attention';
+      statusDotClass = 'error';
+      statusChipClass = 'error';
     }
 
     const remote = `${tunnel.remote_host}:${tunnel.remote_port}`;
+    const isActive = status === 'active';
+    const isConnecting = status === 'connecting';
+    const isRunning = isActive || isConnecting;
+    const startStopIcon = isRunning
+      ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="M 2 2 v 12 h 12 v -12 z"/></svg>'
+      : '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="M 3 2 v 12 l 11 -6 z"/></svg>';
 
     tr.innerHTML =
-      `<td class="tunnel-col-status">${statusDot} ${esc(statusLabel)}</td>` +
-      `<td>${esc(tunnel.label)}</td>` +
+      `<td class="tunnel-col-status"><span class="tunnel-dot ${statusDotClass}"></span><span class="tunnel-status-chip ${statusChipClass}">${esc(statusLabel)}</span></td>` +
+      `<td><div class="tunnel-label">${esc(tunnel.label)}</div>${errorMsg ? `<div class="tunnel-error-inline" title="${attr(errorMsg)}">${esc(errorMsg)}</div>` : ''}</td>` +
       `<td class="tunnel-mono">${tunnel.local_port}</td>` +
       `<td class="tunnel-mono">${esc(remote)}</td>` +
       `<td class="tunnel-mono">${esc(tunnel.session_key)}</td>`;
 
-    // Action buttons cell
+    // Row click opens edit flow.
+    tr.addEventListener('click', () => showEditTunnelForm(tunnel));
+
+    // Compact actions cell: one primary toggle + overflow menu.
     const actionsTd = document.createElement('td');
     actionsTd.className = 'tunnel-actions';
+    const actionIcon = document.createElement('span');
+    actionIcon.className = 'tunnel-action-icon';
+    actionIcon.setAttribute('role', 'button');
+    actionIcon.setAttribute('tabindex', '0');
+    actionIcon.title = isRunning ? 'Stop Tunnel' : (errorMsg ? 'Retry Connection' : 'Start Tunnel');
+    actionIcon.innerHTML = startStopIcon;
+    const handlePrimaryAction = async (e) => {
+      e.stopPropagation();
+      actionIcon.classList.add('disabled');
+      actionIcon.style.pointerEvents = 'none';
+      if (isRunning) {
+        await doStop(tunnel.id);
+      } else {
+        await doStart(tunnel);
+      }
+    };
+    actionIcon.addEventListener('click', handlePrimaryAction);
+    actionIcon.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handlePrimaryAction(e);
+      }
+    });
+    actionsTd.appendChild(actionIcon);
 
-    if (status === 'active' || status === 'connecting') {
-      actionsTd.appendChild(makeActionBtn('Stop', false, () => doStop(tunnel.id)));
-    } else if (errorMsg) {
-      actionsTd.appendChild(makeActionBtn('Error\u2026', true, () => {
-        showErrorDialog('Tunnel Error', errorMsg, () => doStart(tunnel.id));
-      }));
-      actionsTd.appendChild(makeActionBtn('Retry', false, () => doStart(tunnel.id)));
-    } else {
-      actionsTd.appendChild(makeActionBtn('Start', false, () => doStart(tunnel.id)));
-    }
-
-    actionsTd.appendChild(makeActionBtn('Edit', false, () => showEditTunnelForm(tunnel)));
-    actionsTd.appendChild(makeActionBtn('Delete', true, (btn) => doDelete(tunnel, btn)));
+    const moreBtn = document.createElement('button');
+    moreBtn.className = 'tunnel-action-btn tunnel-action-more';
+    moreBtn.textContent = '\u22ef';
+    moreBtn.title = 'More Actions';
+    moreBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showRowMenu(e, tunnel, status, errorMsg);
+    });
+    actionsTd.appendChild(moreBtn);
 
     tr.appendChild(actionsTd);
+    tr.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showRowMenu(e, tunnel, status, errorMsg);
+    });
     return tr;
   }
 
-  async function doStart(tunnelId) {
+  async function doStart(tunnel) {
+    const tunnelId = typeof tunnel === 'object' && tunnel !== null ? tunnel.id : tunnel;
     try {
       await invoke('tunnel_start', { tunnelId });
     } catch (e) {
-      showErrorDialog('Tunnel Error', String(e), () => doStart(tunnelId));
+      showErrorDialog(
+        'Tunnel Error',
+        String(e),
+        () => doStart(tunnel),
+        typeof tunnel === 'object' && tunnel !== null ? () => showEditTunnelForm(tunnel) : null
+      );
       return;
     }
     setTimeout(() => show(), 500);
-  }
-
-  function makeActionBtn(label, danger, onClick) {
-    const btn = document.createElement('button');
-    btn.className = 'tunnel-action-btn' + (danger ? ' danger' : '');
-    btn.textContent = label;
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onClick(btn);
-    });
-    return btn;
   }
 
   async function doStop(tunnelId) {
@@ -168,27 +198,91 @@
     show();
   }
 
-  async function doDelete(tunnel, btn) {
-    // Click-twice confirmation: first click changes label, second click deletes.
-    if (btn.dataset.confirm !== 'yes') {
-      btn.dataset.confirm = 'yes';
-      btn.textContent = 'Confirm?';
-      btn.classList.add('confirm');
-      setTimeout(() => {
-        if (btn.isConnected) {
-          btn.dataset.confirm = '';
-          btn.textContent = 'Delete';
-          btn.classList.remove('confirm');
-        }
-      }, 3000);
-      return;
-    }
+  async function doDelete(tunnel) {
     try {
       await invoke('tunnel_delete', { tunnelId: tunnel.id });
     } catch (e) {
       window.toast.error('Tunnel Error', 'Failed to delete: ' + e);
     }
     show();
+  }
+
+  function showDeleteDialog(tunnel) {
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '3100';
+    overlay.innerHTML = `
+      <div class="ssh-form ssh-form-small">
+        <div class="ssh-form-title">Delete Tunnel</div>
+        <div class="ssh-form-body">
+          <div class="ssh-auth-message">Delete <strong>${esc(tunnel.label)}</strong>?</div>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="del-cancel">Cancel</button>
+          <button class="ssh-form-btn primary" id="del-confirm" style="background:var(--red);border-color:var(--red)">Delete</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const dismiss = () => overlay.remove();
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
+    overlay.querySelector('#del-cancel').addEventListener('click', dismiss);
+    overlay.querySelector('#del-confirm').addEventListener('click', async () => {
+      dismiss();
+      await doDelete(tunnel);
+    });
+  }
+
+  function showRowMenu(e, tunnel, status, errorMsg) {
+    removeContextMenu();
+
+    const items = [];
+    if (status === 'active' || status === 'connecting') {
+      items.push({ label: 'Stop', action: () => doStop(tunnel.id) });
+    } else {
+      items.push({ label: errorMsg ? 'Retry' : 'Start', action: () => doStart(tunnel) });
+    }
+    items.push({ label: 'Edit', action: () => showEditTunnelForm(tunnel) });
+    if (errorMsg) {
+      items.push({ label: 'View Error', action: () => showErrorDialog('Tunnel Error', errorMsg, () => doStart(tunnel), () => showEditTunnelForm(tunnel)) });
+    }
+    items.push({ type: 'separator' });
+    items.push({ label: 'Delete', danger: true, action: () => showDeleteDialog(tunnel) });
+
+    const menu = document.createElement('div');
+    menu.className = 'ssh-context-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    for (const item of items) {
+      if (item.type === 'separator') {
+        const sep = document.createElement('div');
+        sep.className = 'ssh-context-menu-sep';
+        menu.appendChild(sep);
+        continue;
+      }
+      const el = document.createElement('div');
+      el.className = 'ssh-context-menu-item' + (item.danger ? ' danger' : '');
+      el.textContent = item.label;
+      el.addEventListener('click', () => {
+        removeContextMenu();
+        item.action();
+      });
+      menu.appendChild(el);
+    }
+
+    document.body.appendChild(menu);
+    requestAnimationFrame(() => {
+      const rect = menu.getBoundingClientRect();
+      if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
+      if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+    });
+    setTimeout(() => document.addEventListener('click', removeContextMenu, { once: true }), 0);
+  }
+
+  function removeContextMenu() {
+    document.querySelectorAll('.ssh-context-menu').forEach((el) => el.remove());
   }
 
   // ---------------------------------------------------------------------------
@@ -418,7 +512,7 @@
   // Error dialog
   // ---------------------------------------------------------------------------
 
-  function showErrorDialog(title, message, onRetry) {
+  function showErrorDialog(title, message, onRetry, onEdit) {
     // Don't remove the manager overlay — layer this on top
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
@@ -431,6 +525,7 @@
         </div>
         <div class="ssh-form-buttons">
           <button class="ssh-form-btn" id="err-dismiss">Dismiss</button>
+          ${onEdit ? '<button class="ssh-form-btn" id="err-edit">Edit</button>' : ''}
           ${onRetry ? '<button class="ssh-form-btn primary" id="err-retry">Retry</button>' : ''}
         </div>
       </div>
@@ -445,6 +540,12 @@
       overlay.querySelector('#err-retry').addEventListener('click', () => {
         dismiss();
         onRetry();
+      });
+    }
+    if (onEdit) {
+      overlay.querySelector('#err-edit').addEventListener('click', () => {
+        dismiss();
+        onEdit();
       });
     }
 
