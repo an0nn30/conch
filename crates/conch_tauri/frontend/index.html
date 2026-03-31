@@ -1036,6 +1036,25 @@
       white-space: pre-wrap;
       z-index: 1000;
       display: none;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    #status-message {
+      flex: 1;
+      min-width: 0;
+    }
+    #status-dismiss {
+      flex-shrink: 0;
+      border: 1px solid var(--tab-border);
+      background: var(--input-bg);
+      color: var(--fg);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    #status-dismiss:hover {
+      background: var(--active-highlight);
     }
     #app.tabs-visible + #status {
       top: 50px;
@@ -1335,7 +1354,10 @@
       <div id="bottom-panel-content"></div>
     </div>
   </div>
-  <div id="status"></div>
+  <div id="status">
+    <div id="status-message"></div>
+    <button id="status-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+  </div>
 
   <script>
     // Block the native browser context menu globally (release builds only).
@@ -1367,11 +1389,23 @@
   <script src="pane-dnd.js"></script>
   <script>
     const statusEl = document.getElementById('status');
+    const statusMessageEl = document.getElementById('status-message');
+    const statusDismissBtn = document.getElementById('status-dismiss');
+    function hideStatus() {
+      statusEl.style.display = 'none';
+      statusMessageEl.textContent = '';
+    }
     function showStatus(message) {
-      statusEl.style.display = 'block';
-      statusEl.textContent = message;
+      statusEl.style.display = 'flex';
+      statusMessageEl.textContent = message;
       console.error(message);
     }
+    statusDismissBtn.addEventListener('click', hideStatus);
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (statusEl.style.display === 'none') return;
+      hideStatus();
+    }, true);
 
     window.addEventListener('error', (event) => {
       showStatus('Frontend error: ' + event.message);
