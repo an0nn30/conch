@@ -2573,12 +2573,21 @@
           return writeTextToCurrentPane(explicitText);
         }
         try {
-          const text = await navigator.clipboard.readText();
-          return writeTextToCurrentPane(text);
-        } catch (e) {
-          showStatus('Paste failed: clipboard unavailable');
-          return false;
+          const text = await invoke('clipboard_read_text');
+          if (typeof text === 'string' && text.length > 0) {
+            return writeTextToCurrentPane(text);
+          }
+        } catch (_) {}
+        // Avoid macOS webview paste permission popovers for Cmd+V fallback.
+        const isMac = /mac/i.test(navigator.platform || '');
+        if (!isMac) {
+          try {
+            const text = await navigator.clipboard.readText();
+            return writeTextToCurrentPane(text);
+          } catch (_) {}
         }
+        showStatus('Paste failed: clipboard unavailable');
+        return false;
       }
 
       let commandPalette = null;
@@ -3046,6 +3055,18 @@
         pasteIntoCurrentPane();
       }, true);
 
+      document.addEventListener('keydown', (e) => {
+        const isCopyCombo = (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'c';
+        if (!isCopyCombo) return;
+        if (isTextInputTarget(e.target) || isTextInputTarget(document.activeElement)) return;
+        const pane = currentPane();
+        const text = pane && pane.term ? pane.term.getSelection() : '';
+        if (!text) return;
+        e.preventDefault();
+        e.stopPropagation();
+        invoke('clipboard_write_text', { text }).catch(() => {});
+      }, true);
+
       document.addEventListener('paste', (e) => {
         if (isTextInputTarget(e.target) || isTextInputTarget(document.activeElement)) return;
         if (!currentPane()) return;
@@ -3098,7 +3119,9 @@
           const pane = currentPane();
           const text = pane && pane.term ? pane.term.getSelection() : '';
           if (text) {
-            navigator.clipboard.writeText(text).catch(() => {});
+            invoke('clipboard_write_text', { text }).catch(() => {
+              navigator.clipboard.writeText(text).catch(() => {});
+            });
           } else if (isTextInputTarget(document.activeElement)) {
             document.execCommand('copy');
           }

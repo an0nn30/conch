@@ -469,6 +469,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::get_app_config,
             commands::get_about_info,
             commands::get_home_dir,
+            commands::clipboard_read_text,
+            commands::clipboard_write_text,
             windows::open_new_window,
             windows::open_settings_window,
             commands::rebuild_menu,

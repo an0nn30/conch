@@ -61,6 +61,18 @@ pub(crate) fn get_home_dir() -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
+#[tauri::command]
+pub(crate) fn clipboard_read_text() -> Option<String> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    clipboard.get_text().ok()
+}
+
+#[tauri::command]
+pub(crate) fn clipboard_write_text(text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Theme colors
 // ---------------------------------------------------------------------------
