@@ -972,6 +972,51 @@
       background: var(--blue);
       opacity: 1;
     }
+    .pane-dnd-overlay {
+      position: fixed;
+      display: none;
+      pointer-events: none;
+      z-index: 9998;
+      border: 2px solid color-mix(in srgb, var(--blue) 78%, white);
+      border-radius: 8px;
+      box-sizing: border-box;
+      background: color-mix(in srgb, var(--blue) 12%, transparent);
+      will-change: left, top, width, height, opacity;
+      transition: left 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  top 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  height 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  opacity 120ms ease;
+    }
+    .pane-dnd-zone {
+      position: absolute;
+      border-radius: 6px;
+      border: 2px solid color-mix(in srgb, var(--blue) 88%, white);
+      background: color-mix(in srgb, var(--blue) 34%, transparent);
+      box-shadow: 0 0 22px color-mix(in srgb, var(--blue) 50%, transparent);
+      will-change: left, top, width, height, background-color;
+      transition: left 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  top 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  width 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  height 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  background-color 140ms ease;
+    }
+    .pane-dnd-label {
+      position: absolute;
+      left: 8px;
+      bottom: 8px;
+      padding: 2px 8px;
+      font-size: 11px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel-bg) 72%, black);
+      color: var(--fg);
+      border: 1px solid color-mix(in srgb, var(--blue) 40%, var(--tab-border));
+      transition: opacity 120ms ease;
+    }
+    .pane-dnd-dragging {
+      opacity: 0.75;
+      filter: saturate(0.9);
+    }
     .terminal-pane.focused {
       border-top: 2px solid var(--blue);
     }
@@ -1319,6 +1364,7 @@
   <script src="tunnel-manager.js"></script>
   <script src="split-tree.js"></script>
   <script src="split-pane.js"></script>
+  <script src="pane-dnd.js"></script>
   <script>
     const statusEl = document.getElementById('status');
     function showStatus(message) {
@@ -1499,6 +1545,7 @@
 
       const panes = new Map();
       const pluginViewPaneById = new Map();
+      const pluginViewSizeMemory = new Map();
       let nextPaneId = 1;
       let focusedPaneId = null;
 
@@ -1525,6 +1572,97 @@
         if (!tab) return [];
         return window.splitTree.allLeaves(tab.treeRoot);
       }
+
+      function paneRatioInTree(tab, paneId) {
+        if (!tab || !tab.treeRoot) return null;
+        const parent = window.splitTree.findParent(tab.treeRoot, paneId);
+        if (!parent || !parent.parent || parent.parent.type !== 'split') return null;
+        const raw = Number(parent.parent.ratio);
+        if (!Number.isFinite(raw)) return null;
+        const ratio = parent.index === 0 ? raw : (1 - raw);
+        if (!Number.isFinite(ratio)) return null;
+        return Math.max(0.1, Math.min(0.9, ratio));
+      }
+
+      function rememberPluginViewSize(pane) {
+        if (!pane || pane.kind !== 'plugin_view' || !pane.viewId) return;
+        const tab = tabs.get(pane.tabId);
+        const ratio = paneRatioInTree(tab, pane.paneId);
+        if (ratio == null) return;
+        pluginViewSizeMemory.set(pane.viewId, ratio);
+      }
+
+      function insertAroundLeaf(tree, targetPaneId, newPaneId, direction, placeBefore) {
+        if (!tree) return tree;
+        if (tree.type === 'leaf') {
+          if (tree.paneId !== targetPaneId) return tree;
+          const first = placeBefore
+            ? window.splitTree.makeLeaf(newPaneId)
+            : window.splitTree.makeLeaf(targetPaneId);
+          const second = placeBefore
+            ? window.splitTree.makeLeaf(targetPaneId)
+            : window.splitTree.makeLeaf(newPaneId);
+          return window.splitTree.makeSplit(direction, 0.5, [first, second]);
+        }
+        return window.splitTree.makeSplit(tree.direction, tree.ratio, [
+          insertAroundLeaf(tree.children[0], targetPaneId, newPaneId, direction, placeBefore),
+          insertAroundLeaf(tree.children[1], targetPaneId, newPaneId, direction, placeBefore),
+        ]);
+      }
+
+      function movePaneByDrop(dragPaneId, targetPaneId, zone) {
+        const dragPane = panes.get(dragPaneId);
+        if (!dragPane) return false;
+        const tab = tabs.get(dragPane.tabId);
+        if (!tab || !tab.treeRoot) return false;
+
+        if (zone === 'center') {
+          setFocusedPane(dragPaneId);
+          return true;
+        }
+
+        const direction = (zone === 'left' || zone === 'right') ? 'vertical' : 'horizontal';
+        const placeBefore = (zone === 'left' || zone === 'top');
+        const removed = window.splitTree.removeLeaf(tab.treeRoot, dragPaneId);
+        if (!removed) return false;
+
+        let nextRoot = null;
+        if (targetPaneId != null) {
+          const targetPane = panes.get(targetPaneId);
+          if (!targetPane) return false;
+          if (dragPane.tabId !== targetPane.tabId) return false;
+          if (dragPaneId === targetPaneId) return false;
+          if (!window.splitTree.allLeaves(removed).includes(targetPaneId)) return false;
+          nextRoot = insertAroundLeaf(removed, targetPaneId, dragPaneId, direction, placeBefore);
+        } else {
+          const dragLeaf = window.splitTree.makeLeaf(dragPaneId);
+          nextRoot = placeBefore
+            ? window.splitTree.makeSplit(direction, 0.5, [dragLeaf, removed])
+            : window.splitTree.makeSplit(direction, 0.5, [removed, dragLeaf]);
+        }
+        if (!nextRoot) return false;
+
+        tab.treeRoot = nextRoot;
+        rebuildTreeDOM(tab);
+        setFocusedPane(dragPaneId);
+        return true;
+      }
+
+      const paneDnd = window.paneDnd && window.paneDnd.initPaneDnd
+        ? window.paneDnd.initPaneDnd({
+            getActiveTabId: () => activeTabId,
+            getPaneById: (paneId) => panes.get(paneId) || null,
+            getActiveCanvasRect: () => {
+              const tab = currentTab();
+              if (!tab || !tab.containerEl) return null;
+              return tab.containerEl.getBoundingClientRect();
+            },
+            movePaneByDrop,
+            onFocusPane: (paneId) => setFocusedPane(paneId),
+            isDebugEnabled: () => shortcutDebugEnabled,
+            debugLog: (...args) => console.log(...args),
+          })
+        : null;
 
       function setFocusedPane(paneId) {
         if (focusedPaneId === paneId) return;
@@ -1816,6 +1954,8 @@
         for (const pid of paneIds) {
           const pane = panes.get(pid);
           if (!pane) continue;
+          if (paneDnd) paneDnd.unregisterPane(pid);
+          if (pane.kind === 'plugin_view') rememberPluginViewSize(pane);
           if (notifyBackend && pane.kind === 'terminal' && pane.spawned) {
             const cmd = pane.type === 'ssh' ? 'ssh_disconnect' : 'close_pty';
             invoke(cmd, { paneId: pid }).catch(() => {});
@@ -2203,12 +2343,76 @@
       function closePane(paneId) {
         const pane = panes.get(paneId);
         if (!pane) return;
+        if (paneDnd) paneDnd.unregisterPane(paneId);
 
         const tab = tabs.get(pane.tabId);
         if (!tab) return;
+        if (pane.kind === 'plugin_view') rememberPluginViewSize(pane);
 
-        // If this is the last pane in the tab, close the tab.
+        // If this is the last pane in the tab:
+        // - plugin_view: replace it with a fresh local terminal pane.
+        // - terminal: keep existing behavior (close tab/window as needed).
         if (window.splitTree.leafCount(tab.treeRoot) <= 1) {
+          if (pane.kind === 'plugin_view') {
+            if (pane.viewId) {
+              invoke('plugin_view_closed', { viewId: pane.viewId }).catch(() => {});
+              pluginViewPaneById.delete(pane.viewId);
+            }
+            if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
+            if (pane.resizeObserver) pane.resizeObserver.disconnect();
+            if (pane.term) pane.term.dispose();
+
+            const paneEl = pane.root;
+            paneEl.innerHTML = '';
+            delete paneEl.dataset.pluginViewId;
+
+            const { term, fitAddon } = initTerminal(paneEl);
+            const nextPane = {
+              paneId: pane.paneId,
+              tabId: tab.id,
+              kind: 'terminal',
+              type: 'local',
+              connectionId: null,
+              term,
+              fitAddon,
+              root: paneEl,
+              spawned: false,
+              lastCols: 0,
+              lastRows: 0,
+              cleanupMouseBridge: setupTmuxRightClickBridge(term, paneEl),
+              resizeObserver: null,
+              debounceTimer: null,
+            };
+            panes.set(paneId, nextPane);
+            nextPane.resizeObserver = window.splitPane.createPaneResizeObserver(nextPane, fitAndResizePane);
+            paneEl.addEventListener('mousedown', () => setFocusedPane(paneId));
+            term.onData((data) => {
+              if (!nextPane.spawned) return;
+              if (shortcutDebugEnabled) {
+                console.log(
+                  `[conch-keydbg] xterm.onData pane=${paneId} len=${data.length} esc=${data.includes('\x1b')}`,
+                  JSON.stringify({ escaped: toDebugEscaped(data), hex: toDebugHex(data) })
+                );
+              }
+              invoke('write_to_pty', { paneId, data }).catch((e) => {
+                console.error('write_to_pty error:', e);
+              });
+            });
+
+            setFocusedPane(paneId);
+            const dims = fitAddon.proposeDimensions();
+            const cols = dims ? dims.cols : 80;
+            const rows = dims ? dims.rows : 24;
+            invoke('spawn_shell', { paneId, cols, rows })
+              .then(() => {
+                nextPane.spawned = true;
+                fitAndResizePane(nextPane);
+              })
+              .catch((e) => {
+                term.writeln('\\x1b[31mFailed to spawn shell: ' + e + '\\x1b[0m');
+              });
+            return;
+          }
           closeTab(tab.id);
           return;
         }
@@ -2356,7 +2560,10 @@
         const dock = req.dock || {};
         const direction = dock.direction === 'vertical' ? 'vertical' : 'horizontal';
         const ratioRaw = Number(dock.ratio);
-        const ratio = Number.isFinite(ratioRaw) ? Math.max(0.1, Math.min(0.9, ratioRaw)) : 0.35;
+        const rememberedRatio = pluginViewSizeMemory.get(viewId);
+        const ratio = Number.isFinite(rememberedRatio)
+          ? Math.max(0.1, Math.min(0.9, rememberedRatio))
+          : (Number.isFinite(ratioRaw) ? Math.max(0.1, Math.min(0.9, ratioRaw)) : 0.35);
 
         let anchor = currentPane();
         if (!anchor && activeTabId != null) {
@@ -2422,6 +2629,7 @@
           e.stopPropagation();
           closePane(newPaneId);
         });
+        if (paneDnd) paneDnd.registerDraggablePaneHeader(newPaneId, header, 'plugin_view');
 
         const pane = {
           paneId: newPaneId,
