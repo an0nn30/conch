@@ -168,7 +168,7 @@
   function moveTo(id, targetZone) {
     const tw = toolWindows.get(id);
     if (!tw || tw.zone === targetZone) return;
-    if (!zones[targetZone]) return;
+    if (!zones[targetZone] || !zones[targetZone].contentEl) return;
 
     const oldZoneName = tw.zone;
     const oldZone = zones[oldZoneName];
@@ -226,25 +226,50 @@
       zone.el.classList.remove('empty');
     }
 
-    // Tab strip — shown when ≥2 windows in zone
-    if (zone.tabStripEl) {
-      zone.tabStripEl.innerHTML = '';
+    // Zone header — always present when zone has content (title + context menu)
+    let headerEl = zone.el.querySelector('.zone-header');
+    if (hasActive && wins.length >= 1) {
+      const activeTw = toolWindows.get(zone.activeId);
+      if (!headerEl) {
+        headerEl = document.createElement('div');
+        headerEl.className = 'zone-header';
+        // Insert before tab strip or content
+        zone.el.insertBefore(headerEl, zone.el.firstChild);
+      }
+      headerEl.style.display = '';
+      // Build header: title on left, tab buttons if multiple windows
+      headerEl.innerHTML = '';
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'zone-header-title';
+      titleSpan.textContent = activeTw ? activeTw.title : '';
+      headerEl.appendChild(titleSpan);
+
+      // If multiple windows, add tab buttons in the header
       if (wins.length >= 2) {
-        zone.tabStripEl.classList.remove('hidden');
+        const tabGroup = document.createElement('div');
+        tabGroup.className = 'zone-header-tabs';
         for (const wid of wins) {
           const tw = toolWindows.get(wid);
           if (!tw) continue;
-          const tab = document.createElement('div');
-          tab.className = 'zone-tab' + (zone.activeId === wid ? ' active' : '');
-          tab.textContent = tw.title;
-          tab.dataset.toolWindow = wid;
-          tab.addEventListener('click', () => activate(wid));
-          tab.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e, wid); });
-          zone.tabStripEl.appendChild(tab);
+          const btn = document.createElement('button');
+          btn.className = 'zone-header-tab' + (zone.activeId === wid ? ' active' : '');
+          btn.textContent = tw.title;
+          btn.addEventListener('click', () => activate(wid));
+          btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e, wid); });
+          tabGroup.appendChild(btn);
         }
-      } else {
-        zone.tabStripEl.classList.add('hidden');
+        headerEl.appendChild(tabGroup);
       }
+
+      // Right-click on header to move the active window
+      headerEl.oncontextmenu = (e) => { e.preventDefault(); if (zone.activeId) showContextMenu(e, zone.activeId); };
+    } else if (headerEl) {
+      headerEl.style.display = 'none';
+    }
+
+    // Tab strip — hidden (we use the header tabs now instead)
+    if (zone.tabStripEl) {
+      zone.tabStripEl.classList.add('hidden');
     }
 
     // Show/hide content for each window
@@ -312,7 +337,6 @@
       { zone: 'left-bottom',  label: 'Left (Bottom)' },
       { zone: 'right-top',    label: 'Right (Top)' },
       { zone: 'right-bottom', label: 'Right (Bottom)' },
-      { zone: 'bottom',       label: 'Bottom' },
     ];
 
     for (const t of targets) {

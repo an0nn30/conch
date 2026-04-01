@@ -268,7 +268,7 @@
     }
     .sidebar-resize:hover, .sidebar-resize.dragging { background: var(--dim-fg); }
     /* -- Tool-window zones -- */
-    .tool-zone { display: flex; flex-direction: row; flex: 1; min-height: 0; overflow: hidden; }
+    .tool-zone { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
     .tool-zone.empty { display: none; }
     .zone-tab-strip {
       display: flex; flex-direction: column; width: 28px;
@@ -292,6 +292,28 @@
     .zone-divider.hidden { display: none; }
     .zone-divider:hover, .zone-divider.dragging { background: var(--dim-fg); }
     .tool-window-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+    /* -- Zone header (title + tab buttons) -- */
+    .zone-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 4px 8px; flex-shrink: 0;
+      border-bottom: 1px solid var(--tab-border);
+      background: var(--panel-bg); min-height: 24px;
+    }
+    .zone-header-title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.5px; color: var(--dim-fg); white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .zone-header-tabs {
+      display: flex; gap: 2px; margin-left: 8px; flex-shrink: 0;
+    }
+    .zone-header-tab {
+      padding: 2px 8px; border: none; background: none;
+      color: var(--text-muted); font-size: 11px; cursor: pointer;
+      border-radius: 3px; white-space: nowrap;
+    }
+    .zone-header-tab:hover { background: var(--selection, rgba(255,255,255,0.08)); color: var(--fg); }
+    .zone-header-tab.active { color: var(--fg); background: var(--active-highlight, rgba(255,255,255,0.06)); }
     /* -- TWM context menu -- */
     .twm-context-menu {
       background: var(--panel-bg); border: 1px solid var(--tab-border);
