@@ -22,6 +22,9 @@
 
   const strips = { left: null, right: null };
 
+  // Last user-set split ratios per side (preserved across toggle cycles)
+  const lastSplitRatios = { left: 0.5, right: 0.5 };
+
   let fitActiveTabFn = null;
   let saveLayoutFn = null;
   let savedZoneAssignments = null; // populated from backend before registration
@@ -299,13 +302,14 @@
         topZone.el.style.flex = '0';
         botZone.el.style.flex = '1';
       }
-      // When both active, force a balanced split so neither zone is invisible
+      // When both active, restore the last user-set ratio (not a blind 50/50)
       if (topActive && botActive) {
         const tf = parseFloat(topZone.el.style.flex) || 0;
         const bf = parseFloat(botZone.el.style.flex) || 0;
         if (bf < 0.1 || tf < 0.1) {
-          topZone.el.style.flex = '1';
-          botZone.el.style.flex = '1';
+          const ratio = lastSplitRatios[side] || 0.5;
+          topZone.el.style.flex = ratio.toString();
+          botZone.el.style.flex = (1 - ratio).toString();
         }
       }
     }
@@ -494,6 +498,7 @@
       const newTopRatio = Math.max(0.15, Math.min(0.85, startTopFlex + delta / containerH));
       topZoneEl.style.flex = newTopRatio.toString();
       botZoneEl.style.flex = (1 - newTopRatio).toString();
+      lastSplitRatios[side] = newTopRatio;
       if (fitActiveTabFn) fitActiveTabFn();
     });
 
@@ -564,6 +569,7 @@
     if (topEl && botEl && ratio > 0 && ratio < 1) {
       topEl.style.flex = ratio.toString();
       botEl.style.flex = (1 - ratio).toString();
+      lastSplitRatios[side] = ratio;
     }
   }
 

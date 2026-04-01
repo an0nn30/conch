@@ -164,6 +164,14 @@ pub(crate) struct WindowLayout {
     files_panel_visible: Option<bool>,
     bottom_panel_visible: Option<bool>,
     bottom_panel_height: Option<f64>,
+    tool_window_zones: Option<std::collections::HashMap<String, String>>,
+    split_ratios: Option<SplitRatios>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SplitRatios {
+    left: Option<f64>,
+    right: Option<f64>,
 }
 
 /// Layout state sent to the frontend on load.
@@ -178,6 +186,9 @@ pub(crate) struct SavedLayout {
     files_panel_visible: bool,
     bottom_panel_visible: bool,
     bottom_panel_height: f64,
+    tool_window_zones: std::collections::HashMap<String, String>,
+    left_split_ratio: f64,
+    right_split_ratio: f64,
 }
 
 #[tauri::command]
@@ -211,6 +222,9 @@ pub(crate) fn get_saved_layout() -> SavedLayout {
         files_panel_visible: state.layout.left_panel_visible,
         bottom_panel_visible: state.layout.bottom_panel_visible,
         bottom_panel_height: state.layout.bottom_panel_height as f64,
+        tool_window_zones: state.layout.tool_window_zones,
+        left_split_ratio: state.layout.left_split_ratio as f64,
+        right_split_ratio: state.layout.right_split_ratio as f64,
     }
 }
 
@@ -241,6 +255,17 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     }
     if let Some(h) = layout.bottom_panel_height {
         state.layout.bottom_panel_height = h as f32;
+    }
+    if let Some(zones) = layout.tool_window_zones {
+        state.layout.tool_window_zones = zones;
+    }
+    if let Some(ratios) = layout.split_ratios {
+        if let Some(l) = ratios.left {
+            state.layout.left_split_ratio = l as f32;
+        }
+        if let Some(r) = ratios.right {
+            state.layout.right_split_ratio = r as f32;
+        }
     }
     let _ = config::save_persistent_state(&state);
 }

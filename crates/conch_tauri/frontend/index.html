@@ -2839,7 +2839,7 @@
           saveLayout: debouncedSaveLayout,
         });
 
-        // Restore persisted sidebar widths from existing layout.
+        // Restore persisted sidebar widths and zone assignments.
         try {
           const layoutData = await invoke('get_saved_layout');
           if (layoutData.files_panel_width > 100) {
@@ -2848,14 +2848,16 @@
           if (layoutData.ssh_panel_width > 100) {
             window.toolWindowManager.setSidebarWidth('right', layoutData.ssh_panel_width);
           }
-          // Persisted zone assignments (future — backend not yet extended).
-          if (layoutData.tool_window_zones) {
+          // Persisted zone assignments.
+          if (layoutData.tool_window_zones && Object.keys(layoutData.tool_window_zones).length > 0) {
             window.toolWindowManager.setPersistedZones(layoutData.tool_window_zones);
           }
           // Persisted split ratios.
-          if (layoutData.split_ratios) {
-            if (layoutData.split_ratios.left) window.toolWindowManager.setSplitRatio('left', layoutData.split_ratios.left);
-            if (layoutData.split_ratios.right) window.toolWindowManager.setSplitRatio('right', layoutData.split_ratios.right);
+          if (layoutData.left_split_ratio > 0 && layoutData.left_split_ratio < 1) {
+            window.toolWindowManager.setSplitRatio('left', layoutData.left_split_ratio);
+          }
+          if (layoutData.right_split_ratio > 0 && layoutData.right_split_ratio < 1) {
+            window.toolWindowManager.setSplitRatio('right', layoutData.right_split_ratio);
           }
         } catch (_) {}
 
@@ -4163,6 +4165,7 @@
         split_vertical: 'split-vertical',
         split_horizontal: 'split-horizontal',
         close_pane: 'close-pane',
+        settings: 'settings',
       };
 
       function formatKeyEventForDebug(e) {
@@ -4278,9 +4281,10 @@
             if (!action) continue;
             const combo = normalizeShortcutString(keyboard[settingsKey]);
             if (!combo) continue;
-            if (isFunctionKeyCombo(combo)) {
-              functionKeyNext.push({ combo, kind: 'core', action });
-            }
+            // All core shortcuts get a JS-level fallback so they work even
+            // when native menu accelerators don't fire (e.g. xterm.js focus,
+            // menu rebuild race conditions, or platform-specific quirks).
+            functionKeyNext.push({ combo, kind: 'core', action });
           }
 
           const byPluginAction = new Map();
