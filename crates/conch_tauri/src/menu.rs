@@ -3,9 +3,9 @@
 //! All `MENU_*` ID and action constants live here, along with the functions
 //! that build the native app menu and emit menu-action events to the frontend.
 
+use std::collections::BTreeMap;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
-use std::collections::BTreeMap;
 
 use crate::plugins;
 
@@ -515,12 +515,28 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 entries.sort_by(|a, b| {
                     let a_group = a.menu.trim().to_ascii_lowercase();
                     let b_group = b.menu.trim().to_ascii_lowercase();
-                    let a_key = if a_group == "tools" { "" } else { a_group.as_str() };
-                    let b_key = if b_group == "tools" { "" } else { b_group.as_str() };
+                    let a_key = if a_group == "tools" {
+                        ""
+                    } else {
+                        a_group.as_str()
+                    };
+                    let b_key = if b_group == "tools" {
+                        ""
+                    } else {
+                        b_group.as_str()
+                    };
                     a_key
                         .cmp(b_key)
-                        .then_with(|| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()))
-                        .then_with(|| a.action.to_ascii_lowercase().cmp(&b.action.to_ascii_lowercase()))
+                        .then_with(|| {
+                            a.label
+                                .to_ascii_lowercase()
+                                .cmp(&b.label.to_ascii_lowercase())
+                        })
+                        .then_with(|| {
+                            a.action
+                                .to_ascii_lowercase()
+                                .cmp(&b.action.to_ascii_lowercase())
+                        })
                 });
 
                 let mut entry_items: Vec<Box<dyn tauri::menu::IsMenuItem<R>>> = Vec::new();

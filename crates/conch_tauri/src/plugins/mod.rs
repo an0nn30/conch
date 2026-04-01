@@ -99,7 +99,7 @@ fn api_requirement_matches(req: &str) -> bool {
         return false;
     }
     if let Some((major, minor)) = parse_major_minor(req) {
-        return major == HOST_PLUGIN_API_MAJOR && minor <= HOST_PLUGIN_API_MINOR;
+        return major == HOST_PLUGIN_API_MAJOR && minor == HOST_PLUGIN_API_MINOR;
     }
     false
 }

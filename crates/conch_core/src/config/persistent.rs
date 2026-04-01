@@ -1,6 +1,7 @@
 //! Persistent UI state: window layout and zoom (machine-local, not user-edited).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,6 +43,12 @@ pub struct LayoutConfig {
     pub bottom_panel_visible: bool,
     /// Whether the status bar is visible.
     pub status_bar_visible: bool,
+    /// Tool window zone assignments: window-id → zone-name.
+    pub tool_window_zones: HashMap<String, String>,
+    /// Left sidebar top/bottom split ratio (0.0–1.0, top portion).
+    pub left_split_ratio: f32,
+    /// Right sidebar top/bottom split ratio (0.0–1.0, top portion).
+    pub right_split_ratio: f32,
 }
 
 impl Default for LayoutConfig {
@@ -57,6 +64,9 @@ impl Default for LayoutConfig {
             right_panel_visible: true,
             bottom_panel_visible: true,
             status_bar_visible: true,
+            tool_window_zones: HashMap::new(),
+            left_split_ratio: 0.5,
+            right_split_ratio: 0.5,
         }
     }
 }
@@ -96,6 +106,10 @@ mod tests {
 
     #[test]
     fn persistent_state_serde_round_trip() {
+        let mut zones = HashMap::new();
+        zones.insert("ssh-sessions".into(), "right-top".into());
+        zones.insert("file-explorer".into(), "left-top".into());
+
         let original = PersistentState {
             layout: LayoutConfig {
                 window_width: 1280.0,
@@ -108,6 +122,9 @@ mod tests {
                 right_panel_visible: false,
                 bottom_panel_visible: true,
                 status_bar_visible: false,
+                tool_window_zones: zones,
+                left_split_ratio: 0.6,
+                right_split_ratio: 0.4,
             },
             loaded_plugins: vec!["ssh-manager".into(), "git-status".into()],
         };
@@ -123,6 +140,12 @@ mod tests {
         assert_eq!(restored.loaded_plugins.len(), 2);
         assert_eq!(restored.loaded_plugins[0], "ssh-manager");
         assert_eq!(restored.loaded_plugins[1], "git-status");
+        assert_eq!(
+            restored.layout.tool_window_zones.get("ssh-sessions"),
+            Some(&"right-top".to_string())
+        );
+        assert_eq!(restored.layout.left_split_ratio, 0.6);
+        assert_eq!(restored.layout.right_split_ratio, 0.4);
     }
 
     #[test]
@@ -132,6 +155,9 @@ mod tests {
         assert_eq!(ps.layout.zoom_factor, 1.0);
         assert!(ps.layout.left_panel_visible);
         assert!(ps.layout.status_bar_visible);
+        assert!(ps.layout.tool_window_zones.is_empty());
+        assert_eq!(ps.layout.left_split_ratio, 0.5);
+        assert_eq!(ps.layout.right_split_ratio, 0.5);
     }
 
     #[test]

@@ -5,6 +5,7 @@
     const getActiveTabId = opts.getActiveTabId;
     const getPaneById = opts.getPaneById;
     const getActiveCanvasRect = opts.getActiveCanvasRect;
+    const getActiveContainerEl = opts.getActiveContainerEl;
     const movePaneByDrop = opts.movePaneByDrop;
     const onFocusPane = opts.onFocusPane;
     const isDebugEnabled = typeof opts.isDebugEnabled === 'function'
@@ -26,6 +27,7 @@
       lastZoneSig: '',
     };
     const DRAG_START_THRESHOLD_PX = 5;
+    const TARGET_SWITCH_DELAY_MS = 90;
 
     function logDebug(msg, extra) {
       if (!isDebugEnabled()) return;
@@ -123,16 +125,65 @@
       return 'center';
     }
 
-    function findDropTarget(clientX, clientY) {
+    function pointInsideRect(rect, x, y) {
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    function distanceToRect(rect, x, y) {
+      const dx = x < rect.left ? rect.left - x : (x > rect.right ? x - rect.right : 0);
+      const dy = y < rect.top ? rect.top - y : (y > rect.bottom ? y - rect.bottom : 0);
+      return Math.hypot(dx, dy);
+    }
+
+    function parsePaneIdFromEl(el) {
+      if (!el || !el.dataset || !el.dataset.paneId) return null;
+      const parsed = parseInt(el.dataset.paneId, 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function getPaneRectById(containerEl, paneId) {
+      if (!containerEl || paneId == null) return null;
+      const paneEl = containerEl.querySelector(`.terminal-pane[data-pane-id="${paneId}"]`);
+      return paneEl ? paneEl.getBoundingClientRect() : null;
+    }
+
+    function findDropTarget(clientX, clientY, dragPaneId) {
       const rect = getActiveCanvasRect();
       if (!rect) return null;
       if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
         return null;
       }
+      const containerEl = typeof getActiveContainerEl === 'function' ? getActiveContainerEl() : null;
+      if (containerEl) {
+        const paneEls = Array.from(containerEl.querySelectorAll('.terminal-pane[data-pane-id]'));
+        let best = null;
+        let bestDistance = Infinity;
+        for (const paneEl of paneEls) {
+          const paneId = parsePaneIdFromEl(paneEl);
+          if (paneId == null || paneId === dragPaneId) continue;
+          const paneRect = paneEl.getBoundingClientRect();
+          const distance = pointInsideRect(paneRect, clientX, clientY)
+            ? 0
+            : distanceToRect(paneRect, clientX, clientY);
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            best = { paneId, rect: paneRect };
+          }
+        }
+        if (best) {
+          return {
+            paneId: best.paneId,
+            rect: best.rect,
+            zone: zoneForPoint(best.rect, clientX, clientY),
+            distance: bestDistance,
+          };
+        }
+      }
       return {
         paneId: null,
         rect,
         zone: zoneForPoint(rect, clientX, clientY),
+        distance: 0,
       };
     }
 
@@ -201,14 +252,55 @@
         drag.dragging = true;
         logDebug(`start dragPane=${drag.paneId} tab=${drag.tabId}`);
       }
-      const target = findDropTarget(p.clientX, p.clientY);
+      const rawTarget = findDropTarget(p.clientX, p.clientY, drag.paneId);
+      let target = rawTarget;
+      if (rawTarget && rawTarget.paneId != null) {
+        if (drag.lockedPaneId == null) {
+          drag.lockedPaneId = rawTarget.paneId;
+          drag.pendingPaneId = null;
+          drag.pendingPaneSince = 0;
+        } else if (rawTarget.paneId !== drag.lockedPaneId) {
+          const now = performance.now();
+          if (rawTarget.distance === 0) {
+            drag.lockedPaneId = rawTarget.paneId;
+            drag.pendingPaneId = null;
+            drag.pendingPaneSince = 0;
+          } else if (drag.pendingPaneId !== rawTarget.paneId) {
+            drag.pendingPaneId = rawTarget.paneId;
+            drag.pendingPaneSince = now;
+          } else if (now - drag.pendingPaneSince >= TARGET_SWITCH_DELAY_MS) {
+            drag.lockedPaneId = rawTarget.paneId;
+            drag.pendingPaneId = null;
+            drag.pendingPaneSince = 0;
+          }
+        } else {
+          drag.pendingPaneId = null;
+          drag.pendingPaneSince = 0;
+        }
+        if (drag.lockedPaneId !== rawTarget.paneId) {
+          const containerEl = typeof getActiveContainerEl === 'function' ? getActiveContainerEl() : null;
+          const lockedRect = getPaneRectById(containerEl, drag.lockedPaneId);
+          if (lockedRect) {
+            target = {
+              paneId: drag.lockedPaneId,
+              rect: lockedRect,
+              zone: zoneForPoint(lockedRect, p.clientX, p.clientY),
+              distance: distanceToRect(lockedRect, p.clientX, p.clientY),
+            };
+          }
+        }
+      } else if (drag.lockedPaneId != null) {
+        drag.lockedPaneId = null;
+        drag.pendingPaneId = null;
+        drag.pendingPaneSince = 0;
+      }
       drag.drop = target;
       if (target) {
         showOverlay(target.rect, target.zone);
-        const sig = `${target.zone}`;
+        const sig = `${target.paneId == null ? 'root' : target.paneId}:${target.zone}`;
         if (sig !== drag.lastHoverSig) {
           drag.lastHoverSig = sig;
-          logDebug(`hover dragPane=${drag.paneId} zone=${target.zone}`);
+          logDebug(`hover dragPane=${drag.paneId} targetPane=${target.paneId == null ? 'root' : target.paneId} zone=${target.zone}`);
         }
       } else {
         if (drag.lastHoverSig !== '') {
@@ -254,6 +346,9 @@
         startY: e.clientY,
         dragging: false,
         lastHoverSig: '',
+        lockedPaneId: null,
+        pendingPaneId: null,
+        pendingPaneSince: 0,
         drop: null,
       };
 

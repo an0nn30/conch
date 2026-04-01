@@ -8,15 +8,19 @@ use std::ffi::c_char;
 pub enum PluginType {
     /// A run-once action (menu item, keybinding trigger).
     Action = 0,
-    /// A persistent panel that renders widgets.
-    Panel = 1,
+    /// A persistent tool window that renders widgets in a dockable zone.
+    #[serde(alias = "Panel")]
+    ToolWindow = 1,
 }
 
-/// Where a panel plugin wants to be placed by default.
+/// Default zone for a tool-window plugin's initial placement.
+///
+/// The user can move tool windows between zones at runtime; this value
+/// is only used for the first launch before any persisted layout exists.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PanelLocation {
-    /// No panel (action plugins, or runtime-registered panels).
+    /// No tool window (action plugins).
     None = 0,
     Left = 1,
     Right = 2,
@@ -37,7 +41,7 @@ pub struct PluginInfo {
     pub version: *const c_char,
     /// Plugin kind.
     pub plugin_type: PluginType,
-    /// Default panel location (ignored for Action plugins).
+    /// Default zone placement (ignored for Action plugins).
     pub panel_location: PanelLocation,
     /// Null-terminated array of dependency plugin names.
     /// E.g., an SFTP plugin depends on "ssh".

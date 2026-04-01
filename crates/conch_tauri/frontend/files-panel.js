@@ -89,10 +89,22 @@
   // Panel visibility & resize (mirrors ssh-panel pattern)
   // ---------------------------------------------------------------------------
 
-  function isHidden() { return panelWrapEl.classList.contains('hidden'); }
-  function showPanel() { panelWrapEl.classList.remove('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState(); }
-  function hidePanel() { panelWrapEl.classList.add('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState(); }
-  function togglePanel() { if (isHidden()) showPanel(); else hidePanel(); }
+  function isHidden() {
+    if (window.toolWindowManager) return !window.toolWindowManager.isVisible('file-explorer');
+    return panelWrapEl.classList.contains('hidden');
+  }
+  function showPanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.activate('file-explorer'); return; }
+    panelWrapEl.classList.remove('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState();
+  }
+  function hidePanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.deactivate('file-explorer'); return; }
+    panelWrapEl.classList.add('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState();
+  }
+  function togglePanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.toggle('file-explorer'); return; }
+    if (isHidden()) showPanel(); else hidePanel();
+  }
 
   function initResize() {
     if (!resizeHandleEl) return;
@@ -141,6 +153,7 @@
   }
 
   async function restoreLayout() {
+    if (window.toolWindowManager) return;
     try {
       const saved = await invoke('get_saved_layout');
       if (saved.files_panel_width > 100) panelEl.style.width = saved.files_panel_width + 'px';

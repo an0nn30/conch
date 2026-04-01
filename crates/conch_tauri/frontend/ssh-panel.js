@@ -47,9 +47,11 @@
                placeholder="Quick connect (user@host:port)"
                spellcheck="false" autocomplete="off" />
       </div>
-      <div class="ssh-active-sessions" id="ssh-active-sessions"></div>
-      <div class="ssh-tunnels-section" id="ssh-tunnels-section"></div>
-      <div class="ssh-server-list" id="ssh-server-list"></div>
+      <div class="ssh-panel-body" id="ssh-panel-body">
+        <div class="ssh-active-sessions" id="ssh-active-sessions"></div>
+        <div class="ssh-tunnels-section" id="ssh-tunnels-section"></div>
+        <div class="ssh-server-list" id="ssh-server-list"></div>
+      </div>
     `;
 
     serverListEl = panelEl.querySelector('#ssh-server-list');
@@ -149,22 +151,26 @@
   // ---------------------------------------------------------------------------
 
   function isHidden() {
+    if (window.toolWindowManager) return !window.toolWindowManager.isVisible('ssh-sessions');
     return panelWrapEl.classList.contains('hidden');
   }
 
   function showPanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.activate('ssh-sessions'); return; }
     panelWrapEl.classList.remove('hidden');
     if (fitActiveTabFn) fitActiveTabFn();
     saveLayoutState();
   }
 
   function hidePanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.deactivate('ssh-sessions'); return; }
     panelWrapEl.classList.add('hidden');
     if (fitActiveTabFn) fitActiveTabFn();
     saveLayoutState();
   }
 
   function togglePanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.toggle('ssh-sessions'); return; }
     if (isHidden()) showPanel(); else hidePanel();
   }
 
@@ -258,6 +264,8 @@
   }
 
   async function restoreLayout() {
+    // When TWM is active, sidebar width and visibility are managed centrally.
+    if (window.toolWindowManager) return;
     try {
       const saved = await invoke('get_saved_layout');
       if (saved.ssh_panel_width > 100) {

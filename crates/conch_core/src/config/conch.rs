@@ -98,6 +98,7 @@ pub struct KeyboardConfig {
     pub navigate_pane_left: String,
     pub navigate_pane_right: String,
     pub rename_tab: String,
+    pub settings: String,
     pub plugin_shortcuts: HashMap<String, String>,
 }
 
@@ -120,6 +121,7 @@ impl Default for KeyboardConfig {
             navigate_pane_left: "cmd+alt+left".into(),
             navigate_pane_right: "cmd+alt+right".into(),
             rename_tab: "F2".into(),
+            settings: "cmd+,".into(),
             plugin_shortcuts: HashMap::new(),
         }
     }

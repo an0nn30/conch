@@ -412,12 +412,12 @@ fn java_plugin_thread(
     // "java" HostApi name.
     CURRENT_PLUGIN_NAME.with(|n| *n.borrow_mut() = plugin_name.clone());
 
-    // Auto-register panel if this is a panel plugin.
-    if meta.plugin_type == conch_plugin_sdk::PluginType::Panel {
+    // Auto-register tool window if this is a tool-window plugin.
+    if meta.plugin_type == conch_plugin_sdk::PluginType::ToolWindow {
         if let Some(api) = TRAIT_HOST_API.get() {
             api.register_panel(meta.panel_location, &meta.name, None);
             log::info!(
-                "jvm [{plugin_name}]: registered panel at {:?}",
+                "jvm [{plugin_name}]: registered tool window at {:?}",
                 meta.panel_location
             );
         }
@@ -728,7 +728,7 @@ fn read_plugin_info(env: &mut JNIEnv, info: &JObject) -> Result<PluginMeta, Load
     let panel_location_str = get_string_field(env, info, "panelLocation")?;
 
     let plugin_type = match plugin_type_str.as_str() {
-        "panel" => conch_plugin_sdk::PluginType::Panel,
+        "tool_window" | "panel" => conch_plugin_sdk::PluginType::ToolWindow,
         _ => conch_plugin_sdk::PluginType::Action,
     };
     let panel_location = match panel_location_str.as_str() {

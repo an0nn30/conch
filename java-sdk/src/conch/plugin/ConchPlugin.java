@@ -17,7 +17,7 @@ package conch.plugin;
  *   <li>{@link #onEvent(String)} is called whenever a UI or bus event
  *       targets this plugin (menu clicks, widget interactions, etc.).</li>
  *   <li>{@link #render()} is called on every frame to get the current
- *       widget tree for panel plugins.</li>
+ *       widget tree for tool-window plugins.</li>
  *   <li>{@link #teardown()} is called when the plugin is unloaded.
  *       Release resources here.</li>
  * </ol>
@@ -123,8 +123,8 @@ public interface ConchPlugin {
     /**
      * Return the current widget tree as a JSON array string.
      *
-     * <p>Called on every UI frame for panel plugins. Return {@code "[]"} if
-     * the plugin has no panel or no widgets to display.</p>
+     * <p>Called on every UI frame for tool-window plugins. Return {@code "[]"} if
+     * the plugin has no tool window or no widgets to display.</p>
      *
      * <p>Widget types include Button, Label, TextInput, TreeView, Toolbar,
      * Separator, and more. See the Conch Plugin SDK documentation for the

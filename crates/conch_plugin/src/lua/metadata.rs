@@ -5,7 +5,7 @@
 //! ```lua
 //! -- plugin-name: System Info
 //! -- plugin-description: Live system information panel
-//! -- plugin-type: panel
+//! -- plugin-type: tool_window
 //! -- plugin-version: 1.0.0
 //! -- plugin-location: left
 //! -- plugin-icon: info.png
@@ -90,11 +90,11 @@ pub fn parse_lua_metadata(source: &str) -> LuaPluginMeta {
                 .collect();
         } else if let Some(value) = comment.strip_prefix("plugin-type:") {
             meta.plugin_type = match value.trim() {
-                "panel" => PluginType::Panel,
+                "tool_window" | "panel" => PluginType::ToolWindow,
                 _ => PluginType::Action,
             };
-            // Default panel location for panel plugins.
-            if matches!(meta.plugin_type, PluginType::Panel)
+            // Default zone for tool-window plugins.
+            if matches!(meta.plugin_type, PluginType::ToolWindow)
                 && matches!(meta.panel_location, PanelLocation::None)
             {
                 meta.panel_location = PanelLocation::Left;
@@ -162,7 +162,7 @@ mod tests {
     fn parse_full_header() {
         let source = r#"-- plugin-name: System Info
 -- plugin-description: Live system information panel
--- plugin-type: panel
+-- plugin-type: tool_window
 -- plugin-version: 1.3.0
 -- plugin-api: ^1.0
 -- plugin-permissions: ui.panel, ui.menu
@@ -180,7 +180,7 @@ end
         assert_eq!(meta.version, "1.3.0");
         assert_eq!(meta.api_required.as_deref(), Some("^1.0"));
         assert_eq!(meta.permissions, vec!["ui.panel", "ui.menu"]);
-        assert!(matches!(meta.plugin_type, PluginType::Panel));
+        assert!(matches!(meta.plugin_type, PluginType::ToolWindow));
         assert!(matches!(meta.panel_location, PanelLocation::Right));
         assert_eq!(meta.icon.as_deref(), Some("system-info.png"));
         assert_eq!(meta.keybinds.len(), 1);
@@ -210,18 +210,29 @@ end
 
     #[test]
     fn parse_panel_default_location() {
-        let source = "-- plugin-type: panel\nfunction render() end\n";
+        let source = "-- plugin-type: tool_window\nfunction render() end\n";
         let meta = parse_lua_metadata(source);
-        assert!(matches!(meta.plugin_type, PluginType::Panel));
-        // Panel plugins default to Left if no location specified.
+        assert!(matches!(meta.plugin_type, PluginType::ToolWindow));
+        // Tool-window plugins default to Left if no location specified.
         assert!(matches!(meta.panel_location, PanelLocation::Left));
     }
 
     #[test]
     fn parse_panel_explicit_bottom() {
-        let source = "-- plugin-type: panel\n-- plugin-location: bottom\nfunction render() end\n";
+        let source =
+            "-- plugin-type: tool_window\n-- plugin-location: bottom\nfunction render() end\n";
         let meta = parse_lua_metadata(source);
         assert!(matches!(meta.panel_location, PanelLocation::Bottom));
+    }
+
+    #[test]
+    fn parse_legacy_panel_type() {
+        let source = "-- plugin-type: panel\nfunction render() end\n";
+        let meta = parse_lua_metadata(source);
+        assert!(
+            matches!(meta.plugin_type, PluginType::ToolWindow),
+            "legacy 'panel' header should map to ToolWindow"
+        );
     }
 
     #[test]

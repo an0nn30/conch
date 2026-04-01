@@ -130,8 +130,8 @@ fn lua_plugin_thread(
         }
     }
 
-    // If this is a panel plugin, register the panel with the host.
-    if matches!(meta.plugin_type, conch_plugin_sdk::PluginType::Panel) {
+    // If this is a tool-window plugin, register its panel with the host.
+    if matches!(meta.plugin_type, conch_plugin_sdk::PluginType::ToolWindow) {
         let handle = host_api.register_panel(meta.panel_location, &meta.name, None);
         if let Some(store) = lua.app_data_ref::<std::cell::RefCell<api::PanelHandleStore>>() {
             store.borrow_mut().handle = Some(handle);

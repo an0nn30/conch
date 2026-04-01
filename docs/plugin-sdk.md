@@ -18,7 +18,7 @@ Plugins are managed via **Settings > Plugins** -- scan, enable, disable, and per
   - [HostApi Reference](#java-hostapi)
   - [Widget Builder](#widget-builder)
   - [Handling Events](#handling-events-java)
-  - [Panel Plugins](#panel-plugins-java)
+  - [Tool-Window Plugins](#tool-window-plugins-java)
 - [Lua Plugins](#lua-plugins)
   - [Quick Start](#lua-quick-start)
   - [Lua Metadata Fields](#lua-metadata-fields)
@@ -109,7 +109,7 @@ public class MyPlugin implements ConchPlugin {
 
     @Override
     public String render() {
-        return "[]"; // No panel widgets
+        return "[]"; // No widgets (action plugin)
     }
 
     @Override
@@ -228,25 +228,35 @@ Every Java plugin must implement `conch.plugin.ConchPlugin`:
 
 | Method | Description |
 |--------|-------------|
-| `PluginInfo getInfo()` | Return plugin metadata (name, version, type, panel location) |
+| `PluginInfo getInfo()` | Return plugin metadata (name, version, type, default zone) |
 | `void setup()` | Called once on plugin load. Register menu items, initialize state. |
 | `void onEvent(String eventJson)` | Handle events -- menu clicks, widget interactions, bus events. |
 | `String onQuery(String method, String argsJson)` | Handle direct RPC queries from other plugins. Return a JSON value string (`"null"` by default). |
-| `String render()` | Return widget tree as JSON array. Called on demand for panel plugins. |
+| `String render()` | Return widget tree as JSON array. Called on demand for tool-window plugins. |
 | `default String renderView(String viewId)` | Return widget tree JSON for a docked view instance (defaults to `render()`). |
 | `void teardown()` | Clean up resources before unload. |
 
 #### Plugin Types
 
+Conch has two plugin types:
+
+- **`action`** — Background plugin with no persistent UI. Interacts via menu items, keyboard shortcuts, and events.
+- **`tool_window`** — Renders a dockable tool window using widgets or raw HTML. The user can move it between zones (left-top, left-bottom, right-top, right-bottom) at runtime.
+
 ```java
-// Action plugin — no panel, interacts via menu items and events.
+// Action plugin — no tool window, interacts via menu items and events.
 new PluginInfo("My Tool", "Does things", "1.0.0");
 
-// Panel plugin — renders widgets in a sidebar or bottom panel.
-new PluginInfo("My Panel", "Shows info", "1.0.0", "panel", "bottom");
+// Tool-window plugin — renders in a dockable zone (right sidebar by default).
+new PluginInfo("My Panel", "Shows info", "1.0.0", "tool_window", "right");
+
+// Convenience factory method:
+PluginInfo.toolWindow("My Panel", "Shows info", "1.0.0", "right");
 ```
 
-Panel locations: `"left"`, `"right"`, `"bottom"`.
+Default zones: `"left"`, `"right"`, `"bottom"`. The user can reposition tool windows freely; the default zone is only used on first launch.
+
+> **Backward compatibility:** The legacy type `"panel"` is accepted as an alias for `"tool_window"`.
 
 ### Java HostApi
 
@@ -454,14 +464,14 @@ if (event.get("kind").getAsString().equals("menu_action")) {
 }
 ```
 
-### Panel Plugins (Java)
+### Tool-Window Plugins (Java)
 
-Set `pluginType` to `"panel"` and specify a location:
+Set `pluginType` to `"tool_window"` and specify a default zone:
 
 ```java
 @Override
 public PluginInfo getInfo() {
-    return new PluginInfo("My Panel", "Shows info", "1.0.0", "panel", "right");
+    return PluginInfo.toolWindow("My Panel", "Shows info", "1.0.0", "right");
 }
 
 @Override
@@ -472,6 +482,8 @@ public String render() {
         .toJson();
 }
 ```
+
+The tool window appears in the right sidebar by default. Users can drag it to any zone via the context menu.
 
 ---
 
@@ -514,9 +526,9 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 | `-- plugin-version: 1.0.0` | No | Semver version string (default: `"0.0.0"`) |
 | `-- plugin-api: ^1.0` | No | Required host plugin API version/range (legacy plugins may omit) |
 | `-- plugin-permissions: cap1, cap2` | No | Declared capability list for permission gating (e.g. `clipboard.read, ui.menu, ui.dock`) |
-| `-- plugin-type: action` | No | `"action"` (default) or `"panel"` |
-| `-- plugin-location: left` | No | Panel location: `"left"` (default for panel plugins), `"right"`, `"bottom"` |
-| `-- plugin-icon: icon.png` | No | Custom icon for the panel tab (filename relative to plugin location) |
+| `-- plugin-type: action` | No | `"action"` (default) or `"tool_window"` |
+| `-- plugin-location: left` | No | Default zone: `"left"` (default for tool-window plugins), `"right"`, `"bottom"` |
+| `-- plugin-icon: icon.png` | No | Custom icon for the tool window tab (filename relative to plugin location) |
 | `-- plugin-keybind: action = binding \| Description` | No | Register a keyboard shortcut (repeatable) |
 
 **Keybind format:** `action_id = key_combo | Optional description`
@@ -529,7 +541,7 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 ```lua
 -- plugin-name: System Info
 -- plugin-description: Live system information panel
--- plugin-type: panel
+-- plugin-type: tool_window
 -- plugin-version: 1.3.0
 -- plugin-api: ^1.0
 -- plugin-permissions: ui.panel, ui.menu, ui.dock
@@ -539,6 +551,8 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 -- plugin-keybind: refresh = cmd+r
 ```
 
+> **Backward compatibility:** The legacy type `"panel"` is accepted as an alias for `"tool_window"`.
+
 ### Lua Plugin Lifecycle
 
 Each Lua plugin runs on a dedicated OS thread with its own Lua VM. The host manages the lifecycle through five optional functions that the plugin can define at the global scope:
@@ -546,19 +560,19 @@ Each Lua plugin runs on a dedicated OS thread with its own Lua VM. The host mana
 | Function | When Called | Description |
 |----------|------------|-------------|
 | `setup()` | Once, after the plugin source is loaded | Initialize state, register menu items, subscribe to events |
-| `render()` | On demand, for panel plugins | Build the widget tree using `ui.panel_*` functions |
+| `render()` | On demand, for tool-window plugins | Build the widget tree using `ui.panel_*` functions |
 | `render_view(view_id)` | On demand, for docked views | Build the widget tree for a specific docked view id (fallback to `render()` when omitted) |
 | `on_event(event)` | When any event targets this plugin | Handle widget interactions, menu actions, bus events. The `event` argument is a native Lua table. |
 | `on_query(method, args_json)` | When another plugin sends an RPC query | Handle inter-plugin queries. `args_json` is a JSON string. Return a JSON string as the response. |
 | `teardown()` | When the plugin is unloaded or the app shuts down | Clean up resources |
 
-All functions are optional. A minimal plugin only needs `setup()`. Panel plugins need `render()`. Plugins that respond to RPC queries need `on_query()`.
+All functions are optional. A minimal plugin only needs `setup()`. Tool-window plugins need `render()`. Plugins that respond to RPC queries need `on_query()`.
 
-**Example panel plugin with full lifecycle:**
+**Example tool-window plugin with full lifecycle:**
 
 ```lua
 -- plugin-name: Status Monitor
--- plugin-type: panel
+-- plugin-type: tool_window
 -- plugin-location: bottom
 
 local status = "idle"
@@ -668,10 +682,10 @@ local active_result = session.exec_active("pwd")
 
 ### Panel Widget Functions
 
-For panel plugins (`plugin-type: panel`), use `ui.panel_*` functions inside `render()` to build the widget tree:
+For tool-window plugins (`plugin-type: tool_window`), use `ui.panel_*` functions inside `render()` to build the widget tree:
 
 ```lua
--- plugin-type: panel
+-- plugin-type: tool_window
 -- plugin-location: left
 
 function render()
@@ -787,13 +801,17 @@ void teardown();
 public final String name;
 public final String description;
 public final String version;
-public final String pluginType;    // "action" | "panel"
+public final String pluginType;    // "action" | "tool_window"
 public final String panelLocation; // "none" | "left" | "right" | "bottom"
 
 // Constructors
 public PluginInfo(String name, String description, String version,
                   String pluginType, String panelLocation);
 public PluginInfo(String name, String description, String version); // action/none
+
+// Factory methods
+public static PluginInfo toolWindow(String name, String description,
+                                    String version, String defaultZone);
 ```
 
 #### `conch.plugin.HostApi`
@@ -910,7 +928,7 @@ public String toJson();
 function setup() end                      -- optional
 function on_event(event) end              -- optional
 function on_query(method, args_json) end  -- optional; return JSON string
-function render() end                     -- optional (panel plugins usually implement)
+function render() end                     -- optional (tool-window plugins usually implement)
 function render_view(view_id) end         -- optional (docked views; fallback to render())
 function teardown() end                   -- optional
 ```
@@ -1293,7 +1311,7 @@ Frontend                         Rust Backend                    Plugin Thread
 
 **When does this happen?**
 
-- **Initial load:** When a panel plugin is first registered, the frontend does one `request_plugin_render` call.
+- **Initial load:** When a tool-window plugin is first registered, the frontend does one `request_plugin_render` call.
 - **After widget events:** When the user interacts with a widget (button click, text input, etc.), the frontend sends the event to the plugin, then automatically requests a fresh render.
 - **Docked views:** Same flow but using `request_plugin_view_render` with a `view_id`.
 
@@ -1334,7 +1352,7 @@ function switch_env(env)
 end
 ```
 
-> **Note:** `ui.request_render()` currently works for **panel plugins** only. Docked views use the pull-based re-render triggered automatically after each widget event.
+> **Note:** `ui.request_render()` currently works for **tool-window plugins** only. Docked views use the pull-based re-render triggered automatically after each widget event.
 
 ### Auto Re-render After Events
 
