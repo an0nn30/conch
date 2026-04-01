@@ -160,6 +160,13 @@ function ui.panel_path_bar(id, segments) end
 ---@param tabs ConchTabPane[] Tab definitions
 function ui.panel_tabs(id, active, tabs) end
 
+---Render raw HTML in a Shadow DOM with CSS isolation.
+---Theme variables (--bg, --fg, --green, etc.) are forwarded into the shadow root.
+---Elements with `data-action="id"` emit `button_click` events when clicked.
+---@param content string Raw HTML to render
+---@param css? string Optional CSS injected into the shadow root
+function ui.panel_html(content, css) end
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- Layout Containers
 -- ═══════════════════════════════════════════════════════════════════════
@@ -184,6 +191,25 @@ function ui.panel_scroll_area(fn, max_height) end
 ---@param label string Drop zone label
 ---@param fn? fun() Optional builder function for child widgets
 function ui.panel_drop_zone(id, label, fn) end
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- Render Control
+-- ═══════════════════════════════════════════════════════════════════════
+
+---Push the current accumulated widgets to the frontend immediately.
+---Use this to show loading/progress states during blocking operations
+---like `session.exec_local()`.
+---
+---```lua
+---switching = true
+---render()              -- rebuild widgets with loading state
+---ui.request_render()   -- push to frontend now
+---session.exec_local(cmd)   -- blocks
+---switching = false
+---render()
+---ui.request_render()   -- push final state
+---```
+function ui.request_render() end
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- Dialogs (blocking — pauses plugin until user responds)

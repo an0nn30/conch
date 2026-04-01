@@ -152,7 +152,14 @@ fn exec_local_impl(lua: &Lua, cmd: &str) -> LuaResult<LuaTable> {
     if !allowed {
         return build_exec_error(lua, "permission denied: session.exec");
     }
-    match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+    // Use a login shell so the user's PATH (from .zshrc / .bashrc / .profile)
+    // is available.  Fall back to `sh -c` if SHELL is not set.
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    match std::process::Command::new(&shell)
+        .arg("-lc")
+        .arg(cmd)
+        .output()
+    {
         Ok(output) => {
             let result = lua.create_table()?;
             result.set(

@@ -22,6 +22,30 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    // Push current accumulated widgets to the frontend immediately.
+    // Useful for showing loading/progress states during blocking operations.
+    ui.set(
+        "request_render",
+        lua.create_function(|lua, ()| {
+            let widgets = with_acc(lua, |acc| {
+                let w = acc.take_widgets();
+                // Re-push so the accumulator isn't emptied for subsequent calls.
+                for widget in &w {
+                    acc.push_widget(widget.clone());
+                }
+                w
+            })?;
+            let json = serde_json::to_string(&widgets).unwrap_or_else(|_| "[]".into());
+            let handle = lua
+                .app_data_ref::<std::cell::RefCell<super::PanelHandleStore>>()
+                .and_then(|s| s.borrow().handle);
+            if let Some(h) = handle {
+                with_host_api(lua, |api| api.set_widgets(h, &json))?;
+            }
+            Ok(())
+        })?,
+    )?;
+
     // -- Data Display --
 
     ui.set(
@@ -145,6 +169,14 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // -- Interactive Widgets --
+
+    ui.set(
+        "panel_html",
+        lua.create_function(|lua, (content, css): (String, Option<String>)| {
+            with_acc(lua, |acc| acc.push_widget(Widget::Html { content, css }))?;
+            Ok(())
+        })?,
+    )?;
 
     ui.set(
         "panel_button",

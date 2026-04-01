@@ -166,6 +166,13 @@ app = {}
 ---@field panel_button fun(id: string, label: string)
 ---Add a key-value pair row.
 ---@field panel_kv fun(key: string, value: string)
+---Render raw HTML in a Shadow DOM with CSS isolation.
+---Theme variables (--bg, --fg, etc.) are forwarded. Elements with
+---`data-action="id"` emit `button_click` events when clicked.
+---@field panel_html fun(content: string, css?: string)
+---Push current accumulated widgets to the frontend immediately.
+---Use to show loading states during blocking operations.
+---@field request_render fun()
 ---Set the panel auto-refresh interval in seconds. Default is 10.
 ---Use `0` for manual refresh only.
 ---@field set_refresh fun(seconds: number)

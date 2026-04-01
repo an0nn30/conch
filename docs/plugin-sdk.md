@@ -32,6 +32,7 @@ Plugins are managed via **Settings > Plugins** -- scan, enable, disable, and per
 - [Widget System](#widget-system)
 - [Widget Events](#widget-events)
 - [Plugin Events](#plugin-events)
+- [Render Lifecycle & Architecture](#render-lifecycle--architecture)
 - [Form Dialogs](#form-dialogs)
 - [Inter-Plugin Communication](#inter-plugin-communication)
 - [Icons](#icons)
@@ -896,6 +897,8 @@ public Widgets checkbox(String id, String label, boolean checked);
 
 // Raw + serialization
 public Widgets raw(String json);
+public Widgets html(String content);
+public Widgets html(String content, String css);
 public String toJson();
 ```
 
@@ -971,12 +974,16 @@ ui.panel_tree(id, nodes, selected?)
 ui.panel_toolbar(id?, items)
 ui.panel_path_bar(id, segments)
 ui.panel_tabs(id, active, tabs)
+ui.panel_html(content, css?)
 
 -- Layout containers (callback receives no args)
 ui.panel_horizontal(func, spacing?)
 ui.panel_vertical(func, spacing?)
 ui.panel_scroll_area(func, max_height?)
 ui.panel_drop_zone(id, label, func?)
+
+-- Render control
+ui.request_render()              -- push current widgets to frontend immediately
 
 -- Dialogs
 ui.form(title, fields) -> table|nil
@@ -1090,6 +1097,7 @@ Both plugin tiers share the same declarative widget system. Plugins return a JSO
 | `path_bar` **(pending)** | `id`, `segments` | Clickable breadcrumb path bar (segments: array of strings) |
 | `tree_view` | `id`, `nodes`, `selected?` | Hierarchical tree with icons, badges, and context menus |
 | `table` | `id`, `columns`, `rows`, `sort_column?`, `sort_ascending?`, `selected_row?` | Sortable, selectable data table with context menus |
+| `html` | `content`, `css?` | Raw HTML rendered in a Shadow DOM with theme variable access |
 
 **Toolbar items** (each has a `"type"` field):
 
@@ -1141,6 +1149,17 @@ Both plugin tiers share the same declarative widget system. Plugins return a JSO
 | `icon?` | string | Icon name |
 | `enabled?` | boolean | Whether the item is clickable (default: true) |
 | `shortcut?` | string | Keyboard shortcut hint text (display only) |
+
+**Html widget details:**
+
+The `html` widget renders raw HTML inside a Shadow DOM for full CSS isolation. Theme variables (`--bg`, `--fg`, `--green`, `--red`, etc.) are forwarded into the shadow root so plugin styles stay on-theme. Elements with a `data-action="action_id"` attribute emit `button_click` events back to the plugin when clicked.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `content` | string | Raw HTML string to render inside the shadow root |
+| `css?` | string | Optional CSS injected into the shadow root's `<style>` |
+
+Works in both panel and docked view plugin types.
 
 ---
 
@@ -1225,6 +1244,119 @@ end
 > **Note on `bus_query` handling:** Direct queries are handled by dedicated query callbacks rather than `on_event`:
 > - Lua: `on_query(method, args_json)`
 > - Java: `onQuery(String method, String argsJson)`
+
+---
+
+## Render Lifecycle & Architecture
+
+This section explains the internal rendering pipeline — how widgets get from plugin code to the screen, how re-renders are triggered, and how the push/pull mechanisms work. Understanding this is essential for plugin developers who need loading states or immediate UI updates.
+
+### Plugin Types & Rendering Models
+
+| Plugin Type | Registration | Render Trigger | Container |
+|-------------|-------------|----------------|-----------|
+| **Panel** | Auto-registered on load via `register_panel()` | Pull (frontend requests) + Push (`ui.request_render()`) | Sidebar panel (left/right) or bottom panel |
+| **Action** (docked view) | On-demand via `ui.open_docked_view()` | Pull (frontend requests after events) | Tab in the main editor area |
+
+### The Widget Pipeline
+
+Both plugin types follow the same pipeline:
+
+```
+Plugin code (Lua/Java)
+    ↓  calls ui.panel_*() functions
+Widget Accumulator (in-memory list)
+    ↓  serialized to JSON
+Rust backend (HostApi / Tauri commands)
+    ↓  emits Tauri event or returns via oneshot channel
+Frontend JS (plugin-widgets.js)
+    ↓  renderWidgets() → renderWidget() → DOM elements
+Browser (webview)
+```
+
+### Pull-Based Rendering (RenderRequest)
+
+The default mechanism. The frontend asks the plugin to render, and the plugin responds with a widget tree.
+
+```
+Frontend                         Rust Backend                    Plugin Thread
+   │                                │                               │
+   │─ invoke('request_plugin_render')─▶│                               │
+   │                                │─ PluginMail::RenderRequest ──▶│
+   │                                │                               │─ clear accumulator
+   │                                │                               │─ call render()
+   │                                │                               │─ ui.panel_*() fills accumulator
+   │                                │◀── JSON widget array ─────────│
+   │◀── widget JSON ───────────────│                               │
+   │─ renderWidgets(container, json)│                               │
+```
+
+**When does this happen?**
+
+- **Initial load:** When a panel plugin is first registered, the frontend does one `request_plugin_render` call.
+- **After widget events:** When the user interacts with a widget (button click, text input, etc.), the frontend sends the event to the plugin, then automatically requests a fresh render.
+- **Docked views:** Same flow but using `request_plugin_view_render` with a `view_id`.
+
+### Push-Based Rendering (set_widgets / request_render)
+
+Plugins can push widget updates to the frontend at any time — useful for showing loading states during blocking operations.
+
+```
+Plugin Thread                    Rust Backend                    Frontend
+   │                                │                               │
+   │─ ui.request_render() ────────▶│                               │
+   │   (serializes accumulator)     │─ emit('plugin-widgets-updated')▶│
+   │                                │                               │─ renderWidgets()
+```
+
+**How it works internally:**
+
+1. `ui.request_render()` reads the current widget accumulator (without draining it)
+2. Serializes widgets to JSON
+3. Calls `HostApi::set_widgets(panel_handle, json)`
+4. `TauriHostApi` emits a `plugin-widgets-updated` Tauri event
+5. Frontend listener catches the event and re-renders the container
+
+**Example — loading state during a blocking operation:**
+
+```lua
+function switch_env(env)
+    switching = true
+    render()                -- rebuild widgets (now shows loading spinner)
+    ui.request_render()     -- push to frontend immediately
+
+    local r = session.exec_local(cmd)  -- blocks for several seconds
+    switching = false
+
+    refresh()               -- update state variables
+    render()                -- rebuild widgets (now shows new state)
+    ui.request_render()     -- push final state to frontend
+end
+```
+
+> **Note:** `ui.request_render()` currently works for **panel plugins** only. Docked views use the pull-based re-render triggered automatically after each widget event.
+
+### Auto Re-render After Events
+
+When a user interacts with a widget, the frontend handles re-rendering automatically:
+
+**Panel plugins:** `sendEvent()` → `plugin_widget_event` (Tauri command) → `on_event()` runs → frontend calls `refreshPanelPlugin()` → `request_plugin_render` → `render()` → update DOM.
+
+**Docked views:** `sendEvent()` → `plugin_widget_event` → `on_event()` runs → frontend calls `refreshDockedView()` → `request_plugin_view_render` → `render_view(view_id)` or `render()` → update DOM.
+
+In both cases, plugins **do not need to call `ui.request_render()`** after handling events — the re-render happens automatically. Use `ui.request_render()` only when you need to push an update **during** a long-running operation (before the event handler returns).
+
+### Key Source Files
+
+| File | Role |
+|------|------|
+| `crates/conch_plugin/src/lua/runner.rs` | Lua plugin thread, mailbox loop, `handle_render()` |
+| `crates/conch_plugin/src/lua/api/ui.rs` | `ui.panel_*` Lua bindings, `ui.request_render()` |
+| `crates/conch_plugin/src/lua/api/mod.rs` | Widget accumulator, HostApi bridge, PanelHandleStore |
+| `crates/conch_plugin/src/host_api.rs` | `HostApi` trait definition (`set_widgets`, `register_panel`) |
+| `crates/conch_tauri/src/plugins/tauri_host_api.rs` | `TauriHostApi` — emits Tauri events for widget updates |
+| `crates/conch_tauri/src/plugins/mod.rs` | `request_plugin_render` / `request_plugin_view_render` commands |
+| `crates/conch_tauri/frontend/plugin-widgets.js` | Frontend renderer, `sendEvent()`, `refreshPanelPlugin()`, `refreshDockedView()` |
 
 ---
 

@@ -39,3 +39,4 @@ plugins/java-*/build/
 build.ps1
 .superpowers/
 .worktrees/
+plugins/

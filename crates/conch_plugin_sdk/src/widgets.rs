@@ -233,6 +233,20 @@ pub enum Widget {
         child: Box<Widget>,
         items: Vec<ContextMenuItem>,
     },
+
+    /// Raw HTML/CSS rendered inside a Shadow DOM container.
+    ///
+    /// The shadow root inherits the app's CSS custom properties
+    /// (`--bg`, `--fg`, `--green`, etc.) so plugins stay on-theme.
+    /// Elements with a `data-action="id"` attribute emit widget
+    /// click events back to the plugin.
+    Html {
+        /// HTML content to render.
+        content: String,
+        /// Optional CSS injected into the shadow root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        css: Option<String>,
+    },
 }
 
 // -- Supporting Types ------------------------------------------------------
@@ -552,6 +566,13 @@ impl Widget {
             id: None,
             children,
             spacing: None,
+        }
+    }
+
+    pub fn html(content: impl Into<String>) -> Self {
+        Widget::Html {
+            content: content.into(),
+            css: None,
         }
     }
 }
@@ -1341,6 +1362,36 @@ mod tests {
         } = Widget::text_input("s", "")
         {
             assert_eq!(submit_on_enter, Some(true));
+        } else {
+            panic!("Wrong variant");
+        }
+    }
+
+    #[test]
+    fn widget_html_roundtrip() {
+        let w = Widget::Html {
+            content: "<b>hello</b>".into(),
+            css: Some(".b { color: red; }".into()),
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(json.contains("\"type\":\"html\""));
+        assert!(json.contains("<b>hello</b>"));
+        if let Widget::Html { content, css } = roundtrip(&w) {
+            assert_eq!(content, "<b>hello</b>");
+            assert_eq!(css.unwrap(), ".b { color: red; }");
+        } else {
+            panic!("Wrong variant");
+        }
+    }
+
+    #[test]
+    fn widget_html_no_css_roundtrip() {
+        let w = Widget::html("<p>test</p>");
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(!json.contains("\"css\""));
+        if let Widget::Html { content, css } = roundtrip(&w) {
+            assert_eq!(content, "<p>test</p>");
+            assert!(css.is_none());
         } else {
             panic!("Wrong variant");
         }

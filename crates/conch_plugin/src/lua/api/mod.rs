@@ -79,6 +79,18 @@ impl HostApiBridge {
     }
 }
 
+/// Stores the panel handle assigned during `register_panel()` so that
+/// `ui.request_render()` can push widget updates without a RenderRequest.
+pub struct PanelHandleStore {
+    pub handle: Option<u64>,
+}
+
+impl PanelHandleStore {
+    pub fn new() -> Self {
+        Self { handle: None }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration — create and populate all Lua API tables
 // ---------------------------------------------------------------------------
@@ -89,6 +101,7 @@ impl HostApiBridge {
 pub fn register_all(lua: &Lua, host_api: Arc<dyn HostApi>) -> LuaResult<()> {
     lua.set_app_data(RefCell::new(WidgetAccumulator::new()));
     lua.set_app_data(HostApiBridge::new(host_api));
+    lua.set_app_data(RefCell::new(PanelHandleStore::new()));
 
     ui::register_ui_table(lua)?;
     app::register_app_table(lua)?;

@@ -153,6 +153,7 @@
       case 'vertical': return renderVertical(w, pluginName, viewId);
       case 'scroll_area': return renderScrollArea(w, pluginName, viewId);
       case 'tabs': return renderTabs(w, pluginName, viewId);
+      case 'html': return renderHtmlWidget(w, pluginName, viewId);
       default:
         const el = document.createElement('div');
         el.className = 'pw-unknown';
@@ -600,14 +601,29 @@
     const eventJson = JSON.stringify(payload);
     invoke('plugin_widget_event', { pluginName, eventJson })
       .then(() => {
-        if (!viewId) return;
-        const key = pluginName + '::' + viewId;
-        widgetEventTypeByViewKey.set(key, widgetEvent && widgetEvent.type ? widgetEvent.type : '');
-        refreshDockedView(pluginName, viewId);
+        if (viewId) {
+          const key = pluginName + '::' + viewId;
+          widgetEventTypeByViewKey.set(key, widgetEvent && widgetEvent.type ? widgetEvent.type : '');
+          refreshDockedView(pluginName, viewId);
+        } else {
+          refreshPanelPlugin(pluginName);
+        }
       })
       .catch((e) => {
         console.error('plugin_widget_event error:', e);
       });
+  }
+
+  /** Re-render a panel plugin by requesting fresh widgets from the backend. */
+  async function refreshPanelPlugin(pluginName) {
+    const container = document.querySelector(`.plugin-panel-content[data-plugin-name="${CSS.escape(pluginName)}"]`);
+    if (!container) return;
+    try {
+      const result = await invoke('request_plugin_render', { pluginName });
+      if (result != null) renderWidgets(container, result, pluginName);
+    } catch (e) {
+      console.error('refreshPanelPlugin error:', e);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -616,6 +632,54 @@
 
   const esc = window.utils.esc;
   const attr = window.utils.attr;
+
+  // ---------------------------------------------------------------------------
+  // HTML widget (Shadow DOM)
+  // ---------------------------------------------------------------------------
+
+  // CSS custom properties forwarded into each shadow root.
+  const _themeProps = [
+    '--bg', '--fg', '--dim-fg', '--panel-bg', '--tab-bar-bg', '--tab-border',
+    '--active-highlight', '--red', '--green', '--yellow', '--blue', '--cyan',
+    '--magenta', '--input-bg', '--hover-bg', '--text-secondary', '--text-muted',
+    '--ui-font-small', '--ui-font-list', '--ui-font-normal',
+  ];
+
+  function renderHtmlWidget(w, pluginName, viewId) {
+    const host = document.createElement('div');
+    host.className = 'pw-html-host';
+    const shadow = host.attachShadow({ mode: 'open' });
+
+    // Inherit theme variables from the document root.
+    const rootStyle = getComputedStyle(document.documentElement);
+    let vars = ':host {';
+    for (const p of _themeProps) {
+      const v = rootStyle.getPropertyValue(p).trim();
+      if (v) vars += ` ${p}: ${v};`;
+    }
+    vars += ' font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;';
+    vars += ' font-size: var(--ui-font-normal, 14px);';
+    vars += ' color: var(--fg); }';
+
+    const style = document.createElement('style');
+    style.textContent = vars + '\n' + (w.css || '');
+    shadow.appendChild(style);
+
+    const container = document.createElement('div');
+    container.innerHTML = w.content;
+    shadow.appendChild(container);
+
+    // Wire up data-action click events.
+    shadow.addEventListener('click', (e) => {
+      const actionEl = e.target.closest('[data-action]');
+      if (actionEl) {
+        const action = actionEl.getAttribute('data-action');
+        sendEvent(pluginName, { type: 'button_click', id: action }, viewId);
+      }
+    });
+
+    return host;
+  }
 
   // ---------------------------------------------------------------------------
   // Plugin dialogs
