@@ -450,6 +450,12 @@
               paneDnd = orchestrationResult.paneDnd || null;
               if (typeof orchestrationResult.registerTmuxSessionsToolWindow === 'function') {
                 _registerTmuxSessionsToolWindowRef = orchestrationResult.registerTmuxSessionsToolWindow;
+                // If init-backend already fired before orchestration finished,
+                // register the tmux tool window and apply startup now.
+                if (window.backendRouter && window.backendRouter.isTmux()) {
+                  _registerTmuxSessionsToolWindowRef();
+                  applyTmuxStartup();
+                }
               }
             }
           } catch (error) {
