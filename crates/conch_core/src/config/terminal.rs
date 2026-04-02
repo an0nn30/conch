@@ -6,9 +6,78 @@ use serde::{Deserialize, Serialize};
 
 use super::FontConfig;
 
+/// Terminal backend mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalBackend {
+    #[default]
+    Local,
+    Tmux,
+}
+
+/// Tmux-specific configuration. Only used when `backend = "tmux"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TmuxConfig {
+    /// Path to tmux binary. Empty string means search `$PATH`.
+    pub binary: String,
+    /// What to do when a window opens in tmux mode.
+    pub startup_behavior: TmuxStartupBehavior,
+    /// What "New Tab" does in tmux mode.
+    pub new_tab_behavior: TmuxNewTabBehavior,
+    /// What "New Window" does in tmux mode.
+    pub new_window_behavior: TmuxNewWindowBehavior,
+}
+
+impl Default for TmuxConfig {
+    fn default() -> Self {
+        Self {
+            binary: String::new(),
+            startup_behavior: TmuxStartupBehavior::default(),
+            new_tab_behavior: TmuxNewTabBehavior::default(),
+            new_window_behavior: TmuxNewWindowBehavior::default(),
+        }
+    }
+}
+
+impl TmuxConfig {
+    /// Returns the tmux binary path, defaulting to `"tmux"` if empty.
+    pub fn resolved_binary(&self) -> &str {
+        let b = self.binary.trim();
+        if b.is_empty() { "tmux" } else { b }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TmuxStartupBehavior {
+    #[default]
+    AttachLastSession,
+    ShowSessionPicker,
+    CreateNewSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TmuxNewTabBehavior {
+    #[default]
+    NewTmuxWindow,
+    SessionPicker,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TmuxNewWindowBehavior {
+    #[default]
+    AttachSameSession,
+    ShowSessionPicker,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
+    pub backend: TerminalBackend,
+    pub tmux: TmuxConfig,
     pub shell: TerminalShell,
     pub env: HashMap<String, String>,
     pub cursor: CursorConfig,
@@ -19,6 +88,8 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
+            backend: TerminalBackend::default(),
+            tmux: TmuxConfig::default(),
             shell: TerminalShell::default(),
             env: HashMap::new(),
             cursor: CursorConfig::default(),
@@ -209,5 +280,77 @@ blinking = "maybe""#,
         let parsed: TerminalConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.scroll_sensitivity, cfg.scroll_sensitivity);
         assert_eq!(parsed.shell, cfg.shell);
+    }
+
+    #[test]
+    fn default_backend_is_local() {
+        let cfg = TerminalConfig::default();
+        assert_eq!(cfg.backend, TerminalBackend::Local);
+    }
+
+    #[test]
+    fn parse_tmux_backend() {
+        let cfg: TerminalConfig = toml::from_str(r#"backend = "tmux""#).unwrap();
+        assert_eq!(cfg.backend, TerminalBackend::Tmux);
+    }
+
+    #[test]
+    fn tmux_config_defaults() {
+        let cfg: TerminalConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.tmux.binary, "");
+        assert_eq!(cfg.tmux.startup_behavior, TmuxStartupBehavior::AttachLastSession);
+        assert_eq!(cfg.tmux.new_tab_behavior, TmuxNewTabBehavior::NewTmuxWindow);
+        assert_eq!(cfg.tmux.new_window_behavior, TmuxNewWindowBehavior::AttachSameSession);
+    }
+
+    #[test]
+    fn tmux_config_serde_roundtrip() {
+        let cfg = TmuxConfig {
+            binary: "/opt/homebrew/bin/tmux".into(),
+            startup_behavior: TmuxStartupBehavior::ShowSessionPicker,
+            new_tab_behavior: TmuxNewTabBehavior::SessionPicker,
+            new_window_behavior: TmuxNewWindowBehavior::ShowSessionPicker,
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        let parsed: TmuxConfig = toml::from_str(&s).unwrap();
+        assert_eq!(cfg, parsed);
+    }
+
+    #[test]
+    fn backward_compat_no_tmux_section() {
+        let toml_str = r#"
+            [shell]
+            program = "/bin/zsh"
+            args = ["-l"]
+            scroll_sensitivity = 0.2
+        "#;
+        let cfg: TerminalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.backend, TerminalBackend::Local);
+        assert_eq!(cfg.shell.program, "/bin/zsh");
+        assert_eq!(cfg.tmux, TmuxConfig::default());
+    }
+
+    #[test]
+    fn resolved_binary_empty() {
+        let cfg = TmuxConfig::default();
+        assert_eq!(cfg.resolved_binary(), "tmux");
+    }
+
+    #[test]
+    fn resolved_binary_explicit() {
+        let cfg = TmuxConfig {
+            binary: "/opt/homebrew/bin/tmux".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_binary(), "/opt/homebrew/bin/tmux");
+    }
+
+    #[test]
+    fn resolved_binary_whitespace_only() {
+        let cfg = TmuxConfig {
+            binary: "   ".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_binary(), "tmux");
     }
 }

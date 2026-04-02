@@ -9,6 +9,8 @@ pub struct PersistentState {
     pub layout: LayoutConfig,
     /// Names of plugins that were loaded when the app last exited.
     pub loaded_plugins: Vec<String>,
+    /// Last tmux session name for `attach_last_session` startup behavior.
+    pub last_tmux_session: Option<String>,
 }
 
 impl Default for PersistentState {
@@ -16,6 +18,7 @@ impl Default for PersistentState {
         Self {
             layout: LayoutConfig::default(),
             loaded_plugins: Vec::new(),
+            last_tmux_session: None,
         }
     }
 }
@@ -127,6 +130,7 @@ mod tests {
                 right_split_ratio: 0.4,
             },
             loaded_plugins: vec!["ssh-manager".into(), "git-status".into()],
+            last_tmux_session: None,
         };
         let toml_str = toml::to_string(&original).expect("serialize");
         let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
@@ -183,5 +187,33 @@ left_panel_visible = false
             "default bottom_panel_visible"
         );
         assert!(ps.layout.status_bar_visible, "default status_bar_visible");
+    }
+
+    #[test]
+    fn last_tmux_session_default_is_none() {
+        let ps = PersistentState::default();
+        assert!(ps.last_tmux_session.is_none());
+    }
+
+    #[test]
+    fn last_tmux_session_roundtrip() {
+        let state = PersistentState {
+            last_tmux_session: Some("my-session".into()),
+            ..Default::default()
+        };
+        let s = toml::to_string(&state).unwrap();
+        let parsed: PersistentState = toml::from_str(&s).unwrap();
+        assert_eq!(parsed.last_tmux_session, Some("my-session".into()));
+    }
+
+    #[test]
+    fn backward_compat_no_last_tmux_session() {
+        let toml_str = r#"
+            loaded_plugins = ["my-plugin"]
+            [layout]
+            zoom_factor = 1.5
+        "#;
+        let ps: PersistentState = toml::from_str(toml_str).unwrap();
+        assert!(ps.last_tmux_session.is_none());
     }
 }
