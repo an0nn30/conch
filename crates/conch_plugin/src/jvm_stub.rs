@@ -54,6 +54,14 @@ pub mod runtime {
             None
         }
 
+        pub fn probe_jar_api_requirement(&self, _jar_path: &Path) -> Option<String> {
+            None
+        }
+
+        pub fn probe_jar_permissions(&self, _jar_path: &Path) -> Vec<String> {
+            Vec::new()
+        }
+
         pub fn discover(&mut self, _dir: &Path) -> Vec<(PathBuf, PluginMeta)> {
             Vec::new()
         }
