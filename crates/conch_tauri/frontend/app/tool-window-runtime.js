@@ -113,6 +113,28 @@
             }
           },
         });
+
+        // Tmux sessions tool window — registered when backend is tmux
+        function registerTmuxSessionsToolWindow() {
+          if (!global.toolWindowManager) return;
+          global.toolWindowManager.register('tmux-sessions', {
+            title: 'Tmux Sessions',
+            type: 'built-in',
+            defaultZone: 'right-bottom',
+            renderFn: function (container) {
+              var panelEl = document.createElement('div');
+              panelEl.id = 'tmux-sessions-panel';
+              container.appendChild(panelEl);
+              if (global.tmuxPanel) {
+                global.tmuxPanel.init({
+                  invoke: invoke,
+                  listen: listenOnCurrentWindow,
+                  panelEl: panelEl,
+                });
+              }
+            },
+          });
+        }
         if (initialLayoutData) {
           global.toolWindowManager.setPanelVisibility('left', initialLayoutData.files_panel_visible !== false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', initialLayoutData.ssh_panel_visible !== false, { save: false });
@@ -266,6 +288,7 @@
 
       return {
         debouncedSaveLayout,
+        registerTmuxSessionsToolWindow,
       };
     }
 

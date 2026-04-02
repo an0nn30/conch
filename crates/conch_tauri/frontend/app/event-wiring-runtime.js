@@ -186,9 +186,42 @@
         configRuntime.init();
       }
 
+      function wireTmuxEvents() {
+        listenOnCurrentWindow('tmux-output', function (event) {
+          var payload = event.payload || {};
+          if (!global.tmuxIdMap) return;
+          var frontendPaneId = global.tmuxIdMap.getPaneForTmux(payload.pane_id);
+          if (frontendPaneId != null) {
+            var pane = panes.get(frontendPaneId);
+            if (pane && pane.term) pane.term.write(payload.data);
+          }
+        });
+
+        listenOnCurrentWindow('tmux-window-add', function (event) {
+          // Tab creation from tmux notification — to be wired in tab-manager integration
+          console.debug('[tmux] window-add', event.payload);
+        });
+
+        listenOnCurrentWindow('tmux-window-close', function (event) {
+          console.debug('[tmux] window-close', event.payload);
+        });
+
+        listenOnCurrentWindow('tmux-window-renamed', function (event) {
+          console.debug('[tmux] window-renamed', event.payload);
+        });
+
+        listenOnCurrentWindow('tmux-disconnected', function (event) {
+          var reason = event.payload && event.payload.reason;
+          if (global.toast) {
+            global.toast.warn(reason ? 'Tmux disconnected: ' + reason : 'Tmux session ended');
+          }
+        });
+      }
+
       return {
         handleMenuAction,
         showUpdateAvailableToast,
+        wireTmuxEvents,
       };
     }
 

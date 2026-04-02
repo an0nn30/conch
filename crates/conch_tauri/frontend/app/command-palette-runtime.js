@@ -112,6 +112,22 @@
       add('core:toggle-right', 'Toggle Right Panel', 'View', 'panel right sidebar sessions ssh tool windows', () => handleMenuAction('toggle-right-panel'));
       add('core:toggle-bottom', 'Toggle Bottom Panel', 'View', 'panel bottom', () => handleMenuAction('toggle-bottom-panel'));
 
+      // Tmux commands — only shown when backend is tmux
+      if (global.backendRouter && global.backendRouter.isTmux()) {
+        add('tmux:show-sessions', 'Tmux: Show Sessions', 'Tmux', 'tmux session list browse', function () {
+          if (global.toolWindowManager) global.toolWindowManager.activate('tmux-sessions');
+        });
+        add('tmux:create-session', 'Tmux: Create Session', 'Tmux', 'tmux session new create', function () {
+          if (global.tmuxPanel) global.tmuxPanel.createSession();
+        });
+        add('tmux:rename-session', 'Tmux: Rename Session', 'Tmux', 'tmux session rename', function () {
+          if (global.tmuxPanel) global.tmuxPanel.renameCurrentSession();
+        });
+        add('tmux:kill-session', 'Tmux: Kill Session', 'Tmux', 'tmux session kill destroy', function () {
+          if (global.tmuxPanel) global.tmuxPanel.killSessionPrompt();
+        });
+      }
+
       for (const item of (pluginItems || [])) {
         add(
           `plugin-menu:${item.plugin}:${item.action}`,

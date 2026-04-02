@@ -56,6 +56,10 @@
         return;
       }
       if (action === 'new-tab') {
+        if (global.backendRouter && global.backendRouter.isTmux()) {
+          global.backendRouter.newTab();
+          return;
+        }
         createTab().catch((error) => showStatus('Failed to create tab: ' + String(error)));
         return;
       }
@@ -91,6 +95,10 @@
           }
         }
         global.sshPanel.focusQuickConnect();
+        return;
+      }
+      if (action === 'focus-tmux-sessions') {
+        if (global.toolWindowManager) global.toolWindowManager.activate('tmux-sessions');
         return;
       }
       if (action === 'settings') {
