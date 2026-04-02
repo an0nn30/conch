@@ -303,6 +303,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             menu::MENU_FOCUS_SESSIONS_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_FOCUS_SESSIONS)
             }
+            menu::MENU_FOCUS_TMUX_SESSIONS_ID => {
+                menu::emit_menu_action_to_focused_window(
+                    app,
+                    menu::MENU_ACTION_FOCUS_TMUX_SESSIONS,
+                )
+            }
             menu::MENU_SETTINGS_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_SETTINGS)
             }

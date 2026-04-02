@@ -39,6 +39,7 @@ pub(crate) const MENU_SPLIT_HORIZONTAL_ID: &str = "view.split_horizontal";
 pub(crate) const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
+pub(crate) const MENU_FOCUS_TMUX_SESSIONS_ID: &str = "view.focus_tmux_sessions";
 
 // ---------------------------------------------------------------------------
 // Menu action string constants (emitted to frontend via events)
@@ -70,6 +71,7 @@ pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
 pub(crate) const MENU_ACTION_CHECK_UPDATES: &str = "check-for-updates";
 pub(crate) const MENU_ACTION_ABOUT: &str = "about";
 pub(crate) const MENU_ACTION_OPEN_DEVTOOLS: &str = "open-devtools";
+pub(crate) const MENU_ACTION_FOCUS_TMUX_SESSIONS: &str = "focus-tmux-sessions";
 
 // ---------------------------------------------------------------------------
 // Menu action event payload

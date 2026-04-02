@@ -368,3 +368,104 @@
     .ssh-context-menu-item.danger { color: var(--red); }
     .ssh-context-menu-item.danger:hover { background: var(--red); color: var(--fg); }
     .ssh-context-menu-sep { height: 1px; background: var(--tab-border); margin: 4px 0; }
+
+    /* --- Tmux Sessions Panel --- */
+    .tmux-panel-toolbar {
+      display: flex;
+      gap: 4px;
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tmux-btn {
+      background: var(--button-bg, var(--bg));
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 2px 8px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .tmux-btn:hover {
+      background: var(--selection-bg);
+    }
+    .tmux-session-list {
+      overflow-y: auto;
+      flex: 1;
+    }
+    .tmux-session-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .tmux-session-row:hover {
+      background: var(--selection-bg);
+    }
+    .tmux-session-selected {
+      background: var(--selection-bg);
+    }
+    .tmux-session-attached .tmux-session-name {
+      font-weight: bold;
+    }
+    .tmux-session-indicator {
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .tmux-session-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tmux-session-wins {
+      color: var(--text-secondary);
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+    .tmux-empty-state {
+      padding: 16px;
+      text-align: center;
+      color: var(--text-secondary);
+    }
+    .tmux-empty-state p {
+      margin: 4px 0;
+    }
+    .tmux-create-btn {
+      margin-top: 8px;
+    }
+    .tmux-context-menu {
+      position: fixed;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 0;
+      z-index: 9999;
+      min-width: 160px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+    .tmux-ctx-item {
+      padding: 4px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .tmux-ctx-item:hover {
+      background: var(--selection-bg);
+    }
+    .tmux-ctx-danger {
+      color: var(--red, #e06c75);
+    }
+
+    /* --- Tmux Session Badge --- */
+    .tmux-session-badge {
+      font-size: 11px;
+      color: var(--text-secondary);
+      padding: 2px 8px;
+      white-space: nowrap;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .tmux-session-badge:hover {
+      color: var(--fg);
+    }
