@@ -88,6 +88,66 @@
     return String(value || '').trim().toLowerCase();
   }
 
+  function tokenizeSearchText(value) {
+    return normalizeSearchText(value).split(/[\s:_-]+/).filter(Boolean);
+  }
+
+  function levenshteinDistance(a, b) {
+    const left = String(a || '');
+    const right = String(b || '');
+    if (!left) return right.length;
+    if (!right) return left.length;
+    const prev = new Array(right.length + 1);
+    const curr = new Array(right.length + 1);
+    for (let j = 0; j <= right.length; j++) prev[j] = j;
+    for (let i = 1; i <= left.length; i++) {
+      curr[0] = i;
+      for (let j = 1; j <= right.length; j++) {
+        const cost = left.charCodeAt(i - 1) === right.charCodeAt(j - 1) ? 0 : 1;
+        curr[j] = Math.min(
+          prev[j] + 1,
+          curr[j - 1] + 1,
+          prev[j - 1] + cost,
+        );
+      }
+      for (let j = 0; j <= right.length; j++) prev[j] = curr[j];
+    }
+    return prev[right.length];
+  }
+
+  function getFuzzyMatchScore(query, haystack, extraTokens) {
+    const q = normalizeSearchText(query);
+    const text = normalizeSearchText(haystack);
+    if (!q || !text) return Number.POSITIVE_INFINITY;
+    if (text.includes(q)) return 0;
+
+    const tokens = new Set([
+      ...tokenizeSearchText(text),
+      ...(Array.isArray(extraTokens) ? extraTokens.flatMap((item) => tokenizeSearchText(item)) : []),
+    ]);
+    if (tokens.size === 0) return Number.POSITIVE_INFINITY;
+
+    let best = Number.POSITIVE_INFINITY;
+    for (const token of tokens) {
+      if (!token) continue;
+      if (token.startsWith(q) || q.startsWith(token)) {
+        best = Math.min(best, 1);
+        continue;
+      }
+      if (token.includes(q) || q.includes(token)) {
+        best = Math.min(best, 1);
+        continue;
+      }
+      if (q.length >= 4 && token.length >= 4) {
+        const distance = levenshteinDistance(q, token);
+        if (distance <= 2) {
+          best = Math.min(best, 2 + distance);
+        }
+      }
+    }
+    return best;
+  }
+
   function isPrintableKeyEvent(event) {
     return !!(
       event &&
@@ -152,6 +212,20 @@
   function buildSettingsSearchIndex() {
     const entries = SETTINGS_SEARCH_INDEX.map((entry) => ({ ...entry }));
 
+    for (const group of KEYBOARD_CORE_GROUPS) {
+      for (const key of group.keys) {
+        const label = KEYBOARD_CORE_LABELS[key] || toTitleCaseWords(key);
+        entries.push({
+          section: 'keyboard',
+          label,
+          keywords: `keymap keyboard shortcut ${group.label} ${key} ${label}`,
+          path: `Keymap > ${group.label}`,
+          kind: 'core-shortcut',
+          targetId: `keyboard:core:${key}`,
+        });
+      }
+    }
+
     const toolWindowItems = window.toolWindowManager && typeof window.toolWindowManager.listWindows === 'function'
       ? window.toolWindowManager.listWindows()
       : [];
@@ -179,7 +253,8 @@
     const seen = new Set();
     for (const entry of buildSettingsSearchIndex()) {
       const haystack = `${entry.label} ${entry.keywords || ''}`;
-      if (!normalizeSearchText(haystack).includes(q)) continue;
+      const score = getFuzzyMatchScore(q, haystack, [entry.path, entry.section, entry.kind, entry.targetKey, entry.targetId]);
+      if (!Number.isFinite(score)) continue;
       const section = getSectionById(entry.section);
       const sig = `${entry.section}:${entry.label}:${entry.path || ''}`;
       if (seen.has(sig)) continue;
@@ -192,7 +267,7 @@
         kind: entry.kind || 'setting',
         targetKey: entry.targetKey || null,
         targetId: entry.targetId || (entry.kind === 'tool-window' ? `keyboard:tool-window:${entry.targetKey || ''}` : null),
-        score: normalizeSearchText(entry.label).includes(q) ? 0 : 1,
+        score,
       });
     }
     results.sort((a, b) => a.score - b.score || String(a.label).localeCompare(String(b.label)));
@@ -302,7 +377,7 @@
       for (const group of SECTION_DEFS) {
         for (const item of group.items) {
           const haystack = `${item.label} ${item.description || ''} ${item.keywords || ''}`;
-          if (!normalizeSearchText(haystack).includes(q)) continue;
+          if (!Number.isFinite(getFuzzyMatchScore(q, haystack, [group.group, item.id]))) continue;
           sectionMatches.push(item);
         }
       }
@@ -747,9 +822,15 @@
   function applyRowSearchHighlight(row, labelText, descText, query) {
     if (!row || !query) return;
     const labelEl = row.querySelector('.settings-row-label');
-    if (labelEl) appendHighlightedText(labelEl, labelText, query);
+    if (labelEl) {
+      labelEl.textContent = '';
+      appendHighlightedText(labelEl, labelText, query);
+    }
     const descEl = row.querySelector('.settings-row-desc');
-    if (descEl && descText) appendHighlightedText(descEl, descText, query);
+    if (descEl && descText) {
+      descEl.textContent = '';
+      appendHighlightedText(descEl, descText, query);
+    }
   }
 
   function addSearchInput(container, placeholder, value, onInput) {
@@ -1177,6 +1258,7 @@
     close_tab: 'Close Tab',
     rename_tab: 'Rename Tab',
     new_window: 'New Window',
+    manage_tunnels: 'Manage SSH Tunnels',
     quit: 'Quit',
     zen_mode: 'Zen Mode',
     toggle_left_panel: 'Toggle Left Panel',
@@ -1195,6 +1277,10 @@
     {
       label: 'Tab & Window',
       keys: ['new_tab', 'close_tab', 'rename_tab', 'new_window', 'quit'],
+    },
+    {
+      label: 'Tools',
+      keys: ['manage_tunnels'],
     },
     {
       label: 'View',
@@ -1348,7 +1434,7 @@
     const query = normalizeSearchText(keyboardSearchQuery);
     const matchesShortcut = (label, desc, extra) => {
       if (!query) return true;
-      return normalizeSearchText(`${label} ${desc || ''} ${extra || ''}`).includes(query);
+      return Number.isFinite(getFuzzyMatchScore(query, `${label} ${desc || ''} ${extra || ''}`));
     };
     let totalRendered = 0;
 

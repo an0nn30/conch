@@ -86,6 +86,7 @@ pub struct KeyboardConfig {
     pub close_tab: String,
     pub quit: String,
     pub new_window: String,
+    pub manage_tunnels: String,
     pub zen_mode: String,
     pub toggle_left_panel: String,
     pub toggle_right_panel: String,
@@ -110,6 +111,7 @@ impl Default for KeyboardConfig {
             close_tab: "cmd+w".into(),
             quit: "cmd+q".into(),
             new_window: "cmd+shift+n".into(),
+            manage_tunnels: "cmd+shift+t".into(),
             zen_mode: "cmd+shift+z".into(),
             toggle_left_panel: "cmd+shift+e".into(),
             toggle_right_panel: "cmd+shift+r".into(),
@@ -254,6 +256,12 @@ mod tests {
         assert!(cfg.native);
         assert!(cfg.lua);
         assert!(cfg.java);
+    }
+
+    #[test]
+    fn keyboard_config_includes_manage_tunnels_default() {
+        let cfg = KeyboardConfig::default();
+        assert_eq!(cfg.manage_tunnels, "cmd+shift+t");
     }
 
     #[test]

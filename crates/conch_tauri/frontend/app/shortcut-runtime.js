@@ -29,6 +29,7 @@
       close_tab: 'close-tab',
       rename_tab: 'rename-tab',
       new_window: 'new-window',
+      manage_tunnels: 'manage-tunnels',
       quit: null,
       zen_mode: 'zen-mode',
       toggle_left_panel: 'toggle-left-panel',

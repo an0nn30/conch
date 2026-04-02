@@ -134,6 +134,7 @@ pub(crate) struct KeyboardShortcuts {
     split_horizontal: String,
     close_pane: String,
     rename_tab: String,
+    manage_tunnels: String,
 }
 
 #[tauri::command]
@@ -148,6 +149,7 @@ pub(crate) fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> Key
         split_horizontal: kb.split_horizontal.clone(),
         close_pane: kb.close_pane.clone(),
         rename_tab: kb.rename_tab.clone(),
+        manage_tunnels: kb.manage_tunnels.clone(),
     }
 }
 

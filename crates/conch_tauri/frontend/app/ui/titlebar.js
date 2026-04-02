@@ -96,7 +96,7 @@
         label: 'Tools', items: [
           { id: 'open-command-palette', label: 'Plugin Commands\u2026', shortcut: `${ctrl}+Shift+P` },
           { type: 'separator' },
-          { id: 'manage-tunnels', label: 'Manage SSH Tunnels\u2026', shortcut: `${ctrl}+Shift+T` },
+          { id: 'manage-tunnels', label: 'Manage SSH Tunnels\u2026', shortcut: shortcuts.manage_tunnels || `${ctrl}+Shift+T` },
         ]
       },
       {

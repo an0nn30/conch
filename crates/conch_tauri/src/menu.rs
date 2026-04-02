@@ -275,12 +275,13 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         Some("CmdOrCtrl+Comma"),
     )?;
+    let manage_tunnels_accel = config_key_to_accelerator(&keyboard.manage_tunnels);
     let manage_tunnels = MenuItem::with_id(
         app,
         MENU_MANAGE_TUNNELS_ID,
         "Manage SSH Tunnels\u{2026}",
         true,
-        Some("CmdOrCtrl+Shift+T"),
+        Some(&manage_tunnels_accel),
     )?;
     let credential_vault = MenuItem::with_id(
         app,
