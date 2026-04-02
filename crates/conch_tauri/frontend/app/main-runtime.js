@@ -450,12 +450,22 @@
               paneDnd = orchestrationResult.paneDnd || null;
               if (typeof orchestrationResult.registerTmuxSessionsToolWindow === 'function') {
                 _registerTmuxSessionsToolWindowRef = orchestrationResult.registerTmuxSessionsToolWindow;
-                // If init-backend already fired before orchestration finished,
-                // register the tmux tool window and apply startup now.
-                if (window.backendRouter && window.backendRouter.isTmux()) {
-                  _registerTmuxSessionsToolWindowRef();
+              }
+              // After orchestration completes, query backend mode and set up
+              // tmux if needed.  This handles the common case where init-backend
+              // fired before orchestration was ready.
+              try {
+                var detectedBackend = await invoke('tmux_get_backend');
+                if (detectedBackend === 'tmux') {
+                  if (window.backendRouter) window.backendRouter.setMode('tmux');
+                  if (wireTmuxEvents) wireTmuxEvents();
+                  if (typeof _registerTmuxSessionsToolWindowRef === 'function') {
+                    _registerTmuxSessionsToolWindowRef();
+                  }
                   applyTmuxStartup();
                 }
+              } catch (_tmuxErr) {
+                // tmux_get_backend not available or failed — stay in local mode
               }
             }
           } catch (error) {
