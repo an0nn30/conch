@@ -4,6 +4,8 @@
 (function (exports) {
   'use strict';
 
+  const isMacPlatform = typeof navigator !== 'undefined' && navigator.platform.includes('Mac');
+
   let titlebarEl = null;
   let activeMenu = null; // currently open dropdown
   let hoverNavEnabled = false; // when a menu is open, hovering others opens them
@@ -47,7 +49,7 @@
   }
 
   function buildMenuDef(shortcuts, debugBuild, pluginItems) {
-    const ctrl = 'Ctrl';
+    const ctrl = isMacPlatform ? 'Cmd' : 'Ctrl';
     const menus = [
       {
         label: 'File', items: [
@@ -131,14 +133,16 @@
     return menus;
   }
 
-  // Format a shortcut string for display: "cmd+shift+t" -> "Ctrl+Shift+T"
+  // Format a shortcut string for display: "cmd+shift+t" -> "Cmd+Shift+T"
   function formatShortcut(s) {
     if (!s) return '';
     return s
       .split('+')
       .map(part => {
         const p = part.trim().toLowerCase();
-        if (p === 'cmd' || p === 'ctrl' || p === 'cmdorctrl') return 'Ctrl';
+        if (p === 'cmd') return isMacPlatform ? 'Cmd' : 'Ctrl';
+        if (p === 'cmdorctrl') return isMacPlatform ? 'Cmd' : 'Ctrl';
+        if (p === 'ctrl') return 'Ctrl';
         if (p === 'shift') return 'Shift';
         if (p === 'alt') return 'Alt';
         return p.charAt(0).toUpperCase() + p.slice(1);
@@ -405,13 +409,18 @@
   // -----------------------------------------------------------------------
 
   // Parse a config-style shortcut string ("cmd+shift+z") into a matcher
-  // object { ctrl, shift, alt, key }.
+  // object { cmd, ctrl, shift, alt, key }.
   function parseShortcut(str) {
     if (!str) return null;
     const parts = str.toLowerCase().split('+').map(s => s.trim());
-    const combo = { ctrl: false, shift: false, alt: false, key: '' };
+    const combo = { cmd: false, ctrl: false, shift: false, alt: false, key: '' };
     for (const p of parts) {
-      if (p === 'cmd' || p === 'ctrl' || p === 'cmdorctrl') combo.ctrl = true;
+      if (p === 'cmd') combo.cmd = true;
+      else if (p === 'ctrl') combo.ctrl = true;
+      else if (p === 'cmdorctrl') {
+        if (isMacPlatform) combo.cmd = true;
+        else combo.ctrl = true;
+      }
       else if (p === 'shift') combo.shift = true;
       else if (p === 'alt') combo.alt = true;
       else combo.key = p;
@@ -435,7 +444,8 @@
 
   function matchesEvent(combo, e) {
     if (!combo) return false;
-    if (combo.ctrl !== (e.ctrlKey || e.metaKey)) return false;
+    if (combo.cmd !== !!e.metaKey) return false;
+    if (combo.ctrl !== !!e.ctrlKey) return false;
     if (combo.shift !== e.shiftKey) return false;
     if (combo.alt !== e.altKey) return false;
     // Use e.code (physical key) so Shift+9 matches '9' not '('.

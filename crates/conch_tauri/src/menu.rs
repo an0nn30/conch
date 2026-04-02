@@ -84,14 +84,24 @@ pub(crate) struct MenuActionEvent {
 // Accelerator conversion
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
+const PRIMARY_ACCELERATOR_MOD: &str = "Cmd";
+#[cfg(not(target_os = "macos"))]
+const PRIMARY_ACCELERATOR_MOD: &str = "CmdOrCtrl";
+
+fn primary_accelerator(key: &str) -> String {
+    format!("{PRIMARY_ACCELERATOR_MOD}+{key}")
+}
+
 /// Convert a conch config keybinding (e.g. "cmd+shift+r") to a Tauri
-/// accelerator string (e.g. "CmdOrCtrl+Shift+R").
+/// accelerator string (e.g. "Cmd+Shift+R" on macOS).
 pub(crate) fn config_key_to_accelerator(key: &str) -> String {
     key.split('+')
         .map(|part| {
             let lower = part.trim().to_lowercase();
             match lower.as_str() {
-                "cmd" => "CmdOrCtrl".to_string(),
+                "cmd" => PRIMARY_ACCELERATOR_MOD.to_string(),
+                "cmdorctrl" => PRIMARY_ACCELERATOR_MOD.to_string(),
                 "ctrl" => "Ctrl".to_string(),
                 "shift" => "Shift".to_string(),
                 "alt" | "opt" | "option" => "Alt".to_string(),
@@ -110,20 +120,27 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     keyboard: &conch_core::config::KeyboardConfig,
 ) -> tauri::Result<Menu<R>> {
-    let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
+    let new_tab_accel = primary_accelerator("T");
+    let new_tab = MenuItem::with_id(
+        app,
+        MENU_NEW_TAB_ID,
+        "New Tab",
+        true,
+        Some(&new_tab_accel),
+    )?;
     let close_tab = MenuItem::with_id(
         app,
         MENU_CLOSE_TAB_ID,
         "Close Tab",
         true,
-        Some("CmdOrCtrl+W"),
+        Some(&primary_accelerator("W")),
     )?;
     let new_window = MenuItem::with_id(
         app,
         MENU_NEW_WINDOW_ID,
         "New Window",
         true,
-        Some("CmdOrCtrl+Shift+N"),
+        Some(&primary_accelerator("Shift+N")),
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let close_window = PredefinedMenuItem::close_window(app, None)?;
@@ -201,18 +218,30 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_FOCUS_SESSIONS_ID,
         "Toggle & Focus Sessions",
         true,
-        Some("CmdOrCtrl+/"),
+        Some(&primary_accelerator("/")),
     )?;
     let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
     let zen_mode = MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
-    let zoom_in = MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
-    let zoom_out = MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+    let zoom_in = MenuItem::with_id(
+        app,
+        MENU_ZOOM_IN_ID,
+        "Zoom In",
+        true,
+        Some(&primary_accelerator("=")),
+    )?;
+    let zoom_out = MenuItem::with_id(
+        app,
+        MENU_ZOOM_OUT_ID,
+        "Zoom Out",
+        true,
+        Some(&primary_accelerator("-")),
+    )?;
     let zoom_reset = MenuItem::with_id(
         app,
         MENU_ZOOM_RESET_ID,
         "Reset Zoom",
         true,
-        Some("CmdOrCtrl+0"),
+        Some(&primary_accelerator("0")),
     )?;
     let toggle_bottom_accel = config_key_to_accelerator(&keyboard.toggle_bottom_panel);
     let toggle_bottom = MenuItem::with_id(
@@ -273,7 +302,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_SETTINGS_ID,
         "Settings\u{2026}",
         true,
-        Some("CmdOrCtrl+Comma"),
+        Some(&primary_accelerator("Comma")),
     )?;
     let manage_tunnels_accel = config_key_to_accelerator(&keyboard.manage_tunnels);
     let manage_tunnels = MenuItem::with_id(
@@ -288,7 +317,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_VAULT_ID,
         "Credential Vault\u{2026}",
         true,
-        Some("CmdOrCtrl+Shift+V"),
+        Some(&primary_accelerator("Shift+V")),
     )?;
     let generate_ssh_key = MenuItem::with_id(
         app,
@@ -469,7 +498,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_MANAGE_TUNNELS_ID,
             "Manage SSH Tunnels\u{2026}",
             true,
-            Some("CmdOrCtrl+Shift+T"),
+            Some(&primary_accelerator("Shift+T")),
         )?;
         tools_items.push(Box::new(manage_tunnels));
 
@@ -480,7 +509,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_VAULT_ID,
             "Credential Vault\u{2026}",
             true,
-            Some("CmdOrCtrl+Shift+V"),
+            Some(&primary_accelerator("Shift+V")),
         )?));
         tools_items.push(Box::new(MenuItem::with_id(
             app,
@@ -577,14 +606,19 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let new_tools = Submenu::with_items(app, "Tools", true, &refs)?;
 
         // Rebuild full menu bar with new tools menu.
-        let new_tab =
-            MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
+        let new_tab = MenuItem::with_id(
+            app,
+            MENU_NEW_TAB_ID,
+            "New Tab",
+            true,
+            Some(&primary_accelerator("T")),
+        )?;
         let close_tab = MenuItem::with_id(
             app,
             MENU_CLOSE_TAB_ID,
             "Close Tab",
             true,
-            Some("CmdOrCtrl+W"),
+            Some(&primary_accelerator("W")),
         )?;
         let rename_tab_accel = config_key_to_accelerator(&keyboard.rename_tab);
         let rename_tab = MenuItem::with_id(
@@ -599,7 +633,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_NEW_WINDOW_ID,
             "New Window",
             true,
-            Some("CmdOrCtrl+Shift+N"),
+            Some(&primary_accelerator("Shift+N")),
         )?;
         let separator = PredefinedMenuItem::separator(app)?;
         let close_window = PredefinedMenuItem::close_window(app, None)?;
@@ -608,7 +642,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_SETTINGS_ID,
             "Settings\u{2026}",
             true,
-            Some("CmdOrCtrl+Comma"),
+            Some(&primary_accelerator("Comma")),
         )?;
         let ssh_export = MenuItem::with_id(app, MENU_SSH_EXPORT_ID, "Export", true, None::<&str>)?;
         let ssh_import = MenuItem::with_id(app, MENU_SSH_IMPORT_ID, "Import", true, None::<&str>)?;
@@ -671,21 +705,31 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_FOCUS_SESSIONS_ID,
             "Toggle & Focus Sessions",
             true,
-            Some("CmdOrCtrl+/"),
+            Some(&primary_accelerator("/")),
         )?;
         let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
         let zen_mode =
             MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
-        let zoom_in =
-            MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
-        let zoom_out =
-            MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+        let zoom_in = MenuItem::with_id(
+            app,
+            MENU_ZOOM_IN_ID,
+            "Zoom In",
+            true,
+            Some(&primary_accelerator("=")),
+        )?;
+        let zoom_out = MenuItem::with_id(
+            app,
+            MENU_ZOOM_OUT_ID,
+            "Zoom Out",
+            true,
+            Some(&primary_accelerator("-")),
+        )?;
         let zoom_reset = MenuItem::with_id(
             app,
             MENU_ZOOM_RESET_ID,
             "Reset Zoom",
             true,
-            Some("CmdOrCtrl+0"),
+            Some(&primary_accelerator("0")),
         )?;
         let split_v_accel = config_key_to_accelerator(&keyboard.split_vertical);
         let split_v = MenuItem::with_id(
@@ -913,7 +957,15 @@ mod tests {
     fn config_key_to_accelerator_basic() {
         assert_eq!(
             config_key_to_accelerator("cmd+shift+r"),
-            "CmdOrCtrl+Shift+R"
+            format!("{PRIMARY_ACCELERATOR_MOD}+Shift+R")
+        );
+    }
+
+    #[test]
+    fn config_key_to_accelerator_cmdorctrl_uses_primary_modifier() {
+        assert_eq!(
+            config_key_to_accelerator("cmdorctrl+shift+p"),
+            format!("{PRIMARY_ACCELERATOR_MOD}+Shift+P")
         );
     }
 
