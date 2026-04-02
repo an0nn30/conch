@@ -25,6 +25,7 @@ help:
 	@echo "Other:"
 	@echo "  bump V=x.y.z   Bump version everywhere (no tag, no push)"
 	@echo "  release V=x.y.z  Bump version, commit, tag, and push"
+	@echo "                    Also supports prereleases like V=x.y.z-rc.1"
 	@echo "  clean          Remove build artifacts"
 	@echo "  changelog      Generate release notes locally"
 	@echo ""

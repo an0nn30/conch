@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 1.0.1)"
+        description: "Release version (e.g. 1.0.1 or 1.0.1-rc.1)"
         required: true
         type: string
       ref:
@@ -90,7 +90,13 @@ jobs:
 
       - name: Summary
         run: |
+          VERSION="${{ inputs.version }}"
+          TAG="v${VERSION}"
+          RELEASE_KIND="stable release"
+          if echo "$TAG" | grep -qiE -- '-(rc|beta|alpha)([.-][0-9A-Za-z]+)?$'; then
+            RELEASE_KIND="prerelease"
+          fi
           echo "### Release v${{ inputs.version }} created" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tag \`v${{ inputs.version }}\` pushed to \`${{ inputs.ref }}\`." >> "$GITHUB_STEP_SUMMARY"
-          echo "The [Release workflow](../actions/workflows/release.yml) will now build and publish artifacts." >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`v${{ inputs.version }}\` pushed to \`${{ inputs.ref }}\` as a ${RELEASE_KIND}." >> "$GITHUB_STEP_SUMMARY"
+          echo "The [Release workflow](../actions/workflows/release.yml) will now build artifacts and create a matching draft GitHub release." >> "$GITHUB_STEP_SUMMARY"

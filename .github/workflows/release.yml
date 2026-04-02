@@ -37,10 +37,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
+          PRERELEASE_FLAG=""
+          if echo "$TAG" | grep -qiE -- '-(rc|beta|alpha)([.-][0-9A-Za-z]+)?$'; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release edit "$TAG" --draft --notes-file /tmp/release_body.md
+            gh release edit "$TAG" --draft $PRERELEASE_FLAG --notes-file /tmp/release_body.md
           else
-            gh release create "$TAG" --draft --title "$TAG" --notes-file /tmp/release_body.md
+            gh release create "$TAG" --draft $PRERELEASE_FLAG --title "$TAG" --notes-file /tmp/release_body.md
           fi
 
   # ---------------------------------------------------------------------------
@@ -167,13 +171,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Skip prerelease tags
+        id: prerelease
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if echo "$TAG" | grep -qiE -- '-(rc|beta|alpha)([.-][0-9A-Za-z]+)?$'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping latest.json for prerelease tag $TAG"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Extract version
+        if: steps.prerelease.outputs.skip != 'true'
         id: version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download signatures from release assets
+        if: steps.prerelease.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -181,6 +198,7 @@ jobs:
           gh release download "$TAG" --pattern "*.sig" --dir sigs/
 
       - name: Generate latest.json
+        if: steps.prerelease.outputs.skip != 'true'
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${{ steps.version.outputs.version }}"
@@ -210,6 +228,7 @@ jobs:
           ENDJSON
 
       - name: Upload latest.json
+        if: steps.prerelease.outputs.skip != 'true'
         run: |
           ./.github/workflows/upload_asset.sh \
             ./latest.json $GITHUB_TOKEN
