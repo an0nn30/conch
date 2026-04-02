@@ -800,6 +800,7 @@ dependencies = [
  "conch_plugin",
  "conch_plugin_sdk",
  "conch_remote",
+ "conch_tmux",
  "conch_vault",
  "core-foundation 0.9.4",
  "core-text",
@@ -826,6 +827,14 @@ dependencies = [
  "ts-rs",
  "uuid",
  "vergen-git2",
+]
+
+[[package]]
+name = "conch_tmux"
+version = "3.0.0-rc.1"
+dependencies = [
+ "log",
+ "serde",
 ]
 
 [[package]]

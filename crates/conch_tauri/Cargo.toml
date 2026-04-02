@@ -18,6 +18,7 @@ conch_core = { workspace = true }
 conch_plugin = { workspace = true }
 conch_plugin_sdk = { workspace = true }
 conch_remote = { workspace = true }
+conch_tmux = { workspace = true, features = ["serde"] }
 conch_vault = { path = "../conch_vault" }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"

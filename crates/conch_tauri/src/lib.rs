@@ -19,6 +19,7 @@ pub(crate) mod theme;
 pub(crate) mod updater;
 pub(crate) mod utf8_stream;
 pub(crate) mod vault_commands;
+pub(crate) mod tmux;
 mod watcher;
 pub(crate) mod windows;
 
@@ -84,6 +85,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         user_wants_decorations
     };
     let window_theme = windows::appearance_to_theme(&config.colors.appearance_mode);
+    let tmux_binary = config.terminal.tmux.resolved_binary().to_string();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -100,6 +102,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Arc::clone(&plugin_state))
         .manage(Arc::clone(&vault_state))
         .manage(updater::PendingUpdate::new())
+        .manage(tmux::TmuxState::new(tmux_binary))
         .setup(move |app| {
             let kb_config = config::load_user_config()
                 .map(|c| c.conch.keyboard)
@@ -557,6 +560,22 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             updater::check_for_update,
             updater::install_update,
             updater::restart_app,
+            tmux::tmux_connect,
+            tmux::tmux_disconnect,
+            tmux::tmux_list_sessions,
+            tmux::tmux_create_session,
+            tmux::tmux_kill_session,
+            tmux::tmux_rename_session,
+            tmux::tmux_new_window,
+            tmux::tmux_close_window,
+            tmux::tmux_rename_window,
+            tmux::tmux_split_pane,
+            tmux::tmux_close_pane,
+            tmux::tmux_select_pane,
+            tmux::tmux_write_to_pane,
+            tmux::tmux_resize_pane,
+            tmux::tmux_get_backend,
+            tmux::tmux_get_last_session,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
