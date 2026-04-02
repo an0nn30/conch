@@ -24,6 +24,7 @@
 
     let paneDnd = null;
     let debouncedSaveLayout = () => {};
+    let registerTmuxSessionsToolWindow = null;
 
     async function init() {
       paneDnd = global.paneDnd && global.paneDnd.initPaneDnd
@@ -65,6 +66,9 @@
         if (runtimeResult && typeof runtimeResult.debouncedSaveLayout === 'function') {
           debouncedSaveLayout = runtimeResult.debouncedSaveLayout;
         }
+        if (runtimeResult && typeof runtimeResult.registerTmuxSessionsToolWindow === 'function') {
+          registerTmuxSessionsToolWindow = runtimeResult.registerTmuxSessionsToolWindow;
+        }
       }
 
       if (global.conchDragDropRuntime && global.conchDragDropRuntime.create) {
@@ -80,6 +84,7 @@
       return {
         paneDnd,
         debouncedSaveLayout,
+        registerTmuxSessionsToolWindow,
       };
     }
 

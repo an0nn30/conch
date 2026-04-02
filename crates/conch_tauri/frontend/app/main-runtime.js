@@ -88,6 +88,12 @@
             isShortcutDebugEnabled: () => shortcutDebugEnabled,
           })
         : null;
+      // Instantiate the backend router so menu actions and other modules can
+      // check global.backendRouter.isTmux() at any point after startup.
+      if (window.conchBackendRouter && window.conchBackendRouter.create) {
+        window.backendRouter = window.conchBackendRouter.create({ invoke });
+      }
+
       const appEl = composition && composition.appEl ? composition.appEl : document.getElementById('app');
       const tabBarEl = composition && composition.tabBarEl ? composition.tabBarEl : document.getElementById('tabbar');
       const terminalHostEl = composition && composition.terminalHostEl ? composition.terminalHostEl : document.getElementById('terminal-host');
@@ -247,6 +253,7 @@
         bridgeRuntime.initClipboardListeners();
       }
       let showUpdateAvailableToast = (_info) => {};
+      let wireTmuxEvents = null;
       if (window.conchEventWiringRuntime && window.conchEventWiringRuntime.create) {
         const eventWiringRuntime = window.conchEventWiringRuntime.create({
           invoke,
@@ -307,7 +314,62 @@
           if (typeof eventWiringResult.showUpdateAvailableToast === 'function') {
             showUpdateAvailableToast = eventWiringResult.showUpdateAvailableToast;
           }
+          if (typeof eventWiringResult.wireTmuxEvents === 'function') {
+            wireTmuxEvents = eventWiringResult.wireTmuxEvents;
+          }
         }
+      }
+
+      // Listen for the backend mode emitted by Rust during setup.
+      // This fires once per window after the Tauri setup() closure completes.
+      var _registerTmuxSessionsToolWindowRef = null;
+      listenOnCurrentWindow('init-backend', function (event) {
+        var backend = event.payload;
+        if (window.backendRouter) {
+          window.backendRouter.setMode(backend);
+        }
+        if (backend === 'tmux') {
+          // Wire tmux output/disconnect events.
+          if (wireTmuxEvents) {
+            wireTmuxEvents();
+          }
+          // Register the tmux sessions tool window.  Orchestration runs in a
+          // deferred setTimeout(0), so the ref may not be set yet — retry once
+          // the macrotask queue drains if needed.
+          if (typeof _registerTmuxSessionsToolWindowRef === 'function') {
+            _registerTmuxSessionsToolWindowRef();
+          } else {
+            setTimeout(function () {
+              if (typeof _registerTmuxSessionsToolWindowRef === 'function') {
+                _registerTmuxSessionsToolWindowRef();
+              }
+            }, 200);
+          }
+          applyTmuxStartup();
+        }
+      });
+
+      listenOnCurrentWindow('tmux-validation-error', function (event) {
+        if (window.toast) {
+          window.toast.error('Tmux not available: ' + (event.payload || 'unknown error') + '. Using local backend.');
+        }
+      });
+
+      function applyTmuxStartup() {
+        invoke('tmux_get_backend').then(function (backend) {
+          if (backend !== 'tmux') return;
+          invoke('tmux_get_last_session').then(function (lastSession) {
+            if (lastSession) {
+              invoke('tmux_connect', { sessionName: lastSession }).catch(function () {
+                if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
+              });
+            } else {
+              if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
+            }
+          }).catch(function () {
+            if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
+          });
+        }).catch(function () {});
       }
 
       const firstTabPromise = createTab().catch((e) => {
@@ -386,6 +448,9 @@
                 debouncedSaveLayout = orchestrationResult.debouncedSaveLayout;
               }
               paneDnd = orchestrationResult.paneDnd || null;
+              if (typeof orchestrationResult.registerTmuxSessionsToolWindow === 'function') {
+                _registerTmuxSessionsToolWindowRef = orchestrationResult.registerTmuxSessionsToolWindow;
+              }
             }
           } catch (error) {
             console.warn('Deferred orchestration init failed:', error);

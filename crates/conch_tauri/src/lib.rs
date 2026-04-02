@@ -264,6 +264,28 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 }
             }
 
+            // Emit terminal backend mode to frontend.
+            if let Some(win) = app.get_webview_window("main") {
+                let config = conch_core::config::load_user_config().unwrap_or_default();
+                let backend_str = match config.terminal.backend {
+                    conch_core::config::TerminalBackend::Tmux => {
+                        match tmux::validate_tmux_binary(config.terminal.tmux.resolved_binary()) {
+                            Ok(version) => {
+                                log::info!("tmux backend enabled: {version}");
+                                "tmux"
+                            }
+                            Err(e) => {
+                                log::error!("Falling back to local backend: {e}");
+                                let _ = win.emit("tmux-validation-error", &e);
+                                "local"
+                            }
+                        }
+                    }
+                    conch_core::config::TerminalBackend::Local => "local",
+                };
+                let _ = win.emit("init-backend", backend_str);
+            }
+
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
