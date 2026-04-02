@@ -1,0 +1,331 @@
+    /* -- Custom titlebar (Windows) -- */
+    #custom-titlebar {
+      display: none; /* shown via JS on Windows */
+      height: 30px;
+      flex-shrink: 0;
+      background: var(--tab-bar-bg);
+      color: var(--text-secondary);
+      font: 12px/30px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #app.custom-titlebar #custom-titlebar { display: flex; }
+    /* When custom titlebar is active, hide the old drag handle */
+    #app.custom-titlebar #drag-handle { display: none !important; }
+
+    .titlebar-menu-area {
+      display: flex;
+      flex-shrink: 0;
+    }
+    .titlebar-menu-btn {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      font: inherit;
+      padding: 0 10px;
+      height: 30px;
+      cursor: pointer;
+      outline: none;
+    }
+    .titlebar-menu-btn:hover,
+    .titlebar-menu-btn.active {
+      background: var(--active-highlight);
+      color: var(--fg);
+    }
+
+    .titlebar-drag {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-app-region: drag;
+    }
+    .titlebar-title {
+      font-size: var(--ui-font-normal);
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .titlebar-controls {
+      display: flex;
+      flex-shrink: 0;
+      height: 30px;
+    }
+    .titlebar-btn {
+      width: 46px;
+      height: 30px;
+      border: none;
+      background: none;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      outline: none;
+    }
+    .titlebar-btn:hover {
+      background: var(--active-highlight);
+      color: var(--fg);
+    }
+    .titlebar-btn-close:hover {
+      background: #e81123;
+      color: #fff;
+    }
+
+    /* Dropdown menus */
+    .titlebar-dropdown {
+      position: fixed;
+      z-index: 10000;
+      min-width: 220px;
+      background: var(--panel-bg);
+      border: 1px solid var(--tab-border);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      padding: 4px 0;
+      font-size: var(--ui-font-normal); line-height: 1.4; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--text-secondary);
+    }
+    .titlebar-dropdown-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 24px 4px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .titlebar-dropdown-item:hover {
+      background: var(--active-highlight);
+      color: var(--fg);
+    }
+    .titlebar-dropdown-label {
+      flex: 1;
+      margin-right: 24px;
+    }
+    .titlebar-dropdown-shortcut {
+      color: var(--text-muted);
+      font-size: var(--ui-font-small);
+      flex-shrink: 0;
+    }
+    .titlebar-dropdown-sep {
+      height: 1px;
+      background: var(--tab-border);
+      margin: 4px 0;
+    }
+    .titlebar-submenu-parent { position: relative; }
+    .titlebar-submenu {
+      display: none; position: absolute;
+      left: 100%; top: 0;
+    }
+    .titlebar-submenu-parent:hover > .titlebar-submenu { display: block; }
+
+    #tabbar {
+      height: 0;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      padding: 0;
+      background: var(--tab-bar-bg);
+      border-bottom: 0 solid #3a3d4f;
+      overflow-x: hidden;
+      overflow-y: hidden;
+      flex-shrink: 0;
+      opacity: 0;
+      transition:
+        height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        padding 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        border-bottom-width 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        opacity 160ms ease;
+    }
+    #app.tabs-visible #tabbar {
+      height: 36px;
+      padding: 3px 0 0;
+      border-bottom-width: 1px;
+      opacity: 1;
+    }
+    .tab-btn {
+      flex: 1 1 0;
+      min-width: 0;
+      max-width: none;
+      padding: 0 4px 0 12px;
+      border: 1px solid var(--tab-border);
+      border-left-width: 0;
+      border-bottom: none;
+      border-radius: 0;
+      background: var(--input-bg);
+      color: var(--text-secondary);
+      font-size: var(--ui-font-small); line-height: 1.1; font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      display: flex; align-items: center; gap: 4px;
+      opacity: 1;
+      transform: translateY(0) scaleY(1);
+      transform-origin: top center;
+      transition:
+        background 130ms ease,
+        color 130ms ease,
+        border-color 130ms ease,
+        opacity 180ms ease,
+        transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    .tab-btn:first-child {
+      border-left-width: 1px;
+    }
+    .tab-btn.entering {
+      opacity: 0;
+      transform: translateY(-8px) scaleY(0.88);
+    }
+    .tab-btn-label { flex: 1; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+    .tab-btn-close {
+      flex-shrink: 0; border: none; background: none; color: var(--text-muted);
+      cursor: pointer; padding: 2px 4px; border-radius: 3px; font-size: 11px; line-height: 1;
+    }
+    .tab-btn-close:hover { background: var(--active-highlight); color: var(--fg); }
+    .tab-btn.active {
+      background: var(--bg);
+      color: var(--fg);
+      border-color: var(--active-highlight);
+    }
+    #main-area {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+    #terminal-host {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: var(--bg);
+    }
+    #terminal-host.drag-over {
+      outline: 2px solid var(--dim-fg);
+      outline-offset: -2px;
+    }
+
+    /* --- Split pane layout --- */
+    .tab-tree-root {
+      position: absolute;
+      inset: 0;
+      display: none;
+    }
+    .tab-tree-root.active {
+      display: flex;
+    }
+    .split-container {
+      display: flex;
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .split-divider {
+      flex-shrink: 0;
+      background: var(--text-secondary);
+      opacity: 0.4;
+      z-index: 1;
+    }
+    .split-divider.vertical {
+      width: 6px;
+      cursor: col-resize;
+    }
+    .split-divider.horizontal {
+      height: 6px;
+      cursor: row-resize;
+    }
+    .split-divider:hover {
+      background: var(--blue);
+      opacity: 1;
+    }
+    .pane-dnd-overlay {
+      position: fixed;
+      display: none;
+      pointer-events: none;
+      z-index: 9998;
+      border: 2px solid color-mix(in srgb, var(--blue) 78%, white);
+      border-radius: 8px;
+      box-sizing: border-box;
+      background: color-mix(in srgb, var(--blue) 12%, transparent);
+      will-change: left, top, width, height, opacity;
+      transition: left 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  top 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  height 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                  opacity 120ms ease;
+    }
+    .pane-dnd-zone {
+      position: absolute;
+      border-radius: 6px;
+      border: 2px solid color-mix(in srgb, var(--blue) 88%, white);
+      background: color-mix(in srgb, var(--blue) 34%, transparent);
+      box-shadow: 0 0 22px color-mix(in srgb, var(--blue) 50%, transparent);
+      will-change: left, top, width, height, background-color;
+      transition: left 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  top 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  width 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  height 170ms cubic-bezier(0.22, 1, 0.36, 1),
+                  background-color 140ms ease;
+    }
+    .pane-dnd-label {
+      position: absolute;
+      left: 8px;
+      bottom: 8px;
+      padding: 2px 8px;
+      font-size: 11px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel-bg) 72%, black);
+      color: var(--fg);
+      border: 1px solid color-mix(in srgb, var(--blue) 40%, var(--tab-border));
+      transition: opacity 120ms ease;
+    }
+    .pane-dnd-dragging {
+      opacity: 0.75;
+      filter: saturate(0.9);
+    }
+    .terminal-pane.focused {
+      border-top: 2px solid var(--blue);
+    }
+    .terminal-pane:not(.focused) {
+      border-top: 2px solid transparent;
+    }
+    #status {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--red);
+      background: var(--panel-bg);
+      color: var(--red);
+      font: 13px/1.4 monospace;
+      white-space: pre-wrap;
+      z-index: 1000;
+      display: none;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    #status-message {
+      flex: 1;
+      min-width: 0;
+    }
+    #status-dismiss {
+      flex-shrink: 0;
+      border: 1px solid var(--tab-border);
+      background: var(--input-bg);
+      color: var(--fg);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    #status-dismiss:hover {
+      background: var(--active-highlight);
+    }
+    #app.tabs-visible + #status {
+      top: 50px;
+    }
+
