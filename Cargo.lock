@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "conch_core"
-version = "2.0.2"
+version = "3.0.0-rc.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "conch_plugin"
-version = "2.0.2"
+version = "3.0.0-rc.1"
 dependencies = [
  "conch_plugin_sdk",
  "jni",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "conch_plugin_sdk"
-version = "2.0.2"
+version = "3.0.0-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "conch_remote"
-version = "2.0.2"
+version = "3.0.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "conch_tauri"
-version = "2.0.2"
+version = "3.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "conch_vault"
-version = "2.0.2"
+version = "3.0.0-rc.1"
 dependencies = [
  "aes-gcm",
  "argon2",
