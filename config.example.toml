@@ -86,6 +86,32 @@ program = ""
 # Arguments passed to the shell program.
 args = []
 
+# Terminal backend: "local" (default) or "tmux"
+# In tmux mode, Conch acts as a tmux client — tabs map to tmux windows,
+# panes map to tmux panes.
+# backend = "tmux"
+
+# Tmux-specific settings (only used when backend = "tmux")
+# [terminal.tmux]
+# Path to tmux binary. Empty = search $PATH.
+# binary = ""
+#
+# What to do when a window opens in tmux mode:
+#   "attach_last_session" — resume the last session (default)
+#   "show_session_picker" — show the session list, let the user choose
+#   "create_new_session"  — always create a fresh session
+# startup_behavior = "attach_last_session"
+#
+# What "New Tab" does in tmux mode:
+#   "new_tmux_window" — create a tmux window in the current session (default)
+#   "session_picker"  — show the session picker
+# new_tab_behavior = "new_tmux_window"
+#
+# What "New Window" does in tmux mode:
+#   "attach_same_session"  — attach to the same session (default)
+#   "show_session_picker"  — show the session picker
+# new_window_behavior = "attach_same_session"
+
 [terminal.env]
 
 # Extra environment variables set in the terminal.
