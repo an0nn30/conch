@@ -19,21 +19,31 @@
     invoke = opts.invoke;
     listen = opts.listen;
 
+    function ensureBottomPanelTab(panelInfo) {
+      const { handle, plugin, name, location, widgets_json } = panelInfo || {};
+      if (location !== 'bottom' || !plugin || !window.notificationPanel) return;
+      if (handle != null) {
+        bottomPanelHandles.set(handle, plugin);
+      }
+      const tabId = 'plugin-' + plugin;
+      window.notificationPanel.addPluginTab(
+        tabId,
+        name || plugin,
+        (container) => {
+          renderWidgets(container, widgets_json || '[]', plugin);
+        }
+      );
+      window.notificationPanel.updatePluginTab(
+        tabId,
+        (container) => {
+          renderWidgets(container, widgets_json || '[]', plugin);
+        }
+      );
+    }
+
     // Track panel registrations so we know which handles belong to bottom panels.
     listen('plugin-panel-registered', (event) => {
-      const { handle, plugin, name, location } = event.payload;
-      if (location === 'bottom') {
-        bottomPanelHandles.set(handle, plugin);
-        if (window.notificationPanel) {
-          window.notificationPanel.addPluginTab(
-            'plugin-' + plugin,
-            name || plugin,
-            (container) => {
-              renderWidgets(container, '[]', plugin);
-            }
-          );
-        }
-      }
+      ensureBottomPanelTab(event.payload);
     });
 
     // Listen for plugin panel removal (batch event) and clean up bottom panel tabs.
@@ -64,7 +74,10 @@
         }
         return;
       }
-      const container = document.querySelector(`[data-plugin-handle="${handle}"]`);
+      let container = document.querySelector(`[data-plugin-handle="${handle}"]`);
+      if (!container && plugin) {
+        container = document.querySelector(`.plugin-panel-content[data-plugin-name="${CSS.escape(plugin)}"]`);
+      }
       if (container) {
         renderWidgets(container, widgets_json, plugin);
       }
@@ -100,6 +113,38 @@
     listen('plugin-write-pty', (event) => {
       if (opts.writeToActivePty) opts.writeToActivePty(event.payload);
     });
+
+    // Listen for plugin requests to create a new local tab, then optionally
+    // write initial content into the newly focused terminal.
+    listen('plugin-new-tab', async (event) => {
+      const payload = event.payload || {};
+      if (!opts.createTab) return;
+      try {
+        await opts.createTab();
+        if (payload.command && opts.writeToActivePty) {
+          setTimeout(() => {
+            opts.writeToActivePty(payload.command);
+          }, 120);
+        }
+      } catch (e) {
+        console.error('plugin-new-tab error:', e);
+      }
+    });
+
+    if (invoke) {
+      invoke('get_plugin_panels').then((panels) => {
+        if (!Array.isArray(panels)) return;
+        for (const panel of panels) {
+          ensureBottomPanelTab({
+            handle: panel.handle,
+            plugin: panel.plugin_name,
+            name: panel.panel_name,
+            location: panel.location,
+            widgets_json: panel.widgets_json,
+          });
+        }
+      }).catch(() => {});
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -107,6 +152,7 @@
   // ---------------------------------------------------------------------------
 
   function renderWidgets(container, widgetsJson, pluginName, viewId) {
+    const focusState = captureFocusState(container);
     let widgets;
     try {
       widgets = typeof widgetsJson === 'string' ? JSON.parse(widgetsJson) : widgetsJson;
@@ -124,6 +170,43 @@
     }
     container.innerHTML = '';
     container.appendChild(frag);
+    restoreFocusState(container, focusState);
+  }
+
+  function captureFocusState(container) {
+    const active = document.activeElement;
+    if (!active || !container || !container.contains(active)) return null;
+    const widgetId = active.getAttribute && active.getAttribute('data-pw-id');
+    const widgetKind = active.getAttribute && active.getAttribute('data-pw-kind');
+    if (!widgetId || !widgetKind) return null;
+    return {
+      widgetId,
+      widgetKind,
+      selectionStart: typeof active.selectionStart === 'number' ? active.selectionStart : null,
+      selectionEnd: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
+      scrollTop: typeof active.scrollTop === 'number' ? active.scrollTop : null,
+      scrollLeft: typeof active.scrollLeft === 'number' ? active.scrollLeft : null,
+    };
+  }
+
+  function restoreFocusState(container, focusState) {
+    if (!container || !focusState) return;
+    const selector = `[data-pw-kind="${CSS.escape(focusState.widgetKind)}"][data-pw-id="${CSS.escape(focusState.widgetId)}"]`;
+    const next = container.querySelector(selector);
+    if (!next || typeof next.focus !== 'function') return;
+    next.focus({ preventScroll: true });
+    if (focusState.scrollTop != null) next.scrollTop = focusState.scrollTop;
+    if (focusState.scrollLeft != null) next.scrollLeft = focusState.scrollLeft;
+    if (
+      focusState.selectionStart != null &&
+      focusState.selectionEnd != null &&
+      typeof next.setSelectionRange === 'function'
+    ) {
+      const max = typeof next.value === 'string' ? next.value.length : focusState.selectionEnd;
+      const start = Math.min(focusState.selectionStart, max);
+      const end = Math.min(focusState.selectionEnd, max);
+      next.setSelectionRange(start, end);
+    }
   }
 
   function renderWidget(w, pluginName, viewId) {
@@ -326,6 +409,8 @@
     const el = document.createElement('input');
     el.className = 'pw-text-input';
     el.type = 'text';
+    el.setAttribute('data-pw-kind', 'text_input');
+    el.setAttribute('data-pw-id', w.id || '');
     el.value = w.value || '';
     if (w.hint) el.placeholder = w.hint;
     el.spellcheck = false;
@@ -348,6 +433,8 @@
   function renderTextEdit(w, pn, viewId) {
     const el = document.createElement('textarea');
     el.className = 'pw-text-edit';
+    el.setAttribute('data-pw-kind', 'text_edit');
+    el.setAttribute('data-pw-id', w.id || '');
     el.value = w.value || '';
     if (w.hint) el.placeholder = w.hint;
     if (w.lines) el.rows = w.lines;

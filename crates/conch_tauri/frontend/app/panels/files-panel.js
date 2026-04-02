@@ -51,6 +51,11 @@
     fitActiveTabFn = opts.fitActiveTab;
     getActiveTabFn = opts.getActiveTab;
 
+    if (!panelEl) {
+      console.warn('filesPanel.init called without a panel element');
+      return;
+    }
+
     panelEl.innerHTML = `
       <div class="fp-pane-container">
         <div class="fp-pane" id="fp-remote"></div>
@@ -99,6 +104,7 @@
 
   function isHidden() {
     if (window.toolWindowManager) return !window.toolWindowManager.isVisible('file-explorer');
+    if (!panelWrapEl) return true;
     return panelWrapEl.classList.contains('hidden');
   }
   function showPanel() {
@@ -154,6 +160,7 @@
   function saveLayoutState() {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
+      if (!panelEl) return;
       invoke('save_window_layout', {
         layout: { files_panel_width: panelEl.offsetWidth, files_panel_visible: !isHidden() },
       }).catch(() => {});

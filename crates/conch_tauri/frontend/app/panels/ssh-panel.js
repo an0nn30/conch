@@ -32,6 +32,11 @@
     resizeHandleEl = opts.resizeHandleEl;
     refocusTerminalFn = opts.refocusTerminal;
 
+    if (!panelEl) {
+      console.warn('sshPanel.init called without a panel element');
+      return;
+    }
+
     panelEl.innerHTML = `
       <div class="ssh-panel-header">
         <span class="ssh-panel-title">Sessions</span>
@@ -156,6 +161,7 @@
 
   function isHidden() {
     if (window.toolWindowManager) return !window.toolWindowManager.isVisible('ssh-sessions');
+    if (!panelWrapEl) return true;
     return panelWrapEl.classList.contains('hidden');
   }
 

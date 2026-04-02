@@ -1,11 +1,13 @@
 (function initConchToolWindowRuntime(global) {
   function create(deps) {
     const invoke = deps.invoke;
+    const listen = deps.listen;
     const listenOnCurrentWindow = deps.listenOnCurrentWindow;
     const debouncedFitAndResize = deps.debouncedFitAndResize;
     const getCurrentTab = deps.getCurrentTab;
     const getCurrentPane = deps.getCurrentPane;
     const createSshTab = deps.createSshTab;
+    const registeredPluginToolWindows = new Set();
 
     async function init() {
       const bottomPanelEl = document.getElementById('bottom-panel');
@@ -184,7 +186,8 @@
       if (global.pluginWidgets) {
         global.pluginWidgets.init({
           invoke,
-          listen: listenOnCurrentWindow,
+          listen,
+          createTab: () => deps.createTab(),
           writeToActivePty: (data) => {
             const pane = getCurrentPane();
             if (!pane || !pane.spawned) return;
@@ -193,8 +196,8 @@
           },
         });
 
-        listenOnCurrentWindow('plugin-panel-registered', async (event) => {
-          const { handle, plugin, name, location } = event.payload;
+        const registerPluginToolWindow = async (panelInfo) => {
+          const { handle, plugin, name, location } = panelInfo || {};
           if (global.titlebar && typeof global.titlebar.refresh === 'function') {
             global.titlebar.refresh().catch(() => {});
           }
@@ -203,7 +206,8 @@
           const zoneMap = { left: 'left-top', right: 'right-top' };
           const defaultZone = zoneMap[location] || 'right-bottom';
           const twmId = 'plugin:' + plugin;
-          if (global.toolWindowManager) {
+          if (global.toolWindowManager && plugin && !registeredPluginToolWindows.has(twmId)) {
+            registeredPluginToolWindows.add(twmId);
             global.toolWindowManager.register(twmId, {
               title: name || plugin,
               type: 'plugin',
@@ -224,14 +228,19 @@
             });
             refreshShortcutFallbacks();
           }
+        };
+
+        listen('plugin-panel-registered', async (event) => {
+          await registerPluginToolWindow(event.payload);
         });
 
-        listenOnCurrentWindow('plugin-panels-removed', (event) => {
+        listen('plugin-panels-removed', (event) => {
           if (global.titlebar && typeof global.titlebar.refresh === 'function') {
             global.titlebar.refresh().catch(() => {});
           }
           const { plugin, handles } = event.payload;
           if (global.toolWindowManager) {
+            registeredPluginToolWindows.delete('plugin:' + plugin);
             global.toolWindowManager.unregister('plugin:' + plugin);
             refreshShortcutFallbacks();
           }
@@ -240,6 +249,18 @@
             if (container) container.remove();
           }
         });
+
+        invoke('get_plugin_panels').then(async (panels) => {
+          if (!Array.isArray(panels)) return;
+          for (const panel of panels) {
+            await registerPluginToolWindow({
+              handle: panel.handle,
+              plugin: panel.plugin_name,
+              name: panel.panel_name,
+              location: panel.location,
+            });
+          }
+        }).catch(() => {});
 
       }
 

@@ -213,6 +213,7 @@ fn handle_bus_event(lua: &Lua, event_type: &str, data: &serde_json::Value) {
         data: data.clone(),
     };
     dispatch_event(lua, &event);
+    push_tool_window_render(lua);
 }
 
 /// Dispatch a PluginEvent to the Lua `on_event()` function.
@@ -305,6 +306,19 @@ fn handle_render(lua: &Lua, view_id: Option<&str>) -> Vec<Widget> {
     }
 
     api::take_widgets(lua).unwrap_or_default()
+}
+
+fn push_tool_window_render(lua: &Lua) {
+    let handle = lua
+        .app_data_ref::<std::cell::RefCell<api::PanelHandleStore>>()
+        .and_then(|store| store.borrow().handle);
+    let Some(handle) = handle else {
+        return;
+    };
+
+    let widgets = handle_render(lua, None);
+    let json = serde_json::to_string(&widgets).unwrap_or_else(|_| "[]".into());
+    let _ = api::with_host_api(lua, |host| host.set_widgets(handle, &json));
 }
 
 /// Handle a direct query by calling `on_query()` if it exists.

@@ -1,6 +1,7 @@
 (function initConchOrchestrationRuntime(global) {
   function create(deps) {
     const invoke = deps.invoke;
+    const listen = deps.listen;
     const listenOnCurrentWindow = deps.listenOnCurrentWindow;
     const terminalHostEl = deps.terminalHostEl;
     const currentWindow = deps.currentWindow;
@@ -12,6 +13,7 @@
     const currentTab = deps.currentTab;
     const setFocusedPane = deps.setFocusedPane;
     const closePane = deps.closePane;
+    const createTab = deps.createTab;
     const createSshTab = deps.createSshTab;
     const splitPane = deps.splitPane;
     const getPaneManager = deps.getPaneManager;
@@ -51,10 +53,12 @@
       if (global.conchToolWindowRuntime && global.conchToolWindowRuntime.create) {
         const toolWindowRuntime = global.conchToolWindowRuntime.create({
           invoke,
+          listen,
           listenOnCurrentWindow,
           debouncedFitAndResize: () => debouncedFitAndResize(),
           getCurrentTab: () => currentTab(),
           getCurrentPane: () => currentPane(),
+          createTab: () => createTab(),
           createSshTab: (opts) => createSshTab(opts),
         });
         const runtimeResult = await toolWindowRuntime.init();

@@ -355,6 +355,7 @@
         if (window.conchOrchestrationRuntime && window.conchOrchestrationRuntime.create) {
           const orchestrationRuntime = window.conchOrchestrationRuntime.create({
             invoke,
+            listen,
             listenOnCurrentWindow,
             terminalHostEl,
             currentWindow,
@@ -366,6 +367,7 @@
             currentTab: () => currentTab(),
             setFocusedPane: (paneId) => setFocusedPane(paneId),
             closePane: (paneId) => closePane(paneId),
+            createTab: () => createTab(),
             createSshTab: (opts) => createSshTab(opts),
             splitPane: (direction) => splitPane(direction),
             getPaneManager: () => paneManager,

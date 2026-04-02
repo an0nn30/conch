@@ -11,6 +11,7 @@ Plugins are managed via **Settings > Plugins** -- scan, enable, disable, and per
 
 ## Table of Contents
 
+- [Reality-Checked Sample Plugins](#reality-checked-sample-plugins)
 - [Java Plugins](#java-plugins)
   - [Quick Start](#java-quick-start)
   - [Project Setup (Gradle)](#project-setup-gradle)
@@ -37,6 +38,59 @@ Plugins are managed via **Settings > Plugins** -- scan, enable, disable, and per
 - [Inter-Plugin Communication](#inter-plugin-communication)
 - [Icons](#icons)
 - [Plugin Search Paths](#plugin-search-paths)
+
+---
+
+## Reality-Checked Sample Plugins
+
+These sample plugin ideas are meant to exercise the SDK as it exists today, not just the broader shared schema. They were cross-checked against the current Lua bindings, host API surface, and webview widget renderer.
+
+If you want a docs-only acceptance test for the plugin system, these are strong candidates because they cover capabilities that are currently wired up end to end.
+
+### 1. Session Scratchpad
+
+- **Type:** Lua `action`
+- **What it does:** Registers a command like `Scratchpad: Send Snippet`, prompts for text, optionally copies it to the clipboard, then writes it into the active terminal or opens a new tab and sends it there.
+- **Capabilities exercised:** `ui.menu`, `ui.dialog`, `clipboard.read`, `clipboard.write`, `session.write`, `session.new_tab`, `config.read`, `config.write`
+- **Why this is a good test:** It validates the fastest path from docs to a useful plugin: metadata headers, menu registration, dialogs, clipboard access, config persistence, and terminal interaction.
+
+### 2. Session Dashboard
+
+- **Type:** Lua `tool_window`
+- **What it does:** Shows the active session, platform, last command result, and a few status badges inside a dockable tool window.
+- **Capabilities exercised:** `ui.panel`, `session.exec`, `config.read`, `config.write`
+- **Recommended widgets:** `heading`, `label`, `key_value`, `badge`, `progress`, `button`, `scroll_text`, `tabs`, `table`
+- **Why this is a good test:** It covers the core tool-window lifecycle and the widget/rendering model that most plugin authors will rely on.
+
+### 3. Network Probe
+
+- **Type:** Java `action`
+- **What it does:** Opens a form asking for host and ports, resolves DNS, scans the requested ports, and reports the results via notifications or a follow-up dialog.
+- **Capabilities exercised:** `ui.menu`, `ui.dialog`, `ui.notify`, `net.resolve`, `net.scan`
+- **Why this is a good test:** It is a strong Java-path test because it combines manifest metadata, permissions, dialogs, and structured result handling.
+
+### 4. Command Runner
+
+- **Type:** Java `tool_window`
+- **What it does:** Provides a small command runner for plugin-owned tasks, runs commands locally or against the active session, and renders output plus history in a tool window.
+- **Capabilities exercised:** `ui.panel`, `ui.dialog`, `ui.notify`, `session.exec`, `session.new_tab`, `config.read`, `config.write`
+- **Recommended widgets:** `toolbar`, `text_input`, `button`, `scroll_text`, `table`, `html`
+- **Why this is a good test:** It stresses the richer UI surface while still staying inside capabilities that are implemented today.
+
+### 5. Bus Demo
+
+- **Type:** Two plugins: one Lua `action`, one Lua or Java `tool_window`
+- **What it does:** One plugin publishes events like `task.started` / `task.finished`, while the other subscribes to them, renders a live event log, and optionally exposes a query service.
+- **Capabilities exercised:** `bus.publish`, `bus.subscribe`, `bus.query`, `ui.panel`, `ui.menu`
+- **Why this is a good test:** Inter-plugin communication is one of the most important advanced workflows to validate with docs alone.
+
+### 6. HTML Inspector
+
+- **Type:** Lua or Java `tool_window`
+- **What it does:** Renders a custom HTML-based inspector with buttons wired through `data-action` and theme-aware styles in the Shadow DOM.
+- **Capabilities exercised:** `ui.panel`
+- **Recommended widgets:** `html`
+- **Why this is a good test:** It verifies the advanced escape hatch for custom UI without relying on undocumented renderer behavior.
 
 ---
 
@@ -1007,6 +1061,8 @@ net.scan(host, ports, timeout_ms?, concurrency?) -> { {port=number, open=true}, 
 Both plugin tiers share the same declarative widget system. Plugins return a JSON array of widget objects, and the host renders them as HTML in the webview. Each widget has a `"type"` field that determines its kind, and additional fields for configuration.
 
 > **Note:** Some widget types are defined in the SDK but not yet supported by the webview renderer. These are marked with **(pending)** below. Using them will display `[unknown widget: ...]` until renderer support is added.
+>
+> **Verified renderer subset:** the current webview renderer supports `heading`, `label`, `text`, `scroll_text`, `key_value`, `separator`, `spacer`, `icon_label`, `badge`, `progress`, `button`, `text_input`, `text_edit`, `checkbox`, `combo_box`, `toolbar`, `tree_view`, `table`, `horizontal`, `vertical`, `scroll_area`, `tabs`, and `html`.
 
 ### Layout Widgets
 
@@ -1105,7 +1161,7 @@ Both plugin tiers share the same declarative widget system. Plugins return a JSO
 |-------|------|-------------|
 | `id` | string | Row identifier |
 | `cells` | array | Array of cell values (string or `{text, icon?, badge?}`) |
-| `context_menu?` | array | Array of ContextMenuItem objects |
+| `context_menu?` | array | Array of ContextMenuItem objects. Defined in the SDK, but row context menus are not yet rendered in the current webview implementation. |
 
 **ContextMenuItem fields:**
 
@@ -1116,6 +1172,8 @@ Both plugin tiers share the same declarative widget system. Plugins return a JSO
 | `icon?` | string | Icon name |
 | `enabled?` | boolean | Whether the item is clickable (default: true) |
 | `shortcut?` | string | Keyboard shortcut hint text (display only) |
+
+> **Current renderer note for tables:** rich table cells currently render `text` and optional `icon`. The `badge` field exists in the shared schema, but the current webview renderer does not display a badge inside table cells yet.
 
 **Html widget details:**
 
@@ -1133,6 +1191,8 @@ Works in tool-window plugins.
 ## Widget Events
 
 Events generated by interactive widgets. These are delivered to the plugin wrapped in a `PluginEvent` envelope with `"kind": "widget"`.
+
+> **Current renderer note:** events tied to pending widgets or not-yet-wired interactions are part of the shared event schema, but are not emitted by the current webview renderer. Today that includes `tree_context_menu`, `table_context_menu`, `table_header_context_menu`, `path_bar_navigate`, `drop`, and `context_menu_action`.
 
 | Event Type | Fields | Trigger |
 |------------|--------|---------|

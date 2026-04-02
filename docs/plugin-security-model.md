@@ -104,6 +104,21 @@ Java manifest:
 | `close_session` | `session.close` |
 | `set_session_status` | `session.status` |
 
+### Capability Recipes
+
+These are practical capability bundles for common plugin shapes that are realistic with the current SDK:
+
+| Plugin idea | Typical capabilities |
+|---|---|
+| Session Scratchpad | `ui.menu`, `ui.dialog`, `clipboard.read`, `clipboard.write`, `session.write`, `session.new_tab`, `config.read`, `config.write` |
+| Session Dashboard | `ui.panel`, `session.exec`, `config.read`, `config.write` |
+| Network Probe | `ui.menu`, `ui.dialog`, `ui.notify`, `net.resolve`, `net.scan` |
+| Command Runner | `ui.panel`, `ui.dialog`, `ui.notify`, `session.exec`, `session.new_tab`, `config.read`, `config.write` |
+| Bus Demo publisher | `ui.menu`, `bus.publish` |
+| Bus Demo monitor | `ui.panel`, `bus.subscribe`, `bus.query` |
+
+These recipes are intentionally small. Start with the narrowest set that supports the workflow, then add more only when the plugin genuinely needs them.
+
 
 ## Consent UX
 
