@@ -883,6 +883,26 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             fn_ptr: native_host_new_tab as *mut std::ffi::c_void,
         },
         NativeMethod {
+            name: "newTabWithTitle".into(),
+            sig: "(Ljava/lang/String;ZLjava/lang/String;)Ljava/lang/String;".into(),
+            fn_ptr: native_host_new_tab_with_title as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "renameActiveTab".into(),
+            sig: "(Ljava/lang/String;)V".into(),
+            fn_ptr: native_host_rename_active_tab as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "renameTabById".into(),
+            sig: "(Ljava/lang/String;Ljava/lang/String;)V".into(),
+            fn_ptr: native_host_rename_tab_by_id as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "focusTabById".into(),
+            sig: "(Ljava/lang/String;)V".into(),
+            fn_ptr: native_host_focus_tab_by_id as *mut std::ffi::c_void,
+        },
+        NativeMethod {
             name: "getActiveSession".into(),
             sig: "()Ljava/lang/String;".into(),
             fn_ptr: native_host_get_active_session as *mut std::ffi::c_void,
@@ -1262,6 +1282,67 @@ extern "system" fn native_host_new_tab(
         jstr(&mut env, &command)
     };
     api.new_tab(cmd.as_deref(), plain != 0);
+}
+
+extern "system" fn native_host_new_tab_with_title(
+    mut env: JNIEnv,
+    _class: JClass,
+    command: JString,
+    plain: jboolean,
+    title: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let cmd = if command.is_null() {
+        None
+    } else {
+        jstr(&mut env, &command)
+    };
+    let tab_title = if title.is_null() {
+        None
+    } else {
+        jstr(&mut env, &title)
+    };
+    match api.new_tab_with_title(cmd.as_deref(), plain != 0, tab_title.as_deref()) {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn native_host_rename_active_tab(mut env: JNIEnv, _class: JClass, title: JString) {
+    let Some(api) = get_api() else { return };
+    let Some(next_title) = jstr(&mut env, &title) else {
+        return;
+    };
+    api.rename_active_tab(&next_title);
+}
+
+extern "system" fn native_host_rename_tab_by_id(
+    mut env: JNIEnv,
+    _class: JClass,
+    tab_id: JString,
+    title: JString,
+) {
+    let Some(api) = get_api() else { return };
+    let Some(id) = jstr(&mut env, &tab_id) else {
+        return;
+    };
+    let Some(next_title) = jstr(&mut env, &title) else {
+        return;
+    };
+    api.rename_tab_by_id(&id, &next_title);
+}
+
+extern "system" fn native_host_focus_tab_by_id(mut env: JNIEnv, _class: JClass, tab_id: JString) {
+    let Some(api) = get_api() else { return };
+    let Some(id) = jstr(&mut env, &tab_id) else {
+        return;
+    };
+    api.focus_tab_by_id(&id);
 }
 
 extern "system" fn native_host_get_active_session(mut env: JNIEnv, _class: JClass) -> jobject {

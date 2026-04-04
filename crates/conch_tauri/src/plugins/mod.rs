@@ -38,6 +38,7 @@ fn supported_capability_set() -> &'static [&'static str] {
         "bus.query",
         "session.write",
         "session.new_tab",
+        "session.rename_tab",
         "session.exec",
         "session.open",
         "session.close",
@@ -130,6 +131,7 @@ pub(crate) struct PendingDialogs {
     pub forms: HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>,
     pub prompts: HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>,
     pub confirms: HashMap<String, tokio::sync::oneshot::Sender<bool>>,
+    pub tab_creations: HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>,
 }
 
 impl PendingDialogs {
@@ -138,6 +140,7 @@ impl PendingDialogs {
             forms: HashMap::new(),
             prompts: HashMap::new(),
             confirms: HashMap::new(),
+            tab_creations: HashMap::new(),
         }
     }
 
@@ -153,6 +156,7 @@ impl PendingDialogs {
         self.forms.retain(|id, _| !id.starts_with(&prefix));
         self.prompts.retain(|id, _| !id.starts_with(&prefix));
         self.confirms.retain(|id, _| !id.starts_with(&prefix));
+        self.tab_creations.retain(|id, _| !id.starts_with(&prefix));
     }
 }
 
@@ -752,6 +756,23 @@ pub(crate) fn dialog_respond_confirm(
         .remove(&prompt_id)
     {
         let _ = tx.send(accepted);
+    }
+}
+
+#[tauri::command]
+pub(crate) fn plugin_respond_new_tab(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    request_id: String,
+    tab_id: Option<String>,
+) {
+    if let Some(tx) = state
+        .lock()
+        .pending_dialogs
+        .lock()
+        .tab_creations
+        .remove(&request_id)
+    {
+        let _ = tx.send(tab_id);
     }
 }
 

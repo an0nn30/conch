@@ -134,6 +134,64 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    // Open a new tab and set its title once created.
+    // Args: (command?, plain?, title?)
+    session.set(
+        "new_tab_with_title",
+        lua.create_function(
+            |lua, (command, plain, title): (Option<String>, Option<bool>, Option<String>)| {
+                let tab_id = with_host_api(lua, |api| {
+                    api.new_tab_with_title(
+                        command.as_deref(),
+                        plain.unwrap_or(false),
+                        title.as_deref(),
+                    )
+                })?;
+                Ok(tab_id)
+            },
+        )?,
+    )?;
+
+    // Convenience helper: open a new plain shell tab.
+    // Args: (command?)
+    session.set(
+        "new_plain_tab",
+        lua.create_function(|lua, command: Option<String>| {
+            with_host_api(lua, |api| api.new_tab(command.as_deref(), true))?;
+            Ok(())
+        })?,
+    )?;
+
+    // Rename the active tab in the focused window.
+    // Args: (title)
+    session.set(
+        "rename_tab",
+        lua.create_function(|lua, title: String| {
+            with_host_api(lua, |api| api.rename_active_tab(&title))?;
+            Ok(())
+        })?,
+    )?;
+
+    // Rename a specific tab by id.
+    // Args: (tab_id, title)
+    session.set(
+        "rename_tab_by_id",
+        lua.create_function(|lua, (tab_id, title): (String, String)| {
+            with_host_api(lua, |api| api.rename_tab_by_id(&tab_id, &title))?;
+            Ok(())
+        })?,
+    )?;
+
+    // Focus a specific tab by id.
+    // Args: (tab_id)
+    session.set(
+        "focus_tab_by_id",
+        lua.create_function(|lua, tab_id: String| {
+            with_host_api(lua, |api| api.focus_tab_by_id(&tab_id))?;
+            Ok(())
+        })?,
+    )?;
+
     lua.globals().set("session", session)?;
     Ok(())
 }

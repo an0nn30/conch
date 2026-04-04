@@ -522,13 +522,77 @@ impl HostApi for TauriHostApi {
         let _ = self.app_handle.emit("plugin-write-pty", text);
     }
 
-    fn new_tab(&self, command: Option<&str>, _plain: bool) {
+    fn new_tab(&self, command: Option<&str>, plain: bool) {
         let _ = self.app_handle.emit(
             "plugin-new-tab",
             serde_json::json!({
                 "command": command,
+                "plain": plain,
             }),
         );
+    }
+
+    fn rename_active_tab(&self, title: &str) {
+        let _ = self.app_handle.emit(
+            "plugin-rename-tab",
+            serde_json::json!({
+                "title": title,
+            }),
+        );
+    }
+
+    fn rename_tab_by_id(&self, tab_id: &str, title: &str) {
+        let _ = self.app_handle.emit(
+            "plugin-rename-tab",
+            serde_json::json!({
+                "tab_id": tab_id,
+                "title": title,
+            }),
+        );
+    }
+
+    fn focus_tab_by_id(&self, tab_id: &str) {
+        let _ = self.app_handle.emit(
+            "plugin-focus-tab",
+            serde_json::json!({
+                "tab_id": tab_id,
+            }),
+        );
+    }
+
+    fn new_tab_with_title(
+        &self,
+        command: Option<&str>,
+        plain: bool,
+        title: Option<&str>,
+    ) -> Option<String> {
+        let request_id = format!("{}\0{}", self.name, uuid::Uuid::new_v4());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_dialogs
+            .lock()
+            .tab_creations
+            .insert(request_id.clone(), tx);
+
+        if self
+            .app_handle
+            .emit(
+                "plugin-new-tab",
+                serde_json::json!({
+                    "command": command,
+                    "plain": plain,
+                    "tab_title": title,
+                    "request_id": request_id,
+                }),
+            )
+            .is_err()
+        {
+            self.pending_dialogs
+                .lock()
+                .tab_creations
+                .remove(&request_id);
+            return None;
+        }
+        rx.blocking_recv().unwrap_or(None)
     }
 
     fn open_session(&self, _meta_json: &str) -> u64 {

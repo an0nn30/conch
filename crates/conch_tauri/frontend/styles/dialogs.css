@@ -102,12 +102,33 @@
       cursor: pointer;
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
-      gap: 10px;
+      align-items: center;
+      gap: 12px;
     }
     .command-palette-item.active { background: var(--input-bg); }
+    .command-palette-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
     .command-palette-title { color: var(--fg); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .command-palette-subtitle { color: var(--dim-fg); font-size: 11px; flex-shrink: 0; }
+    .command-palette-subtitle { color: var(--dim-fg); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .command-palette-shortcut {
+      width: 20px;
+      height: 20px;
+      border-radius: 6px;
+      border: 1px solid var(--tab-border);
+      background: var(--panel-bg);
+      color: var(--dim-fg);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1;
+      flex: 0 0 auto;
+    }
+    .command-palette-item.active .command-palette-shortcut {
+      border-color: var(--active-highlight);
+      color: var(--fg);
+      background: rgba(255, 255, 255, 0.03);
+    }
     .command-palette-empty { color: var(--dim-fg); font-size: 13px; padding: 10px 12px; }
     /* -- Export dialog -- */
     .ssh-export-section { font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg); margin-bottom: 4px; }

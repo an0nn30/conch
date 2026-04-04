@@ -15,6 +15,7 @@
     const closePane = deps.closePane;
     const createTab = deps.createTab;
     const createSshTab = deps.createSshTab;
+    const activateTab = deps.activateTab;
     const splitPane = deps.splitPane;
     const getPaneManager = deps.getPaneManager;
     const isDebugEnabled = deps.isDebugEnabled;
@@ -57,9 +58,11 @@
           listenOnCurrentWindow,
           debouncedFitAndResize: () => debouncedFitAndResize(),
           getCurrentTab: () => currentTab(),
+          getTabById: (tabId) => tabs.get(Number(tabId)) || null,
           getCurrentPane: () => currentPane(),
-          createTab: () => createTab(),
+          createTab: (options) => createTab(options),
           createSshTab: (opts) => createSshTab(opts),
+          activateTab: (tabId) => activateTab(tabId),
         });
         const runtimeResult = await toolWindowRuntime.init();
         if (runtimeResult && typeof runtimeResult.debouncedSaveLayout === 'function') {

@@ -58,11 +58,19 @@ fn spawn_shell_for_pane(
     rows: u16,
     shell: Option<String>,
     shell_args: Vec<String>,
+    clear_tmux_env: bool,
 ) -> Result<(), String> {
     let key = session_key(&window_label, pane_id);
     let cfg = state.config.read();
-    let backend = PtyBackend::new(cols, rows, shell.as_deref(), &shell_args, &cfg.terminal.env)
-        .map_err(|e| format!("Failed to spawn PTY: {e}"))?;
+    let backend = PtyBackend::new(
+        cols,
+        rows,
+        shell.as_deref(),
+        &shell_args,
+        &cfg.terminal.env,
+        clear_tmux_env,
+    )
+    .map_err(|e| format!("Failed to spawn PTY: {e}"))?;
     drop(cfg);
 
     let reader = backend
@@ -126,6 +134,7 @@ pub(crate) fn spawn_shell(
         rows,
         shell_owned,
         shell_args_owned,
+        false,
     )
 }
 
@@ -139,7 +148,17 @@ pub(crate) fn spawn_default_shell(
     rows: u16,
 ) -> Result<(), String> {
     let window_label = window.label().to_string();
-    spawn_shell_for_pane(window_label, app, state, pane_id, cols, rows, None, Vec::new())
+    spawn_shell_for_pane(
+        window_label,
+        app,
+        state,
+        pane_id,
+        cols,
+        rows,
+        None,
+        Vec::new(),
+        true,
+    )
 }
 
 #[tauri::command]

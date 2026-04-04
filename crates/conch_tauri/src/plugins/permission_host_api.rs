@@ -287,6 +287,47 @@ impl HostApi for PermissionCheckedHostApi {
         self.inner.new_tab(command, plain)
     }
 
+    fn rename_active_tab(&self, title: &str) {
+        if !self.check_capability("rename_active_tab", "session.rename_tab") {
+            return;
+        }
+        self.inner.rename_active_tab(title)
+    }
+
+    fn rename_tab_by_id(&self, tab_id: &str, title: &str) {
+        if !self.check_capability("rename_tab_by_id", "session.rename_tab") {
+            return;
+        }
+        self.inner.rename_tab_by_id(tab_id, title)
+    }
+
+    fn focus_tab_by_id(&self, tab_id: &str) {
+        if !self.check_capability("focus_tab_by_id", "session.rename_tab") {
+            return;
+        }
+        self.inner.focus_tab_by_id(tab_id)
+    }
+
+    fn new_tab_with_title(
+        &self,
+        command: Option<&str>,
+        plain: bool,
+        title: Option<&str>,
+    ) -> Option<String> {
+        if !self.check_capability("new_tab_with_title", "session.new_tab") {
+            return None;
+        }
+        let filtered_title = if title.is_some()
+            && !self.check_capability("new_tab_with_title", "session.rename_tab")
+        {
+            None
+        } else {
+            title
+        };
+        self.inner
+            .new_tab_with_title(command, plain, filtered_title)
+    }
+
     fn open_session(&self, meta_json: &str) -> u64 {
         if !self.check_capability("open_session", "session.open") {
             return 0;
@@ -379,6 +420,9 @@ mod tests {
         }
         fn write_to_pty(&self, _: &[u8]) {}
         fn new_tab(&self, _: Option<&str>, _: bool) {}
+        fn rename_active_tab(&self, _: &str) {}
+        fn rename_tab_by_id(&self, _: &str, _: &str) {}
+        fn focus_tab_by_id(&self, _: &str) {}
         fn open_session(&self, _: &str) -> u64 {
             0
         }

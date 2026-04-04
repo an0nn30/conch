@@ -8,6 +8,7 @@
     const showStatus = deps.showStatus;
     const refreshTitlebar = deps.refreshTitlebar;
     const refreshSshPanel = deps.refreshSshPanel;
+    const MAX_QUICK_RESULTS = 5;
 
     let commandPalette = null;
 
@@ -214,7 +215,14 @@
         scored.push({ c, score });
       }
       scored.sort((a, b) => b.score - a.score || a.c.title.localeCompare(b.c.title));
-      return scored.map((x) => x.c);
+      return scored.slice(0, MAX_QUICK_RESULTS).map((x) => x.c);
+    }
+
+    function quickPickIndexFromKey(event) {
+      if (!event || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null;
+      const key = String(event.key || '');
+      if (!/^[1-5]$/.test(key)) return null;
+      return Number(key) - 1;
     }
 
     function renderPaletteResults() {
@@ -237,8 +245,11 @@
         const row = document.createElement('div');
         row.className = 'command-palette-item' + (i === commandPalette.selectedIndex ? ' active' : '');
         row.innerHTML =
-          `<div class="command-palette-title">${esc(cmd.title)}</div>` +
-          `<div class="command-palette-subtitle">${esc(cmd.subtitle || '')}</div>`;
+          `<div class="command-palette-main">` +
+            `<div class="command-palette-title">${esc(cmd.title)}</div>` +
+            `<div class="command-palette-subtitle">${esc(cmd.subtitle || '')}</div>` +
+          `</div>` +
+          `<div class="command-palette-shortcut">${i + 1}</div>`;
         row.addEventListener('mouseenter', () => {
           if (!commandPalette || commandPalette.keyboardMode) return;
           commandPalette.selectedIndex = i;
@@ -285,7 +296,7 @@
       const shell = document.createElement('div');
       shell.className = 'command-palette';
       shell.innerHTML =
-        `<input class="command-palette-input" placeholder="Type to search commands (connect, tunnel, plugin)..." spellcheck="false" />` +
+        `<input class="command-palette-input" placeholder="Type to search commands... (press 1-5 to run)" spellcheck="false" />` +
         `<div class="command-palette-list"><div class="command-palette-empty">Loading commands…</div></div>`;
       overlay.appendChild(shell);
       document.body.appendChild(overlay);
@@ -315,6 +326,15 @@
           event.preventDefault();
           event.stopPropagation();
           closeCommandPalette();
+          return;
+        }
+        const quickIdx = quickPickIndexFromKey(event);
+        if (quickIdx !== null) {
+          if (quickIdx < state.filtered.length) {
+            event.preventDefault();
+            event.stopPropagation();
+            executePaletteCommand(quickIdx);
+          }
           return;
         }
         if (event.key === 'ArrowDown') {

@@ -369,6 +369,7 @@
             closePane: (paneId) => closePane(paneId),
             createTab: (options) => createTab(options),
             createSshTab: (opts) => createSshTab(opts),
+            activateTab: (tabId) => activateTab(tabId),
             splitPane: (direction) => splitPane(direction),
             getPaneManager: () => paneManager,
             isDebugEnabled: () => shortcutDebugEnabled,
