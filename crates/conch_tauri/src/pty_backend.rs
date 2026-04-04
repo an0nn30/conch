@@ -25,6 +25,7 @@ impl PtyBackend {
         shell: Option<&str>,
         shell_args: &[String],
         extra_env: &HashMap<String, String>,
+        clear_tmux_env: bool,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
 
@@ -52,6 +53,9 @@ impl PtyBackend {
         // Match conch_pty behavior: defaults first, then user overrides.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        if clear_tmux_env {
+            cmd.env_remove("TMUX");
+        }
         for (k, v) in extra_env {
             cmd.env(k, v);
         }

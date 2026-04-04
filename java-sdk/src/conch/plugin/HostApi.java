@@ -34,6 +34,8 @@ import java.util.List;
  *   <li><b>Inter-plugin bus + RPC</b> — {@link #subscribe},
  *       {@link #publishEvent}, {@link #queryPlugin}, {@link #registerService}</li>
  *   <li><b>Session + terminal</b> — {@link #writeToPty}, {@link #newTab},
+ *       {@link #newTabWithTitle}, {@link #renameActiveTab},
+ *       {@link #focusTabById},
  *       {@link #getActiveSession}, {@link #execActiveSession},
  *       {@link #execLocal}, {@link #platform}</li>
  *   <li><b>Network helpers</b> — {@link #time}, {@link #resolve}, {@link #scan}</li>
@@ -437,6 +439,39 @@ public class HostApi {
     public static native void newTab(String command, boolean plain);
 
     /**
+     * Open a new local shell tab and set its tab title once created.
+     *
+     * @param command optional command to run in the new tab (null for none)
+     * @param plain   if true, use the OS default shell instead of the
+     *                configured terminal.shell
+     * @param title   optional tab title to apply
+     * @return created tab id, or null if unavailable
+     */
+    public static native String newTabWithTitle(String command, boolean plain, String title);
+
+    /**
+     * Rename the currently active tab in the focused window.
+     *
+     * @param title new tab title
+     */
+    public static native void renameActiveTab(String title);
+
+    /**
+     * Rename a specific tab by id.
+     *
+     * @param tabId tab id returned by {@link #newTabWithTitle}
+     * @param title new tab title
+     */
+    public static native void renameTabById(String tabId, String title);
+
+    /**
+     * Focus a specific tab by id.
+     *
+     * @param tabId tab id returned by {@link #newTabWithTitle}
+     */
+    public static native void focusTabById(String tabId);
+
+    /**
      * Get info about the currently active session as JSON.
      *
      * @return JSON object or null when unavailable
@@ -468,6 +503,17 @@ public class HostApi {
      */
     public static void newPlainTab(String command) {
         newTab(command, true);
+    }
+
+    /**
+     * Open a new plain shell tab and set the tab title.
+     *
+     * @param command command to execute in the new tab
+     * @param title   tab title to apply
+     * @return created tab id, or null if unavailable
+     */
+    public static String newPlainTabWithTitle(String command, String title) {
+        return newTabWithTitle(command, true, title);
     }
 
     /**

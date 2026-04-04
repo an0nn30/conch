@@ -120,15 +120,55 @@
       const payload = event.payload || {};
       if (!opts.createTab) return;
       try {
-        await opts.createTab();
+        const createdTabId = await opts.createTab({ plainShell: payload.plain === true });
+        if (payload.request_id && invoke) {
+          invoke('plugin_respond_new_tab', {
+            requestId: payload.request_id,
+            tabId: createdTabId != null ? String(createdTabId) : null,
+          }).catch(() => {});
+        }
+        if (payload.tab_title && opts.renameActiveTab) {
+          if (payload.request_id && createdTabId != null && opts.renameTabById) {
+            opts.renameTabById(String(createdTabId), payload.tab_title);
+          } else {
+            opts.renameActiveTab(payload.tab_title);
+          }
+        }
         if (payload.command && opts.writeToActivePty) {
           setTimeout(() => {
             opts.writeToActivePty(payload.command);
           }, 120);
         }
       } catch (e) {
+        if (payload.request_id && invoke) {
+          invoke('plugin_respond_new_tab', {
+            requestId: payload.request_id,
+            tabId: null,
+          }).catch(() => {});
+        }
         console.error('plugin-new-tab error:', e);
       }
+    });
+
+    // Listen for plugin requests to rename the active tab.
+    listen('plugin-rename-tab', (event) => {
+      const payload = event.payload || {};
+      const title = typeof payload === 'string' ? payload : payload.title;
+      if (!title) return;
+      if (payload && payload.tab_id && opts.renameTabById) {
+        opts.renameTabById(String(payload.tab_id), title);
+        return;
+      }
+      if (!opts.renameActiveTab) return;
+      opts.renameActiveTab(title);
+    });
+
+    // Listen for plugin requests to focus an existing tab by id.
+    listen('plugin-focus-tab', (event) => {
+      const payload = event.payload || {};
+      if (!payload || payload.tab_id == null) return;
+      if (!opts.focusTabById) return;
+      opts.focusTabById(String(payload.tab_id));
     });
 
     if (invoke) {

@@ -7,6 +7,7 @@
     const getCurrentTab = deps.getCurrentTab;
     const getCurrentPane = deps.getCurrentPane;
     const createSshTab = deps.createSshTab;
+    const activateTab = deps.activateTab;
     const registeredPluginToolWindows = new Set();
 
     async function init() {
@@ -184,10 +185,34 @@
       });
 
       if (global.pluginWidgets) {
+        const applyTabTitle = (tab, title) => {
+          if (!tab || !tab.button) return;
+          const nextTitle = String(title || '').trim();
+          if (!nextTitle) return;
+          if (tab.button._labelSpan) tab.button._labelSpan.textContent = nextTitle;
+          else tab.button.textContent = nextTitle;
+          tab.label = nextTitle;
+          tab.hasCustomTitle = true;
+          tab.button.title = nextTitle;
+        };
+
         global.pluginWidgets.init({
           invoke,
           listen,
-          createTab: () => deps.createTab(),
+          createTab: (options) => deps.createTab(options),
+          renameActiveTab: (title) => {
+            const tab = deps.getCurrentTab ? deps.getCurrentTab() : null;
+            applyTabTitle(tab, title);
+          },
+          renameTabById: (tabId, title) => {
+            const tab = deps.getTabById ? deps.getTabById(tabId) : null;
+            applyTabTitle(tab, title);
+          },
+          focusTabById: (tabId) => {
+            const tab = deps.getTabById ? deps.getTabById(tabId) : null;
+            if (!tab || tab.id == null || typeof activateTab !== 'function') return;
+            activateTab(tab.id);
+          },
           writeToActivePty: (data) => {
             const pane = getCurrentPane();
             if (!pane || !pane.spawned) return;

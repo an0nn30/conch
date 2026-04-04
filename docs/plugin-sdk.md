@@ -404,14 +404,21 @@ Config is stored at `~/.config/conch/plugins/<plugin-name>/<key>.json`.
 | `queryPlugin(String target, String method, String argsJson)` | RPC query to another plugin/service; returns JSON result or null |
 | `registerService(String name)` | Register this plugin as a named RPC service |
 
+> Host-reserved bus event: `host.tick` is published about once per second with payload `{ "unix_ms": <epoch_ms> }`. Subscribe with `subscribe("host.tick")` (Java) or `app.subscribe("host.tick")` (Lua) for poll-driven sync workflows.
+
 **Terminal / Tabs:**
 
 | Method | Description |
 |--------|-------------|
 | `writeToPty(String text)` | Write text to the focused terminal (include `\n` for Enter) |
 | `newTab(String command, boolean plain)` | Open a new tab (plain=true bypasses terminal.shell config) |
+| `newTabWithTitle(String command, boolean plain, String title)` | Open a new tab, set its tab title, and return tab id (or null) |
+| `renameActiveTab(String title)` | Rename the active tab in the focused window |
+| `renameTabById(String tabId, String title)` | Rename a specific tab by id |
+| `focusTabById(String tabId)` | Focus/switch to a specific tab by id |
 | `newTab()` | Open a new tab with default shell |
 | `newPlainTab(String command)` | Open a plain shell tab and run a command |
+| `newPlainTabWithTitle(String command, String title)` | Open a plain shell tab and set the tab title |
 | `getActiveSession()` | Get active session metadata JSON (local/ssh, window/pane identifiers, SSH host/user/port when applicable) |
 | `execActiveSession(String command)` | Execute on active session and return JSON with `status/stdout/stderr/exit_code` |
 
@@ -689,6 +696,11 @@ Functions are organized across four global tables: `app`, `ui`, `session`, and `
 | `session.exec(command)` | Backward-compatible alias for `session.exec_local(command)` |
 | `session.write(text)` | Write text to the focused terminal PTY |
 | `session.new_tab(command?, plain?)` | Open a new tab (plain=true uses OS default shell) |
+| `session.new_tab_with_title(command?, plain?, title?)` | Open a new tab, set its tab title, and return tab id or nil |
+| `session.new_plain_tab(command?)` | Open a new plain-shell tab (equivalent to `session.new_tab(command, true)`) |
+| `session.rename_tab(title)` | Rename the active tab in the focused window |
+| `session.rename_tab_by_id(tab_id, title)` | Rename a specific tab by id |
+| `session.focus_tab_by_id(tab_id)` | Focus/switch to a specific tab by id |
 
 > **Note:** `session.platform()` is a function call, not a property access. Use `session.platform()` (with parentheses).
 
@@ -892,10 +904,15 @@ public static native void registerService(String name);
 // Terminal / session
 public static native void writeToPty(String text);
 public static native void newTab(String command, boolean plain);
+public static native String newTabWithTitle(String command, boolean plain, String title);
+public static native void renameActiveTab(String title);
+public static native void renameTabById(String tabId, String title);
+public static native void focusTabById(String tabId);
 public static native String getActiveSession();
 public static native String execActiveSession(String command);
 public static void newTab();
 public static void newPlainTab(String command);
+public static String newPlainTabWithTitle(String command, String title);
 public static String platform();
 public static String execLocal(String command);
 
@@ -1044,6 +1061,11 @@ session.exec_active(command) -> {stdout, stderr, exit_code, status}
 session.current() -> table
 session.write(text)
 session.new_tab(command?, plain?)
+session.new_tab_with_title(command?, plain?, title?) -> string|nil
+session.new_plain_tab(command?)
+session.rename_tab(title)
+session.rename_tab_by_id(tab_id, title)
+session.focus_tab_by_id(tab_id)
 ```
 
 #### `net` table
@@ -1243,6 +1265,7 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 { "kind": "widget", "type": "button_click", "id": "my_button" }
 { "kind": "widget", "type": "tree_context_menu", "id": "tree1", "node_id": "srv1", "action": "delete" }
 { "kind": "bus_event", "event_type": "ssh.connected", "data": { "host": "10.0.0.1" } }
+{ "kind": "bus_event", "event_type": "host.tick", "data": { "unix_ms": 1775389200123 } }
 { "kind": "theme_changed", "theme_json": "{...}" }
 { "kind": "shutdown" }
 ```
@@ -1450,12 +1473,14 @@ Subscribe to event types and publish events. Events are broadcast to all subscri
 // Java
 HostApi.subscribe("my.event_type");
 HostApi.publishEvent("my.event_type", "{\"key\": \"value\"}");
+HostApi.subscribe("host.tick");
 ```
 
 ```lua
 -- Lua
 app.subscribe("my.event_type")
 app.publish("my.event_type", { key = "value" })
+app.subscribe("host.tick")
 ```
 
 Received events arrive as `bus_event` plugin events:

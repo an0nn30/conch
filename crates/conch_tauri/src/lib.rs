@@ -137,7 +137,26 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 }
                 // Restore plugins that were enabled in the previous session.
                 ps.restore_plugins(&handle);
+                let bus = Arc::clone(&ps.bus);
                 drop(ps);
+
+                // Publish a lightweight host tick event for plugins that need
+                // polling/synchronization with external state changes.
+                tauri::async_runtime::spawn(async move {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+                    loop {
+                        ticker.tick().await;
+                        let unix_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        bus.publish(
+                            "__host__",
+                            "host.tick",
+                            serde_json::json!({ "unix_ms": unix_ms }),
+                        );
+                    }
+                });
 
                 // Rebuild the menu after a short delay to let plugin threads
                 // run setup() and register their menu items.
@@ -531,6 +550,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             plugins::dialog_respond_form,
             plugins::dialog_respond_prompt,
             plugins::dialog_respond_confirm,
+            plugins::plugin_respond_new_tab,
             plugins::get_plugin_menu_items,
             plugins::trigger_plugin_menu_action,
             plugins::get_plugin_panels,

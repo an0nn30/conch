@@ -325,7 +325,9 @@
       } catch (error) {
         term.writeln('\x1b[31mFailed to spawn shell: ' + error + '\x1b[0m');
         await closeTab(tabId, { notifyBackend: false, closeWindowWhenLast: false });
+        return null;
       }
+      return tabId;
     }
 
     async function createSshTab(opts) {

@@ -76,6 +76,21 @@ pub trait HostApi: Send + Sync {
     // -- Terminal / Tabs --
     fn write_to_pty(&self, data: &[u8]);
     fn new_tab(&self, command: Option<&str>, plain: bool);
+    fn rename_active_tab(&self, title: &str);
+    fn rename_tab_by_id(&self, tab_id: &str, title: &str);
+    fn focus_tab_by_id(&self, tab_id: &str);
+    fn new_tab_with_title(
+        &self,
+        command: Option<&str>,
+        plain: bool,
+        title: Option<&str>,
+    ) -> Option<String> {
+        self.new_tab(command, plain);
+        if let Some(t) = title {
+            self.rename_active_tab(t);
+        }
+        None
+    }
 
     // -- Session Management --
     fn open_session(&self, meta_json: &str) -> u64;
@@ -143,6 +158,9 @@ mod tests {
         }
         fn write_to_pty(&self, _: &[u8]) {}
         fn new_tab(&self, _: Option<&str>, _: bool) {}
+        fn rename_active_tab(&self, _: &str) {}
+        fn rename_tab_by_id(&self, _: &str, _: &str) {}
+        fn focus_tab_by_id(&self, _: &str) {}
         fn open_session(&self, _: &str) -> u64 {
             0
         }
