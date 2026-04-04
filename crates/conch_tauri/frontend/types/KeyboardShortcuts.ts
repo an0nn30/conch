@@ -3,4 +3,4 @@
 /**
  * Keyboard shortcuts exposed to the frontend.
  */
-export type KeyboardShortcuts = { toggle_right_panel: string, toggle_left_panel: string, toggle_bottom_panel: string, split_vertical: string, split_horizontal: string, close_pane: string, rename_tab: string, };
+export type KeyboardShortcuts = { new_plain_shell_tab: string, toggle_right_panel: string, toggle_left_panel: string, toggle_bottom_panel: string, split_vertical: string, split_horizontal: string, close_pane: string, rename_tab: string, manage_tunnels: string, };

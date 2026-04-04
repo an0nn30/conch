@@ -8,6 +8,16 @@
     function writeTextToCurrentPane(text) {
       const pane = getCurrentPane();
       if (!pane || pane.kind !== 'terminal' || !pane.spawned || typeof text !== 'string' || text.length === 0) return false;
+      if (pane.type === 'tmux' && window.tmuxIdMap && window.backendRouter) {
+        const tmuxPaneId = window.tmuxIdMap.getTmuxForPane(pane.paneId);
+        if (tmuxPaneId != null) {
+          window.backendRouter.writeToPane(tmuxPaneId, text).catch((event) => {
+            console.error('paste write error:', event);
+          });
+          if (pane.term) pane.term.focus();
+          return true;
+        }
+      }
       const cmd = pane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
       invoke(cmd, { paneId: pane.paneId, data: text }).catch((event) => {
         console.error('paste write error:', event);

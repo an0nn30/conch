@@ -82,6 +82,9 @@
       createSshTab(opts) {
         return requireTabManager('createSshTab')(opts);
       },
+      createTmuxTab(opts) {
+        return requireTabManager('createTmuxTab')(opts);
+      },
     };
   }
 

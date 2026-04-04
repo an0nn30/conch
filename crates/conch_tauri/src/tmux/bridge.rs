@@ -1,6 +1,5 @@
 //! Reader thread that drives the control mode parser and emits Tauri events.
 
-use std::io::Read;
 use std::sync::{Arc, RwLock};
 
 use conch_tmux::{ConnectionReader, Notification, SessionList};
@@ -18,10 +17,14 @@ pub(crate) fn spawn_reader_thread(
     std::thread::Builder::new()
         .name(format!("tmux-reader-{window_label}"))
         .spawn(move || {
+            log::info!("[tmux] reader thread started window_label={}", window_label);
             let mut buf = [0u8; 8192];
             loop {
                 match reader.stdout().read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        log::info!("[tmux] reader EOF window_label={}", window_label);
+                        break;
+                    }
                     Ok(n) => {
                         for notif in reader.parse_bytes(&buf[..n]) {
                             if let Ok(mut list) = sessions.write() {
@@ -36,6 +39,7 @@ pub(crate) fn spawn_reader_thread(
                     }
                 }
             }
+            log::info!("[tmux] emitting tmux-disconnected window_label={}", window_label);
             let _ = app.emit_to(
                 &window_label,
                 "tmux-disconnected",

@@ -6,6 +6,7 @@ description = "Tmux control mode protocol library for Conch"
 
 [dependencies]
 log = { workspace = true }
+portable-pty = "0.8"
 
 [dependencies.serde]
 workspace = true

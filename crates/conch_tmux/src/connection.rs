@@ -1,14 +1,14 @@
 //! Control mode connection manager.
 
-use std::io::{self, BufWriter, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{self, Read, Write};
 
 use crate::parser::ControlModeParser;
 use crate::protocol::Notification;
+use portable_pty::{CommandBuilder as PtyCommandBuilder, PtySize, native_pty_system};
 
 /// The write half of a control mode connection.
 pub struct ConnectionWriter {
-    writer: BufWriter<ChildStdin>,
+    writer: Box<dyn Write + Send>,
 }
 
 impl ConnectionWriter {
@@ -20,13 +20,13 @@ impl ConnectionWriter {
 
 /// The read half of a control mode connection.
 pub struct ConnectionReader {
-    stdout: ChildStdout,
+    reader: Box<dyn Read + Send>,
     parser: ControlModeParser,
 }
 
 impl ConnectionReader {
-    pub fn stdout(&mut self) -> &mut ChildStdout {
-        &mut self.stdout
+    pub fn stdout(&mut self) -> &mut (dyn Read + Send) {
+        self.reader.as_mut()
     }
 
     pub fn parse_bytes(&mut self, data: &[u8]) -> Vec<Notification> {
@@ -36,12 +36,12 @@ impl ConnectionReader {
 
 /// A handle to the tmux child process. Drop this to kill tmux.
 pub struct ConnectionHandle {
-    child: Child,
+    child: Box<dyn portable_pty::Child + Send>,
 }
 
 impl ConnectionHandle {
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        self.child.process_id().unwrap_or(0)
     }
 
     pub fn kill(mut self) -> io::Result<()> {
@@ -60,30 +60,50 @@ impl Drop for ConnectionHandle {
 
 /// Spawn a tmux control mode process and split into reader, writer, and handle.
 pub fn spawn(binary: &str, args: &[&str]) -> io::Result<(ConnectionReader, ConnectionWriter, ConnectionHandle)> {
-    let mut child = Command::new(binary)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| io::Error::other(format!("failed to open tmux PTY: {e}")))?;
 
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to open tmux stdin"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to open tmux stdout"))?;
+    let mut command = PtyCommandBuilder::new(binary);
+    for arg in args {
+        command.arg(arg);
+    }
+
+    // GUI-launched app processes may not have TERM/COLORTERM set.
+    if std::env::var_os("TERM").is_none() {
+        command.env("TERM", "xterm-256color");
+    }
+    if std::env::var_os("COLORTERM").is_none() {
+        command.env("COLORTERM", "truecolor");
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|e| io::Error::other(format!("failed to spawn tmux control mode: {e}")))?;
+    drop(pair.slave);
+
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| io::Error::other(format!("failed to clone tmux reader: {e}")))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| io::Error::other(format!("failed to take tmux writer: {e}")))?;
 
     Ok((
         ConnectionReader {
-            stdout,
+            reader,
             parser: ControlModeParser::new(),
         },
-        ConnectionWriter {
-            writer: BufWriter::new(stdin),
-        },
+        ConnectionWriter { writer },
         ConnectionHandle { child },
     ))
 }

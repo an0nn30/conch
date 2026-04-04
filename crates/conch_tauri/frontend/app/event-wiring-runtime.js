@@ -14,6 +14,7 @@
     const getCurrentTab = deps.getCurrentTab;
     const closeTab = deps.closeTab;
     const createTab = deps.createTab;
+    const createTmuxTab = deps.createTmuxTab;
     const closePane = deps.closePane;
     const splitPane = deps.splitPane;
     const renameActiveTab = deps.renameActiveTab;
@@ -187,31 +188,201 @@
       }
 
       function wireTmuxEvents() {
+        if (global.__conchTmuxEventsWired) return;
+        global.__conchTmuxEventsWired = true;
+        var currentTmuxSession = null;
+        var tmuxSyncTimer = null;
+
+        function syncTmuxSession(sessionName) {
+          if (!sessionName || !createTmuxTab) return Promise.resolve();
+          currentTmuxSession = sessionName;
+          console.info('[tmux] syncTmuxSession start', { sessionName: sessionName });
+          return invoke('tmux_list_windows', { sessionName: sessionName }).then(function (windows) {
+            console.info('[tmux] syncTmuxSession windows', { sessionName: sessionName, windows: windows });
+            var windowIds = new Set();
+            (windows || []).forEach(function (windowInfo) {
+              windowIds.add(Number(windowInfo.id));
+              console.info('[tmux] syncTmuxSession createTmuxTab', {
+                windowId: Number(windowInfo.id),
+                paneCount: Array.isArray(windowInfo.panes) ? windowInfo.panes.length : 0,
+                active: !!windowInfo.active,
+              });
+              createTmuxTab({
+                windowId: Number(windowInfo.id),
+                name: windowInfo.name,
+                panes: Array.isArray(windowInfo.panes) ? windowInfo.panes : [],
+                activate: !!windowInfo.active,
+              });
+            });
+
+            if (global.tmuxIdMap) {
+              Array.from(tabs.values()).forEach(function (tab) {
+                if (!tab || tab.type !== 'tmux') return;
+                if (!windowIds.has(Number(tab.tmuxWindowId))) {
+                  console.info('[tmux] syncTmuxSession removing stale tmux tab', {
+                    tabId: tab.id,
+                    tmuxWindowId: tab.tmuxWindowId,
+                  });
+                  closeTab(tab.id, { notifyBackend: false, closeWindowWhenLast: false });
+                }
+              });
+            }
+            var switchState = window.__conchTmuxSwitchState || null;
+            if (switchState && switchState.connectedSession === sessionName) {
+              switchState.syncedAt = Date.now();
+              switchState.suppressDisconnectsUntil = Date.now() + 1500;
+              window.__conchTmuxSwitchState = switchState;
+            }
+          }).catch(function (error) {
+            console.error('[tmux] failed to sync session:', error);
+          });
+        }
+
+        function scheduleTmuxSync() {
+          if (!currentTmuxSession) return;
+          clearTimeout(tmuxSyncTimer);
+          tmuxSyncTimer = setTimeout(function () {
+            syncTmuxSession(currentTmuxSession);
+          }, 60);
+        }
+
+        function forceSyncSession(sessionName, attempt) {
+          if (!sessionName) return;
+          var tries = Number(attempt) || 0;
+          syncTmuxSession(sessionName).then(function () {
+            var hasTmuxTab = Array.from(tabs.values()).some(function (tab) {
+              return tab && tab.type === 'tmux';
+            });
+            if (hasTmuxTab) return;
+            if (tries >= 3) return;
+            var retryDelays = [120, 300, 700];
+            setTimeout(function () {
+              forceSyncSession(sessionName, tries + 1);
+            }, retryDelays[tries] || 300);
+          });
+        }
+
+        global.__conchTmuxRequestSyncSoon = function (delayMs) {
+          if (!currentTmuxSession) return;
+          clearTimeout(tmuxSyncTimer);
+          tmuxSyncTimer = setTimeout(function () {
+            syncTmuxSession(currentTmuxSession);
+          }, typeof delayMs === 'number' ? delayMs : 80);
+        };
+        global.__conchTmuxForceSyncSession = function (sessionName) {
+          forceSyncSession(sessionName, 0);
+        };
+
+        listenOnCurrentWindow('tmux-connected', function (event) {
+          var payload = event.payload || {};
+          var switchState = window.__conchTmuxSwitchState || null;
+          console.info('[tmux] connected event', {
+            session: payload.session || null,
+            switchState: switchState,
+          });
+          if (switchState) {
+            switchState.connectedAt = Date.now();
+            switchState.connectedSession = payload.session || null;
+            switchState.suppressDisconnectsUntil = Date.now() + 3000;
+            window.__conchTmuxSwitchState = switchState;
+          }
+          var targetSession = payload.session || currentTmuxSession;
+          if (targetSession) {
+            forceSyncSession(targetSession, 0);
+          } else {
+            invoke('tmux_get_last_session').then(function (lastSession) {
+              if (lastSession) forceSyncSession(lastSession, 0);
+            }).catch(function () {});
+          }
+        });
+
         listenOnCurrentWindow('tmux-output', function (event) {
           var payload = event.payload || {};
           if (!global.tmuxIdMap) return;
           var frontendPaneId = global.tmuxIdMap.getPaneForTmux(payload.pane_id);
           if (frontendPaneId != null) {
             var pane = panes.get(frontendPaneId);
-            if (pane && pane.term) pane.term.write(payload.data);
+            if (pane && pane.term) {
+              var dataText = typeof payload.data === 'string' ? payload.data : '';
+              if (pane._tmuxSnapshotTimer) {
+                clearTimeout(pane._tmuxSnapshotTimer);
+                pane._tmuxSnapshotTimer = null;
+              }
+              if (!pane._tmuxLiveActive) {
+                console.info('[tmux] pane marked live from tmux-output', {
+                  frontendPaneId: frontendPaneId,
+                  tmuxPaneId: payload.pane_id,
+                });
+                var snapshotAgeMs = pane._tmuxSnapshotAppliedAt
+                  ? (Date.now() - Number(pane._tmuxSnapshotAppliedAt))
+                  : Number.POSITIVE_INFINITY;
+                var looksLikeScreenPaint = dataText.indexOf('\n') >= 0 || dataText.indexOf('\x1b') >= 0;
+                if (snapshotAgeMs < 1500 && looksLikeScreenPaint) {
+                  // Replace freshly hydrated snapshot content with authoritative live stream.
+                  pane.term.reset();
+                }
+              }
+              pane._tmuxLiveActive = true;
+              pane.term.write(payload.data);
+
+              // When full-screen TUIs (htop/vim/etc) exit, tmux emits alt-screen restore
+              // sequences. Force a quick snapshot resync to avoid stale ghost frames.
+              if (typeof dataText === 'string' && (
+                dataText.indexOf('\x1b[?1049l') !== -1 ||
+                dataText.indexOf('\x1b[?47l') !== -1 ||
+                dataText.indexOf('\x1b[?1047l') !== -1
+              )) {
+                pane._tmuxLiveActive = false;
+                if (typeof global.__conchTmuxRequestSyncSoon === 'function') {
+                  global.__conchTmuxRequestSyncSoon(40);
+                }
+              }
+            }
           }
         });
 
         listenOnCurrentWindow('tmux-window-add', function (event) {
-          // Tab creation from tmux notification — to be wired in tab-manager integration
-          console.debug('[tmux] window-add', event.payload);
+          scheduleTmuxSync();
         });
 
         listenOnCurrentWindow('tmux-window-close', function (event) {
-          console.debug('[tmux] window-close', event.payload);
+          scheduleTmuxSync();
         });
 
         listenOnCurrentWindow('tmux-window-renamed', function (event) {
-          console.debug('[tmux] window-renamed', event.payload);
+          scheduleTmuxSync();
         });
 
+        listenOnCurrentWindow('tmux-layout-change', function () {
+          scheduleTmuxSync();
+        });
+
+        // `tmux-pane-changed` can fire very frequently (including during typing).
+        // Full snapshot sync on each event causes severe redraw/focus churn.
+        // Keep structural sync driven by window/layout events instead.
+        listenOnCurrentWindow('tmux-pane-changed', function () {});
+
         listenOnCurrentWindow('tmux-disconnected', function (event) {
+          var switchState = window.__conchTmuxSwitchState || null;
           var reason = event.payload && event.payload.reason;
+          var now = Date.now();
+          var suppressForSwitch = !!(switchState && now <= Number(switchState.suppressDisconnectsUntil || 0));
+          console.info('[tmux] disconnected event', {
+            reason: reason || null,
+            suppressForSwitch: suppressForSwitch,
+            switchState: switchState,
+          });
+          if (suppressForSwitch) {
+            return;
+          }
+          if (!reason) {
+            console.info('[tmux] disconnected event ignored; snapshot sync remains active', {
+              session: currentTmuxSession,
+            });
+            return;
+          }
+          currentTmuxSession = null;
+          window.__conchTmuxSwitchState = null;
           if (global.toast) {
             global.toast.warn(reason ? 'Tmux disconnected: ' + reason : 'Tmux session ended');
           }

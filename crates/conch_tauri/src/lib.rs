@@ -591,6 +591,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             tmux::tmux_connect,
             tmux::tmux_disconnect,
             tmux::tmux_list_sessions,
+            tmux::tmux_list_windows,
             tmux::tmux_create_session,
             tmux::tmux_kill_session,
             tmux::tmux_rename_session,
@@ -602,6 +603,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             tmux::tmux_select_pane,
             tmux::tmux_write_to_pane,
             tmux::tmux_resize_pane,
+            tmux::tmux_resize_client,
             tmux::tmux_get_backend,
             tmux::tmux_get_last_session,
         ])

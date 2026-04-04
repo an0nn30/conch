@@ -64,16 +64,25 @@
       return invoke('resize_pty', { paneId, cols, rows });
     }
 
+    function resizeClient(cols, rows) {
+      if (isTmux()) {
+        return invoke('tmux_resize_client', { cols, rows });
+      }
+      return null;
+    }
+
     function splitVertical(paneId) {
       if (isTmux()) {
-        return invoke('tmux_split_pane', { paneId, horizontal: false });
+        // "Vertical split" in Conch means side-by-side panes, which maps to tmux -h.
+        return invoke('tmux_split_pane', { paneId, horizontal: true });
       }
       return null;
     }
 
     function splitHorizontal(paneId) {
       if (isTmux()) {
-        return invoke('tmux_split_pane', { paneId, horizontal: true });
+        // "Horizontal split" in Conch means stacked panes, which maps to tmux -v.
+        return invoke('tmux_split_pane', { paneId, horizontal: false });
       }
       return null;
     }
@@ -111,6 +120,7 @@
       renameTab,
       writeToPane,
       resizePane,
+      resizeClient,
       splitVertical,
       splitHorizontal,
       closePane,

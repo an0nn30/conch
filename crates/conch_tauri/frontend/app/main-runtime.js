@@ -93,6 +93,9 @@
       if (window.conchBackendRouter && window.conchBackendRouter.create) {
         window.backendRouter = window.conchBackendRouter.create({ invoke });
       }
+      if (window.conchTmuxIdMap && window.conchTmuxIdMap.create) {
+        window.tmuxIdMap = window.conchTmuxIdMap.create();
+      }
 
       const appEl = composition && composition.appEl ? composition.appEl : document.getElementById('app');
       const tabBarEl = composition && composition.tabBarEl ? composition.tabBarEl : document.getElementById('tabbar');
@@ -122,6 +125,7 @@
         ? window.conchLayoutRuntime.create({
             invoke,
             getPanes: () => panes,
+            getTabs: () => tabs,
             allPanesInTab: (tabId) => allPanesInTab(tabId),
             getCurrentTab: () => currentTab(),
             renderTree: (treeRoot, getRoot) => window.splitPane.renderTree(treeRoot, getRoot),
@@ -162,6 +166,7 @@
             startTabRename: () => { throw new Error('managerDelegates.startTabRename is unavailable'); },
             createTab: () => { throw new Error('managerDelegates.createTab is unavailable'); },
             createSshTab: () => { throw new Error('managerDelegates.createSshTab is unavailable'); },
+            createTmuxTab: () => { throw new Error('managerDelegates.createTmuxTab is unavailable'); },
           };
 
       let paneDnd = null;
@@ -211,6 +216,7 @@
       const startTabRename = (...args) => managerDelegates.startTabRename(...args);
       const createTab = (...args) => managerDelegates.createTab(...args);
       const createSshTab = (...args) => managerDelegates.createSshTab(...args);
+      const createTmuxTab = (...args) => managerDelegates.createTmuxTab(...args);
       const closePane = (...args) => managerDelegates.closePane(...args);
       const splitPane = (...args) => managerDelegates.splitPane(...args);
 
@@ -268,8 +274,9 @@
           getFocusedPaneId: () => focusedPaneId,
           getCurrentPane: () => currentPane(),
           getCurrentTab: () => currentTab(),
-          closeTab: (tabId) => closeTab(tabId),
+          closeTab: (tabId, options) => closeTab(tabId, options),
           createTab: (options) => createTab(options),
+          createTmuxTab: (options) => createTmuxTab(options),
           closePane: (paneId) => closePane(paneId),
           splitPane: (direction) => splitPane(direction),
           renameActiveTab: () => renameActiveTab(),
@@ -346,6 +353,10 @@
             }, 200);
           }
           applyTmuxStartup();
+        } else if (tabs.size === 0) {
+          createTab().catch(function (error) {
+            showStatus('Failed to initialize first tab: ' + String(error));
+          });
         }
       });
 
@@ -356,25 +367,93 @@
       });
 
       function applyTmuxStartup() {
-        invoke('tmux_get_backend').then(function (backend) {
-          if (backend !== 'tmux') return;
-          invoke('tmux_get_last_session').then(function (lastSession) {
-            if (lastSession) {
-              invoke('tmux_connect', { sessionName: lastSession }).catch(function () {
-                if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
-              });
-            } else {
-              if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
+        if (window.__conchTmuxStartupApplied) return;
+        window.__conchTmuxStartupApplied = true;
+        function connectOrActivate(sessionName) {
+          if (!sessionName) {
+            if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
+            return;
+          }
+          invoke('tmux_connect', { sessionName: sessionName }).then(function () {
+            if (typeof window.__conchTmuxForceSyncSession === 'function') {
+              window.__conchTmuxForceSyncSession(sessionName);
             }
           }).catch(function () {
+            console.info('[tmux] applyTmuxStartup connect failed, activating tool window');
+            if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
+          });
+        }
+        function pickSessionName(sessions) {
+          if (!Array.isArray(sessions) || sessions.length === 0) return null;
+          var sorted = sessions.slice().filter(function (session) {
+            return session && session.name;
+          });
+          if (sorted.length === 0) return null;
+          sorted.sort(function (a, b) {
+            var createdA = Number(a && a.created) || 0;
+            var createdB = Number(b && b.created) || 0;
+            if (createdA !== createdB) return createdB - createdA;
+            return (Number(b && b.id) || 0) - (Number(a && a.id) || 0);
+          });
+          return String(sorted[0].name || '');
+        }
+        invoke('tmux_get_backend').then(function (backend) {
+          console.info('[tmux] applyTmuxStartup backend', backend);
+          if (backend !== 'tmux') return;
+          Promise.all([
+            invoke('tmux_get_last_session'),
+            invoke('tmux_list_sessions').catch(function () { return []; }),
+          ]).then(function (values) {
+            var lastSession = values[0];
+            var sessions = Array.isArray(values[1]) ? values[1] : [];
+            console.info('[tmux] applyTmuxStartup lastSession', lastSession || null);
+            var hasSavedSession = !!lastSession && sessions.some(function (session) {
+              return session && session.name === lastSession;
+            });
+            if (hasSavedSession) {
+              connectOrActivate(lastSession);
+              return;
+            }
+
+            // If the persisted session is missing (or absent), attach the first
+            // available session so tmux backend windows are immediately usable.
+            var fallbackSession = pickSessionName(sessions);
+            if (fallbackSession) {
+              console.info('[tmux] applyTmuxStartup fallback attach', fallbackSession);
+              connectOrActivate(fallbackSession);
+            } else {
+              console.info('[tmux] applyTmuxStartup no sessions; auto-creating one');
+              invoke('tmux_create_session', { name: null }).then(function () {
+                return invoke('tmux_list_sessions');
+              }).then(function (createdSessions) {
+                var createdSession = pickSessionName(Array.isArray(createdSessions) ? createdSessions : []);
+                console.info('[tmux] applyTmuxStartup auto-created session', createdSession || null);
+                connectOrActivate(createdSession);
+              }).catch(function () {
+                console.info('[tmux] applyTmuxStartup auto-create failed, activating tool window');
+                if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
+              });
+            }
+          }).catch(function () {
+            console.info('[tmux] applyTmuxStartup failed to load last session, activating tool window');
             if (window.toolWindowManager) window.toolWindowManager.activate('tmux-sessions');
           });
         }).catch(function () {});
       }
 
-      const firstTabPromise = createTab().catch((e) => {
-        showStatus('Failed to initialize first tab: ' + String(e));
-      });
+      let initialBackend = 'local';
+      try {
+        initialBackend = await invoke('tmux_get_backend');
+        if (window.backendRouter) {
+          window.backendRouter.setMode(initialBackend);
+        }
+      } catch (_) {}
+
+      const firstTabPromise = initialBackend === 'tmux'
+        ? Promise.resolve()
+        : createTab().catch((e) => {
+            showStatus('Failed to initialize first tab: ' + String(e));
+          });
       try {
         await invoke('app_ready');
       } catch (e) {

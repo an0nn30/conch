@@ -24,6 +24,25 @@ impl From<&conch_tmux::TmuxSession> for TmuxSessionInfo {
 }
 
 #[derive(Clone, Serialize)]
+pub(crate) struct TmuxPaneInfo {
+    pub id: u64,
+    pub active: bool,
+    pub width: u16,
+    pub height: u16,
+    pub left: u16,
+    pub top: u16,
+    pub content: String,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct TmuxWindowInfo {
+    pub id: u64,
+    pub name: String,
+    pub active: bool,
+    pub panes: Vec<TmuxPaneInfo>,
+}
+
+#[derive(Clone, Serialize)]
 pub(crate) struct TmuxConnectedEvent {
     pub session: String,
 }

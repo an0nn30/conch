@@ -57,7 +57,51 @@
       }
       if (action === 'new-tab') {
         if (global.backendRouter && global.backendRouter.isTmux()) {
-          global.backendRouter.newTab();
+          const requestSync = function () {
+            if (typeof global.__conchTmuxRequestSyncSoon === 'function') {
+              global.__conchTmuxRequestSyncSoon(120);
+            }
+          };
+          const recoverTmuxConnection = function () {
+            return invoke('tmux_get_last_session')
+              .then(function (sessionName) {
+                if (!sessionName) {
+                  return invoke('tmux_list_sessions').then(function (sessions) {
+                    if (Array.isArray(sessions) && sessions.length > 0 && sessions[0] && sessions[0].name) {
+                      return String(sessions[0].name);
+                    }
+                    throw new Error('No tmux session available');
+                  });
+                }
+                return String(sessionName);
+              })
+              .then(function (sessionName) {
+                return invoke('tmux_connect', { sessionName: sessionName });
+              });
+          };
+
+          global.backendRouter.newTab().then(function () {
+            requestSync();
+          }).catch(function (error) {
+            const message = String(error || '');
+            const isConnectionError =
+              message.toLowerCase().includes('no tmux connection') ||
+              message.toLowerCase().includes('broken pipe');
+            if (!isConnectionError) {
+              showStatus('Failed to create tab: ' + message);
+              return;
+            }
+            recoverTmuxConnection()
+              .then(function () {
+                return global.backendRouter.newTab();
+              })
+              .then(function () {
+                requestSync();
+              })
+              .catch(function (recoverError) {
+                showStatus('Failed to create tab: ' + String(recoverError));
+              });
+          });
           return;
         }
         createTab().catch((error) => showStatus('Failed to create tab: ' + String(error)));

@@ -142,6 +142,16 @@
         return;
       }
 
+      if (pane.kind === 'terminal' && pane.type === 'tmux') {
+        const tmuxPaneId = global.tmuxIdMap ? global.tmuxIdMap.getTmuxForPane(paneId) : null;
+        if (tmuxPaneId != null && global.backendRouter) {
+          global.backendRouter.closePane(tmuxPaneId).catch((error) => {
+            toastError('Failed to close tmux pane: ' + error);
+          });
+        }
+        return;
+      }
+
       if (pane.kind === 'terminal' && pane.spawned) {
         notifyTerminalClosed(paneId, pane.type);
       }
@@ -171,6 +181,21 @@
 
       const tab = tabs.get(pane.tabId);
       if (!tab) return;
+
+      if (pane.kind === 'terminal' && pane.type === 'tmux') {
+        const tmuxPaneId = global.tmuxIdMap ? global.tmuxIdMap.getTmuxForPane(pane.paneId) : null;
+        if (tmuxPaneId == null || !global.backendRouter) return;
+        try {
+          if (direction === 'vertical') {
+            await global.backendRouter.splitVertical(tmuxPaneId);
+          } else {
+            await global.backendRouter.splitHorizontal(tmuxPaneId);
+          }
+        } catch (error) {
+          toastError('Failed to split tmux pane: ' + error);
+        }
+        return;
+      }
 
       const newPaneId = allocatePaneId();
       tab.treeRoot = splitLeaf(tab.treeRoot, pane.paneId, newPaneId, direction);

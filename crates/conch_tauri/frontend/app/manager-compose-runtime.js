@@ -32,6 +32,61 @@
     const closeTabDelegate = deps.closeTabDelegate;
     const showStatus = deps.showStatus;
 
+    function queueTmuxWrite(pane, frontendPaneId, tmuxPaneId, data, source) {
+      if (!pane || tmuxPaneId == null || !global.backendRouter) return false;
+      if (!pane._tmuxWriteQueue) {
+        pane._tmuxWriteQueue = {
+          tmuxPaneId,
+          buffer: '',
+          timer: null,
+          inFlight: false,
+        };
+      }
+      const queue = pane._tmuxWriteQueue;
+      if (queue.tmuxPaneId !== tmuxPaneId) {
+        queue.tmuxPaneId = tmuxPaneId;
+        queue.buffer = '';
+        if (queue.timer) {
+          clearTimeout(queue.timer);
+          queue.timer = null;
+        }
+      }
+
+      queue.buffer += data;
+      if (queue.timer) return true;
+
+      const flush = () => {
+        queue.timer = null;
+        if (queue.inFlight) {
+          queue.timer = setTimeout(flush, 12);
+          return;
+        }
+        const chunk = queue.buffer;
+        if (!chunk) return;
+        queue.buffer = '';
+        queue.inFlight = true;
+
+        global.backendRouter.writeToPane(queue.tmuxPaneId, chunk).then(() => {
+          console.info('[tmux] write success (' + source + ')', {
+            frontendPaneId,
+            tmuxPaneId: queue.tmuxPaneId,
+            len: chunk.length,
+          });
+        }).catch((event) => {
+          console.error('tmux_write error:', event);
+        }).finally(() => {
+          queue.inFlight = false;
+          if (queue.buffer && !queue.timer) {
+            queue.timer = setTimeout(flush, 0);
+          }
+        });
+      };
+
+      // Batch fast keypress bursts into fewer tmux send operations.
+      queue.timer = setTimeout(flush, 12);
+      return true;
+    }
+
     const paneManager = global.conchPaneManager && global.conchPaneManager.create
       ? global.conchPaneManager.create({
           getPanes: () => panes,
@@ -49,6 +104,15 @@
           },
           onTerminalFocused: (paneId, pane) => {
             if (global.filesPanel) global.filesPanel.onTabChanged(pane);
+            if (pane && pane.type === 'tmux') {
+              const tmuxPaneId = pane.tmuxPaneId != null
+                ? pane.tmuxPaneId
+                : (global.tmuxIdMap ? global.tmuxIdMap.getTmuxForPane(paneId) : null);
+              if (tmuxPaneId != null && global.backendRouter) {
+                global.backendRouter.selectPane(tmuxPaneId).catch(() => {});
+              }
+              return;
+            }
             invoke('set_active_pane', { paneId }).catch(() => {});
           },
           unregisterPaneDnd: (paneId) => {
@@ -68,11 +132,27 @@
             return fitAndResizePane(pane);
           },
           onLocalTerminalData: (paneId, data) => {
+            const pane = panes.get(paneId);
             if (shortcutDebugEnabled) {
               console.log(
                 `[conch-keydbg] xterm.onData pane=${paneId} len=${data.length} esc=${data.includes('\x1b')}`,
                 JSON.stringify({ escaped: terminalRuntime.toDebugEscaped(data), hex: terminalRuntime.toDebugHex(data) })
               );
+            }
+            if (pane && pane.type === 'tmux' && global.tmuxIdMap && global.backendRouter) {
+              const tmuxPaneId = pane.tmuxPaneId != null
+                ? pane.tmuxPaneId
+                : global.tmuxIdMap.getTmuxForPane(paneId);
+              if (tmuxPaneId != null) {
+                console.info('[tmux] write request (local path)', {
+                  frontendPaneId: paneId,
+                  tmuxPaneId: tmuxPaneId,
+                  len: data.length,
+                  liveActive: !!pane._tmuxLiveActive,
+                });
+                queueTmuxWrite(pane, paneId, tmuxPaneId, data, 'local path');
+                return;
+              }
             }
             invoke('write_to_pty', { paneId, data }).catch((event) => {
               console.error('write_to_pty error:', event);
@@ -118,6 +198,10 @@
           setNextTabLabel: (value) => setNextTabLabel(value),
           appEl,
           setFocusedPane: (paneId) => setFocusedPane(paneId),
+          rebuildTreeDOM: (tab) => {
+            if (layoutRuntime && layoutRuntime.rebuildTreeDOM) return layoutRuntime.rebuildTreeDOM(tab);
+            return rebuildTreeDOM(tab);
+          },
           fitAndResizeTab: (tab) => {
             if (layoutRuntime && layoutRuntime.fitAndResizeTab) return layoutRuntime.fitAndResizeTab(tab);
             return fitAndResizeTab(tab);
@@ -166,6 +250,21 @@
                 `[conch-keydbg] xterm.onData pane=${paneId} len=${data.length} esc=${data.includes('\x1b')}`,
                 JSON.stringify({ escaped: terminalRuntime.toDebugEscaped(data), hex: terminalRuntime.toDebugHex(data) })
               );
+            }
+            if (pane.type === 'tmux' && global.tmuxIdMap && global.backendRouter) {
+              const tmuxPaneId = pane.tmuxPaneId != null
+                ? pane.tmuxPaneId
+                : global.tmuxIdMap.getTmuxForPane(paneId);
+              console.info('[tmux] onTerminalData routing', {
+                frontendPaneId: paneId,
+                paneType: pane.type,
+                tmuxPaneId: tmuxPaneId == null ? null : tmuxPaneId,
+                liveActive: !!pane._tmuxLiveActive,
+              });
+              if (tmuxPaneId != null) {
+                queueTmuxWrite(pane, paneId, tmuxPaneId, data, 'runtime path');
+                return;
+              }
             }
             const cmd = pane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
             invoke(cmd, { paneId, data }).catch((event) => {

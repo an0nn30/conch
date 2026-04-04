@@ -196,6 +196,27 @@
           }
         }
 
+        // Defensive fallback: always support the canonical New Tab accelerator.
+        // This keeps Cmd+T reliable even if settings-based shortcut maps are stale.
+        if (isMacPlatform && event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && (event.key || '').toLowerCase() === 't') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+          handleMenuAction('new-tab');
+          return;
+        }
+        if (!isMacPlatform && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (event.key || '').toLowerCase() === 't') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+          handleMenuAction('new-tab');
+          return;
+        }
+
         if (isTextInputTarget(event.target)) return;
         if (!combo) return;
         const fKeyHit = functionKeyShortcutFallbacks.find((s) => s.combo === combo);

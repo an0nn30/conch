@@ -834,6 +834,7 @@ name = "conch_tmux"
 version = "3.0.0-rc.1"
 dependencies = [
  "log",
+ "portable-pty",
  "serde",
 ]
 

@@ -100,6 +100,7 @@
           startTabRename: () => { throw new Error('managerDelegates.startTabRename is unavailable'); },
           createTab: () => { throw new Error('managerDelegates.createTab is unavailable'); },
           createSshTab: () => { throw new Error('managerDelegates.createSshTab is unavailable'); },
+          createTmuxTab: () => { throw new Error('managerDelegates.createTmuxTab is unavailable'); },
         };
 
     return {

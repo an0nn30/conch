@@ -50,7 +50,7 @@
    * Set up divider drag via event delegation on the container.
    * Call this ONCE per tab during creation — handles all current and future dividers.
    */
-  function setupDividerDrag(containerEl, getTreeRoot, setTreeRoot) {
+  function setupDividerDrag(containerEl, getTreeRoot, setTreeRoot, onLayoutUpdated) {
     containerEl.addEventListener('pointerdown', (e) => {
       if (!e.target.classList.contains('split-divider')) return;
       e.preventDefault();
@@ -86,11 +86,13 @@
         const tree = getTreeRoot();
         const updated = updateRatioByChildren(tree, child0PaneId, child1PaneId, ratio);
         setTreeRoot(updated);
+        if (typeof onLayoutUpdated === 'function') onLayoutUpdated();
       }
 
       function onUp() {
         divider.removeEventListener('pointermove', onMove);
         divider.removeEventListener('pointerup', onUp);
+        if (typeof onLayoutUpdated === 'function') onLayoutUpdated();
       }
 
       divider.addEventListener('pointermove', onMove);

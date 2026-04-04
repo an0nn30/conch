@@ -83,17 +83,17 @@ impl ControlModeParser {
                 Some(Notification::SessionWindowChanged { session_id, window_id })
             }
 
-            "window-add" => {
+            "window-add" | "unlinked-window-add" => {
                 let id = parse_prefixed_id(rest.trim(), '@')?;
                 Some(Notification::WindowAdd { window_id: id })
             }
 
-            "window-close" => {
+            "window-close" | "unlinked-window-close" => {
                 let id = parse_prefixed_id(rest.trim(), '@')?;
                 Some(Notification::WindowClose { window_id: id })
             }
 
-            "window-renamed" => {
+            "window-renamed" | "unlinked-window-renamed" => {
                 let (id, name) = parse_id_and_name(rest, '@')?;
                 Some(Notification::WindowRenamed { window_id: id, name })
             }
@@ -112,18 +112,18 @@ impl ControlModeParser {
             }
 
             "output" => {
-                // rest is either "%N data..." or just "%N" (empty output)
-                let (pane_id, encoded) = match rest.split_once(' ') {
-                    Some((id_part, data_part)) => {
-                        let id = parse_prefixed_id(id_part, '%')?;
-                        (id, data_part.to_string())
-                    }
-                    None => {
-                        let id = parse_prefixed_id(rest.trim(), '%')?;
-                        (id, String::new())
-                    }
-                };
-                let data = decode_octal_escapes(&encoded);
+                // 3.1 and earlier:
+                //   %output %<pane id> <data...>
+                // 3.2+ with pause mode:
+                //   %output %<pane id> <latency> <data...>
+                let (pane_id, data) = parse_output_payload(rest)?;
+                Some(Notification::Output { pane_id, data })
+            }
+
+            "extended-output" => {
+                // 3.2+:
+                //   %extended-output %<pane id> <latency> [flags...] : <data...>
+                let (pane_id, data) = parse_extended_output_payload(rest)?;
                 Some(Notification::Output { pane_id, data })
             }
 
@@ -225,6 +225,45 @@ fn decode_octal_escapes(s: &str) -> Vec<u8> {
     out
 }
 
+fn parse_output_payload(rest: &str) -> Option<(u64, Vec<u8>)> {
+    let trimmed = rest.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (pane_part, mut remaining) = match trimmed.split_once(' ') {
+        Some((pane, rest)) => (pane, rest.trim_start()),
+        None => (trimmed, ""),
+    };
+    let pane_id = parse_prefixed_id(pane_part, '%')?;
+
+    // Optional latency token in pause mode.
+    if let Some((token, rest_after_token)) = remaining.split_once(' ') {
+        if !token.is_empty() && token.chars().all(|c| c.is_ascii_digit()) {
+            remaining = rest_after_token.trim_start();
+        }
+    }
+
+    Some((pane_id, decode_octal_escapes(remaining)))
+}
+
+fn parse_extended_output_payload(rest: &str) -> Option<(u64, Vec<u8>)> {
+    let trimmed = rest.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (pane_part, remaining) = trimmed.split_once(' ')?;
+    let pane_id = parse_prefixed_id(pane_part, '%')?;
+
+    // Must include latency token first.
+    let (_latency, rest_after_latency) = remaining.trim_start().split_once(' ')?;
+    let rest_after_latency = rest_after_latency.trim_start();
+
+    // Skip optional flags until ": ".
+    let (_metadata, encoded) = rest_after_latency.split_once(": ")?;
+    Some((pane_id, decode_octal_escapes(encoded)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,9 +311,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_unlinked_window_close() {
+        let mut p = ControlModeParser::new();
+        let notifs = p.feed(b"%unlinked-window-close @3\n");
+        assert_eq!(notifs, vec![Notification::WindowClose { window_id: 3 }]);
+    }
+
+    #[test]
     fn parse_window_renamed() {
         let mut p = ControlModeParser::new();
         let notifs = p.feed(b"%window-renamed @1 my-window\n");
+        assert_eq!(notifs, vec![Notification::WindowRenamed { window_id: 1, name: "my-window".into() }]);
+    }
+
+    #[test]
+    fn parse_unlinked_window_renamed() {
+        let mut p = ControlModeParser::new();
+        let notifs = p.feed(b"%unlinked-window-renamed @1 my-window\n");
         assert_eq!(notifs, vec![Notification::WindowRenamed { window_id: 1, name: "my-window".into() }]);
     }
 
@@ -339,6 +392,32 @@ mod tests {
         let mut p = ControlModeParser::new();
         let notifs = p.feed(b"%output %5 \n");
         assert_eq!(notifs, vec![Notification::Output { pane_id: 5, data: Vec::new() }]);
+    }
+
+    #[test]
+    fn parse_output_with_latency_token() {
+        let mut p = ControlModeParser::new();
+        let notifs = p.feed(b"%output %5 123 \\033[31mred\\012\n");
+        assert_eq!(
+            notifs,
+            vec![Notification::Output {
+                pane_id: 5,
+                data: vec![0x1b, b'[', b'3', b'1', b'm', b'r', b'e', b'd', 0x0a],
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_extended_output() {
+        let mut p = ControlModeParser::new();
+        let notifs = p.feed(b"%extended-output %11 3129 : \\033[32mok\\012\n");
+        assert_eq!(
+            notifs,
+            vec![Notification::Output {
+                pane_id: 11,
+                data: vec![0x1b, b'[', b'3', b'2', b'm', b'o', b'k', 0x0a],
+            }]
+        );
     }
 
     #[test]
