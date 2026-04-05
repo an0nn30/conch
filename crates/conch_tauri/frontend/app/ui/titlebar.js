@@ -473,6 +473,9 @@
           collect(item.submenu);
           continue;
         }
+        // Plugin shortcuts are handled by shortcut-runtime fallback logic.
+        // Excluding them here avoids double-dispatch in custom-titlebar mode.
+        if (typeof item.id === 'string' && item.id.startsWith('plugin.')) continue;
         if (!item.shortcut || item.noAccel) continue;
         const combo = parseShortcut(item.shortcut);
         if (combo && item.id) {
