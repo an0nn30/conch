@@ -15,6 +15,7 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 pub(crate) struct PtyBackend {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
+    process_id: Option<u32>,
 }
 
 impl PtyBackend {
@@ -60,9 +61,11 @@ impl PtyBackend {
             cmd.env(k, v);
         }
 
-        pair.slave
+        let child = pair
+            .slave
             .spawn_command(cmd)
             .context("Failed to spawn shell in PTY")?;
+        let process_id = child.process_id();
 
         drop(pair.slave);
 
@@ -74,6 +77,7 @@ impl PtyBackend {
         Ok(Self {
             master: pair.master,
             writer: Mutex::new(writer),
+            process_id,
         })
     }
 
@@ -101,6 +105,60 @@ impl PtyBackend {
     pub fn try_clone_reader(&self) -> Option<Box<dyn std::io::Read + Send>> {
         self.master.try_clone_reader().ok()
     }
+
+    pub fn current_dir(&self) -> Option<String> {
+        self.process_id.and_then(cwd_for_pid)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cwd_for_pid(pid: u32) -> Option<String> {
+    let link = std::path::PathBuf::from(format!("/proc/{pid}/cwd"));
+    std::fs::read_link(link)
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn cwd_for_pid(pid: u32) -> Option<String> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let rc = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            size,
+        )
+    };
+    if rc != size {
+        return None;
+    }
+
+    let info = unsafe { info.assume_init() };
+    let path_bytes = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flat_map(|chunk| chunk.iter().map(|c| *c as u8))
+        .collect::<Vec<u8>>();
+    let nul = path_bytes
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(path_bytes.len());
+    if nul == 0 {
+        return None;
+    }
+
+    std::str::from_utf8(&path_bytes[..nul])
+        .ok()
+        .map(|s| s.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn cwd_for_pid(_pid: u32) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]

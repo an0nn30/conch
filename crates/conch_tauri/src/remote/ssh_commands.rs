@@ -10,7 +10,10 @@ use tokio::sync::mpsc;
 use conch_remote::config::ServerEntry;
 use conch_remote::ssh::{ChannelInput, SshCredentials};
 
-use super::{RemoteState, SshSession, establish_ssh_session, session_key, spawn_output_forwarder};
+use super::{
+    RemoteState, SshSession, establish_ssh_session, session_key, spawn_output_forwarder,
+    update_session_cwd_from_input,
+};
 use crate::pty::PtyExitEvent;
 use crate::vault_commands::VaultState;
 
@@ -215,7 +218,8 @@ pub(crate) fn ssh_write(
             debug_bytes_hex(data.as_bytes())
         );
     }
-    let state = remote.lock();
+    let mut state = remote.lock();
+    update_session_cwd_from_input(&mut state, &key, &data);
     let session = state.sessions.get(&key).ok_or("SSH session not found")?;
     session
         .input_tx
@@ -256,6 +260,74 @@ pub(crate) fn ssh_disconnect(
     if let Some(session) = state.sessions.get(&key) {
         let _ = session.input_tx.send(ChannelInput::Shutdown);
     }
+}
+
+#[tauri::command]
+pub(crate) async fn ssh_get_pane_cwd(
+    window: tauri::WebviewWindow,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    pane_id: u32,
+) -> Result<Option<String>, String> {
+    let key = session_key(window.label(), pane_id);
+    log::info!("ssh_get_pane_cwd: called pane={} key={}", pane_id, key);
+    let (cached, needs_sync, ssh_handle) = {
+        let state = remote.lock();
+        let cached = state.pane_cwds.get(&key).cloned();
+        let needs_sync = *state.pane_cwd_needs_sync.get(&key).unwrap_or(&false);
+        let ssh_handle = state
+            .sessions
+            .get(&key)
+            .and_then(|session| state.connections.get(&session.connection_id))
+            .map(|conn| Arc::clone(&conn.ssh_handle));
+        (cached, needs_sync, ssh_handle)
+    };
+    if cached.is_some() && !needs_sync {
+        return Ok(cached);
+    }
+    if needs_sync {
+        // Wait for prompt/OSC parsing from the interactive stream.
+        // Running `pwd` in a fresh exec channel can return the session default
+        // directory rather than the interactive shell cwd.
+        return Ok(cached);
+    }
+    if cached.is_some() {
+        return Ok(cached);
+    }
+    let Some(handle) = ssh_handle else {
+        return Ok(cached);
+    };
+
+    let cmd = "pwd -P 2>/dev/null || pwd";
+    let (stdout, _stderr, exit_code) = match conch_remote::ssh::exec(&handle, cmd).await {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "ssh_get_pane_cwd: sync exec failed for pane={} key={} err={}",
+                pane_id,
+                key,
+                e
+            );
+            return Ok(cached);
+        }
+    };
+    if exit_code != 0 {
+        return Ok(cached);
+    }
+    let fresh = stdout
+        .lines()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string());
+
+    if let Some(path) = fresh.clone() {
+        let mut state = remote.lock();
+        state.pane_cwds.insert(key.clone(), path.clone());
+        if let Some(home) = super::derive_home_from_path(&path) {
+            state.pane_home_dirs.insert(key.clone(), home);
+        }
+        state.pane_cwd_needs_sync.insert(key, false);
+    }
+    Ok(fresh.or(cached))
 }
 
 /// Open a new shell channel on an existing SSH connection.
@@ -328,12 +400,18 @@ pub(crate) async fn ssh_open_channel(
     let task = tokio::spawn(async move {
         let exited = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         let mut state = remote_for_loop.lock();
-        if state.sessions.remove(&key_for_loop).is_some()
-            && let Some(conn) = state.connections.get_mut(&conn_id)
-        {
-            conn.ref_count = conn.ref_count.saturating_sub(1);
-            if conn.ref_count == 0 {
-                state.connections.remove(&conn_id);
+        if state.sessions.remove(&key_for_loop).is_some() {
+            state.pane_cwds.remove(&key_for_loop);
+            state.pane_cwd_buffers.remove(&key_for_loop);
+            state.pane_input_buffers.remove(&key_for_loop);
+            state.pane_prev_cwds.remove(&key_for_loop);
+            state.pane_cwd_needs_sync.remove(&key_for_loop);
+            state.pane_home_dirs.remove(&key_for_loop);
+            if let Some(conn) = state.connections.get_mut(&conn_id) {
+                conn.ref_count = conn.ref_count.saturating_sub(1);
+                if conn.ref_count == 0 {
+                    state.connections.remove(&conn_id);
+                }
             }
         }
         drop(state);
@@ -357,7 +435,15 @@ pub(crate) async fn ssh_open_channel(
         }
     }
 
-    spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
+    spawn_output_forwarder(
+        &app,
+        &remote,
+        &key,
+        &window_label,
+        pane_id,
+        false,
+        output_rx,
+    );
     Ok(())
 }
 

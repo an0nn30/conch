@@ -20,11 +20,18 @@
   const localPane = createPaneState('local', true);
   const remotePane = createPaneState('remote', false);
   let activeRemotePaneId = null;
+  let localCwdPollTimer = null;
+  let localCwdPollInFlight = false;
+  let lastLocalCwdByPaneId = new Map();
+  let remoteCwdPollTimer = null;
+  let remoteCwdPollInFlight = false;
+  let lastRemoteCwdByPaneId = new Map();
 
   function createPaneState(prefix, isLocal) {
     return {
       prefix,
       isLocal,
+      followCwd: true,
       currentPath: '',
       pathInput: '',
       backStack: [],
@@ -88,10 +95,22 @@
     if (opts.listen) {
       opts.listen('transfer-progress', handleTransferProgress);
     }
+
+    startLocalCwdPolling();
+    startRemoteCwdPolling();
   }
 
   function hasPanelDom() {
     return !!panelEl;
+  }
+
+  function getActivePaneIdForType(expectedType) {
+    const activeTab = getActiveTabFn ? getActiveTabFn() : null;
+    if (!activeTab || activeTab.type !== expectedType) return null;
+    if (activeTab.paneId != null) return activeTab.paneId;
+    if (activeTab.focusedPaneId != null) return activeTab.focusedPaneId;
+    if (activeTab.id != null) return activeTab.id;
+    return null;
   }
 
   function getPaneRoot(selector) {
@@ -184,6 +203,12 @@
 
   async function onTabChanged(tab) {
     if (!hasPanelDom()) return;
+    if (tab && tab.type === 'local') {
+      const paneId = tab.paneId != null ? tab.paneId : tab.focusedPaneId;
+      if (paneId != null) {
+        pollActiveLocalPaneCwd(paneId);
+      }
+    }
     if (!tab || tab.type !== 'ssh' || !tab.spawned) {
       activeRemotePaneId = null;
       remotePane.entries = [];
@@ -197,6 +222,7 @@
     const id = tab.paneId != null ? tab.paneId : tab.id;
     if (activeRemotePaneId === id) return;
     activeRemotePaneId = id;
+    pollActiveRemotePaneCwd(id);
 
     try {
       const path = await invoke('sftp_realpath', { paneId: id, path: '.' });
@@ -209,6 +235,73 @@
       remotePane.error = String(e);
       renderPane(remotePane, getPaneRoot('#fp-remote'));
     }
+  }
+
+  function startLocalCwdPolling() {
+    if (localCwdPollTimer) clearInterval(localCwdPollTimer);
+    localCwdPollTimer = setInterval(() => {
+      const paneId = getActivePaneIdForType('local');
+      if (paneId == null) return;
+      pollActiveLocalPaneCwd(paneId);
+    }, 600);
+  }
+
+  function startRemoteCwdPolling() {
+    if (remoteCwdPollTimer) clearInterval(remoteCwdPollTimer);
+    remoteCwdPollTimer = setInterval(() => {
+      const paneId = getActivePaneIdForType('ssh');
+      if (paneId == null) return;
+      pollActiveRemotePaneCwd(paneId);
+    }, 600);
+  }
+
+  function pollActiveLocalPaneCwd(paneId) {
+    if (!invoke || localCwdPollInFlight || paneId == null) return;
+    const activePaneId = getActivePaneIdForType('local');
+    if (activePaneId !== paneId) return;
+
+    localCwdPollInFlight = true;
+    invoke('get_local_pane_cwd', { paneId })
+      .then((path) => {
+        if (!path) return;
+        if (lastLocalCwdByPaneId.get(paneId) === path) return;
+        lastLocalCwdByPaneId.set(paneId, path);
+        if (localPane.followCwd && path !== localPane.currentPath) {
+          navigate(localPane, path);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        localCwdPollInFlight = false;
+      });
+  }
+
+  function pollActiveRemotePaneCwd(paneId) {
+    if (!invoke || remoteCwdPollInFlight || paneId == null) return;
+    const activePaneId = getActivePaneIdForType('ssh');
+    if (activePaneId !== paneId) return;
+
+    remoteCwdPollInFlight = true;
+    console.info('[files-cwd] polling ssh pane cwd', paneId);
+    invoke('ssh_get_pane_cwd', { paneId })
+      .then((path) => {
+        if (!path) {
+          console.info('[files-cwd] ssh pane cwd empty', paneId);
+          return;
+        }
+        console.info('[files-cwd] ssh pane cwd resolved', paneId, path);
+        if (lastRemoteCwdByPaneId.get(paneId) === path) return;
+        lastRemoteCwdByPaneId.set(paneId, path);
+        if (remotePane.followCwd && path !== remotePane.currentPath) {
+          navigate(remotePane, path);
+        }
+      })
+      .catch((e) => {
+        console.warn('Remote cwd poll failed for pane', paneId, e);
+      })
+      .finally(() => {
+        remoteCwdPollInFlight = false;
+      });
   }
 
   // ---------------------------------------------------------------------------
@@ -342,6 +435,7 @@
         <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
         <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${ICON_HOME}</button>
         <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${ICON_REFRESH}</button>
+        <label class="fp-follow-wrap" title="${pane.followCwd ? 'Following terminal path' : 'Path following paused'}"><span class="fp-follow-label">Follow Path:</span><input class="fp-follow-toggle" type="checkbox" ${pane.followCwd ? 'checked' : ''} ${noSession ? 'disabled' : ''} /></label>
         <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
       </div>
       ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}
@@ -402,6 +496,28 @@
         else if (action === 'hidden') { pane.showHidden = !pane.showHidden; renderPane(pane, el); }
       });
     });
+
+    const followToggle = el.querySelector('.fp-follow-toggle');
+    if (followToggle) {
+      followToggle.addEventListener('change', () => {
+        pane.followCwd = !!followToggle.checked;
+        if (pane.followCwd) {
+          const activeTab = getActiveTabFn ? getActiveTabFn() : null;
+          if (!activeTab) return;
+          const paneId = activeTab.paneId != null ? activeTab.paneId : activeTab.focusedPaneId;
+          if (paneId == null) return;
+          if (pane.isLocal && activeTab.type === 'local') {
+            const knownPath = lastLocalCwdByPaneId.get(paneId);
+            if (knownPath && knownPath !== pane.currentPath) navigate(pane, knownPath);
+            pollActiveLocalPaneCwd(paneId);
+          } else if (!pane.isLocal && activeTab.type === 'ssh') {
+            const knownPath = lastRemoteCwdByPaneId.get(paneId);
+            if (knownPath && knownPath !== pane.currentPath) navigate(pane, knownPath);
+            pollActiveRemotePaneCwd(paneId);
+          }
+        }
+      });
+    }
 
     // Path input
     const pathInput = el.querySelector('.fp-path-input');

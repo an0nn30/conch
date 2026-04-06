@@ -68,6 +68,13 @@ pub(crate) fn cleanup_ssh_sessions(remote: &Arc<Mutex<RemoteState>>, window_labe
         .collect();
 
     for (key, session) in sessions {
+        state.pane_cwds.remove(&key);
+        state.pane_cwd_buffers.remove(&key);
+        state.pane_input_buffers.remove(&key);
+        state.pane_prev_cwds.remove(&key);
+        state.pane_cwd_needs_sync.remove(&key);
+        state.pane_home_dirs.remove(&key);
+
         // Signal the channel loop to shut down.
         let _ = session.input_tx.send(ChannelInput::Shutdown);
 

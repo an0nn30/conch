@@ -212,6 +212,16 @@ pub async fn connect_and_open_shell(
         .await
         .map_err(|e| RemoteError::Connection(format!("PTY request failed: {e}")))?;
 
+    // Best-effort shell hook for cwd tracking without command injection noise.
+    // Servers may ignore SetEnv depending on AcceptEnv policy; that's okay.
+    let _ = channel
+        .set_env(
+            false,
+            "PROMPT_COMMAND",
+            "printf '\\033]7;file://%s%s\\007' \"${HOST:-${HOSTNAME:-}}\" \"$PWD\"",
+        )
+        .await;
+
     channel
         .request_shell(false)
         .await
@@ -405,6 +415,15 @@ pub async fn open_shell_channel(
         .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
         .await
         .map_err(|e| RemoteError::Connection(format!("PTY request failed: {e}")))?;
+
+    // Best-effort shell hook for cwd tracking without command injection noise.
+    let _ = channel
+        .set_env(
+            false,
+            "PROMPT_COMMAND",
+            "printf '\\033]7;file://%s%s\\007' \"${HOST:-${HOSTNAME:-}}\" \"$PWD\"",
+        )
+        .await;
 
     channel
         .request_shell(false)

@@ -206,6 +206,17 @@ pub(crate) fn close_pty(
     state.ptys.lock().remove(&key);
 }
 
+#[tauri::command]
+pub(crate) fn get_local_pane_cwd(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, TauriState>,
+    pane_id: u32,
+) -> Option<String> {
+    let key = session_key(window.label(), pane_id);
+    let guard = state.ptys.lock();
+    guard.get(&key).and_then(|pty| pty.current_dir())
+}
+
 // ---------------------------------------------------------------------------
 // PTY reader loop
 // ---------------------------------------------------------------------------
