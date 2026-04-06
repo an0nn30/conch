@@ -132,9 +132,13 @@ fn update_session_cwd_from_output(state: &mut RemoteState, session_key: &str, te
     let marker = "\x1b]7;";
     let mut latest_path: Option<String> = None;
     loop {
-        let Some(start) = buffer.find(marker) else { break };
+        let Some(start) = buffer.find(marker) else {
+            break;
+        };
         let content_start = start + marker.len();
-        let bel_idx = buffer[content_start..].find('\x07').map(|n| content_start + n);
+        let bel_idx = buffer[content_start..]
+            .find('\x07')
+            .map(|n| content_start + n);
         let st_idx = buffer[content_start..]
             .find("\x1b\\")
             .map(|n| content_start + n);
@@ -194,9 +198,7 @@ fn update_session_cwd_from_output(state: &mut RemoteState, session_key: &str, te
         buffer
     };
     if !keep.is_empty() {
-        state
-            .pane_cwd_buffers
-            .insert(session_key.to_string(), keep);
+        state.pane_cwd_buffers.insert(session_key.to_string(), keep);
     }
 }
 
@@ -415,7 +417,8 @@ fn spawn_output_forwarder(
                 let mut state = remote.lock();
                 update_session_cwd_from_output(&mut state, &session_key, &text);
             }
-            let filtered = strip_bootstrap_noise(&text, &mut bootstrap_state, &mut bootstrap_buffer);
+            let filtered =
+                strip_bootstrap_noise(&text, &mut bootstrap_state, &mut bootstrap_buffer);
             if filtered.is_empty() {
                 continue;
             }
@@ -575,7 +578,11 @@ fn normalize_unix_path(path: &str) -> String {
     }
 }
 
-fn resolve_cd_target(current: Option<&str>, previous: Option<&str>, arg: Option<&str>) -> Option<String> {
+fn resolve_cd_target(
+    current: Option<&str>,
+    previous: Option<&str>,
+    arg: Option<&str>,
+) -> Option<String> {
     let cur = current?;
     let home = if cur.starts_with("/home/") || cur.starts_with("/Users/") {
         Some(cur.to_string())
@@ -647,7 +654,11 @@ fn maybe_apply_cd_command(state: &mut RemoteState, session_key: &str, line: &str
     }
 }
 
-pub(crate) fn update_session_cwd_from_input(state: &mut RemoteState, session_key: &str, text: &str) {
+pub(crate) fn update_session_cwd_from_input(
+    state: &mut RemoteState,
+    session_key: &str,
+    text: &str,
+) {
     let mut line_buf = state
         .pane_input_buffers
         .remove(session_key)
