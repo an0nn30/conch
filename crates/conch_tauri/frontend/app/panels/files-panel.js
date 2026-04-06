@@ -50,6 +50,29 @@
     };
   }
 
+  function applyFollowPathSetting(enabled) {
+    const follow = enabled !== false;
+    localPane.followCwd = follow;
+    remotePane.followCwd = follow;
+  }
+
+  function loadFollowPathSetting() {
+    if (!invoke) return;
+    invoke('get_all_settings')
+      .then((settings) => {
+        const follow = settings
+          && settings.conch
+          && settings.conch.files
+          && typeof settings.conch.files.follow_path === 'boolean'
+          ? settings.conch.files.follow_path
+          : true;
+        applyFollowPathSetting(follow);
+      })
+      .catch(() => {
+        applyFollowPathSetting(true);
+      });
+  }
+
   function init(opts) {
     invoke = opts.invoke;
     panelEl = opts.panelEl;
@@ -94,8 +117,12 @@
     // Listen for transfer progress
     if (opts.listen) {
       opts.listen('transfer-progress', handleTransferProgress);
+      opts.listen('config-changed', () => {
+        loadFollowPathSetting();
+      });
     }
 
+    loadFollowPathSetting();
     startLocalCwdPolling();
     startRemoteCwdPolling();
   }
@@ -435,7 +462,6 @@
         <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
         <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${ICON_HOME}</button>
         <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${ICON_REFRESH}</button>
-        <label class="fp-follow-wrap" title="${pane.followCwd ? 'Following terminal path' : 'Path following paused'}"><span class="fp-follow-label">Follow Path:</span><input class="fp-follow-toggle" type="checkbox" ${pane.followCwd ? 'checked' : ''} ${noSession ? 'disabled' : ''} /></label>
         <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
       </div>
       ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}
@@ -496,28 +522,6 @@
         else if (action === 'hidden') { pane.showHidden = !pane.showHidden; renderPane(pane, el); }
       });
     });
-
-    const followToggle = el.querySelector('.fp-follow-toggle');
-    if (followToggle) {
-      followToggle.addEventListener('change', () => {
-        pane.followCwd = !!followToggle.checked;
-        if (pane.followCwd) {
-          const activeTab = getActiveTabFn ? getActiveTabFn() : null;
-          if (!activeTab) return;
-          const paneId = activeTab.paneId != null ? activeTab.paneId : activeTab.focusedPaneId;
-          if (paneId == null) return;
-          if (pane.isLocal && activeTab.type === 'local') {
-            const knownPath = lastLocalCwdByPaneId.get(paneId);
-            if (knownPath && knownPath !== pane.currentPath) navigate(pane, knownPath);
-            pollActiveLocalPaneCwd(paneId);
-          } else if (!pane.isLocal && activeTab.type === 'ssh') {
-            const knownPath = lastRemoteCwdByPaneId.get(paneId);
-            if (knownPath && knownPath !== pane.currentPath) navigate(pane, knownPath);
-            pollActiveRemotePaneCwd(paneId);
-          }
-        }
-      });
-    }
 
     // Path input
     const pathInput = el.querySelector('.fp-path-input');

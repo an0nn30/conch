@@ -26,6 +26,7 @@
     { group: 'Workspace', items: [
       { id: 'appearance', label: 'Appearance', description: 'Theme, notifications, window chrome, UI fonts', keywords: 'theme colors interface notifications window menu bar fonts typography appearance' },
       { id: 'keyboard', label: 'Keymap', description: 'Core shortcuts, tool window shortcuts, plugin shortcuts', keywords: 'keyboard shortcuts keymap bindings hotkeys commands tool windows plugins' },
+      { id: 'files', label: 'Files', description: 'File explorer behavior and path following', keywords: 'files explorer path follow cwd directory' },
     ]},
     { group: 'Terminal', items: [
       { id: 'terminal', label: 'Terminal', description: 'Font rendering and scrolling', keywords: 'terminal font size offset scrolling display rendering' },
@@ -52,6 +53,7 @@
     { section: 'keyboard', label: 'Keyboard Shortcuts', keywords: 'keyboard shortcuts keymap bindings' },
     { section: 'keyboard', label: 'Tool Window Shortcuts', keywords: 'tool window keyboard shortcuts sidebars panels' },
     { section: 'keyboard', label: 'Plugin Shortcuts', keywords: 'plugin keyboard shortcuts' },
+    { section: 'files', label: 'Follow Path', keywords: 'files explorer follow path cwd directory sync', targetId: 'files:follow-path' },
     { section: 'terminal', label: 'Terminal Font Family', keywords: 'terminal font family monospace', targetId: 'terminal:font-family' },
     { section: 'terminal', label: 'Terminal Font Size', keywords: 'terminal font size', targetId: 'terminal:font-size' },
     { section: 'terminal', label: 'Font Offset X', keywords: 'font offset horizontal x rendering', targetId: 'terminal:font-offset-x' },
@@ -82,6 +84,16 @@
   function init(opts) {
     invoke = opts.invoke;
     listenFn = opts.listen;
+  }
+
+  function ensureSettingsShape(settings) {
+    if (!settings.conch) settings.conch = {};
+    if (!settings.conch.files || typeof settings.conch.files !== 'object') {
+      settings.conch.files = {};
+    }
+    if (typeof settings.conch.files.follow_path !== 'boolean') {
+      settings.conch.files.follow_path = true;
+    }
   }
 
   function normalizeSearchText(value) {
@@ -494,6 +506,8 @@
       ]);
       originalSettings = JSON.parse(JSON.stringify(settings));
       pendingSettings = JSON.parse(JSON.stringify(settings));
+      ensureSettingsShape(originalSettings);
+      ensureSettingsShape(pendingSettings);
       cachedThemes = themes;
       cachedPlugins = plugins;
       cachedPluginMenuItems = Array.isArray(pluginMenuItems) ? pluginMenuItems : [];
@@ -522,6 +536,8 @@
       ]);
       originalSettings = JSON.parse(JSON.stringify(settings));
       pendingSettings = JSON.parse(JSON.stringify(settings));
+      ensureSettingsShape(originalSettings);
+      ensureSettingsShape(pendingSettings);
       cachedThemes = themes;
       cachedPlugins = plugins;
       cachedPluginMenuItems = Array.isArray(pluginMenuItems) ? pluginMenuItems : [];
@@ -740,6 +756,7 @@
     switch (currentSection) {
       case 'appearance': renderAppearance(content); break;
       case 'keyboard': renderKeyboard(content); break;
+      case 'files': renderFiles(content); break;
       case 'terminal': renderTerminal(content); break;
       case 'shell': renderShell(content); break;
       case 'cursor': renderCursor(content); break;
@@ -2217,6 +2234,27 @@
       normalInput.value = 14.0;
     });
     c.appendChild(resetLink);
+  }
+
+  function renderFiles(c) {
+    const h = document.createElement('h3');
+    h.textContent = 'Files';
+    c.appendChild(h);
+
+    addSectionLabel(c, 'Explorer');
+    const followSwitch = makeSwitch(
+      pendingSettings.conch.files.follow_path !== false,
+      (val) => { pendingSettings.conch.files.follow_path = val; }
+    );
+    setRowTarget(
+      addRow(
+        c,
+        'Follow Path',
+        'Automatically follow the active terminal working directory in local and remote file panes.',
+        followSwitch
+      ),
+      'files:follow-path'
+    );
   }
 
   async function applySettings() {

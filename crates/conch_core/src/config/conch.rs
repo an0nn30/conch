@@ -8,6 +8,7 @@ use std::collections::HashMap;
 pub struct ConchConfig {
     pub keyboard: KeyboardConfig,
     pub ui: UiConfig,
+    pub files: FilesConfig,
     pub plugins: PluginsConfig,
     pub check_for_updates: bool,
 }
@@ -17,9 +18,23 @@ impl Default for ConchConfig {
         Self {
             keyboard: KeyboardConfig::default(),
             ui: UiConfig::default(),
+            files: FilesConfig::default(),
             plugins: PluginsConfig::default(),
             check_for_updates: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesConfig {
+    /// When true, local/remote file panes follow the active terminal cwd.
+    pub follow_path: bool,
+}
+
+impl Default for FilesConfig {
+    fn default() -> Self {
+        Self { follow_path: true }
     }
 }
 
@@ -335,6 +350,12 @@ mod tests {
     fn native_notifications_defaults_to_true() {
         let cfg = UiConfig::default();
         assert!(cfg.native_notifications);
+    }
+
+    #[test]
+    fn files_config_defaults_to_follow_enabled() {
+        let cfg = FilesConfig::default();
+        assert!(cfg.follow_path);
     }
 
     #[test]

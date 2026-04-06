@@ -18,30 +18,6 @@
     .fp-tb-btn:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
     .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
     .fp-tb-btn.active { color: var(--green); }
-    .fp-follow-wrap {
-      display: inline-flex; align-items: center; gap: 4px; margin-left: 4px;
-      color: var(--text-muted); font-size: var(--ui-font-small); user-select: none;
-    }
-    .fp-follow-label { white-space: nowrap; }
-    .fp-follow-toggle {
-      appearance: none; width: 26px; height: 14px; border-radius: 999px;
-      border: 1px solid var(--tab-border); background: var(--input-bg);
-      position: relative; cursor: pointer; outline: none;
-      transition: background 120ms ease, border-color 120ms ease;
-    }
-    .fp-follow-toggle::after {
-      content: ''; position: absolute; left: 1px; top: 1px;
-      width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted);
-      transition: transform 120ms ease, background 120ms ease;
-    }
-    .fp-follow-toggle:checked {
-      background: color-mix(in srgb, var(--green) 25%, var(--input-bg));
-      border-color: var(--green);
-    }
-    .fp-follow-toggle:checked::after {
-      transform: translateX(12px);
-      background: var(--green);
-    }
     .fp-path-input {
       flex: 1; min-width: 0; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
       border-radius: 3px; color: var(--fg); font: 11px "JetBrains Mono", monospace; outline: none;
