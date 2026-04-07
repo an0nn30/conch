@@ -191,6 +191,12 @@ mod tests {
                 config_dir: std::path::PathBuf::from("/tmp/test"),
                 default_key_paths: vec![],
             },
+            pane_cwds: HashMap::new(),
+            pane_cwd_buffers: HashMap::new(),
+            pane_input_buffers: HashMap::new(),
+            pane_prev_cwds: HashMap::new(),
+            pane_cwd_needs_sync: HashMap::new(),
+            pane_home_dirs: HashMap::new(),
         }));
 
         // Insert test sessions (no connections — they require a real SSH handle).
@@ -274,6 +280,12 @@ mod tests {
                 config_dir: std::path::PathBuf::from("/tmp/test"),
                 default_key_paths: vec![],
             },
+            pane_cwds: HashMap::new(),
+            pane_cwd_buffers: HashMap::new(),
+            pane_input_buffers: HashMap::new(),
+            pane_prev_cwds: HashMap::new(),
+            pane_cwd_needs_sync: HashMap::new(),
+            pane_home_dirs: HashMap::new(),
         }));
 
         let count = cleanup_ssh_sessions(&remote, "nonexistent");

@@ -541,6 +541,12 @@ mod tests {
                 config_dir: std::path::PathBuf::from("/tmp/test_config"),
                 default_key_paths: vec![],
             },
+            pane_cwds: HashMap::new(),
+            pane_cwd_buffers: HashMap::new(),
+            pane_input_buffers: HashMap::new(),
+            pane_prev_cwds: HashMap::new(),
+            pane_cwd_needs_sync: HashMap::new(),
+            pane_home_dirs: HashMap::new(),
         }
     }
 
