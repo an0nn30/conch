@@ -1,6 +1,6 @@
 -- plugin-name: Tmux Manager
 -- plugin-description: Manage local tmux sessions from a docked tool window and command palette actions.
--- plugin-version: 1.7.1
+-- plugin-version: 1.8.0-diag
 -- plugin-api: ^1.0
 -- plugin-permissions: ui.panel, ui.menu, ui.settings, ui.notify, ui.dialog, session.exec, session.new_tab, session.rename_tab, bus.subscribe, config.read, config.write
 -- plugin-type: tool_window
@@ -182,9 +182,111 @@ local function tmux_available()
     return false
 end
 
-local function run_tmux(args)
-    return run_shell(sh_quote(tmux_command_path()) .. " " .. args)
+-- ---------------------------------------------------------------------------
+-- Diagnostic logging (sandbox-safe: uses exec_local instead of os/io)
+-- Log file: ~/.config/conch/tmux-manager-diag.log
+-- ---------------------------------------------------------------------------
+local DIAG_LOG = nil
+
+local function diag_log_path()
+    if DIAG_LOG ~= nil then return DIAG_LOG end
+    local r = session.exec_local("echo $HOME")
+    local home = trim(r.stdout or "")
+    if home == "" then home = "/tmp" end
+    DIAG_LOG = home .. "/.config/conch/tmux-manager-diag.log"
+    return DIAG_LOG
 end
+
+local function dlog(msg)
+    local ts_result = session.exec_local("date '+%Y-%m-%d %H:%M:%S'")
+    local ts = trim(ts_result.stdout or "?")
+    local line = "[" .. ts .. "] " .. tostring(msg)
+    session.exec_local("echo " .. sh_quote(line) .. " >> " .. sh_quote(diag_log_path()))
+end
+
+local function run_tmux(args)
+    local cmd = sh_quote(tmux_command_path()) .. " " .. args
+    local result = run_shell(cmd)
+    dlog("run_tmux: " .. args .. " => exit=" .. tostring(result.exit_code)
+        .. (trim(result.stderr or "") ~= "" and (" stderr=" .. trim(result.stderr)) or ""))
+    return result
+end
+
+local function dlog_tmux_state(label)
+    dlog("--- " .. label .. " ---")
+    local sv = run_shell(sh_quote(tmux_command_path()) .. " display-message -p '#{version}' 2>&1")
+    dlog("  tmux version: " .. trim(sv.stdout or "?") .. " (exit=" .. tostring(sv.exit_code) .. ")")
+
+    local ls = run_shell(sh_quote(tmux_command_path())
+        .. " list-sessions -F '#{session_name} attached=#{session_attached} windows=#{session_windows} id=#{session_id}' 2>&1")
+    for _, line in ipairs(split_lines(ls.stdout or "")) do
+        if trim(line) ~= "" then dlog("  session: " .. line) end
+    end
+    if trim(ls.stdout or "") == "" then
+        dlog("  (no sessions or server not running, stderr=" .. trim(ls.stderr or "") .. ")")
+    end
+
+    local sessions = run_shell(sh_quote(tmux_command_path()) .. " list-sessions -F '#{session_name}' 2>/dev/null")
+    for _, sname in ipairs(split_lines(sessions.stdout or "")) do
+        sname = trim(sname)
+        if sname ~= "" then
+            local opts = run_shell(sh_quote(tmux_command_path())
+                .. " show-options -t " .. sh_quote(sname) .. " 2>/dev/null")
+            dlog("  options[" .. sname .. "]: " .. trim(opts.stdout or "(none)"):gsub("\n", " | "))
+
+            local wopts = run_shell(sh_quote(tmux_command_path())
+                .. " show-window-options -t " .. sh_quote(sname) .. " 2>/dev/null")
+            dlog("  wopts[" .. sname .. "]:   " .. trim(wopts.stdout or "(none)"):gsub("\n", " | "))
+
+            local panes = run_shell(sh_quote(tmux_command_path())
+                .. " list-panes -t " .. sh_quote(sname)
+                .. " -s -F '#{pane_id} pid=#{pane_pid} dead=#{pane_dead} cmd=#{pane_current_command}' 2>/dev/null")
+            for _, pline in ipairs(split_lines(panes.stdout or "")) do
+                if trim(pline) ~= "" then dlog("  pane[" .. sname .. "]: " .. pline) end
+            end
+        end
+    end
+
+    local gopts = run_shell(sh_quote(tmux_command_path()) .. " show-window-options -g 2>/dev/null")
+    local remain_line = ""
+    for _, line in ipairs(split_lines(gopts.stdout or "")) do
+        if line:find("remain-on-exit", 1, true) then remain_line = trim(line) end
+    end
+    dlog("  global wopts: " .. (remain_line ~= "" and remain_line or "remain-on-exit (default)"))
+
+    local global_sopts = run_shell(sh_quote(tmux_command_path()) .. " show-options -g 2>/dev/null")
+    local destroy_line = ""
+    for _, line in ipairs(split_lines(global_sopts.stdout or "")) do
+        if line:find("destroy-unattached", 1, true) then destroy_line = trim(line) end
+    end
+    if destroy_line ~= "" then dlog("  global sopts: " .. destroy_line) end
+
+    local server_opts = run_shell(sh_quote(tmux_command_path()) .. " show-options -s 2>/dev/null")
+    dlog("  server opts: " .. trim(server_opts.stdout or "(none)"):gsub("\n", " | "))
+    dlog("--- end " .. label .. " ---")
+end
+
+-- Respawn any dead panes in a managed session so the user never sees
+-- "[Pane is dead]" after an app restart.
+local function respawn_dead_panes(session_name)
+    local result = run_tmux("list-panes -t " .. sh_quote(session_name)
+        .. " -s -F '#{pane_id} #{pane_dead}'")
+    if (result.exit_code or -1) ~= 0 then return 0 end
+    local count = 0
+    for _, line in ipairs(split_lines(result.stdout or "")) do
+        local pane_id, dead = line:match("^(%S+)%s+(%d+)")
+        if pane_id and dead == "1" then
+            dlog("respawning dead pane " .. pane_id .. " in session " .. session_name)
+            run_tmux("respawn-pane -k -t " .. sh_quote(pane_id))
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        dlog("respawned " .. count .. " dead pane(s) in " .. session_name)
+    end
+    return count
+end
+-- ---------------------------------------------------------------------------
 
 local function session_by_name(name)
     for _, s in ipairs(state.sessions or {}) do
@@ -267,6 +369,8 @@ local function ensure_session_persistence(name, opts)
         return
     end
     opts = opts or {}
+    dlog("ensure_session_persistence: name=" .. name .. " opts.force=" .. tostring(opts.force)
+        .. " opts.refresh_windows=" .. tostring(opts.refresh_windows))
 
     local state_for_session = state.persistence_initialized[name]
     if state_for_session == nil then
@@ -277,15 +381,24 @@ local function ensure_session_persistence(name, opts)
     local force = opts.force == true
     local refresh_windows = opts.refresh_windows == true
     if state_for_session.base == true and not force and not refresh_windows then
+        dlog("  persistence already initialized, skipping")
         return
     end
 
     -- Keep session state alive when client tabs are closed/reopened and
     -- avoid losing a window if the attached pane exits unexpectedly.
     if force or state_for_session.base ~= true then
+        dlog("  setting base persistence options")
         run_tmux("set-option -q -t " .. sh_quote(name) .. " destroy-unattached off")
         run_tmux("set-option -q -t " .. sh_quote(name) .. " detach-on-destroy off")
-        run_tmux("set-window-option -g -q -t " .. sh_quote(name) .. " remain-on-exit on")
+        run_tmux("set-window-option -q -t " .. sh_quote(name) .. " remain-on-exit on")
+
+        -- Auto-respawn dead panes at the tmux-server level so the session
+        -- stays alive even after Conch is closed.  The hook fires inside the
+        -- tmux server and does not require Conch to be running.
+        run_tmux("set-hook -t " .. sh_quote(name) .. " " .. sh_quote("pane-died[99]") .. " " .. sh_quote("respawn-pane -k"))
+        dlog("  installed per-session pane-died auto-respawn hook")
+
         state_for_session.base = true
     end
 
@@ -294,8 +407,10 @@ local function ensure_session_persistence(name, opts)
     end
 
     if force or state_for_session.windows ~= true then
+        dlog("  setting per-window remain-on-exit")
         local windows_result = run_tmux("list-windows -t " .. sh_quote(name) .. " -F '#{window_id}'")
         if tonumber(windows_result.exit_code or -1) ~= 0 then
+            dlog("  list-windows failed, aborting per-window setup")
             return
         end
         for _, line in ipairs(split_lines(windows_result.stdout or "")) do
@@ -640,10 +755,18 @@ local function attach_session(name)
         return
     end
 
+    dlog("attach_session: name=" .. name)
+    dlog_tmux_state("before attach " .. name)
+
     ensure_session_persistence(name, { refresh_windows = true })
+
+    -- Respawn any dead panes left from a previous app exit so the user
+    -- never sees "[Pane is dead]" when re-attaching.
+    respawn_dead_panes(name)
 
     local existing_tab_id = tracked_tab_id_for_session(name)
     if existing_tab_id ~= nil then
+        dlog("  focusing existing tab " .. existing_tab_id)
         session.focus_tab_by_id(existing_tab_id)
         state.status = "Switched to existing tab for tmux session '" .. name .. "'."
         return
@@ -653,6 +776,8 @@ local function attach_session(name)
         "attach-session -t " .. sh_quote(name),
         name
     )
+    dlog("  launched tab, tab_id=" .. tostring(tab_id))
+    dlog_tmux_state("after attach launched " .. name)
     if tab_id ~= nil and tab_id ~= "" then
         local known = session_by_name(name)
         if known ~= nil and tonumber(known.created_unix or 0) > 0 then
@@ -713,17 +838,27 @@ local function create_session(name)
         return
     end
 
+    dlog("create_session: name=" .. name)
+    dlog_tmux_state("before create " .. name)
+
     local create_result = run_tmux("new-session -d -s " .. sh_quote(name))
     if tonumber(create_result.exit_code or -1) ~= 0 then
         local message = trim(create_result.stderr or "Unable to create tmux session.")
         state.status = "Create failed."
         state.last_error = message
+        dlog("  create FAILED: " .. message)
         app.notify("Tmux Manager", message, "error", 3800)
         return
     end
 
+    dlog_tmux_state("after new-session " .. name)
+
     ensure_session_persistence(name, { refresh_windows = true })
+
+    dlog_tmux_state("after persistence " .. name)
+
     local tab_id = launch_tmux_in_plain_tab("attach-session -t " .. sh_quote(name), name)
+    dlog("  launched tab, tab_id=" .. tostring(tab_id))
     if tab_id ~= nil and tab_id ~= "" then
         state.pending_tabs_by_name[name] = tab_id
     end
@@ -1589,6 +1724,46 @@ local function handle_button_action(action_id, context_x, context_y)
 end
 
 function setup()
+    dlog("===== PLUGIN SETUP START =====")
+    dlog_tmux_state("setup initial state")
+
+    -- Clean up stale global remain-on-exit from previous plugin versions.
+    -- Older versions set this globally (-g) which polluted all tmux sessions.
+    -- Now we set it per-window on managed sessions only.
+    run_tmux("set-window-option -g -uq remain-on-exit 2>/dev/null")
+    dlog("cleared stale global remain-on-exit")
+
+    -- Respawn any dead panes across all sessions left from a previous exit.
+    local ls = run_tmux("list-sessions -F '#{session_name}' 2>/dev/null")
+    for _, sname in ipairs(split_lines(ls.stdout or "")) do
+        sname = trim(sname)
+        if sname ~= "" then
+            respawn_dead_panes(sname)
+        end
+    end
+
+    -- Install tmux hooks to log session lifecycle events to the diag log.
+    -- These fire inside the tmux server regardless of whether Conch is running.
+    local log_path = diag_log_path()
+    local hooks = {
+        { "client-detached",         "client-detached session=#{session_name} client=#{client_name}" },
+        { "client-session-changed",  "client-session-changed session=#{session_name}" },
+        { "session-closed",          "session-closed session=#{session_name}" },
+        { "window-linked",           "window-linked session=#{session_name} window=#{window_name}" },
+        { "window-unlinked",         "window-unlinked session=#{session_name} window=#{window_name}" },
+        { "pane-died",               "pane-died session=#{session_name} pane=#{pane_id} pid=#{pane_pid} status=#{pane_dead_status} signal=#{pane_dead_signal}" },
+        { "pane-exited",             "pane-exited session=#{session_name} pane=#{pane_id} pid=#{pane_pid}" },
+    }
+    for _, h in ipairs(hooks) do
+        -- Build: tmux set-hook -g <hook> 'run-shell "echo ... >> logfile"'
+        local inner = "echo \\\"[$(date +%%Y-%%m-%%d\\ %%H:%%M:%%S)] tmux-hook: " .. h[2] .. "\\\" >> " .. log_path:gsub('"', '\\"')
+        run_shell(sh_quote(tmux_command_path())
+            .. " set-hook -g " .. h[1]
+            .. " 'run-shell \"" .. inner .. "\"'"
+            .. " 2>/dev/null")
+    end
+    dlog("tmux hooks installed")
+
     sync_tmux_settings_draft_from_host()
     app.register_settings_section({
         id = "tmux-manager",
@@ -1614,6 +1789,8 @@ function setup()
     app.register_command("Tmux: Rename Tab...", ACTION_RENAME_TAB_EXISTING)
     app.subscribe("host.tick")
     refresh_sessions(true)
+    dlog("===== PLUGIN SETUP COMPLETE =====")
+    dlog_tmux_state("setup final state")
 end
 
 function render()

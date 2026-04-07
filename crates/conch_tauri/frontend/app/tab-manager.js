@@ -313,6 +313,7 @@
 
       button.addEventListener('click', () => activateTab(tabId));
       term.onTitleChange((title) => {
+        if (tab.pluginRenamed) return;
         const tabTitle = normalizeTabTitle(title, tab.label);
         tab.hasCustomTitle = true;
         setTabLabel(tab.button, tabTitle);
@@ -413,6 +414,7 @@
 
       button.addEventListener('click', () => activateTab(tabId));
       term.onTitleChange((title) => {
+        if (tab.pluginRenamed) return;
         const tabTitle = normalizeTabTitle(title, tab.label);
         tab.hasCustomTitle = true;
         setTabLabel(tab.button, tabTitle);

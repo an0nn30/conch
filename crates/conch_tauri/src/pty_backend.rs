@@ -18,6 +18,35 @@ pub(crate) struct PtyBackend {
     process_id: Option<u32>,
 }
 
+impl Drop for PtyBackend {
+    fn drop(&mut self) {
+        // portable-pty's UnixMasterWriter::drop() sends `\n` + EOF (Ctrl-D) to
+        // the PTY master.  When the PTY hosts a `tmux attach-session`, that EOF
+        // is forwarded by the tmux client to the **active pane** inside the tmux
+        // session, causing the pane's shell to exit cleanly (status 0).
+        //
+        // To prevent this we replace the writer with a no-op sink before the
+        // struct's field-level drops run.  The original writer is `forget`-ed so
+        // its Drop (and the EOF write) never executes.  Its underlying FD is
+        // leaked, but that FD is closed moments later when the process exits or
+        // when the master FD is closed, and this path only runs during window or
+        // app cleanup.
+        //
+        // Sending SIGHUP explicitly to the child process group ensures the shell
+        // and any child processes (e.g. `tmux attach`) still receive a proper
+        // hangup signal.
+        if let Some(pid) = self.process_id {
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGHUP);
+            }
+        }
+
+        let mut guard = self.writer.lock();
+        let old_writer = std::mem::replace(&mut *guard, Box::new(std::io::sink()));
+        std::mem::forget(old_writer);
+    }
+}
+
 impl PtyBackend {
     /// Spawn a new PTY with the given dimensions and shell/env overrides.
     pub fn new(
