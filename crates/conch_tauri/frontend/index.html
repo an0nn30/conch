@@ -63,11 +63,6 @@
     <button id="status-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
   </div>
 
-  <script>
-    // Block the native browser context menu globally (release builds only).
-    // Custom app context menus are unaffected as they are built in JS.
-    document.addEventListener('contextmenu', e => e.preventDefault());
-  </script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
@@ -77,15 +72,47 @@
        terminal to render with a fallback font.  The canvas renderer in
        xterm.js 5.x is fast enough for interactive use. -->
   <script src="app/core/utils.js"></script>
+  <script src="app/core/tauri-client.js"></script>
+  <script src="app/core/keyboard-router.js"></script>
+  <script src="app/core/dialog-service.js"></script>
+  <script src="app/core/layout-service.js"></script>
+  <script src="app/core/config-service.js"></script>
   <script src="app/ui/titlebar.js"></script>
   <script src="app/ui/toast.js"></script>
   <script src="app/ui/notification-panel.js"></script>
   <script src="app/panels/plugin-widgets.js"></script>
+  <script src="app/features/settings/constants.js"></script>
+  <script src="app/features/settings/data-service.js"></script>
+  <script src="app/features/settings/search.js"></script>
+  <script src="app/features/settings/sidebar.js"></script>
+  <script src="app/features/settings/sections-appearance.js"></script>
+  <script src="app/features/settings/sections-basic.js"></script>
+  <script src="app/features/settings/sections-keyboard.js"></script>
+  <script src="app/features/settings/sections-terminal.js"></script>
+  <script src="app/features/settings/plugins-section.js"></script>
   <script src="app/panels/settings.js"></script>
   <script src="app/panels/file-icons.js"></script>
+  <script src="app/features/files/data-service.js"></script>
+  <script src="app/features/files/pane-store.js"></script>
+  <script src="app/features/files/actions.js"></script>
+  <script src="app/features/files/pane-view.js"></script>
+  <script src="app/features/files/transfers.js"></script>
   <script src="app/panels/files-panel.js"></script>
+  <script src="app/features/vault/data-service.js"></script>
+  <script src="app/features/vault/dialogs.js"></script>
+  <script src="app/features/vault/account-form.js"></script>
+  <script src="app/features/vault/sections.js"></script>
   <script src="app/panels/vault.js"></script>
   <script src="app/core/keygen.js"></script>
+  <script src="app/features/ssh/data-service.js"></script>
+  <script src="app/features/ssh/store.js"></script>
+  <script src="app/features/ssh/actions.js"></script>
+  <script src="app/features/ssh/view.js"></script>
+  <script src="app/features/ssh/context-menu.js"></script>
+  <script src="app/features/ssh/auth-prompts.js"></script>
+  <script src="app/features/ssh/dependency-prompt.js"></script>
+  <script src="app/features/ssh/connection-form.js"></script>
+  <script src="app/features/ssh/dialogs.js"></script>
   <script src="app/panels/ssh-panel.js"></script>
   <script src="app/layout/tool-window-manager.js"></script>
   <script src="app/panels/tunnel-manager.js"></script>
@@ -118,11 +145,11 @@
   <script src="app/terminal-runtime.js"></script>
   <script src="app/startup-runtime.js"></script>
   <script src="app/main-runtime.js"></script>
-  <div id="terminal-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+  <div id="terminal-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--tab-border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
     <button class="context-item" data-action="split-vertical" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Vertically</button>
     <button class="context-item" data-action="split-horizontal" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Horizontally</button>
   </div>
-  <div id="tab-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+  <div id="tab-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--tab-border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
     <button class="context-item" data-action="rename-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Rename Tab</button>
     <button class="context-item" data-action="close-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Close Tab</button>
   </div>

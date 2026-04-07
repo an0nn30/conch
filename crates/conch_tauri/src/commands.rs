@@ -137,6 +137,7 @@ pub(crate) struct KeyboardShortcuts {
     close_pane: String,
     rename_tab: String,
     manage_tunnels: String,
+    vault_open: String,
 }
 
 #[tauri::command]
@@ -153,6 +154,7 @@ pub(crate) fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> Key
         close_pane: kb.close_pane.clone(),
         rename_tab: kb.rename_tab.clone(),
         manage_tunnels: kb.manage_tunnels.clone(),
+        vault_open: kb.vault_open.clone(),
     }
 }
 
@@ -171,6 +173,7 @@ pub(crate) struct WindowLayout {
     bottom_panel_height: Option<f64>,
     zen_mode: Option<bool>,
     tool_window_zones: Option<std::collections::HashMap<String, String>>,
+    active_tool_windows: Option<std::collections::HashMap<String, String>>,
     split_ratios: Option<SplitRatios>,
 }
 
@@ -194,6 +197,7 @@ pub(crate) struct SavedLayout {
     bottom_panel_height: f64,
     zen_mode: bool,
     tool_window_zones: std::collections::HashMap<String, String>,
+    active_tool_windows: std::collections::HashMap<String, String>,
     left_split_ratio: f64,
     right_split_ratio: f64,
 }
@@ -230,7 +234,8 @@ pub(crate) fn get_saved_layout() -> SavedLayout {
         bottom_panel_visible: state.layout.bottom_panel_visible,
         bottom_panel_height: state.layout.bottom_panel_height as f64,
         zen_mode: state.layout.zen_mode,
-        tool_window_zones: state.layout.tool_window_zones,
+        tool_window_zones: state.layout.tool_window_zones.clone(),
+        active_tool_windows: state.layout.active_tool_windows.clone(),
         left_split_ratio: state.layout.left_split_ratio as f64,
         right_split_ratio: state.layout.right_split_ratio as f64,
     }
@@ -269,6 +274,9 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     }
     if let Some(zones) = layout.tool_window_zones {
         state.layout.tool_window_zones = zones;
+    }
+    if let Some(active_windows) = layout.active_tool_windows {
+        state.layout.active_tool_windows = active_windows;
     }
     if let Some(ratios) = layout.split_ratios {
         if let Some(l) = ratios.left {

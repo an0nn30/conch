@@ -7,16 +7,30 @@
   let listen = null;
   let serverDataFn = null; // returns { folders, ungrouped, ssh_config }
 
-  function attachEscapeHandler(onEscape) {
-    const onKey = (e) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      e.stopPropagation();
-      onEscape();
-      document.removeEventListener('keydown', onKey, true);
-    };
-    document.addEventListener('keydown', onKey, true);
-    return onKey;
+  function setOverlayDialogAttributes(overlay, label) {
+    if (!overlay) return;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', String(label || 'Dialog'));
+  }
+
+  function registerOverlayEscape(overlay, name, onEscape) {
+    const keyboardRouter = window.conchKeyboardRouter;
+    if (!keyboardRouter || typeof keyboardRouter.register !== 'function') {
+      console.warn('tunnel-manager: keyboard router unavailable, skipping escape registration:', name || 'tunnel-overlay');
+      return () => {};
+    }
+    return keyboardRouter.register({
+      name: name || 'tunnel-overlay',
+      priority: 220,
+      isActive: () => !!(overlay && overlay.isConnected),
+      onKeyDown: (event) => {
+        if (!overlay || !overlay.isConnected) return false;
+        if (event.key !== 'Escape') return false;
+        onEscape(event);
+        return true;
+      },
+    });
   }
 
   function init(opts) {
@@ -50,6 +64,7 @@
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
     overlay.id = 'tunnel-manager-overlay';
+    setOverlayDialogAttributes(overlay, 'SSH tunnels');
 
     overlay.innerHTML = `
       <div class="ssh-form tunnel-manager-dialog">
@@ -87,11 +102,23 @@
     }
 
     // Events
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
-    overlay.querySelector('#tm-close').addEventListener('click', removeOverlay);
-    overlay.querySelector('#tm-new').addEventListener('click', () => showNewTunnelForm());
+    let closed = false;
+    let unregisterEscape = null;
+    const closeManager = () => {
+      if (closed) return;
+      closed = true;
+      if (typeof unregisterEscape === 'function') unregisterEscape();
+      unregisterEscape = null;
+      removeOverlay();
+    };
 
-    attachEscapeHandler(() => removeOverlay());
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeManager(); });
+    overlay.querySelector('#tm-close').addEventListener('click', closeManager);
+    overlay.querySelector('#tm-new').addEventListener('click', () => {
+      closeManager();
+      showNewTunnelForm();
+    });
+    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-manager-main', () => closeManager());
   }
 
   function createTunnelRow(tunnel) {
@@ -220,6 +247,7 @@
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
     overlay.style.zIndex = '3100';
+    setOverlayDialogAttributes(overlay, 'Delete tunnel');
     overlay.innerHTML = `
       <div class="ssh-form ssh-form-small">
         <div class="ssh-form-title">Delete Tunnel</div>
@@ -234,14 +262,22 @@
     `;
     document.body.appendChild(overlay);
 
-    const dismiss = () => overlay.remove();
+    let dismissed = false;
+    let unregisterEscape = null;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (typeof unregisterEscape === 'function') unregisterEscape();
+      unregisterEscape = null;
+      overlay.remove();
+    };
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
     overlay.querySelector('#del-cancel').addEventListener('click', dismiss);
     overlay.querySelector('#del-confirm').addEventListener('click', async () => {
       dismiss();
       await doDelete(tunnel);
     });
-    attachEscapeHandler(() => dismiss());
+    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-delete-dialog', () => dismiss());
   }
 
   function showRowMenu(e, tunnel, status, errorMsg) {
@@ -262,6 +298,8 @@
 
     const menu = document.createElement('div');
     menu.className = 'ssh-context-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Tunnel actions');
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
 
@@ -275,9 +313,17 @@
       const el = document.createElement('div');
       el.className = 'ssh-context-menu-item' + (item.danger ? ' danger' : '');
       el.textContent = item.label;
-      el.addEventListener('click', () => {
+      el.setAttribute('role', 'menuitem');
+      el.tabIndex = 0;
+      const activate = () => {
         removeContextMenu();
         item.action();
+      };
+      el.addEventListener('click', activate);
+      el.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        activate();
       });
       menu.appendChild(el);
     }
@@ -287,6 +333,8 @@
       const rect = menu.getBoundingClientRect();
       if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
       if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+      const firstItem = menu.querySelector('.ssh-context-menu-item[role="menuitem"]');
+      if (firstItem && typeof firstItem.focus === 'function') firstItem.focus();
     });
     setTimeout(() => document.addEventListener('click', removeContextMenu, { once: true }), 0);
   }
@@ -314,10 +362,9 @@
       return { key, label: `${s.label} \u2014 ${key}` };
     });
 
-    const defaultServer = serverOptions.length > 0 ? serverOptions[0].key : '';
-
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
+    setOverlayDialogAttributes(overlay, 'New SSH tunnel');
     overlay.innerHTML = `
       <div class="ssh-form">
         <div class="ssh-form-title">New SSH Tunnel</div>
@@ -354,14 +401,24 @@
     document.body.appendChild(overlay);
     setTimeout(() => overlay.querySelector('#nt-local-port').focus(), 50);
 
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
-    attachEscapeHandler(() => removeOverlay());
+    let dismissed = false;
+    let unregisterEscape = null;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (typeof unregisterEscape === 'function') unregisterEscape();
+      unregisterEscape = null;
+      removeOverlay();
+    };
 
-    overlay.querySelector('#nt-cancel').addEventListener('click', () => { removeOverlay(); show(); });
-    overlay.querySelector('#nt-save').addEventListener('click', () => submitNewTunnel(overlay));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
+    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-new-form', () => dismiss());
+
+    overlay.querySelector('#nt-cancel').addEventListener('click', () => { dismiss(); show(); });
+    overlay.querySelector('#nt-save').addEventListener('click', () => submitNewTunnel(overlay, dismiss));
   }
 
-  async function submitNewTunnel(overlay) {
+  async function submitNewTunnel(overlay, dismissOverlay) {
     const sessionKey = overlay.querySelector('#nt-server').value;
     const localPort = parseInt(overlay.querySelector('#nt-local-port').value, 10);
     const remoteHost = overlay.querySelector('#nt-remote-host').value.trim() || 'localhost';
@@ -391,7 +448,8 @@
       auto_start: false,
     };
 
-    removeOverlay();
+    if (typeof dismissOverlay === 'function') dismissOverlay();
+    else removeOverlay();
 
     try {
       await invoke('tunnel_save', { tunnel });
@@ -431,6 +489,7 @@
 
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
+    setOverlayDialogAttributes(overlay, 'Edit SSH tunnel');
     overlay.innerHTML = `
       <div class="ssh-form">
         <div class="ssh-form-title">Edit SSH Tunnel</div>
@@ -467,17 +526,27 @@
     document.body.appendChild(overlay);
     setTimeout(() => overlay.querySelector('#et-local-port').focus(), 50);
 
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { removeOverlay(); show(); } });
-    attachEscapeHandler(() => {
+    let dismissed = false;
+    let unregisterEscape = null;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (typeof unregisterEscape === 'function') unregisterEscape();
+      unregisterEscape = null;
       removeOverlay();
+    };
+
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { dismiss(); show(); } });
+    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-edit-form', () => {
+      dismiss();
       show();
     });
 
-    overlay.querySelector('#et-cancel').addEventListener('click', () => { removeOverlay(); show(); });
-    overlay.querySelector('#et-save').addEventListener('click', () => submitEditTunnel(overlay, tunnel));
+    overlay.querySelector('#et-cancel').addEventListener('click', () => { dismiss(); show(); });
+    overlay.querySelector('#et-save').addEventListener('click', () => submitEditTunnel(overlay, tunnel, dismiss));
   }
 
-  async function submitEditTunnel(overlay, original) {
+  async function submitEditTunnel(overlay, original, dismissOverlay) {
     const sessionKey = overlay.querySelector('#et-server').value;
     const localPort = parseInt(overlay.querySelector('#et-local-port').value, 10);
     const remoteHost = overlay.querySelector('#et-remote-host').value.trim() || 'localhost';
@@ -503,7 +572,8 @@
       auto_start: original.auto_start || false,
     };
 
-    removeOverlay();
+    if (typeof dismissOverlay === 'function') dismissOverlay();
+    else removeOverlay();
 
     try {
       // Stop the tunnel if it was running (config changed).
@@ -524,6 +594,7 @@
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
     overlay.style.zIndex = '3100';
+    setOverlayDialogAttributes(overlay, title || 'Tunnel error');
     overlay.innerHTML = `
       <div class="ssh-form ssh-form-small">
         <div class="ssh-form-title">${esc(title)}</div>
@@ -539,7 +610,15 @@
     `;
     document.body.appendChild(overlay);
 
-    const dismiss = () => overlay.remove();
+    let dismissed = false;
+    let unregisterEscape = null;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (typeof unregisterEscape === 'function') unregisterEscape();
+      unregisterEscape = null;
+      overlay.remove();
+    };
     overlay.querySelector('#err-dismiss').addEventListener('click', dismiss);
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
 
@@ -556,7 +635,7 @@
       });
     }
 
-    attachEscapeHandler(() => dismiss());
+    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-error-dialog', () => dismiss());
   }
 
   // ---------------------------------------------------------------------------

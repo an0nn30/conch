@@ -47,6 +47,8 @@ pub struct LayoutConfig {
     pub zen_mode: bool,
     /// Tool window zone assignments: window-id → zone-name.
     pub tool_window_zones: HashMap<String, String>,
+    /// Active tool window by zone-name.
+    pub active_tool_windows: HashMap<String, String>,
     /// Left sidebar top/bottom split ratio (0.0–1.0, top portion).
     pub left_split_ratio: f32,
     /// Right sidebar top/bottom split ratio (0.0–1.0, top portion).
@@ -68,6 +70,7 @@ impl Default for LayoutConfig {
             status_bar_visible: true,
             zen_mode: false,
             tool_window_zones: HashMap::new(),
+            active_tool_windows: HashMap::new(),
             left_split_ratio: 0.5,
             right_split_ratio: 0.5,
         }
@@ -112,6 +115,9 @@ mod tests {
         let mut zones = HashMap::new();
         zones.insert("ssh-sessions".into(), "right-top".into());
         zones.insert("file-explorer".into(), "left-top".into());
+        let mut active = HashMap::new();
+        active.insert("right-top".into(), "ssh-sessions".into());
+        active.insert("left-top".into(), "file-explorer".into());
 
         let original = PersistentState {
             layout: LayoutConfig {
@@ -127,6 +133,7 @@ mod tests {
                 status_bar_visible: false,
                 zen_mode: true,
                 tool_window_zones: zones,
+                active_tool_windows: active,
                 left_split_ratio: 0.6,
                 right_split_ratio: 0.4,
             },
@@ -148,6 +155,10 @@ mod tests {
             restored.layout.tool_window_zones.get("ssh-sessions"),
             Some(&"right-top".to_string())
         );
+        assert_eq!(
+            restored.layout.active_tool_windows.get("right-top"),
+            Some(&"ssh-sessions".to_string())
+        );
         assert_eq!(restored.layout.left_split_ratio, 0.6);
         assert_eq!(restored.layout.right_split_ratio, 0.4);
     }
@@ -160,6 +171,7 @@ mod tests {
         assert!(ps.layout.left_panel_visible);
         assert!(ps.layout.status_bar_visible);
         assert!(ps.layout.tool_window_zones.is_empty());
+        assert!(ps.layout.active_tool_windows.is_empty());
         assert_eq!(ps.layout.left_split_ratio, 0.5);
         assert_eq!(ps.layout.right_split_ratio, 0.5);
     }

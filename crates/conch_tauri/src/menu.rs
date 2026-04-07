@@ -322,7 +322,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_VAULT_ID,
         "Credential Vault\u{2026}",
         true,
-        Some(&primary_accelerator("Shift+V")),
+        Some(&config_key_to_accelerator(&keyboard.vault_open)),
     )?;
     let generate_ssh_key = MenuItem::with_id(
         app,
@@ -514,7 +514,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_VAULT_ID,
             "Credential Vault\u{2026}",
             true,
-            Some(&primary_accelerator("Shift+V")),
+            Some(&config_key_to_accelerator(&keyboard.vault_open)),
         )?));
         tools_items.push(Box::new(MenuItem::with_id(
             app,

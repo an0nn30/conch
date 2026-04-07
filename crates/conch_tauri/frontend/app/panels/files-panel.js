@@ -7,14 +7,28 @@
   let panelEl = null;
   let panelWrapEl = null;
   let resizeHandleEl = null;
+  let layoutService = null;
+  const filesDataService = exports.conchFilesFeatureDataService || {};
+  const filesPaneStore = exports.conchFilesPaneStore || {};
+  const filesActions = exports.conchFilesActions || {};
+  const filesPaneView = exports.conchFilesPaneView || {};
+  const filesTransfers = exports.conchFilesTransfers || {};
   let fitActiveTabFn = null;
   let getActiveTabFn = null;
+  let transferController = null;
 
   // Navigation icons — PNG assets from icons/ directory
   const ICON_BACK = '<img src="icons/go-previous-dark.png" width="12" height="12" class="fp-icon">';
   const ICON_FWD = '<img src="icons/go-next-dark.png" width="12" height="12" class="fp-icon">';
   const ICON_HOME = '<img src="icons/go-home-dark.png" width="12" height="12" class="fp-icon">';
   const ICON_REFRESH = '<img src="icons/view-refresh-dark.png" width="12" height="12" class="fp-icon">';
+
+  function createPaneState(prefix, isLocal) {
+    if (!filesPaneStore || typeof filesPaneStore.createPaneState !== 'function') {
+      throw new Error('files-pane-store missing createPaneState');
+    }
+    return filesPaneStore.createPaneState(prefix, isLocal);
+  }
 
   // Pane state
   const localPane = createPaneState('local', true);
@@ -27,45 +41,30 @@
   let remoteCwdPollInFlight = false;
   let lastRemoteCwdByPaneId = new Map();
 
-  function createPaneState(prefix, isLocal) {
-    return {
-      prefix,
-      isLocal,
-      followCwd: true,
-      currentPath: '',
-      pathInput: '',
-      backStack: [],
-      forwardStack: [],
-      entries: [],
-      sortColumn: 'name',
-      sortAscending: true,
-      showHidden: false,
-      colExt: false,
-      colSize: true,
-      colModified: false,
-      error: null,
-      loading: false,
-      // Transfer state per entry: { [name]: { status, percent } }
-      transferStatus: {},
-    };
-  }
-
   function applyFollowPathSetting(enabled) {
-    const follow = enabled !== false;
-    localPane.followCwd = follow;
-    remotePane.followCwd = follow;
+    if (!filesPaneStore || typeof filesPaneStore.applyFollowPathSetting !== 'function') {
+      console.error('files-pane-store missing applyFollowPathSetting');
+      return;
+    }
+    filesPaneStore.applyFollowPathSetting(localPane, remotePane, enabled);
   }
 
   function loadFollowPathSetting() {
     if (!invoke) return;
-    invoke('get_all_settings')
+    if (!filesDataService || typeof filesDataService.getAllSettings !== 'function') {
+      console.error('files-data-service missing getAllSettings');
+      applyFollowPathSetting(true);
+      return;
+    }
+    if (!filesPaneStore || typeof filesPaneStore.getFollowPathFromSettings !== 'function') {
+      console.error('files-pane-store missing getFollowPathFromSettings');
+      applyFollowPathSetting(true);
+      return;
+    }
+    const loadSettings = filesDataService.getAllSettings(invoke);
+    loadSettings
       .then((settings) => {
-        const follow = settings
-          && settings.conch
-          && settings.conch.files
-          && typeof settings.conch.files.follow_path === 'boolean'
-          ? settings.conch.files.follow_path
-          : true;
+        const follow = filesPaneStore.getFollowPathFromSettings(settings);
         applyFollowPathSetting(follow);
       })
       .catch(() => {
@@ -78,8 +77,25 @@
     panelEl = opts.panelEl;
     panelWrapEl = opts.panelWrapEl;
     resizeHandleEl = opts.resizeHandleEl;
+    layoutService = opts.layoutService
+      || (window.conchServices && window.conchServices.layoutService)
+      || null;
     fitActiveTabFn = opts.fitActiveTab;
     getActiveTabFn = opts.getActiveTab;
+    transferController = filesTransfers && typeof filesTransfers.createController === 'function'
+      ? filesTransfers.createController({
+        localPane,
+        remotePane,
+        loadEntries,
+        formatSize: window.utils && window.utils.formatSize,
+        toast: window.toast,
+        cancelTransfer: (transferId) => (
+          filesDataService && typeof filesDataService.transferCancel === 'function'
+            ? filesDataService.transferCancel(invoke, transferId)
+            : Promise.reject(new Error('Files data service unavailable: transferCancel'))
+        ),
+      })
+      : null;
 
     if (!panelEl) {
       console.warn('filesPanel.init called without a panel element');
@@ -104,7 +120,10 @@
     restoreLayout();
 
     // Start local pane at home
-    invoke('get_home_dir').then((home) => {
+    const homePromise = filesDataService && typeof filesDataService.getHomeDir === 'function'
+      ? filesDataService.getHomeDir(invoke)
+      : Promise.reject(new Error('Files data service unavailable: getHomeDir'));
+    homePromise.then((home) => {
       localPane.currentPath = home;
       localPane.pathInput = home;
       loadEntries(localPane);
@@ -207,16 +226,21 @@
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (!panelEl) return;
-      invoke('save_window_layout', {
-        layout: { files_panel_width: panelEl.offsetWidth, files_panel_visible: !isHidden() },
-      }).catch(() => {});
+      const patch = { files_panel_width: panelEl.offsetWidth, files_panel_visible: !isHidden() };
+      if (layoutService && typeof layoutService.savePartialLayout === 'function') {
+        layoutService.savePartialLayout(patch);
+      } else {
+        invoke('save_window_layout', { layout: patch }).catch(() => {});
+      }
     }, 300);
   }
 
   async function restoreLayout() {
     if (window.toolWindowManager) return;
     try {
-      const saved = await invoke('get_saved_layout');
+      const saved = layoutService && typeof layoutService.getSavedLayout === 'function'
+        ? await layoutService.getSavedLayout()
+        : await invoke('get_saved_layout');
       if (saved.files_panel_width > 100) panelEl.style.width = saved.files_panel_width + 'px';
       if (saved.files_panel_visible === false) panelWrapEl.classList.add('hidden');
       else panelWrapEl.classList.remove('hidden');
@@ -252,7 +276,9 @@
     pollActiveRemotePaneCwd(id);
 
     try {
-      const path = await invoke('sftp_realpath', { paneId: id, path: '.' });
+      const path = filesDataService && typeof filesDataService.getRemoteRealPath === 'function'
+        ? await filesDataService.getRemoteRealPath(invoke, id, '.')
+        : await Promise.reject(new Error('Files data service unavailable: getRemoteRealPath'));
       remotePane.currentPath = path;
       remotePane.pathInput = path;
       remotePane.backStack = [];
@@ -288,7 +314,10 @@
     if (activePaneId !== paneId) return;
 
     localCwdPollInFlight = true;
-    invoke('get_local_pane_cwd', { paneId })
+    const localCwdPromise = filesDataService && typeof filesDataService.getLocalPaneCwd === 'function'
+      ? filesDataService.getLocalPaneCwd(invoke, paneId)
+      : Promise.reject(new Error('Files data service unavailable: getLocalPaneCwd'));
+    localCwdPromise
       .then((path) => {
         if (!path) return;
         if (lastLocalCwdByPaneId.get(paneId) === path) return;
@@ -310,7 +339,10 @@
 
     remoteCwdPollInFlight = true;
     console.info('[files-cwd] polling ssh pane cwd', paneId);
-    invoke('ssh_get_pane_cwd', { paneId })
+    const remoteCwdPromise = filesDataService && typeof filesDataService.getRemotePaneCwd === 'function'
+      ? filesDataService.getRemotePaneCwd(invoke, paneId)
+      : Promise.reject(new Error('Files data service unavailable: getRemotePaneCwd'));
+    remoteCwdPromise
       .then((path) => {
         if (!path) {
           console.info('[files-cwd] ssh pane cwd empty', paneId);
@@ -345,7 +377,9 @@
     try {
       let entries;
       if (pane.isLocal) {
-        entries = await invoke('local_list_dir', { path: pane.currentPath });
+        entries = filesDataService && typeof filesDataService.listLocalDir === 'function'
+          ? await filesDataService.listLocalDir(invoke, pane.currentPath)
+          : await Promise.reject(new Error('Files data service unavailable: listLocalDir'));
       } else {
         if (!activeRemotePaneId) {
           pane.entries = [];
@@ -353,7 +387,9 @@
           renderPane(pane, el);
           return;
         }
-        entries = await invoke('sftp_list_dir', { paneId: activeRemotePaneId, path: pane.currentPath });
+        entries = filesDataService && typeof filesDataService.listRemoteDir === 'function'
+          ? await filesDataService.listRemoteDir(invoke, activeRemotePaneId, pane.currentPath)
+          : await Promise.reject(new Error('Files data service unavailable: listRemoteDir'));
       }
       pane.entries = entries;
       sortEntries(pane);
@@ -366,74 +402,66 @@
   }
 
   function sortEntries(pane) {
-    const col = pane.sortColumn;
-    const asc = pane.sortAscending;
-    pane.entries.sort((a, b) => {
-      // Dirs first always
-      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-      let ord = 0;
-      if (col === 'name') ord = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-      else if (col === 'ext') {
-        const ea = extOf(a.name), eb = extOf(b.name);
-        ord = ea.localeCompare(eb);
-      }
-      else if (col === 'size') ord = (a.size || 0) - (b.size || 0);
-      else if (col === 'modified') ord = (a.modified || 0) - (b.modified || 0);
-      return asc ? ord : -ord;
-    });
+    if (!filesPaneStore || typeof filesPaneStore.sortEntries !== 'function') {
+      console.error('files-pane-store missing sortEntries');
+      return;
+    }
+    filesPaneStore.sortEntries(pane);
   }
 
   // ---------------------------------------------------------------------------
   // Navigation
   // ---------------------------------------------------------------------------
 
+  function actionDeps() {
+    return {
+      loadEntries,
+      getHomeDir: async () => (
+        filesDataService && typeof filesDataService.getHomeDir === 'function'
+          ? filesDataService.getHomeDir(invoke)
+          : Promise.reject(new Error('Files data service unavailable: getHomeDir'))
+      ),
+    };
+  }
+
   function navigate(pane, path) {
-    pane.backStack.push(pane.currentPath);
-    pane.forwardStack = [];
-    pane.currentPath = path;
-    pane.pathInput = path;
-    loadEntries(pane);
+    if (!filesActions || typeof filesActions.navigate !== 'function') {
+      console.error('files-actions missing navigate');
+      return;
+    }
+    filesActions.navigate(pane, path, actionDeps());
   }
 
   function goBack(pane) {
-    if (pane.backStack.length === 0) return;
-    pane.forwardStack.push(pane.currentPath);
-    pane.currentPath = pane.backStack.pop();
-    pane.pathInput = pane.currentPath;
-    loadEntries(pane);
+    if (!filesActions || typeof filesActions.goBack !== 'function') {
+      console.error('files-actions missing goBack');
+      return;
+    }
+    filesActions.goBack(pane, actionDeps());
   }
 
   function goForward(pane) {
-    if (pane.forwardStack.length === 0) return;
-    pane.backStack.push(pane.currentPath);
-    pane.currentPath = pane.forwardStack.pop();
-    pane.pathInput = pane.currentPath;
-    loadEntries(pane);
+    if (!filesActions || typeof filesActions.goForward !== 'function') {
+      console.error('files-actions missing goForward');
+      return;
+    }
+    filesActions.goForward(pane, actionDeps());
   }
 
   async function goHome(pane) {
-    if (pane.isLocal) {
-      try {
-        const home = await invoke('get_home_dir');
-        navigate(pane, home);
-      } catch (_) {
-        navigate(pane, '/');
-      }
-    } else {
-      navigate(pane, '.');
+    if (!filesActions || typeof filesActions.goHome !== 'function') {
+      console.error('files-actions missing goHome');
+      return;
     }
+    await filesActions.goHome(pane, actionDeps());
   }
 
   function activateEntry(pane, entry) {
-    if (!entry.is_dir) return;
-    const sep = '/';
-    let newPath;
-    if (pane.currentPath.endsWith(sep)) {
-      newPath = pane.currentPath + entry.name;
-    } else {
-      newPath = pane.currentPath + sep + entry.name;
+    if (!filesActions || typeof filesActions.activateEntry !== 'function') {
+      console.error('files-actions missing activateEntry');
+      return;
     }
-    navigate(pane, newPath);
+    filesActions.activateEntry(pane, entry, actionDeps());
   }
 
   // ---------------------------------------------------------------------------
@@ -442,111 +470,39 @@
 
   function renderPane(pane, el) {
     if (!el) return;
-    const isRemote = !pane.isLocal;
-    const noSession = isRemote && !activeRemotePaneId;
-    const label = isRemote
-      ? (noSession ? 'Remote — No SSH session' : 'Remote')
-      : 'Local';
-
-    const visibleEntries = pane.entries.filter((e) => pane.showHidden || !e.name.startsWith('.'));
-    const hiddenCount = pane.entries.length - visibleEntries.length;
-    const footerText = hiddenCount > 0
-      ? `${visibleEntries.length} items (${hiddenCount} hidden)`
-      : `${visibleEntries.length} items`;
-
-    el.innerHTML = `
-      <div class="fp-pane-label">${esc(label)}</div>
-      <div class="fp-toolbar">
-        <button class="fp-tb-btn" data-action="back" ${pane.backStack.length === 0 ? 'disabled' : ''} title="Back">${ICON_BACK}</button>
-        <button class="fp-tb-btn" data-action="forward" ${pane.forwardStack.length === 0 ? 'disabled' : ''} title="Forward">${ICON_FWD}</button>
-        <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
-        <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${ICON_HOME}</button>
-        <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${ICON_REFRESH}</button>
-        <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
-      </div>
-      ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}
-      <div class="fp-table-wrap">
-        <table class="fp-table">
-          <thead><tr>
-            <th class="fp-th-name" data-col="name">Name ${sortArrow(pane, 'name')}</th>
-            ${pane.colExt ? `<th class="fp-th-ext" data-col="ext">Ext ${sortArrow(pane, 'ext')}</th>` : ''}
-            ${pane.colSize ? `<th class="fp-th-size" data-col="size">Size ${sortArrow(pane, 'size')}</th>` : ''}
-            ${pane.colModified ? `<th class="fp-th-mod" data-col="modified">Modified ${sortArrow(pane, 'modified')}</th>` : ''}
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="fp-footer">${noSession ? '' : footerText}</div>
-    `;
-
-    // Populate table body
-    const tbody = el.querySelector('tbody');
-    for (const entry of visibleEntries) {
-      const tr = document.createElement('tr');
-      tr.className = 'fp-row';
-      const ts = pane.transferStatus[entry.name];
-      if (ts) {
-        if (ts.status === 'completed') tr.classList.add('fp-transferred');
-        else if (ts.status === 'in_progress') tr.classList.add('fp-transferring');
-      }
-      tr.dataset.name = entry.name;
-
-      const icon = window.fileIcons.iconFor(entry.name, entry.is_dir, !pane.isLocal);
-      let cells = `<td class="fp-cell-name">${icon} <span>${esc(entry.name)}</span>`;
-      if (ts && ts.status === 'in_progress') {
-        cells += `<span class="fp-transfer-pct">${ts.percent || 0}%</span>`;
-      }
-      cells += '</td>';
-      if (pane.colExt) cells += `<td class="fp-cell-ext">${esc(extOf(entry.name))}</td>`;
-      if (pane.colSize) cells += `<td class="fp-cell-size">${entry.is_dir ? '' : formatSize(entry.size)}</td>`;
-      if (pane.colModified) cells += `<td class="fp-cell-mod">${entry.modified ? formatDate(entry.modified) : ''}</td>`;
-      tr.innerHTML = cells;
-
-      tr.addEventListener('dblclick', () => activateEntry(pane, entry));
-      tr.addEventListener('click', () => {
-        el.querySelectorAll('.fp-row.selected').forEach((r) => r.classList.remove('selected'));
-        tr.classList.add('selected');
-        pane._selectedName = entry.name;
-      });
-      tbody.appendChild(tr);
+    if (!filesPaneView || typeof filesPaneView.renderPane !== 'function') {
+      console.error('files-pane-view missing renderPane');
+      el.innerHTML = '<div class="fp-error">Files pane view module unavailable.</div>';
+      return;
     }
-
-    // Wire toolbar buttons
-    el.querySelectorAll('.fp-tb-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action;
-        if (action === 'back') goBack(pane);
-        else if (action === 'forward') goForward(pane);
-        else if (action === 'home') goHome(pane);
-        else if (action === 'refresh') loadEntries(pane);
-        else if (action === 'hidden') { pane.showHidden = !pane.showHidden; renderPane(pane, el); }
-      });
-    });
-
-    // Path input
-    const pathInput = el.querySelector('.fp-path-input');
-    pathInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const val = pathInput.value.trim();
-        if (val) navigate(pane, val);
-      }
-    });
-
-    // Column header click to sort
-    el.querySelectorAll('th[data-col]').forEach((th) => {
-      th.style.cursor = 'pointer';
-      th.addEventListener('click', () => {
-        const col = th.dataset.col;
+    filesPaneView.renderPane(pane, el, {
+      activeRemotePaneId,
+      iconBack: ICON_BACK,
+      iconForward: ICON_FWD,
+      iconHome: ICON_HOME,
+      iconRefresh: ICON_REFRESH,
+      fileIcons: window.fileIcons,
+      sortArrow,
+      extOf,
+      formatSize,
+      formatDate,
+      esc,
+      attr,
+      onActivateEntry: (entry) => activateEntry(pane, entry),
+      onSelectEntry: (name) => { pane._selectedName = name; },
+      onBack: () => goBack(pane),
+      onForward: () => goForward(pane),
+      onHome: () => goHome(pane),
+      onRefresh: () => loadEntries(pane),
+      onToggleHidden: () => { pane.showHidden = !pane.showHidden; renderPane(pane, el); },
+      onNavigate: (path) => navigate(pane, path),
+      onSort: (col) => {
         if (pane.sortColumn === col) pane.sortAscending = !pane.sortAscending;
         else { pane.sortColumn = col; pane.sortAscending = true; }
         sortEntries(pane);
         renderPane(pane, el);
-      });
-      // Right-click to toggle column visibility
-      th.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        showColumnMenu(e, pane, el);
-      });
+      },
+      onOpenColumnMenu: (event) => showColumnMenu(event, pane, el),
     });
   }
 
@@ -556,34 +512,16 @@
   }
 
   function showColumnMenu(e, pane, el) {
-    // Remove existing
-    document.querySelectorAll('.fp-col-menu').forEach((m) => m.remove());
-
-    const menu = document.createElement('div');
-    menu.className = 'fp-col-menu';
-    menu.style.left = e.clientX + 'px';
-    menu.style.top = e.clientY + 'px';
-
-    const cols = [
-      { key: 'colExt', label: 'Extension' },
-      { key: 'colSize', label: 'Size' },
-      { key: 'colModified', label: 'Modified' },
-    ];
-
-    for (const c of cols) {
-      const item = document.createElement('div');
-      item.className = 'fp-col-menu-item';
-      item.innerHTML = `<span class="fp-col-check">${pane[c.key] ? '✓' : ''}</span> ${c.label}`;
-      item.addEventListener('click', () => {
-        pane[c.key] = !pane[c.key];
-        menu.remove();
-        renderPane(pane, el);
-      });
-      menu.appendChild(item);
+    if (!filesPaneView || typeof filesPaneView.showColumnMenu !== 'function') {
+      console.error('files-pane-view missing showColumnMenu');
+      return;
     }
-
-    document.body.appendChild(menu);
-    setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
+    filesPaneView.showColumnMenu(e, pane, {
+      onToggleColumn: (key) => {
+        pane[key] = !pane[key];
+        renderPane(pane, el);
+      },
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -604,11 +542,10 @@
     const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
 
     try {
-      const transferId = await invoke('transfer_download', {
-        paneId: activeRemotePaneId,
-        remotePath,
-        localPath,
-      });
+      if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
+        throw new Error('Files data service unavailable: transferDownload');
+      }
+      const transferId = await filesDataService.transferDownload(invoke, activeRemotePaneId, remotePath, localPath);
       // Mark as transferring in local pane
       localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
     } catch (e) {
@@ -625,11 +562,10 @@
     const remotePath = remotePane.currentPath + '/' + entry.name;
 
     try {
-      const transferId = await invoke('transfer_upload', {
-        paneId: activeRemotePaneId,
-        localPath,
-        remotePath,
-      });
+      if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
+        throw new Error('Files data service unavailable: transferUpload');
+      }
+      const transferId = await filesDataService.transferUpload(invoke, activeRemotePaneId, localPath, remotePath);
       // Mark as transferring in remote pane
       remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
     } catch (e) {
@@ -641,107 +577,12 @@
   // Transfer progress toasts
   // ---------------------------------------------------------------------------
 
-  // Active progress toasts keyed by transfer_id.
-  const activeTransferToasts = new Map();
-
   function handleTransferProgress(event) {
-    const p = event.payload;
-    if (!p || !p.transfer_id) return;
-
-    const pct = p.total_bytes > 0 ? Math.round((p.bytes_transferred / p.total_bytes) * 100) : 0;
-    const pane = p.kind === 'download' ? localPane : remotePane;
-
-    if (p.status === 'completed') {
-      removeTransferToast(p.transfer_id);
-      showCompletionToast(p.file_name, p.kind);
-      pane.transferStatus[p.file_name] = { status: 'completed', percent: 100 };
-      loadEntries(pane);
-    } else if (p.status === 'failed' || p.status === 'cancelled') {
-      removeTransferToast(p.transfer_id);
-      delete pane.transferStatus[p.file_name];
-      if (p.status === 'failed') {
-        showCompletionToast(p.file_name, p.kind, p.error);
-      }
-    } else {
-      pane.transferStatus[p.file_name] = { status: 'in_progress', percent: pct };
-      updateOrCreateTransferToast(p);
+    if (!transferController || typeof transferController.handleTransferProgress !== 'function') {
+      console.error('files-transfers missing handleTransferProgress controller');
+      return;
     }
-  }
-
-  function updateOrCreateTransferToast(p) {
-    let toast = activeTransferToasts.get(p.transfer_id);
-
-    if (!toast) {
-      toast = document.createElement('div');
-      toast.className = 'fp-progress-toast';
-      toast.innerHTML = `
-        <div class="fp-pt-header">
-          <span class="fp-pt-kind">${p.kind === 'download' ? '\u2193' : '\u2191'}</span>
-          <span class="fp-pt-filename"></span>
-          <button class="fp-pt-cancel" title="Cancel transfer">\u2715</button>
-        </div>
-        <div class="fp-pt-bar-wrap"><div class="fp-pt-bar"></div></div>
-        <div class="fp-pt-details">
-          <span class="fp-pt-bytes"></span>
-          <span class="fp-pt-speed"></span>
-        </div>
-      `;
-      toast.querySelector('.fp-pt-cancel').addEventListener('click', () => {
-        invoke('transfer_cancel', { transferId: p.transfer_id }).catch(() => {});
-        removeTransferToast(p.transfer_id);
-      });
-      toast._startTime = Date.now();
-      toast._startBytes = 0;
-      toast._lastBytes = 0;
-      toast._lastTime = Date.now();
-
-      // Use the global toast container so transfer toasts stack with other toasts.
-      let container = document.getElementById('toast-container');
-      if (!container) {
-        container = document.createElement('div');
-        container.id = 'toast-container';
-        document.body.appendChild(container);
-      }
-      container.appendChild(toast);
-      requestAnimationFrame(() => toast.classList.add('visible'));
-      activeTransferToasts.set(p.transfer_id, toast);
-    }
-
-    // Update content
-    toast.querySelector('.fp-pt-filename').textContent = p.file_name;
-    const pct = p.total_bytes > 0 ? Math.round((p.bytes_transferred / p.total_bytes) * 100) : 0;
-    toast.querySelector('.fp-pt-bar').style.width = pct + '%';
-
-    const bytesStr = formatSize(p.bytes_transferred) + ' / ' + formatSize(p.total_bytes);
-    toast.querySelector('.fp-pt-bytes').textContent = bytesStr;
-
-    // Calculate speed (smoothed over last interval)
-    const now = Date.now();
-    const elapsed = (now - toast._lastTime) / 1000;
-    if (elapsed > 0.05) {
-      const bytesDelta = p.bytes_transferred - toast._lastBytes;
-      const speed = bytesDelta / elapsed;
-      toast.querySelector('.fp-pt-speed').textContent = formatSize(Math.round(speed)) + '/s';
-      toast._lastBytes = p.bytes_transferred;
-      toast._lastTime = now;
-    }
-  }
-
-  function removeTransferToast(transferId) {
-    const toast = activeTransferToasts.get(transferId);
-    if (!toast) return;
-    toast.classList.remove('visible');
-    activeTransferToasts.delete(transferId);
-    setTimeout(() => toast.remove(), 300);
-  }
-
-  function showCompletionToast(fileName, kind, error) {
-    const arrow = kind === 'download' ? '\u2193' : '\u2191';
-    if (error) {
-      window.toast.error(`${arrow} Transfer Failed: ${fileName}`, error);
-    } else {
-      window.toast.success(`${arrow} Transfer Complete: ${fileName}`);
-    }
+    transferController.handleTransferProgress(event);
   }
 
   // ---------------------------------------------------------------------------
@@ -752,8 +593,11 @@
   const formatDate = window.utils.formatDate;
 
   function extOf(name) {
-    const i = name.lastIndexOf('.');
-    return i > 0 ? name.slice(i + 1).toLowerCase() : '';
+    if (!filesPaneStore || typeof filesPaneStore.extOf !== 'function') {
+      console.error('files-pane-store missing extOf');
+      return '';
+    }
+    return filesPaneStore.extOf(name);
   }
 
   const esc = window.utils.esc;

@@ -39,6 +39,8 @@
   let fitActiveTabFn = null;
   let saveLayoutFn = null;
   let savedZoneAssignments = null; // populated from backend before registration
+  let savedActiveZoneWindows = null; // populated from backend before registration
+  let savedPanelVisibility = { left: null, right: null }; // persisted panel visibility hints
   const stripDrag = {
     active: null,
     overlayEl: null,
@@ -87,6 +89,26 @@
     savedZoneAssignments = map || {};
   }
 
+  // Provide persisted active window map so register() can restore active window per zone.
+  function setPersistedActiveZoneWindows(map) {
+    savedActiveZoneWindows = map || {};
+  }
+
+  // Provide persisted panel visibility so boot activation can respect hidden panels.
+  function setPersistedPanelVisibility(map) {
+    const next = map || {};
+    if (typeof next.left === 'boolean') savedPanelVisibility.left = next.left;
+    if (typeof next.right === 'boolean') savedPanelVisibility.right = next.right;
+  }
+
+  function hasPersistedActiveForSide(side) {
+    if (side !== 'left' && side !== 'right') return false;
+    const active = savedActiveZoneWindows || {};
+    const top = active[side + '-top'];
+    const bottom = active[side + '-bottom'];
+    return (typeof top === 'string' && top.length > 0) || (typeof bottom === 'string' && bottom.length > 0);
+  }
+
   // ---- Registration ---------------------------------------------------------
 
   function register(id, opts) {
@@ -110,10 +132,32 @@
     const side = sideForZone(zone);
     const appRoot = document.getElementById('app');
     const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
-    const sideHiddenOnBoot = (side === 'left' || side === 'right') && !isPanelVisible(side);
-    const shouldAutoActivate = !zenActive && !sideHiddenOnBoot;
+    const persistedSideHidden = (side === 'left' || side === 'right') && savedPanelVisibility[side] === false;
+    const sideHiddenOnBoot = (side === 'left' || side === 'right') && (persistedSideHidden || !isPanelVisible(side));
+    const sideHasPersistedActive = hasPersistedActiveForSide(side);
+    const shouldAutoActivate = !zenActive && !sideHiddenOnBoot && !sideHasPersistedActive;
+    const savedActiveId = savedActiveZoneWindows && typeof savedActiveZoneWindows[zone] === 'string'
+      ? savedActiveZoneWindows[zone]
+      : null;
 
-    if (zones[zone].activeId === null && shouldAutoActivate) {
+    if (savedActiveId && savedActiveId === id) {
+      if (shouldAutoActivate) {
+        activate(id);
+      } else {
+        if (zones[zone].activeId && zones[zone].activeId !== id) {
+          const prev = toolWindows.get(zones[zone].activeId);
+          if (prev) {
+            prev.active = false;
+            if (prev.el) prev.el.style.display = 'none';
+          }
+        }
+        zones[zone].activeId = id;
+        tw.active = true;
+        updateZone(zone);
+        updateSidebar(side);
+        updateStrips();
+      }
+    } else if (zones[zone].activeId === null && shouldAutoActivate) {
       activate(id);
     } else {
       updateZone(zone);
@@ -862,6 +906,17 @@
     return !!(panelState[side] && panelState[side].visible);
   }
 
+  function hasActiveWindowOnSide(side) {
+    if (side !== 'left' && side !== 'right') return false;
+    const topZone = zones[side + '-top'];
+    const botZone = zones[side + '-bottom'];
+    return !!((topZone && topZone.activeId) || (botZone && botZone.activeId));
+  }
+
+  function isPanelOpen(side) {
+    return isPanelVisible(side) && hasActiveWindowOnSide(side);
+  }
+
   function setPanelVisibility(side, visible, opts) {
     if (!panelState[side]) return;
     panelState[side].visible = !!visible;
@@ -910,6 +965,17 @@
   function getZoneAssignments() {
     const map = {};
     for (const [id, tw] of toolWindows) { map[id] = tw.zone; }
+    return map;
+  }
+
+  function getActiveZoneAssignments() {
+    const map = {};
+    for (const zoneName of ZONE_IDS) {
+      const activeId = zones[zoneName] ? zones[zoneName].activeId : null;
+      if (typeof activeId === 'string' && activeId.length > 0) {
+        map[zoneName] = activeId;
+      }
+    }
     return map;
   }
 
@@ -970,6 +1036,8 @@
   exports.toolWindowManager = {
     init,
     setPersistedZones,
+    setPersistedActiveZoneWindows,
+    setPersistedPanelVisibility,
     register,
     unregister,
     activate,
@@ -978,11 +1046,13 @@
     moveTo,
     isVisible,
     isPanelVisible,
+    isPanelOpen,
     setPanelVisibility,
     togglePanel,
     getZoneForWindow,
     getWindowsInZone,
     getZoneAssignments,
+    getActiveZoneAssignments,
     getSplitRatios,
     setSplitRatio,
     getSidebarWidths,

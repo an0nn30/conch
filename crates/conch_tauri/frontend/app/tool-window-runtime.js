@@ -3,6 +3,10 @@
     const invoke = deps.invoke;
     const listen = deps.listen;
     const listenOnCurrentWindow = deps.listenOnCurrentWindow;
+    const layoutService = deps.layoutService
+      || (global.conchLayoutService && typeof global.conchLayoutService.create === 'function'
+        ? global.conchLayoutService.create({ invoke })
+        : null);
     const debouncedFitAndResize = deps.debouncedFitAndResize;
     const getCurrentTab = deps.getCurrentTab;
     const getCurrentPane = deps.getCurrentPane;
@@ -29,26 +33,32 @@
         const zenRestore = global.__conchZenRestoreState || {};
         const leftVisible = zenActive && typeof zenRestore.leftVisible === 'boolean'
           ? !!zenRestore.leftVisible
-          : twm.isPanelVisible('left');
+          : (typeof twm.isPanelOpen === 'function' ? twm.isPanelOpen('left') : twm.isPanelVisible('left'));
         const rightVisible = zenActive && typeof zenRestore.rightVisible === 'boolean'
           ? !!zenRestore.rightVisible
-          : twm.isPanelVisible('right');
+          : (typeof twm.isPanelOpen === 'function' ? twm.isPanelOpen('right') : twm.isPanelVisible('right'));
         const bottomVisible = zenActive && typeof zenRestore.bottomVisible === 'boolean'
           ? !!zenRestore.bottomVisible
           : !bottomPanelEl.classList.contains('hidden');
-        invoke('save_window_layout', {
-          layout: {
-            ssh_panel_width: widths.right,
-            ssh_panel_visible: rightVisible,
-            files_panel_width: widths.left,
-            files_panel_visible: leftVisible,
-            bottom_panel_visible: bottomVisible,
-            bottom_panel_height: bottomPanelEl.offsetHeight,
-            zen_mode: !!(appRoot && appRoot.classList.contains('zen-mode')),
-            tool_window_zones: twm.getZoneAssignments(),
-            split_ratios: twm.getSplitRatios(),
-          },
-        }).catch(() => {});
+        const payload = {
+          ssh_panel_width: widths.right,
+          ssh_panel_visible: rightVisible,
+          files_panel_width: widths.left,
+          files_panel_visible: leftVisible,
+          bottom_panel_visible: bottomVisible,
+          bottom_panel_height: bottomPanelEl.offsetHeight,
+          zen_mode: !!(appRoot && appRoot.classList.contains('zen-mode')),
+          tool_window_zones: twm.getZoneAssignments(),
+          active_tool_windows: typeof twm.getActiveZoneAssignments === 'function'
+            ? twm.getActiveZoneAssignments()
+            : {},
+          split_ratios: twm.getSplitRatios(),
+        };
+        if (layoutService && typeof layoutService.saveLayout === 'function') {
+          layoutService.saveLayout(payload);
+        } else {
+          invoke('save_window_layout', { layout: payload }).catch(() => {});
+        }
       }
 
       let windowResaveSaveTimer = null;
@@ -66,7 +76,9 @@
         });
 
         try {
-          initialLayoutData = await invoke('get_saved_layout');
+          initialLayoutData = layoutService && typeof layoutService.getSavedLayout === 'function'
+            ? await layoutService.getSavedLayout()
+            : await invoke('get_saved_layout');
           if (initialLayoutData.files_panel_width > 100) {
             global.toolWindowManager.setSidebarWidth('left', initialLayoutData.files_panel_width);
           }
@@ -75,6 +87,15 @@
           }
           if (initialLayoutData.tool_window_zones && Object.keys(initialLayoutData.tool_window_zones).length > 0) {
             global.toolWindowManager.setPersistedZones(initialLayoutData.tool_window_zones);
+          }
+          if (initialLayoutData.active_tool_windows && Object.keys(initialLayoutData.active_tool_windows).length > 0) {
+            global.toolWindowManager.setPersistedActiveZoneWindows(initialLayoutData.active_tool_windows);
+          }
+          if (typeof global.toolWindowManager.setPersistedPanelVisibility === 'function') {
+            global.toolWindowManager.setPersistedPanelVisibility({
+              left: initialLayoutData.files_panel_visible !== false,
+              right: initialLayoutData.ssh_panel_visible !== false,
+            });
           }
           if (initialLayoutData.left_split_ratio > 0 && initialLayoutData.left_split_ratio < 1) {
             global.toolWindowManager.setSplitRatio('left', initialLayoutData.left_split_ratio);
@@ -104,6 +125,7 @@
                 panelEl,
                 panelWrapEl: document.getElementById('left-sidebar'),
                 resizeHandleEl: null,
+                layoutService,
                 fitActiveTab: debouncedFitAndResize,
                 getActiveTab: () => getCurrentTab(),
               });
@@ -127,6 +149,7 @@
                 panelEl,
                 panelWrapEl: document.getElementById('right-sidebar'),
                 resizeHandleEl: null,
+                layoutService,
                 fitActiveTab: debouncedFitAndResize,
                 refocusTerminal: () => {
                   const pane = getCurrentPane();

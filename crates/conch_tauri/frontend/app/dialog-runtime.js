@@ -4,23 +4,33 @@
     const esc = deps.esc;
     const refocusActiveTerminal = deps.refocusActiveTerminal;
     const isCommandPaletteOpen = deps.isCommandPaletteOpen;
+    const keyboardRouter = global.conchKeyboardRouter;
 
     function initOverlayFocusHandlers() {
-      document.addEventListener('keydown', (event) => {
-        if (event.key !== 'Escape') return;
+      const handleEscape = (event) => {
+        if (event.key !== 'Escape') return false;
 
         const overlay = document.querySelector('.ssh-overlay');
-        if (overlay) return;
+        if (overlay) return false;
 
         const ctxMenu = document.querySelector('.ssh-context-menu');
         if (ctxMenu) {
           ctxMenu.remove();
-          event.preventDefault();
-          return;
+          return true;
         }
 
         refocusActiveTerminal();
-      }, true);
+        return false;
+      };
+      if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+        keyboardRouter.register({
+          name: 'overlay-focus-handler',
+          priority: 100,
+          onKeyDown: (event) => handleEscape(event),
+        });
+      } else {
+        console.warn('dialog-runtime: keyboard router unavailable, overlay focus escape handler not registered');
+      }
 
       let previousOverlayCount = document.querySelectorAll('.ssh-overlay').length;
       function scheduleRefocusAfterOverlayClose() {

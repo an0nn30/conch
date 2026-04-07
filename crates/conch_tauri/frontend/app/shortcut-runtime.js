@@ -32,6 +32,7 @@
       rename_tab: 'rename-tab',
       new_window: 'new-window',
       manage_tunnels: 'manage-tunnels',
+      vault_open: 'vault-open',
       quit: null,
       zen_mode: 'zen-mode',
       toggle_left_panel: 'toggle-left-panel',
@@ -191,38 +192,23 @@
     }
 
     function initListeners() {
-      document.addEventListener('keydown', (event) => {
-        if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return;
-        console.log('[conch-keydbg] keydown(capture)', formatKeyEventForDebug(event));
-      }, true);
-      document.addEventListener('keyup', (event) => {
-        if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return;
-        console.log('[conch-keydbg] keyup(capture)', formatKeyEventForDebug(event));
-      }, true);
-
-      document.addEventListener('keydown', (event) => {
+      const keyboardRouter = global.conchKeyboardRouter;
+      const runShortcutFallbacks = (event) => {
         const combo = normalizeShortcutEventForPluginFallback(event);
         const coreHit = combo ? coreShortcutFallbacks.find((s) => s.combo === combo) : null;
         if (coreHit) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (typeof event.stopImmediatePropagation === 'function') {
-            event.stopImmediatePropagation();
-          }
           if (coreHit.action === 'navigate-pane-up') navigatePane('up');
           else if (coreHit.action === 'navigate-pane-down') navigatePane('down');
           else if (coreHit.action === 'navigate-pane-left') navigatePane('left');
           else if (coreHit.action === 'navigate-pane-right') navigatePane('right');
           else handleMenuAction(coreHit.action);
-          return;
+          return true;
         }
 
-        if (isTextInputTarget(event.target)) return;
-        if (!combo) return;
+        if (isTextInputTarget(event.target)) return false;
+        if (!combo) return false;
         const fKeyHit = functionKeyShortcutFallbacks.find((s) => s.combo === combo);
         if (fKeyHit) {
-          event.preventDefault();
-          event.stopPropagation();
           if (fKeyHit.kind === 'core') {
             handleMenuAction(fKeyHit.action);
           } else if (fKeyHit.kind === 'tool-window') {
@@ -235,75 +221,107 @@
               action: fKeyHit.action,
             }).catch(() => {});
           }
-          return;
+          return true;
         }
         if (!isMacPlatform || !event.ctrlKey || !event.altKey || event.metaKey) {
           const toolWindowHit = toolWindowShortcutFallbacks.find((s) => s.combo === combo);
           if (toolWindowHit) {
-            event.preventDefault();
-            event.stopPropagation();
             if (window.toolWindowManager) {
               window.toolWindowManager.toggle(toolWindowHit.windowId);
             }
-            return;
+            return true;
           }
           const allHit = pluginAllShortcutFallbacks.find((s) => s.combo === combo);
           if (allHit) {
-            event.preventDefault();
-            event.stopPropagation();
             invoke('trigger_plugin_menu_action', {
               pluginName: allHit.plugin,
               action: allHit.action,
             }).catch(() => {});
+            return true;
           }
-          return;
+          return false;
         }
         const hit = pluginCtrlAltShortcutFallbacks.find((s) => s.combo === combo);
-        if (!hit) return;
-        event.preventDefault();
-        event.stopPropagation();
+        if (!hit) return false;
         invoke('trigger_plugin_menu_action', {
           pluginName: hit.plugin,
           action: hit.action,
         }).catch(() => {});
-      }, true);
+        return true;
+      };
 
-      document.addEventListener('keydown', (event) => {
+      const togglePaletteShortcut = (event) => {
         const key = (event.key || '').toLowerCase();
         const superPressed = isMacPlatform ? event.metaKey : (event.metaKey || event.ctrlKey);
-        if (!superPressed || !event.shiftKey || key !== 'p') return;
-        if (isTextInputTarget(event.target)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (typeof event.stopImmediatePropagation === 'function') {
-          event.stopImmediatePropagation();
-        }
+        if (!superPressed || !event.shiftKey || key !== 'p') return false;
+        if (isTextInputTarget(event.target)) return false;
         if (isCommandPaletteOpen()) closeCommandPalette();
         else openCommandPalette();
-      }, true);
+        return true;
+      };
 
-      document.addEventListener('keydown', (event) => {
-        if ((event.metaKey || event.ctrlKey) && event.key >= '1' && event.key <= '9') {
-          event.preventDefault();
-          const idx = parseInt(event.key, 10) - 1;
-          const tabIds = getTabIds();
-          if (idx < tabIds.length) activateTab(tabIds[idx]);
-        }
-      });
+      const tabSwitchShortcut = (event) => {
+        if (!(event.metaKey || event.ctrlKey) || event.key < '1' || event.key > '9') return false;
+        const idx = parseInt(event.key, 10) - 1;
+        const tabIds = getTabIds();
+        if (idx < tabIds.length) activateTab(tabIds[idx]);
+        return true;
+      };
 
-      document.addEventListener('keydown', (event) => {
-        if (!isMacPlatform) return;
-        if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
-        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-        if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return;
+      const macAltArrowShortcut = (event) => {
+        if (!isMacPlatform) return false;
+        if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return false;
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return false;
+        if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return false;
         const pane = getCurrentPane();
-        if (!pane || pane.kind !== 'terminal' || !pane.term) return;
-        event.preventDefault();
-        event.stopPropagation();
+        if (!pane || pane.kind !== 'terminal' || !pane.term) return false;
         const seq = event.key === 'ArrowLeft' ? '\x1b[1;3D' : '\x1b[1;3C';
         writeTextToCurrentPane(seq);
-      }, true);
+        return true;
+      };
 
+      if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+        keyboardRouter.register({
+          name: 'shortcut-debug-down',
+          priority: 25,
+          onKeyDown: (event) => {
+            if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return false;
+            console.log('[conch-keydbg] keydown(capture)', formatKeyEventForDebug(event));
+            return false;
+          },
+        });
+        keyboardRouter.register({
+          name: 'shortcut-debug-up',
+          priority: 25,
+          onKeyUp: (event) => {
+            if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return false;
+            console.log('[conch-keydbg] keyup(capture)', formatKeyEventForDebug(event));
+            return false;
+          },
+        });
+        keyboardRouter.register({
+          name: 'shortcut-fallbacks',
+          priority: 120,
+          onKeyDown: (event) => runShortcutFallbacks(event),
+        });
+        keyboardRouter.register({
+          name: 'shortcut-palette-toggle',
+          priority: 110,
+          onKeyDown: (event) => togglePaletteShortcut(event),
+        });
+        keyboardRouter.register({
+          name: 'shortcut-tab-switch',
+          priority: 80,
+          onKeyDown: (event) => tabSwitchShortcut(event),
+        });
+        keyboardRouter.register({
+          name: 'shortcut-mac-alt-arrow',
+          priority: 75,
+          onKeyDown: (event) => macAltArrowShortcut(event),
+        });
+        return;
+      }
+      console.warn('shortcut-runtime: keyboard router unavailable, shortcut handlers were not registered');
     }
 
     async function init() {

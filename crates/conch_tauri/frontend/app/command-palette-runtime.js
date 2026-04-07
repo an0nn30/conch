@@ -1,6 +1,7 @@
 (function initConchCommandPaletteRuntime(global) {
   function create(deps) {
     const invoke = deps.invoke;
+    const listen = deps.listen;
     const esc = deps.esc;
     const handleMenuAction = deps.handleMenuAction;
     const createSshTab = deps.createSshTab;
@@ -9,8 +10,38 @@
     const refreshTitlebar = deps.refreshTitlebar;
     const refreshSshPanel = deps.refreshSshPanel;
     const MAX_QUICK_RESULTS = 5;
+    const COMMAND_CACHE_TTL_MS = 45000;
 
     let commandPalette = null;
+    let commandCache = {
+      commands: null,
+      builtAt: 0,
+      invalidateReason: '',
+    };
+    let invalidationHooksInstalled = false;
+
+    function invalidateCommandCache(reason) {
+      commandCache.commands = null;
+      commandCache.builtAt = 0;
+      commandCache.invalidateReason = String(reason || 'manual');
+    }
+
+    function installInvalidationHooks() {
+      if (invalidationHooksInstalled) return;
+      invalidationHooksInstalled = true;
+      if (typeof listen !== 'function') return;
+
+      const events = [
+        'config-changed',
+        'plugin-panel-registered',
+        'plugin-panels-removed',
+        'plugin-widgets-updated',
+        'plugin-menu-item',
+      ];
+      for (const eventName of events) {
+        listen(eventName, () => invalidateCommandCache('event:' + eventName)).catch(() => {});
+      }
+    }
 
     function fuzzyScore(query, text) {
       const q = (query || '').trim().toLowerCase();
@@ -47,48 +78,13 @@
     }
 
     function confirmPluginPermissionsForPalette(pluginName, permissions) {
-      return new Promise((resolve) => {
-        const overlay = document.createElement('div');
-        overlay.className = 'ssh-overlay';
-        const items = permissions
-          .map((p) => `<div style="font-size:12px; color:var(--fg); line-height:1.5;">• ${esc(p)}</div>`)
-          .join('');
-        overlay.innerHTML = `
-          <div class="ssh-form" style="min-width:420px; max-width:620px;">
-            <div class="ssh-form-title">Plugin Permissions</div>
-            <div class="ssh-form-body">
-              <div style="margin-bottom:10px; font-size:12px; color:var(--fg);">
-                Plugin "${esc(pluginName)}" requests:
-              </div>
-              <div style="display:flex; flex-direction:column; gap:4px; margin-bottom:12px;">
-                ${items}
-              </div>
-              <div style="font-size:12px; color:var(--dim-fg);">Allow and enable this plugin?</div>
-            </div>
-            <div class="ssh-form-buttons">
-              <button class="ssh-form-btn" id="cpp-deny">Deny</button>
-              <button class="ssh-form-btn primary" id="cpp-allow">Allow</button>
-            </div>
-          </div>`;
-        const done = (accepted) => {
-          document.removeEventListener('keydown', onKey, true);
-          overlay.remove();
-          resolve(accepted);
-        };
-        const onKey = (event) => {
-          if (event.key !== 'Escape') return;
-          event.preventDefault();
-          event.stopPropagation();
-          done(false);
-        };
-        overlay.addEventListener('mousedown', (event) => {
-          if (event.target === overlay) done(false);
-        });
-        overlay.querySelector('#cpp-deny').addEventListener('click', () => done(false));
-        overlay.querySelector('#cpp-allow').addEventListener('click', () => done(true));
-        document.addEventListener('keydown', onKey, true);
-        document.body.appendChild(overlay);
-      });
+      if (global.conchDialogService && typeof global.conchDialogService.confirmPluginPermissions === 'function') {
+        return global.conchDialogService.confirmPluginPermissions(pluginName, permissions);
+      }
+      if (global.toast && typeof global.toast.error === 'function') {
+        global.toast.error('Plugin Permissions', 'Dialog service unavailable; denying permission request.');
+      }
+      return Promise.resolve(false);
     }
 
     async function buildPaletteCommands() {
@@ -138,6 +134,7 @@
             async () => {
               await invoke('disable_plugin', { name: p.name, source: p.source });
               await invoke('rebuild_menu').catch(() => {});
+              invalidateCommandCache('plugin-disabled');
               refreshTitlebar();
             }
           );
@@ -155,6 +152,7 @@
               }
               await invoke('enable_plugin', { name: p.name, source: p.source, path: p.path });
               await invoke('rebuild_menu').catch(() => {});
+              invalidateCommandCache('plugin-enabled');
               refreshTitlebar();
             }
           );
@@ -184,6 +182,7 @@
             `tunnel stop disconnect ${t.label}`,
             async () => {
               await invoke('tunnel_stop', { tunnelId: t.id });
+              invalidateCommandCache('tunnel-stop');
               refreshSshPanel();
             }
           );
@@ -195,12 +194,27 @@
             `tunnel start connect ${t.label}`,
             async () => {
               await invoke('tunnel_start', { tunnelId: t.id });
+              invalidateCommandCache('tunnel-start');
               refreshSshPanel();
             }
           );
         }
       }
 
+      return commands;
+    }
+
+    async function getPaletteCommands(options) {
+      const opts = options || {};
+      const forceRefresh = opts.forceRefresh === true;
+      const cacheIsFresh = !!commandCache.commands && (Date.now() - commandCache.builtAt) < COMMAND_CACHE_TTL_MS;
+      if (!forceRefresh && cacheIsFresh) {
+        return commandCache.commands;
+      }
+      const commands = await buildPaletteCommands();
+      commandCache.commands = commands;
+      commandCache.builtAt = Date.now();
+      commandCache.invalidateReason = '';
       return commands;
     }
 
@@ -262,7 +276,10 @@
 
     function closeCommandPalette(refocus = true) {
       if (!commandPalette) return;
-      document.removeEventListener('keydown', commandPalette.onKeyDown, true);
+      if (typeof commandPalette.keyHandlerUnregister === 'function') {
+        commandPalette.keyHandlerUnregister();
+        commandPalette.keyHandlerUnregister = null;
+      }
       commandPalette.overlayEl.remove();
       commandPalette = null;
       if (refocus) {
@@ -313,6 +330,7 @@
         selectedIndex: 0,
         keyboardMode: false,
         onKeyDown: null,
+        keyHandlerUnregister: null,
       };
       commandPalette = state;
 
@@ -326,7 +344,7 @@
           event.preventDefault();
           event.stopPropagation();
           closeCommandPalette();
-          return;
+          return true;
         }
         const quickIdx = quickPickIndexFromKey(event);
         if (quickIdx !== null) {
@@ -334,8 +352,9 @@
             event.preventDefault();
             event.stopPropagation();
             executePaletteCommand(quickIdx);
+            return true;
           }
-          return;
+          return false;
         }
         if (event.key === 'ArrowDown') {
           event.preventDefault();
@@ -345,7 +364,7 @@
             state.selectedIndex = Math.min(state.selectedIndex + 1, state.filtered.length - 1);
             renderPaletteResults();
           }
-          return;
+          return true;
         }
         if (event.key === 'ArrowUp') {
           event.preventDefault();
@@ -355,15 +374,27 @@
             state.selectedIndex = Math.max(state.selectedIndex - 1, 0);
             renderPaletteResults();
           }
-          return;
+          return true;
         }
         if (event.key === 'Enter') {
           event.preventDefault();
           event.stopPropagation();
           executePaletteCommand(state.selectedIndex);
+          return true;
         }
+        return false;
       };
-      document.addEventListener('keydown', state.onKeyDown, true);
+      const keyboardRouter = global.conchKeyboardRouter;
+      if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+        state.keyHandlerUnregister = keyboardRouter.register({
+          name: 'command-palette',
+          priority: 260,
+          isActive: () => !!(commandPalette && commandPalette === state && state.overlayEl && state.overlayEl.isConnected),
+          onKeyDown: (event) => state.onKeyDown(event) === true,
+        });
+      } else {
+        console.warn('command-palette: keyboard router unavailable, palette keyboard navigation disabled');
+      }
 
       listEl.addEventListener('mousemove', () => {
         if (!commandPalette) return;
@@ -380,7 +411,7 @@
       setTimeout(() => input.focus(), 0);
 
       try {
-        state.allCommands = await buildPaletteCommands();
+        state.allCommands = await getPaletteCommands();
         state.filtered = [];
         state.selectedIndex = 0;
         renderPaletteResults();
@@ -389,10 +420,14 @@
       }
     }
 
+    installInvalidationHooks();
+    global.__conchInvalidateCommandPaletteCache = invalidateCommandCache;
+
     return {
       isOpen: () => Boolean(commandPalette),
       open: openCommandPalette,
       close: closeCommandPalette,
+      invalidateCache: (reason) => invalidateCommandCache(reason),
     };
   }
 

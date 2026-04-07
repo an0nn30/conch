@@ -13,6 +13,11 @@
     const termContextMenu = document.getElementById('terminal-context-menu');
     const tabContextMenu = document.getElementById('tab-context-menu');
     let tabContextMenuTabId = null;
+    const hideContextMenus = () => {
+      if (termContextMenu.style.display !== 'none') termContextMenu.style.display = 'none';
+      if (tabContextMenu.style.display !== 'none') tabContextMenu.style.display = 'none';
+      tabContextMenuTabId = null;
+    };
 
     terminalHostEl.addEventListener('contextmenu', (event) => {
       const paneEl = event.target.closest('.terminal-pane');
@@ -34,7 +39,7 @@
     termContextMenu.addEventListener('click', (event) => {
       const btn = event.target.closest('.context-item');
       if (!btn) return;
-      termContextMenu.style.display = 'none';
+      hideContextMenus();
       const action = btn.dataset.action;
       if (action === 'split-vertical') splitPane('vertical');
       if (action === 'split-horizontal') splitPane('horizontal');
@@ -60,7 +65,7 @@
     tabContextMenu.addEventListener('click', (event) => {
       const btn = event.target.closest('.context-item');
       if (!btn) return;
-      tabContextMenu.style.display = 'none';
+      hideContextMenus();
       const action = btn.dataset.action;
       if (action === 'rename-tab' && tabContextMenuTabId != null) {
         startTabRenameById(tabContextMenuTabId);
@@ -68,24 +73,28 @@
       if (action === 'close-tab' && tabContextMenuTabId != null) {
         closeTab(tabContextMenuTabId);
       }
-      tabContextMenuTabId = null;
     });
 
     document.addEventListener('mousedown', (event) => {
-      if (termContextMenu.style.display !== 'none' && !termContextMenu.contains(event.target)) {
-        termContextMenu.style.display = 'none';
-      }
-      if (tabContextMenu.style.display !== 'none' && !tabContextMenu.contains(event.target)) {
-        tabContextMenu.style.display = 'none';
-      }
+      if (termContextMenu.style.display !== 'none' && !termContextMenu.contains(event.target)) hideContextMenus();
+      if (tabContextMenu.style.display !== 'none' && !tabContextMenu.contains(event.target)) hideContextMenus();
     });
 
-    document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        if (termContextMenu.style.display !== 'none') termContextMenu.style.display = 'none';
-        if (tabContextMenu.style.display !== 'none') tabContextMenu.style.display = 'none';
-      }
-    }, true);
+    const keyboardRouter = global.conchKeyboardRouter;
+    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+      keyboardRouter.register({
+        name: 'context-menu-dismiss',
+        priority: 180,
+        isActive: () => termContextMenu.style.display !== 'none' || tabContextMenu.style.display !== 'none',
+        onKeyDown: (event) => {
+          if (event.key !== 'Escape') return false;
+          hideContextMenus();
+          return true;
+        },
+      });
+    } else {
+      console.warn('context-menu-runtime: keyboard router unavailable, Escape dismiss handler not registered');
+    }
   }
 
   global.conchContextMenuRuntime = {

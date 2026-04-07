@@ -4,268 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Settings — Conch</title>
-  <style>
-    :root {
-      --bg: #282a36; --fg: #f8f8f2; --dim-fg: #6272a4;
-      --panel-bg: #21222c; --tab-bar-bg: #1f212b; --tab-border: #3a3d4f;
-      --active-highlight: #44475a;
-      --red: #ff5555; --green: #50fa7b; --yellow: #f1fa8c; --blue: #bd93f9;
-      --cyan: #8be9fd; --magenta: #ff79c6;
-      --input-bg: #2b2e3a; --hover-bg: #2b2e3a;
-      --text-secondary: #c5c8d5; --text-muted: #8b8fa3;
-      --ui-font-small: 12px; --ui-font-list: 14px; --ui-font-normal: 14px;
-    }
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-      width: 100%; height: 100%; overflow: hidden; background: var(--panel-bg);
-      font-size: var(--ui-font-normal); line-height: 1.4;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: var(--fg);
-    }
-    html.no-animations *,
-    html.no-animations *::before,
-    html.no-animations *::after {
-      animation: none !important;
-      transition: none !important;
-      scroll-behavior: auto !important;
-    }
-    body {
-      display: flex; flex-direction: column;
-    }
-
-    /* ---- Custom titlebar (Windows/Linux) ---- */
-    #settings-titlebar {
-      display: none; /* shown via JS when custom titlebar is needed */
-      height: 30px; flex-shrink: 0;
-      background: var(--tab-bar-bg);
-      color: var(--text-secondary);
-      font: 12px/30px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      user-select: none; -webkit-user-select: none;
-    }
-    #settings-titlebar.visible { display: flex; }
-    .settings-titlebar-drag {
-      flex: 1; min-width: 0;
-      display: flex; align-items: center; padding-left: 14px;
-      -webkit-app-region: drag;
-    }
-    .settings-titlebar-title {
-      font-size: 12px; color: var(--text-muted);
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      pointer-events: none;
-    }
-    .settings-titlebar-controls { display: flex; flex-shrink: 0; height: 30px; }
-    .settings-titlebar-btn {
-      width: 46px; height: 30px; border: none; background: none;
-      color: var(--text-secondary); display: flex; align-items: center;
-      justify-content: center; cursor: pointer; outline: none;
-    }
-    .settings-titlebar-btn:hover { background: var(--active-highlight); color: var(--fg); }
-    .settings-titlebar-btn-close:hover { background: #e81123; color: #fff; }
-
-    /* ---- Settings layout (standalone window mode) ---- */
-    #settings-root {
-      display: flex; flex-direction: column;
-      width: 100%; flex: 1; min-height: 0;
-    }
-    #settings-root .settings-title {
-      padding: 10px 18px 8px; font-size: 15px; font-weight: 600;
-      border-bottom: 1px solid var(--tab-border);
-      flex-shrink: 0;
-    }
-    #settings-root .settings-body {
-      display: flex; flex: 1; overflow: hidden; min-height: 0;
-    }
-    #settings-root .settings-sidebar {
-      width: 250px; border-right: 1px solid var(--tab-border);
-      padding: 12px 0; overflow-y: auto; flex-shrink: 0;
-    }
-    .settings-sidebar-search-wrap { padding: 0 12px 10px; }
-    .settings-sidebar-search {
-      width: 100%;
-      padding: 8px 10px;
-      border: 1px solid var(--tab-border);
-      border-radius: 6px;
-      background: var(--input-bg);
-      color: var(--fg);
-      outline: none;
-      font: 12px/1.3 "JetBrains Mono", monospace;
-    }
-    .settings-sidebar-search:focus { border-color: var(--dim-fg); }
-    #settings-root .settings-sidebar-group {
-      font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase;
-      color: var(--dim-fg); padding: 8px 14px 4px; letter-spacing: 0.5px;
-    }
-    #settings-root .settings-sidebar-item {
-      padding: 7px 14px 7px 18px; cursor: pointer;
-      color: var(--text-secondary); font-size: var(--ui-font-normal);
-    }
-    #settings-root .settings-sidebar-item:hover { background: var(--input-bg); }
-    #settings-root .settings-sidebar-item.active { background: var(--active-highlight); color: var(--fg); font-weight: 600; }
-    .settings-sidebar-item.selected {
-      background: color-mix(in srgb, var(--blue) 16%, var(--input-bg));
-      color: var(--fg);
-    }
-    .settings-sidebar-item-search { padding-left: 14px; }
-    .settings-sidebar-item-title { font-size: 13px; color: inherit; }
-    .settings-sidebar-item-desc {
-      margin-top: 2px;
-      font-size: 11px;
-      line-height: 1.35;
-      color: var(--dim-fg);
-    }
-    .settings-sidebar-item.active .settings-sidebar-item-desc { color: var(--text-secondary); }
-    .settings-sidebar-empty {
-      padding: 8px 14px;
-      color: var(--dim-fg);
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    #settings-root .settings-content {
-      flex: 1; padding: 16px 20px; overflow-y: auto;
-    }
-    #settings-root .settings-content h3 { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: var(--fg); }
-    .settings-search-wrap { margin: 0 0 14px; }
-    .settings-search-input { width: min(360px, 100%); }
-    .settings-search-empty {
-      padding: 10px 0;
-      color: var(--dim-fg);
-      font-size: 12px;
-    }
-    .settings-search-highlight {
-      background: color-mix(in srgb, var(--blue) 22%, transparent);
-      color: inherit;
-      padding: 0 1px;
-      border-radius: 2px;
-    }
-    #settings-root .settings-footer {
-      display: flex; justify-content: flex-end; gap: 8px;
-      padding: 10px 18px 14px; border-top: 1px solid var(--tab-border);
-      flex-shrink: 0;
-    }
-
-    /* ---- Shared settings form elements ---- */
-    .settings-section-label {
-      font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.5px; color: var(--dim-fg); margin-bottom: 4px;
-    }
-    .settings-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; gap: 12px; }
-    .settings-row > :first-child { min-width: 0; flex: 1; }
-    .settings-row-jump-highlight {
-      animation: settings-row-bounce-highlight 720ms cubic-bezier(0.22, 1, 0.36, 1);
-      transform-origin: center;
-    }
-    .settings-row-label { font-size: var(--ui-font-normal); color: var(--fg); }
-    .settings-row-desc { font-size: var(--ui-font-small); color: var(--dim-fg); margin-top: 2px; }
-    .settings-divider { border: none; border-top: 1px solid var(--tab-border); margin: 12px 0; }
-    .settings-input {
-      padding: 6px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
-      border-radius: 5px; color: var(--fg); font: 13px/1.3 "JetBrains Mono", monospace;
-      outline: none;
-    }
-    .settings-input:focus { border-color: var(--dim-fg); }
-    .settings-select {
-      padding: 6px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
-      border-radius: 5px; color: var(--fg); font: 13px/1.3 "JetBrains Mono", monospace;
-      outline: none; -webkit-appearance: none; appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236272a4'/%3E%3C/svg%3E");
-      background-repeat: no-repeat; background-position: right 8px center;
-      padding-right: 24px; cursor: pointer;
-    }
-    .settings-select:focus { border-color: var(--dim-fg); }
-    .settings-toggle-group { display: flex; gap: 0; }
-    .settings-toggle {
-      padding: 5px 12px; border: 1px solid var(--tab-border);
-      background: var(--input-bg); color: var(--text-secondary);
-      font-size: var(--ui-font-normal); cursor: pointer; outline: none;
-    }
-    .settings-toggle:first-child { border-radius: 5px 0 0 5px; }
-    .settings-toggle:last-child { border-radius: 0 5px 5px 0; }
-    .settings-toggle + .settings-toggle { border-left: none; }
-    .settings-toggle.active { background: var(--active-highlight); color: var(--fg); font-weight: 600; }
-    .settings-switch {
-      position: relative; display: inline-block; width: 34px; height: 18px;
-    }
-    .settings-switch input { opacity: 0; width: 0; height: 0; }
-    .settings-switch .slider {
-      position: absolute; inset: 0; background: var(--tab-border);
-      border-radius: 9px; cursor: pointer; transition: background 0.2s;
-    }
-    .settings-switch .slider::before {
-      content: ''; position: absolute; left: 2px; top: 2px;
-      width: 14px; height: 14px; background: var(--fg);
-      border-radius: 50%; transition: transform 0.2s;
-    }
-    .settings-switch input:checked + .slider { background: var(--blue, #7aa2f7); }
-    .settings-switch input:checked + .slider::before { transform: translateX(16px); }
-    .settings-shortcut-key {
-      display: inline-block; padding: 2px 6px; border: 1px solid var(--tab-border);
-      border-radius: 3px; background: var(--input-bg); color: var(--fg);
-      font: 11px/1.2 "JetBrains Mono", monospace; min-width: 20px; text-align: center;
-      cursor: pointer; user-select: none;
-    }
-    .settings-shortcut-key:hover { border-color: var(--dim-fg); }
-    .settings-shortcut-key.recording {
-      border-color: var(--blue, #7aa2f7); color: var(--blue, #7aa2f7);
-      animation: shortcut-pulse 1s ease-in-out infinite;
-    }
-    @keyframes settings-row-bounce-highlight {
-      0% { transform: scale(1); background: transparent; }
-      20% { transform: scale(1.018); background: color-mix(in srgb, var(--blue) 18%, transparent); }
-      45% { transform: scale(0.995); background: color-mix(in srgb, var(--blue) 12%, transparent); }
-      70% { transform: scale(1.01); background: color-mix(in srgb, var(--blue) 9%, transparent); }
-      100% { transform: scale(1); background: transparent; }
-    }
-    @keyframes shortcut-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-
-    /* Theme preview */
-    .tp-container {
-      border-radius: 6px; padding: 14px; margin: 8px 0 12px 0;
-      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-      font-size: var(--ui-font-normal); line-height: 1.5;
-      border: 1px solid var(--tab-border);
-    }
-    .tp-label { font-size: 9px; letter-spacing: 0.1em; margin-bottom: 8px; text-transform: uppercase; }
-    .tp-cursor { display: inline-block; width: 0.6em; height: 1em; vertical-align: text-bottom; }
-    .tp-swatch-divider { margin: 8px 0 6px 0; border-top: 1px solid var(--tab-border); }
-    .tp-swatch-row { display: flex; gap: 4px; }
-    .tp-swatch-row--normal { margin-bottom: 4px; }
-    .tp-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }
-
-    /* Buttons (mirror ssh-form-btn from main page) */
-    .ssh-form-btn {
-      padding: 6px 16px; border: 1px solid var(--tab-border); border-radius: 5px;
-      background: var(--input-bg); color: var(--text-secondary); cursor: pointer;
-      font-size: var(--ui-font-normal); line-height: 1;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    }
-    .ssh-form-btn:hover { background: var(--tab-border); color: var(--fg); }
-    .ssh-form-btn.primary { background: var(--dim-fg); color: var(--fg); border-color: var(--dim-fg); }
-    .ssh-form-btn.primary:hover { background: var(--active-highlight); }
-
-    /* Toast notifications */
-    #toast-container {
-      position: fixed; z-index: 9999; display: flex; flex-direction: column;
-      gap: 8px; pointer-events: none; right: 16px; bottom: 16px;
-      align-items: flex-end;
-    }
-    .toast-item {
-      pointer-events: auto; display: flex; align-items: flex-start; gap: 10px;
-      padding: 10px 14px; border-radius: 6px; background: var(--panel-bg);
-      border: 1px solid var(--tab-border); box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-      min-width: 260px; max-width: 400px; animation: toastIn 0.25s ease-out;
-      font-size: var(--ui-font-normal); line-height: 1.4;
-    }
-    .toast-icon { flex-shrink: 0; font-size: 16px; line-height: 1; }
-    .toast-body { flex: 1; min-width: 0; }
-    .toast-title { font-weight: 600; color: var(--fg); margin-bottom: 2px; }
-    .toast-msg { color: var(--text-secondary); word-break: break-word; }
-    .toast-close {
-      flex-shrink: 0; background: none; border: none; color: var(--text-muted);
-      cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1;
-    }
-    .toast-close:hover { color: var(--fg); }
-    @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-  </style>
+  <link rel="stylesheet" href="styles/base.css" />
+  <link rel="stylesheet" href="styles/panels.css" />
+  <link rel="stylesheet" href="styles/dialogs.css" />
+  <link rel="stylesheet" href="styles/settings-window.css" />
 </head>
 <body>
   <div id="settings-titlebar">
@@ -290,51 +32,57 @@
   <div id="settings-root"></div>
 
   <script src="app/core/utils.js"></script>
+  <script src="app/core/tauri-client.js"></script>
+  <script src="app/core/keyboard-router.js"></script>
+  <script src="app/core/dialog-service.js"></script>
+  <script src="app/core/config-service.js"></script>
   <script src="app/ui/toast.js"></script>
+  <script src="app/features/settings/constants.js"></script>
+  <script src="app/features/settings/data-service.js"></script>
+  <script src="app/features/settings/search.js"></script>
+  <script src="app/features/settings/sidebar.js"></script>
+  <script src="app/features/settings/sections-appearance.js"></script>
+  <script src="app/features/settings/sections-basic.js"></script>
+  <script src="app/features/settings/sections-keyboard.js"></script>
+  <script src="app/features/settings/sections-terminal.js"></script>
+  <script src="app/features/settings/plugins-section.js"></script>
   <script src="app/panels/settings.js"></script>
   <script type="module">
-    const { invoke } = window.__TAURI__.core;
-    const { listen } = window.__TAURI__.event;
+    const tauriClient = window.conchTauriClient && typeof window.conchTauriClient.create === 'function'
+      ? window.conchTauriClient.create({ tauri: window.__TAURI__ })
+      : null;
+    if (!tauriClient) {
+      throw new Error('Tauri client is unavailable in settings window');
+    }
+    const invoke = tauriClient.invoke;
+    const listen = tauriClient.listenOnCurrentWindow;
+    const configService = window.conchConfigService || {};
 
     // Apply theme colors.
     try {
-      const tc = await invoke('get_theme_colors');
-      const r = document.documentElement.style;
-      r.setProperty('--bg', tc.background);
-      r.setProperty('--fg', tc.foreground);
-      r.setProperty('--dim-fg', tc.dim_fg);
-      r.setProperty('--panel-bg', tc.panel_bg);
-      r.setProperty('--tab-bar-bg', tc.tab_bar_bg);
-      r.setProperty('--tab-border', tc.tab_border);
-      r.setProperty('--active-highlight', tc.active_highlight);
-      r.setProperty('--red', tc.red);
-      r.setProperty('--green', tc.green);
-      r.setProperty('--yellow', tc.yellow);
-      r.setProperty('--blue', tc.blue);
-      r.setProperty('--cyan', tc.cyan);
-      r.setProperty('--magenta', tc.magenta);
-      r.setProperty('--input-bg', tc.input_bg);
-      r.setProperty('--hover-bg', tc.input_bg);
-      if (tc.text_secondary) r.setProperty('--text-secondary', tc.text_secondary);
-      if (tc.text_muted) r.setProperty('--text-muted', tc.text_muted);
-      document.body.style.background = tc.panel_bg;
+      const tc = await invoke('GET_THEME_COLORS');
+      if (typeof configService.applyThemeCss === 'function') {
+        configService.applyThemeCss(tc);
+      }
+      document.body.style.background = tc.panel_bg || tc.background;
     } catch (e) {
       console.warn('Failed to load theme colors:', e);
     }
 
     // Apply UI font sizes from config.
     try {
-      const appCfg = await invoke('get_app_config');
-      document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
-      if (appCfg.ui_font_small) document.documentElement.style.setProperty('--ui-font-small', appCfg.ui_font_small + 'px');
-      if (appCfg.ui_font_list) document.documentElement.style.setProperty('--ui-font-list', appCfg.ui_font_list + 'px');
-      if (appCfg.ui_font_normal) document.documentElement.style.setProperty('--ui-font-normal', appCfg.ui_font_normal + 'px');
+      const appCfg = await invoke('GET_APP_CONFIG');
+      if (typeof configService.applyUiConfig === 'function') {
+        configService.applyUiConfig(appCfg);
+      } else {
+        document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
+      }
       if (appCfg.ui_font_family) document.body.style.fontFamily = appCfg.ui_font_family;
     } catch (_) {}
 
     // Activate custom titlebar on Windows/Linux (no native decorations).
     try {
-      const appCfg = await invoke('get_app_config');
+      const appCfg = await invoke('GET_APP_CONFIG');
       if (appCfg.platform === 'windows' || appCfg.platform === 'linux') {
         const titlebar = document.getElementById('settings-titlebar');
         titlebar.classList.add('visible');

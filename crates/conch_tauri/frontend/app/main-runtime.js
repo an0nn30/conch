@@ -35,17 +35,24 @@
         return;
       }
 
-      const { invoke } = tauri.core;
-      const { listen } = tauri.event;
-      const currentWindow = tauri.window && typeof tauri.window.getCurrentWindow === 'function'
-        ? tauri.window.getCurrentWindow()
+      const tauriClient = window.conchTauriClient && typeof window.conchTauriClient.create === 'function'
+        ? window.conchTauriClient.create({ tauri })
         : null;
-      const listenOnCurrentWindow = (eventName, handler) => {
-        if (currentWindow && typeof currentWindow.listen === 'function') {
-          return currentWindow.listen(eventName, handler);
-        }
-        return listen(eventName, handler);
-      };
+      if (!tauriClient) {
+        showStatus('Tauri client is unavailable.');
+        return;
+      }
+      const invoke = (command, payload) => tauriClient.invoke(command, payload);
+      const listen = (eventName, handler) => tauriClient.listen(eventName, handler);
+      const listenOnCurrentWindow = (eventName, handler) => tauriClient.listenOnCurrentWindow(eventName, handler);
+      const currentWindow = tauriClient.currentWindow || null;
+      const layoutService = window.conchLayoutService && typeof window.conchLayoutService.create === 'function'
+        ? window.conchLayoutService.create({ invoke })
+        : null;
+      window.conchServices = Object.assign({}, window.conchServices || {}, {
+        tauriClient,
+        layoutService,
+      });
       const currentWindowLabel = await invoke('current_window_label');
 
       const FONT_FALLBACKS = ', "Symbols Nerd Font Mono", "Symbols Nerd Font", "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace';
@@ -214,6 +221,7 @@
       const bridgeRuntime = window.conchBridgeRuntime && window.conchBridgeRuntime.create
         ? window.conchBridgeRuntime.create({
             invoke,
+            listenOnCurrentWindow,
             showStatus: (message) => showStatus(message),
             inputRuntime,
             layoutRuntime,
@@ -322,6 +330,7 @@
           invoke,
           listen,
           listenOnCurrentWindow,
+          layoutService,
           terminalHostEl,
           currentWindow,
           tabs,

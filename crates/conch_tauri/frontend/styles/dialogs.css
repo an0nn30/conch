@@ -130,6 +130,30 @@
       background: rgba(255, 255, 255, 0.03);
     }
     .command-palette-empty { color: var(--dim-fg); font-size: 13px; padding: 10px 12px; }
+    .plugin-permissions-dialog {
+      min-width: 420px;
+      max-width: 620px;
+    }
+    .plugin-permissions-label {
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: var(--fg);
+    }
+    .plugin-permissions-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+    .plugin-permissions-item {
+      font-size: 12px;
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    .plugin-permissions-footnote {
+      font-size: 12px;
+      color: var(--dim-fg);
+    }
     /* -- Export dialog -- */
     .ssh-export-section { font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg); margin-bottom: 4px; }
     .ssh-export-group { font-size: var(--ui-font-small); font-weight: 600; color: var(--dim-fg); margin: 8px 0 2px 0; }
@@ -288,6 +312,11 @@
       color: var(--text-secondary); font-size: var(--ui-font-normal);
     }
     .settings-sidebar-item:hover { background: var(--input-bg); }
+    .settings-sidebar-item:focus-visible {
+      outline: 1px solid var(--dim-fg);
+      outline-offset: -1px;
+      background: var(--input-bg);
+    }
     .settings-sidebar-item.active { background: var(--active-highlight); color: var(--fg); font-weight: 600; }
     .settings-sidebar-item.selected {
       background: color-mix(in srgb, var(--blue) 16%, var(--input-bg));
@@ -307,6 +336,69 @@
       color: var(--dim-fg);
       font-size: 12px;
       line-height: 1.4;
+    }
+    .settings-installed-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-right: 10px;
+    }
+    .settings-rescan-action {
+      font-size: 12px;
+      color: var(--blue, #7aa2f7);
+      cursor: pointer;
+      user-select: none;
+    }
+    .settings-rescan-action:focus-visible {
+      outline: 1px solid var(--dim-fg);
+      outline-offset: 2px;
+      border-radius: 3px;
+    }
+    .settings-plugin-empty {
+      padding: 16px;
+      text-align: center;
+      color: var(--dim-fg);
+      font-size: 12px;
+    }
+    .settings-plugin-row {
+      background: var(--bg);
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .settings-plugin-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+    }
+    .settings-plugin-badge {
+      font-size: 9px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .settings-plugin-badge.lua { background: #a6e3a1; color: #1e1e2e; }
+    .settings-plugin-badge.java { background: #f9e2af; color: #1e1e2e; }
+    .settings-plugin-info { min-width: 0; }
+    .settings-plugin-name { font-weight: 700; }
+    .settings-plugin-meta {
+      color: var(--dim-fg);
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .settings-plugin-toggle {
+      flex-shrink: 0;
+      margin-left: 8px;
     }
     .settings-content { flex: 1; padding: 16px 20px; overflow-y: auto; }
     .settings-content h3 { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: var(--fg); }
@@ -361,6 +453,10 @@
     .settings-toggle:last-child { border-radius: 0 5px 5px 0; }
     .settings-toggle + .settings-toggle { border-left: none; }
     .settings-toggle.active { background: var(--active-highlight); color: var(--fg); font-weight: 600; }
+    .settings-toggle:focus-visible {
+      outline: 1px solid var(--dim-fg);
+      outline-offset: -1px;
+    }
     .settings-switch {
       position: relative; display: inline-block; width: 34px; height: 18px;
     }
@@ -384,6 +480,10 @@
       cursor: pointer; user-select: none;
     }
     .settings-shortcut-key:hover { border-color: var(--dim-fg); }
+    .settings-shortcut-key:focus-visible {
+      outline: 1px solid var(--dim-fg);
+      outline-offset: 1px;
+    }
     .settings-shortcut-key.recording {
       border-color: var(--blue, #7aa2f7); color: var(--blue, #7aa2f7);
       animation: shortcut-pulse 1s ease-in-out infinite;
@@ -457,6 +557,11 @@
       color: var(--text-secondary); font-size: var(--ui-font-normal);
     }
     .vault-sidebar-item:hover { background: var(--input-bg); }
+    .vault-sidebar-item:focus-visible {
+      outline: 1px solid var(--dim-fg);
+      outline-offset: -1px;
+      background: var(--input-bg);
+    }
     .vault-sidebar-item.active { background: var(--active-highlight); color: var(--fg); font-weight: 600; }
     .vault-sidebar-footer {
       margin-top: auto; padding: 10px 14px;

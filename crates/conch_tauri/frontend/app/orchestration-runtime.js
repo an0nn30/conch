@@ -3,6 +3,7 @@
     const invoke = deps.invoke;
     const listen = deps.listen;
     const listenOnCurrentWindow = deps.listenOnCurrentWindow;
+    const layoutService = deps.layoutService;
     const terminalHostEl = deps.terminalHostEl;
     const currentWindow = deps.currentWindow;
     const tabs = deps.tabs;
@@ -56,6 +57,7 @@
           invoke,
           listen,
           listenOnCurrentWindow,
+          layoutService,
           debouncedFitAndResize: () => debouncedFitAndResize(),
           getCurrentTab: () => currentTab(),
           getTabById: (tabId) => tabs.get(Number(tabId)) || null,

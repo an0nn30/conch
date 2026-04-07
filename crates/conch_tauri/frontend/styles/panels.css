@@ -368,6 +368,11 @@
       padding: 5px 14px; cursor: pointer; font-size: var(--ui-font-normal); color: var(--fg);
     }
     .ssh-context-menu-item:hover { background: var(--active-highlight); }
+    .ssh-context-menu-item:focus-visible {
+      outline: 1px solid var(--dim-fg);
+      outline-offset: -1px;
+      background: var(--active-highlight);
+    }
     .ssh-auth-message { font-size: 13px; color: var(--fg); line-height: 1.5; margin-bottom: 8px; }
     .ssh-auth-detail {
       font: 12px/1.4 "JetBrains Mono", monospace; color: var(--cyan);

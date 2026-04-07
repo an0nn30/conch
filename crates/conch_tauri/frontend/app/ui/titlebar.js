@@ -15,6 +15,8 @@
   let shortcutsState = {};
   let debugBuildState = false;
   let acceleratorHandler = null;
+  let acceleratorUnregister = null;
+  let menuEscapeUnregister = null;
 
   // -----------------------------------------------------------------------
   // Menu definition — mirrors the native Tauri menu built in Rust.
@@ -101,7 +103,7 @@
           { type: 'separator' },
           { id: 'manage-tunnels', label: 'Manage SSH Tunnels\u2026', shortcut: shortcuts.manage_tunnels || `${ctrl}+Shift+M` },
           { type: 'separator' },
-          { id: 'vault-open', label: 'Credential Vault\u2026', shortcut: `${ctrl}+Shift+V` },
+          { id: 'vault-open', label: 'Credential Vault\u2026', shortcut: shortcuts.vault_open || `${ctrl}+Shift+V` },
           { id: 'keygen-open', label: 'Generate SSH Key\u2026' },
           { id: 'vault-lock', label: 'Lock Vault' },
         ]
@@ -232,14 +234,25 @@
       }
     });
 
-    // Close menus on Escape
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && activeMenu) {
-        closeAllMenus();
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    }, true);
+    const keyboardRouter = window.conchKeyboardRouter;
+    if (typeof menuEscapeUnregister === 'function') {
+      menuEscapeUnregister();
+      menuEscapeUnregister = null;
+    }
+    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+      menuEscapeUnregister = keyboardRouter.register({
+        name: 'titlebar-menu-escape',
+        priority: 170,
+        isActive: () => !!activeMenu,
+        onKeyDown: (event) => {
+          if (event.key !== 'Escape') return false;
+          closeAllMenus();
+          return true;
+        },
+      });
+    } else {
+      console.warn('titlebar: keyboard router unavailable, menu Escape handler not registered');
+    }
 
   }
 
@@ -485,21 +498,32 @@
     }
     for (const menu of menuDef) collect(menu.items);
 
+    if (typeof acceleratorUnregister === 'function') {
+      acceleratorUnregister();
+      acceleratorUnregister = null;
+    }
     if (acceleratorHandler) {
-      document.removeEventListener('keydown', acceleratorHandler, true);
       acceleratorHandler = null;
     }
     acceleratorHandler = (e) => {
       for (const { combo, id } of bindings) {
         if (matchesEvent(combo, e)) {
-          e.preventDefault();
-          e.stopPropagation();
           handleItemClick(id);
-          return;
+          return true;
         }
       }
+      return false;
     };
-    document.addEventListener('keydown', acceleratorHandler, true); // capture phase so we fire before xterm.js
+    const keyboardRouter = window.conchKeyboardRouter;
+    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+      acceleratorUnregister = keyboardRouter.register({
+        name: 'titlebar-accelerators',
+        priority: 115,
+        onKeyDown: (event) => acceleratorHandler(event) === true,
+      });
+    } else {
+      console.warn('titlebar: keyboard router unavailable, accelerators were not registered');
+    }
   }
 
   exports.titlebar = { init, refresh };

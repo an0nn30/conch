@@ -103,6 +103,7 @@ pub struct KeyboardConfig {
     pub quit: String,
     pub new_window: String,
     pub manage_tunnels: String,
+    pub vault_open: String,
     pub zen_mode: String,
     pub toggle_left_panel: String,
     pub toggle_right_panel: String,
@@ -129,6 +130,7 @@ impl Default for KeyboardConfig {
             quit: "cmd+q".into(),
             new_window: "cmd+shift+n".into(),
             manage_tunnels: "cmd+shift+m".into(),
+            vault_open: "cmd+shift+v".into(),
             zen_mode: "cmd+shift+z".into(),
             toggle_left_panel: "cmd+shift+e".into(),
             toggle_right_panel: "cmd+shift+r".into(),
@@ -282,6 +284,12 @@ mod tests {
     fn keyboard_config_includes_manage_tunnels_default() {
         let cfg = KeyboardConfig::default();
         assert_eq!(cfg.manage_tunnels, "cmd+shift+m");
+    }
+
+    #[test]
+    fn keyboard_config_includes_vault_open_default() {
+        let cfg = KeyboardConfig::default();
+        assert_eq!(cfg.vault_open, "cmd+shift+v");
     }
 
     #[test]

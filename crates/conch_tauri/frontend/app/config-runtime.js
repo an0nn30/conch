@@ -8,33 +8,17 @@
     const getFontFallbacks = deps.getFontFallbacks;
     const setTermFontFamily = deps.setTermFontFamily;
     const setTermFontSize = deps.setTermFontSize;
+    const configService = global.conchConfigService || {};
 
     async function applyConfigChanged() {
       try {
         await refreshKeyboardShortcutFallbacks();
         const tc = await invoke('get_theme_colors');
+        if (typeof configService.applyThemeCss === 'function') {
+          configService.applyThemeCss(tc);
+        }
 
-        const rootStyle = document.documentElement.style;
-        rootStyle.setProperty('--bg', tc.background);
-        rootStyle.setProperty('--fg', tc.foreground);
-        rootStyle.setProperty('--dim-fg', tc.dim_fg);
-        rootStyle.setProperty('--panel-bg', tc.panel_bg);
-        rootStyle.setProperty('--tab-bar-bg', tc.tab_bar_bg);
-        rootStyle.setProperty('--tab-border', tc.tab_border);
-        rootStyle.setProperty('--active-highlight', tc.active_highlight);
-        rootStyle.setProperty('--input-bg', tc.input_bg);
-        rootStyle.setProperty('--hover-bg', tc.input_bg);
-        rootStyle.setProperty('--red', tc.red);
-        rootStyle.setProperty('--green', tc.green);
-        rootStyle.setProperty('--yellow', tc.yellow);
-        rootStyle.setProperty('--blue', tc.blue);
-        rootStyle.setProperty('--cyan', tc.cyan);
-        rootStyle.setProperty('--magenta', tc.magenta);
-        if (tc.text_secondary) rootStyle.setProperty('--text-secondary', tc.text_secondary);
-        if (tc.text_muted) rootStyle.setProperty('--text-muted', tc.text_muted);
-        document.body.style.background = tc.background;
-
-        const newTheme = {
+        const fallbackTheme = {
           background: tc.background, foreground: tc.foreground,
           cursor: tc.cursor_color, cursorAccent: tc.cursor_text,
           selectionBackground: tc.selection_bg, selectionForeground: tc.selection_text,
@@ -45,6 +29,9 @@
           brightBlue: tc.bright_blue, brightMagenta: tc.bright_magenta,
           brightCyan: tc.bright_cyan, brightWhite: tc.bright_white,
         };
+        const newTheme = typeof configService.toTerminalTheme === 'function'
+          ? configService.toTerminalTheme(tc, fallbackTheme)
+          : fallbackTheme;
         setTheme(newTheme);
         for (const pane of getPanes().values()) {
           if (pane.kind === 'terminal' && pane.term) {
@@ -53,15 +40,10 @@
         }
 
         const appCfg = await invoke('get_app_config');
-        document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
-        if (appCfg.ui_font_small > 0) rootStyle.setProperty('--ui-font-small', appCfg.ui_font_small + 'px');
-        if (appCfg.ui_font_list > 0) rootStyle.setProperty('--ui-font-list', appCfg.ui_font_list + 'px');
-        if (appCfg.ui_font_normal > 0) rootStyle.setProperty('--ui-font-normal', appCfg.ui_font_normal + 'px');
-        if (appCfg.ui_font_family) {
-          document.body.style.fontFamily = appCfg.ui_font_family + ', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-        }
-        if (appCfg.ui_font_size > 0) {
-          document.body.style.fontSize = appCfg.ui_font_size + 'px';
+        if (typeof configService.applyUiConfig === 'function') {
+          configService.applyUiConfig(appCfg);
+        } else {
+          document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
         }
 
         try {
@@ -90,12 +72,6 @@
           console.warn('Failed to reload terminal font:', error);
         }
 
-        if (global.toast && global.toast.configure) {
-          global.toast.configure({
-            position: appCfg.notification_position || 'bottom',
-            nativeNotifications: appCfg.native_notifications !== false,
-          });
-        }
       } catch (error) {
         console.warn('Config reload failed:', error);
       }

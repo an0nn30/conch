@@ -9,6 +9,16 @@
   let panelEl = null;
   let panelWrapEl = null;
   let resizeHandleEl = null;
+  let layoutService = null;
+  const sshDataService = exports.conchSshFeatureDataService || {};
+  const sshStore = exports.conchSshStore || {};
+  const sshActions = exports.conchSshActions || {};
+  const sshView = exports.conchSshView || {};
+  const sshContextMenuFeature = exports.conchSshContextMenu || {};
+  const sshAuthPromptsFeature = exports.conchSshAuthPrompts || {};
+  const sshDialogsFeature = exports.conchSshDialogs || {};
+  const sshDependencyPromptFeature = exports.conchSshDependencyPrompt || {};
+  const sshConnectionFormFeature = exports.conchSshConnectionForm || {};
   let serverListEl = null;
   let quickConnectEl = null;
   let sessionListEl = null;
@@ -22,6 +32,37 @@
   let searchQuery = '';
   let searchSelectedIndex = 0;
 
+  function setOverlayDialogAttributes(overlay, label) {
+    if (!overlay) return;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', String(label || 'Dialog'));
+  }
+
+  function registerOverlayKeys(overlay, name, onKeyDown) {
+    const keyboardRouter = window.conchKeyboardRouter;
+    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+      return keyboardRouter.register({
+        name: name || 'ssh-overlay',
+        priority: 220,
+        isActive: () => !!(overlay && overlay.isConnected),
+        onKeyDown: (event) => {
+          if (!overlay || !overlay.isConnected) return false;
+          return onKeyDown(event) === true;
+        },
+      });
+    }
+
+    console.warn('ssh-panel: keyboard router unavailable, skipping overlay handler registration:', name || 'ssh-overlay');
+    return () => {};
+  }
+
+  function invalidateCommandPaletteCache(reason) {
+    if (typeof window.__conchInvalidateCommandPaletteCache === 'function') {
+      window.__conchInvalidateCommandPaletteCache(reason || 'ssh-panel');
+    }
+  }
+
   function init(opts) {
     invoke = opts.invoke;
     listen = opts.listen;
@@ -30,6 +71,9 @@
     panelEl = opts.panelEl;
     panelWrapEl = opts.panelWrapEl;
     resizeHandleEl = opts.resizeHandleEl;
+    layoutService = opts.layoutService
+      || (window.conchServices && window.conchServices.layoutService)
+      || null;
     refocusTerminalFn = opts.refocusTerminal;
 
     if (!panelEl) {
@@ -141,9 +185,6 @@
     // Vault auto-save prompt
     listen('vault-auto-save-prompt', handleVaultAutoSavePrompt);
 
-    // Global shortcuts
-    document.addEventListener('keydown', handleGlobalKeydown);
-
     // Resize drag + state restore
     initResize();
     restoreLayout();
@@ -200,12 +241,6 @@
       { label: 'New Folder', action: () => showAddFolderDialog() },
       { label: 'New Tunnel', action: () => { if (window.tunnelManager) window.tunnelManager.show(); } },
     ]);
-  }
-
-  function handleGlobalKeydown(e) {
-    // Keyboard shortcuts are now handled via native menu accelerators.
-    // The menu emits events which are caught in the menu-action listener.
-    // Keep Escape handling for the quick connect input (handled in its own listener).
   }
 
   // ---------------------------------------------------------------------------
@@ -265,12 +300,15 @@
     if (saveTimeout) clearTimeout(saveTimeout);
     saveTimeout = setTimeout(() => {
       if (!invoke) return;
-      invoke('save_window_layout', {
-        layout: {
-          ssh_panel_width: panelEl.offsetWidth,
-          ssh_panel_visible: !isHidden(),
-        },
-      }).catch(() => {});
+      const patch = {
+        ssh_panel_width: panelEl.offsetWidth,
+        ssh_panel_visible: !isHidden(),
+      };
+      if (layoutService && typeof layoutService.savePartialLayout === 'function') {
+        layoutService.savePartialLayout(patch);
+      } else {
+        invoke('save_window_layout', { layout: patch }).catch(() => {});
+      }
     }, 300);
   }
 
@@ -278,7 +316,9 @@
     // When TWM is active, sidebar width and visibility are managed centrally.
     if (window.toolWindowManager) return;
     try {
-      const saved = await invoke('get_saved_layout');
+      const saved = layoutService && typeof layoutService.getSavedLayout === 'function'
+        ? await layoutService.getSavedLayout()
+        : await invoke('get_saved_layout');
       if (saved.ssh_panel_width > 100) {
         panelEl.style.width = saved.ssh_panel_width + 'px';
       }
@@ -299,11 +339,15 @@
 
   async function refreshAll() {
     try {
-      serverData = await invoke('remote_get_servers');
+      if (!sshDataService || typeof sshDataService.getServers !== 'function') {
+        throw new Error('SSH data service unavailable: getServers');
+      }
+      serverData = await sshDataService.getServers(invoke);
     } catch (e) {
       console.error('Failed to load servers:', e);
       serverData = { folders: [], ungrouped: [], ssh_config: [] };
     }
+    invalidateCommandPaletteCache('ssh-refresh-all');
     if (!hasPanelDom()) return;
     renderServerList();
     await refreshSessions();
@@ -315,8 +359,11 @@
     let data;
     let tunnels;
     try {
-      data = await invoke('remote_get_servers');
-      tunnels = await invoke('tunnel_get_all');
+      if (!sshDataService || typeof sshDataService.getServers !== 'function' || typeof sshDataService.getTunnels !== 'function') {
+        throw new Error('SSH data service unavailable: getServers/getTunnels');
+      }
+      data = await sshDataService.getServers(invoke);
+      tunnels = await sshDataService.getTunnels(invoke);
     } catch (e) {
       if (window.toast) window.toast.error('Export Failed', String(e));
       return;
@@ -325,6 +372,7 @@
     removeOverlay();
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
+    setOverlayDialogAttributes(overlay, 'Export connections');
 
     // Build checkbox list HTML.
     let serversHtml = '';
@@ -381,10 +429,20 @@
       allBoxes().forEach(cb => cb.checked = selectAll.checked);
     });
 
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
-    const onKey = (e) => { if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); } };
-    document.addEventListener('keydown', onKey);
-    overlay.querySelector('#exp-cancel').addEventListener('click', removeOverlay);
+    let closed = false;
+    const closeExportDialog = () => {
+      if (closed) return;
+      closed = true;
+      if (typeof unregisterKeys === 'function') unregisterKeys();
+      removeOverlay();
+    };
+    const unregisterKeys = registerOverlayKeys(overlay, 'ssh-export-dialog', (event) => {
+      if (event.key !== 'Escape') return false;
+      closeExportDialog();
+      return true;
+    });
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeExportDialog(); });
+    overlay.querySelector('#exp-cancel').addEventListener('click', closeExportDialog);
 
     // Build a lookup of all servers by their session key (user@host:port).
     const allServers = [];
@@ -451,10 +509,12 @@
         }
       }
 
-      removeOverlay();
-      document.removeEventListener('keydown', onKey);
+      closeExportDialog();
       try {
-        await invoke('remote_export', { serverIds, tunnelIds });
+        if (!sshDataService || typeof sshDataService.exportSelection !== 'function') {
+          throw new Error('SSH data service unavailable: exportSelection');
+        }
+        await sshDataService.exportSelection(invoke, serverIds, tunnelIds);
         if (window.toast) window.toast.info('Export', `Exported ${serverIds.length} server(s), ${tunnelIds.length} tunnel(s)`);
       } catch (e) {
         if (String(e) === 'Export cancelled') return;
@@ -466,59 +526,26 @@
 
 
   function showDependencyPrompt(missingDependencies) {
-    return new Promise((resolve) => {
-      const existing = document.querySelector('.ssh-overlay.dep-prompt');
-      if (existing) existing.remove();
-
-      const overlay = document.createElement('div');
-      overlay.className = 'ssh-overlay dep-prompt';
-
-      let listHtml = '';
-      for (const dep of missingDependencies) {
-        const dependencyLabel = `${dep.server.label} (${dep.server.user}@${dep.server.host}:${dep.server.port})`;
-        const reasonText = dep.reason === 'proxy_jump'
-          ? `${dep.sourceLabel} uses ProxyJump`
-          : dep.sourceLabel;
-        listHtml += `<div class="ssh-export-item" style="padding:2px 0;">
-          <span>${esc(reasonText)}</span>
-          <span class="ssh-export-dim">\u2192 ${esc(dependencyLabel)}</span>
-        </div>`;
-      }
-
-      overlay.innerHTML = `
-        <div class="ssh-form" style="min-width:400px;">
-          <div class="ssh-form-title">Include Dependency Servers?</div>
-          <div class="ssh-form-body">
-            <div style="margin-bottom:8px;font-size:12px;color:var(--fg);">
-              The following selections depend on server connections that are not in your export:
-            </div>
-            ${listHtml}
-            <div style="margin-top:10px;font-size:11px;color:var(--dim-fg);">
-              Without these servers, imported connections may fail on another machine.
-            </div>
-          </div>
-          <div class="ssh-form-buttons">
-            <button class="ssh-form-btn" id="dep-cancel">Cancel</button>
-            <button class="ssh-form-btn" id="dep-skip">Export Without</button>
-            <button class="ssh-form-btn primary" id="dep-include">Include Servers</button>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(overlay);
-      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
-      overlay.querySelector('#dep-cancel').addEventListener('click', () => { overlay.remove(); resolve(null); });
-      overlay.querySelector('#dep-skip').addEventListener('click', () => { overlay.remove(); resolve(false); });
-      overlay.querySelector('#dep-include').addEventListener('click', () => { overlay.remove(); resolve(true); });
-
-      const onKey = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(null); } };
-      document.addEventListener('keydown', onKey);
-    });
+    if (sshDependencyPromptFeature && typeof sshDependencyPromptFeature.showDependencyPrompt === 'function') {
+      const delegated = sshDependencyPromptFeature.showDependencyPrompt(missingDependencies, {
+        esc,
+        setOverlayDialogAttributes,
+        registerOverlayKeys,
+      });
+      if (delegated) return delegated;
+    }
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Dependency prompt module is unavailable.');
+    }
+    return Promise.resolve(null);
   }
 
   async function importConfig() {
     try {
-      const msg = await invoke('remote_import');
+      if (!sshDataService || typeof sshDataService.importConfig !== 'function') {
+        throw new Error('SSH data service unavailable: importConfig');
+      }
+      const msg = await sshDataService.importConfig(invoke);
       await refreshAll();
       if (window.toast) window.toast.info('Import', msg);
     } catch (e) {
@@ -530,7 +557,10 @@
 
   async function refreshSessions() {
     try {
-      const sessions = await invoke('remote_get_sessions');
+      if (!sshDataService || typeof sshDataService.getSessions !== 'function') {
+        throw new Error('SSH data service unavailable: getSessions');
+      }
+      const sessions = await sshDataService.getSessions(invoke);
       renderSessions(sessions);
     } catch (e) {
       console.error('Failed to load sessions:', e);
@@ -542,124 +572,83 @@
   // ---------------------------------------------------------------------------
 
   function getAllServers() {
-    const all = [];
-    for (const f of serverData.folders) {
-      for (const s of f.entries) all.push(s);
+    if (!sshStore || typeof sshStore.getAllServers !== 'function') {
+      console.error('ssh-store missing getAllServers');
+      return [];
     }
-    for (const s of serverData.ungrouped) all.push(s);
-    for (const s of serverData.ssh_config) all.push(s);
-    return all;
+    return sshStore.getAllServers(serverData);
   }
 
   function serverMatchesQuery(server, query) {
-    if (!query) return true;
-    const hay = `${server.label} ${server.host} ${server.user}@${server.host}`.toLowerCase();
-    return query.split(/\s+/).every((term) => hay.includes(term));
+    if (!sshStore || typeof sshStore.serverMatchesQuery !== 'function') {
+      console.error('ssh-store missing serverMatchesQuery');
+      return true;
+    }
+    return sshStore.serverMatchesQuery(server, query);
   }
 
   function getFilteredServers(query) {
-    if (!query) return [];
-    return getAllServers().filter((s) => serverMatchesQuery(s, query));
+    if (!sshStore || typeof sshStore.getFilteredServers !== 'function') {
+      console.error('ssh-store missing getFilteredServers');
+      return [];
+    }
+    return sshStore.getFilteredServers(serverData, query);
   }
 
   function buildProxyJumpOptions(excludedServerId) {
-    const options = [];
-    const seenSpecs = new Set();
-
-    const addFromList = (servers, source) => {
-      for (const s of servers || []) {
-        if (s.id === excludedServerId) continue;
-        const spec = makeProxyJumpSpec(s);
-        if (!spec) continue;
-        const normalizedSpec = normalizeProxyJump(spec);
-        if (!normalizedSpec || seenSpecs.has(normalizedSpec)) continue;
-        seenSpecs.add(normalizedSpec);
-        options.push({
-          source,
-          spec,
-          label: s.label || spec,
-          details: `${s.user || 'user'}@${s.host}:${s.port || 22}`,
-        });
-      }
-    };
-
-    for (const folder of serverData.folders) addFromList(folder.entries, 'saved');
-    addFromList(serverData.ungrouped, 'saved');
-    addFromList(serverData.ssh_config, 'ssh_config');
-
-    return options;
+    if (!sshStore || typeof sshStore.buildProxyJumpOptions !== 'function') {
+      console.error('ssh-store missing buildProxyJumpOptions');
+      return [];
+    }
+    return sshStore.buildProxyJumpOptions(serverData, excludedServerId);
   }
 
   function renderProxyJumpOptions(options) {
-    const groups = [
-      { source: 'saved', title: 'Saved Sessions' },
-      { source: 'ssh_config', title: '~/.ssh/config' },
-    ];
-    return groups
-      .map((group) => {
-        const groupOptions = options.filter((opt) => opt.source === group.source);
-        if (!groupOptions.length) return '';
-        const optionHtml = groupOptions
-          .map((opt) => `<option value="${attr(opt.spec)}">${esc(opt.label)} (${esc(opt.details)})</option>`)
-          .join('');
-        return `<optgroup label="${esc(group.title)}">${optionHtml}</optgroup>`;
-      })
-      .join('');
+    if (!sshStore || typeof sshStore.renderProxyJumpOptions !== 'function') {
+      console.error('ssh-store missing renderProxyJumpOptions');
+      return '';
+    }
+    return sshStore.renderProxyJumpOptions(options, { esc, attr });
   }
 
   function parseProxyJump(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return null;
-    const match = raw.match(/^(?:(.+?)@)?(\[[^\]]+\]|[^:]+?)(?::(\d+))?$/);
-    if (!match) return null;
-    const user = (match[1] || '').trim();
-    const host = (match[2] || '').trim().toLowerCase();
-    if (!host) return null;
-    const port = match[3] ? parseInt(match[3], 10) : 22;
-    return { user: user.toLowerCase(), host, port: Number.isFinite(port) ? port : 22 };
+    if (!sshStore || typeof sshStore.parseProxyJump !== 'function') {
+      console.error('ssh-store missing parseProxyJump');
+      return null;
+    }
+    return sshStore.parseProxyJump(value);
   }
 
   function normalizeProxyJump(value) {
-    const parsed = parseProxyJump(value);
-    if (!parsed) return null;
-    return `${parsed.user}@${parsed.host}:${parsed.port}`;
+    if (!sshStore || typeof sshStore.normalizeProxyJump !== 'function') {
+      console.error('ssh-store missing normalizeProxyJump');
+      return null;
+    }
+    return sshStore.normalizeProxyJump(value);
   }
 
   function makeProxyJumpSpec(server) {
-    if (!server || !server.host) return '';
-    const host = String(server.host).trim();
-    if (!host) return '';
-    const user = String(server.user || '').trim();
-    const port = Number.isFinite(Number(server.port)) ? Number(server.port) : 22;
-    const base = user ? `${user}@${host}` : host;
-    return port === 22 ? base : `${base}:${port}`;
+    if (!sshStore || typeof sshStore.makeProxyJumpSpec !== 'function') {
+      console.error('ssh-store missing makeProxyJumpSpec');
+      return '';
+    }
+    return sshStore.makeProxyJumpSpec(server);
   }
 
   function findServerForProxyJump(proxyJumpValue, servers) {
-    const parsed = parseProxyJump(proxyJumpValue);
-    if (!parsed) return null;
-
-    const normalized = normalizeProxyJump(proxyJumpValue);
-    if (parsed.user) {
-      return servers.find((s) => normalizeProxyJump(makeProxyJumpSpec(s)) === normalized) || null;
+    if (!sshStore || typeof sshStore.findServerForProxyJump !== 'function') {
+      console.error('ssh-store missing findServerForProxyJump');
+      return null;
     }
-
-    return servers.find((s) => {
-      const spec = parseProxyJump(makeProxyJumpSpec(s));
-      return spec && spec.host === parsed.host && spec.port === parsed.port;
-    }) || null;
+    return sshStore.findServerForProxyJump(proxyJumpValue, servers);
   }
 
   function dedupeDependencyServers(missingDependencies) {
-    const seen = new Set();
-    const deduped = [];
-    for (const dep of missingDependencies) {
-      const key = `${dep.reason}:${dep.sourceId}:${dep.server.id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      deduped.push(dep);
+    if (!sshStore || typeof sshStore.dedupeDependencyServers !== 'function') {
+      console.error('ssh-store missing dedupeDependencyServers');
+      return Array.isArray(missingDependencies) ? missingDependencies : [];
     }
-    return deduped;
+    return sshStore.dedupeDependencyServers(missingDependencies);
   }
 
   // ---------------------------------------------------------------------------
@@ -667,144 +656,36 @@
   // ---------------------------------------------------------------------------
 
   function renderServerList() {
-    if (!serverListEl) return;
-    const frag = document.createDocumentFragment();
-
-    if (searchQuery) {
-      // Flat filtered list
-      const matches = getFilteredServers(searchQuery);
-      for (let i = 0; i < matches.length; i++) {
-        frag.appendChild(createServerNode(matches[i], false, null, i === searchSelectedIndex));
-      }
-      if (matches.length === 0) {
-        const hint = document.createElement('div');
-        hint.className = 'ssh-search-hint';
-        hint.textContent = 'No matches \u2014 Enter to quick-connect';
-        frag.appendChild(hint);
-      }
-    } else {
-      // SSH Sessions section header
-      const hasServers = serverData.folders.length > 0
-        || serverData.ungrouped.length > 0
-        || serverData.ssh_config.length > 0;
-
-      if (hasServers) {
-        const sep = document.createElement('div');
-        sep.className = 'ssh-panel-separator';
-        frag.appendChild(sep);
-
-        const headerRow = document.createElement('div');
-        headerRow.className = 'ssh-tunnels-header';
-        headerRow.innerHTML =
-          `<span class="ssh-section-header-inline">SSH Sessions</span>`;
-        frag.appendChild(headerRow);
-      }
-
-      // Folders
-      for (const folder of serverData.folders) {
-        frag.appendChild(createFolderNode(folder));
-      }
-      // Ungrouped servers
-      for (const server of serverData.ungrouped) {
-        frag.appendChild(createServerNode(server));
-      }
-      // ~/.ssh/config servers (dimmed)
-      if (serverData.ssh_config.length > 0) {
-        frag.appendChild(makeSectionHeader('~/.ssh/config'));
-        for (const server of serverData.ssh_config) {
-          frag.appendChild(createServerNode(server, true));
+    if (!sshView || typeof sshView.renderServerList !== 'function') {
+      console.error('ssh-view missing renderServerList');
+      return;
+    }
+    sshView.renderServerList({
+      serverListEl,
+      serverData,
+      searchQuery,
+      searchSelectedIndex,
+      getFilteredServers,
+      esc,
+      onFolderToggle: (folder, expanded) => {
+        if (sshActions && typeof sshActions.setFolderExpanded === 'function') {
+          sshActions.setFolderExpanded(invoke, folder.id, expanded).catch(() => {});
         }
-      }
-    }
-
-    serverListEl.innerHTML = '';
-    serverListEl.appendChild(frag);
-  }
-
-  function makeSectionHeader(text) {
-    const el = document.createElement('div');
-    el.className = 'ssh-section-header';
-    el.textContent = text;
-    return el;
-  }
-
-  function createFolderNode(folder) {
-    const el = document.createElement('div');
-    el.className = 'ssh-folder';
-
-    const header = document.createElement('div');
-    header.className = 'ssh-folder-header';
-    const expanded = folder.expanded !== false;
-    header.innerHTML =
-      `<span class="ssh-folder-arrow">${expanded ? '▼' : '▶'}</span>` +
-      `<span class="ssh-folder-name">${esc(folder.name)}</span>` +
-      `<span class="ssh-folder-count">${folder.entries.length}</span>`;
-
-    header.addEventListener('click', () => {
-      invoke('remote_set_folder_expanded', { folderId: folder.id, expanded: !expanded }).catch(() => {});
-      folder.expanded = !expanded;
-      renderServerList();
+        folder.expanded = expanded;
+        renderServerList();
+      },
+      onFolderContextMenu: (event, folder) => showFolderContextMenu(event, folder),
+      onServerContextMenu: (event, server, folderId) => showServerContextMenu(event, server, folderId),
+      onServerDblClick: (server) => createSshTabFn({ serverId: server.id }),
     });
-
-    header.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showFolderContextMenu(e, folder);
-    });
-
-    el.appendChild(header);
-
-    if (expanded) {
-      const list = document.createElement('div');
-      list.className = 'ssh-folder-entries';
-      for (const server of folder.entries) {
-        list.appendChild(createServerNode(server, false, folder.id));
-      }
-      el.appendChild(list);
-    }
-
-    return el;
-  }
-
-  function createServerNode(server, dimmed, folderId, highlighted) {
-    const el = document.createElement('div');
-    el.className = 'ssh-server-node' + (dimmed ? ' dimmed' : '') + (highlighted ? ' highlighted' : '');
-    el.title = `${server.user}@${server.host}:${server.port}`;
-
-    const label = server.label || `${server.user}@${server.host}`;
-    const detail = server.host + (server.port !== 22 ? ':' + server.port : '');
-
-    el.innerHTML =
-      `<span class="ssh-server-label">${esc(label)}</span>` +
-      `<span class="ssh-server-detail">${esc(detail)}</span>`;
-
-    el.addEventListener('dblclick', () => createSshTabFn({ serverId: server.id }));
-
-    el.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showServerContextMenu(e, server, folderId);
-    });
-
-    return el;
   }
 
   function renderSessions(sessions) {
-    if (!sessionListEl) return;
-    sessionListEl.innerHTML = '';
-    if (!sessions || sessions.length === 0) return;
-
-    const frag = document.createDocumentFragment();
-    frag.appendChild(makeSectionHeader('Active'));
-
-    for (const s of sessions) {
-      const el = document.createElement('div');
-      el.className = 'ssh-session-node';
-      el.innerHTML =
-        `<span class="ssh-session-dot"></span>` +
-        `<span class="ssh-session-label">${esc(s.user)}@${esc(s.host)}</span>`;
-      frag.appendChild(el);
+    if (!sshView || typeof sshView.renderSessions !== 'function') {
+      console.error('ssh-view missing renderSessions');
+      return;
     }
-
-    sessionListEl.appendChild(frag);
+    sshView.renderSessions(sessionListEl, sessions, { esc });
   }
 
   // ---------------------------------------------------------------------------
@@ -814,126 +695,54 @@
   async function refreshTunnels() {
     let tunnels = [];
     try {
-      tunnels = await invoke('tunnel_get_all');
+      if (!sshDataService || typeof sshDataService.getTunnels !== 'function') {
+        throw new Error('SSH data service unavailable: getTunnels');
+      }
+      tunnels = await sshDataService.getTunnels(invoke);
     } catch (e) {
       console.error('Failed to load tunnels:', e);
     }
+    invalidateCommandPaletteCache('ssh-refresh-tunnels');
     renderTunnels(tunnels);
   }
 
   function renderTunnels(tunnels) {
-    if (!tunnelsSectionEl) return;
-    tunnelsSectionEl.innerHTML = '';
-    if (tunnels.length === 0 && !tunnelsSectionEl.dataset.showEmpty) return;
-
-    const frag = document.createDocumentFragment();
-
-    // Separator + header
-    const sep = document.createElement('div');
-    sep.className = 'ssh-panel-separator';
-    frag.appendChild(sep);
-
-    const headerRow = document.createElement('div');
-    headerRow.className = 'ssh-tunnels-header';
-    headerRow.innerHTML =
-      `<span class="ssh-section-header-inline">Tunnels</span>`;
-    frag.appendChild(headerRow);
-
-    for (const t of tunnels) {
-      frag.appendChild(createTunnelNode(t));
+    if (!sshView || typeof sshView.renderTunnels !== 'function') {
+      console.error('ssh-view missing renderTunnels');
+      return;
     }
-
-    if (tunnels.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'ssh-tunnel-empty';
-      empty.textContent = 'No tunnels configured';
-      frag.appendChild(empty);
-    }
-
-    tunnelsSectionEl.appendChild(frag);
-  }
-
-  function createTunnelNode(tunnel) {
-    const el = document.createElement('div');
-    el.className = 'ssh-tunnel-node';
-
-    const status = tunnel.status || null;
-    let dotClass = 'inactive';
-    let errorMsg = null;
-    if (status === 'active') dotClass = 'active';
-    else if (status === 'connecting') dotClass = 'connecting';
-    else if (status && status.startsWith('error')) {
-      dotClass = 'error';
-      errorMsg = status.replace(/^error:\s*/, '');
-    }
-
-    const isConnected = status === 'active' || status === 'connecting';
-    const btnIcon = isConnected
-      ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="M 2 2 v 12 h 12 v -12 z"/></svg>'
-      : '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="M 3 2 v 12 l 11 -6 z"/></svg>';
-    const btnTitle = isConnected ? 'Disconnect' : (errorMsg ? 'Retry' : 'Connect');
-
-    el.innerHTML =
-      `<span class="tunnel-dot ${dotClass}"></span>` +
-      `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>` +
-      (errorMsg ? `<span class="ssh-tunnel-error-indicator" title="Error: ${attr(errorMsg)}">!</span>` : '') +
-      `<button class="ssh-tunnel-btn ssh-tunnel-action-btn" title="${btnTitle}">${errorMsg ? 'Retry' : btnIcon}</button>` +
-      `<button class="ssh-tunnel-btn ssh-tunnel-menu-btn" title="More actions">\u22ef</button>`;
-
-    if (errorMsg) el.title = 'Error: ' + errorMsg;
-
-    const actionBtn = el.querySelector('.ssh-tunnel-action-btn');
-    actionBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      actionBtn.disabled = true;
-      if (isConnected) {
-        try {
-          await invoke('tunnel_stop', { tunnelId: tunnel.id });
-          window.toast.info('Tunnel Disconnected', tunnel.label);
-        } catch (err) {
-          window.toast.error('Tunnel Error', String(err));
+    sshView.renderTunnels(tunnelsSectionEl, tunnels, {
+      esc,
+      toast: window.toast,
+      onStartTunnel: async (tunnel) => {
+        if (!sshActions || typeof sshActions.startTunnel !== 'function') {
+          throw new Error('SSH actions unavailable: startTunnel');
         }
-      } else {
-        try {
-          await invoke('tunnel_start', { tunnelId: tunnel.id });
-          window.toast.success('Tunnel Connected', tunnel.label);
-        } catch (err) {
-          window.toast.error('Tunnel Error', String(err));
+        await sshActions.startTunnel(invoke, tunnel.id);
+      },
+      onStopTunnel: async (tunnel) => {
+        if (!sshActions || typeof sshActions.stopTunnel !== 'function') {
+          throw new Error('SSH actions unavailable: stopTunnel');
         }
-      }
-      setTimeout(refreshTunnels, 400);
+        await sshActions.stopTunnel(invoke, tunnel.id);
+      },
+      onRefreshTunnels: refreshTunnels,
+      onTunnelContextMenu: (event, tunnel, status) => showTunnelContextMenu(event, tunnel, status),
     });
-
-    const menuBtn = el.querySelector('.ssh-tunnel-menu-btn');
-    menuBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const rect = menuBtn.getBoundingClientRect();
-      showTunnelContextMenu(
-        { preventDefault() {}, clientX: rect.right - 4, clientY: rect.bottom + 2 },
-        tunnel,
-        status
-      );
-    });
-
-    // Right-click for context menu
-    el.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showTunnelContextMenu(e, tunnel, status);
-    });
-
-    return el;
   }
 
   function showTunnelContextMenu(e, tunnel, status) {
     const items = [];
     if (status === 'active' || status === 'connecting') {
       items.push({ label: 'Stop', action: async () => {
-        try { await invoke('tunnel_stop', { tunnelId: tunnel.id }); } catch (err) { console.error(err); }
+        if (!sshActions || typeof sshActions.stopTunnel !== 'function') return;
+        try { await sshActions.stopTunnel(invoke, tunnel.id); } catch (err) { console.error(err); }
         setTimeout(refreshTunnels, 300);
       }});
     } else {
       items.push({ label: 'Start', action: async () => {
-        try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (err) { window.toast.error('Tunnel Error', String(err)); }
+        if (!sshActions || typeof sshActions.startTunnel !== 'function') return;
+        try { await sshActions.startTunnel(invoke, tunnel.id); } catch (err) { window.toast.error('Tunnel Error', String(err)); }
         setTimeout(refreshTunnels, 500);
       }});
     }
@@ -942,7 +751,8 @@
     }});
     items.push({ type: 'separator' });
     items.push({ label: 'Delete', danger: true, action: async () => {
-      try { await invoke('tunnel_delete', { tunnelId: tunnel.id }); } catch (err) { console.error(err); }
+      if (!sshActions || typeof sshActions.deleteTunnel !== 'function') return;
+      try { await sshActions.deleteTunnel(invoke, tunnel.id); } catch (err) { console.error(err); }
       refreshTunnels();
     }});
 
@@ -954,327 +764,27 @@
   // ---------------------------------------------------------------------------
 
   function showConnectionForm(existing, defaultFolderId) {
-    removeOverlay();
-
-    const isEdit = !!existing;
-    const title = isEdit ? 'Edit SSH Connection' : 'New SSH Connection';
-
-    // Build folder options
-    const folderOptions = [{ id: '', name: '(none)' }];
-    for (const f of serverData.folders) {
-      folderOptions.push({ id: f.id, name: f.name });
-    }
-
-    // Determine default folder
-    let selectedFolder = defaultFolderId || '';
-    if (isEdit && !selectedFolder) {
-      for (const f of serverData.folders) {
-        if (f.entries.some((e) => e.id === existing.id)) {
-          selectedFolder = f.id;
-          break;
-        }
-      }
-    }
-
-    const proxyJumpOptions = buildProxyJumpOptions(existing ? existing.id : null);
-
-    // Determine proxy state
-    let proxyType = 'none';
-    let proxyValue = '';
-    if (existing) {
-      if (existing.proxy_jump) { proxyType = 'jump'; proxyValue = existing.proxy_jump; }
-      else if (existing.proxy_command) { proxyType = 'command'; proxyValue = existing.proxy_command; }
-    }
-    const normalizedExistingProxyJump = proxyType === 'jump' ? normalizeProxyJump(proxyValue) : null;
-    const selectedProxyJumpOption = normalizedExistingProxyJump
-      ? proxyJumpOptions.find((opt) => normalizeProxyJump(opt.spec) === normalizedExistingProxyJump)
-      : null;
-
-    const existingVaultId = existing ? (existing.vault_account_id || '') : '';
-
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.innerHTML = `
-      <div class="ssh-form">
-        <div class="ssh-form-title">${esc(title)}</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">Session Name
-            <input type="text" id="cf-label" value="${attr(existing ? existing.label : '')}"
-                   placeholder="optional" spellcheck="false" />
-          </label>
-          <div class="ssh-form-row">
-            <label class="ssh-form-label" style="flex:1">Host / IP
-              <input type="text" id="cf-host" value="${attr(existing ? existing.host : '')}"
-                     placeholder="example.com" spellcheck="false" required />
-            </label>
-            <label class="ssh-form-label" style="width:80px">Port
-              <input type="number" id="cf-port" value="${existing ? existing.port : 22}" min="1" max="65535" />
-            </label>
-          </div>
-          <label class="ssh-form-label">Account
-            <select id="cf-vault-account">
-              <option value="">Manual credentials</option>
-              <option value="__create__">+ Create New Account...</option>
-            </select>
-          </label>
-          <div id="cf-vault-account-info" style="display:none;padding:6px 8px;border-radius:4px;background:var(--bg);border:1px solid var(--selection);margin-bottom:8px;font-size:12px"></div>
-          <div id="cf-manual-creds">
-            <label class="ssh-form-label">Username
-              <input type="text" id="cf-user" value="${attr(existing ? existing.user : '')}"
-                     placeholder="root" spellcheck="false" />
-            </label>
-            <label class="ssh-form-label">Password
-              <input type="password" id="cf-password" value="" placeholder="leave empty for key auth" />
-            </label>
-            <label class="ssh-form-label">Private Key
-              <input type="text" id="cf-key-path" value="${attr(existing && existing.key_path ? existing.key_path : '')}"
-                     placeholder="~/.ssh/id_ed25519" spellcheck="false" />
-            </label>
-          </div>
-          <details class="ssh-form-advanced" ${proxyType !== 'none' ? 'open' : ''}>
-            <summary>Advanced</summary>
-            <label class="ssh-form-label">Proxy Type
-              <select id="cf-proxy-type">
-                <option value="none" ${proxyType === 'none' ? 'selected' : ''}>None</option>
-                <option value="jump" ${proxyType === 'jump' ? 'selected' : ''}>ProxyJump</option>
-                <option value="command" ${proxyType === 'command' ? 'selected' : ''}>ProxyCommand</option>
-              </select>
-            </label>
-            <label class="ssh-form-label" id="cf-proxy-jump-row" style="display:${proxyType === 'jump' ? '' : 'none'}">Proxy Jump Session
-              <select id="cf-proxy-jump-select">
-                <option value="__custom__" ${selectedProxyJumpOption ? '' : 'selected'}>Custom value...</option>
-                ${renderProxyJumpOptions(proxyJumpOptions)}
-              </select>
-            </label>
-            <label class="ssh-form-label" id="cf-proxy-value-row" style="display:${proxyType === 'none' ? 'none' : ''}">Proxy Value
-              <input type="text" id="cf-proxy-value" value="${attr(proxyValue)}"
-                     placeholder="user@jumphost or ssh -W %h:%p host" spellcheck="false" />
-            </label>
-          </details>
-          <label class="ssh-form-label">Save to Folder
-            <select id="cf-folder">
-              ${folderOptions.map((f) =>
-                `<option value="${attr(f.id)}" ${f.id === selectedFolder ? 'selected' : ''}>${esc(f.name)}</option>`
-              ).join('')}
-            </select>
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="cf-cancel">Cancel</button>
-          <button class="ssh-form-btn" id="cf-save">Save</button>
-          <button class="ssh-form-btn primary" id="cf-save-connect">Save & Connect</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-
-    // Populate vault account picker
-    populateAccountPicker(overlay, existingVaultId);
-
-    // Account picker change handler
-    const accountSelect = overlay.querySelector('#cf-vault-account');
-    accountSelect.addEventListener('change', () => {
-      const val = accountSelect.value;
-      if (val === '__create__') {
-        handleCreateNewAccount(overlay, existingVaultId);
-        return;
-      }
-      updateCredentialFieldsVisibility(overlay);
-    });
-
-    const proxyTypeSelect = overlay.querySelector('#cf-proxy-type');
-    const proxyValueInput = overlay.querySelector('#cf-proxy-value');
-    const proxyValueRow = overlay.querySelector('#cf-proxy-value-row');
-    const proxyJumpRow = overlay.querySelector('#cf-proxy-jump-row');
-    const proxyJumpSelect = overlay.querySelector('#cf-proxy-jump-select');
-
-    function syncProxyJumpSelectFromValue() {
-      if (!proxyJumpSelect || proxyTypeSelect.value !== 'jump') return;
-      const normalized = normalizeProxyJump(proxyValueInput.value);
-      if (!normalized) {
-        proxyJumpSelect.value = '__custom__';
-        return;
-      }
-      const match = proxyJumpOptions.find((opt) => normalizeProxyJump(opt.spec) === normalized);
-      proxyJumpSelect.value = match ? match.spec : '__custom__';
-    }
-
-    function syncProxyUi() {
-      const currentProxyType = proxyTypeSelect.value;
-      proxyJumpRow.style.display = currentProxyType === 'jump' ? '' : 'none';
-      proxyValueRow.style.display = currentProxyType === 'none' ? 'none' : '';
-      if (currentProxyType === 'jump') {
-        proxyValueInput.placeholder = 'user@jump-host or jump-host:2222';
-        syncProxyJumpSelectFromValue();
-      } else if (currentProxyType === 'command') {
-        proxyValueInput.placeholder = 'ssh -W %h:%p jump-host';
-      }
-    }
-
-    if (proxyJumpSelect) {
-      proxyJumpSelect.addEventListener('change', () => {
-        if (proxyJumpSelect.value === '__custom__') {
-          proxyValueInput.focus();
-          return;
-        }
-        proxyValueInput.value = proxyJumpSelect.value;
+    if (sshConnectionFormFeature && typeof sshConnectionFormFeature.showConnectionForm === 'function') {
+      const handled = sshConnectionFormFeature.showConnectionForm(existing, defaultFolderId, {
+        removeOverlay,
+        setOverlayDialogAttributes,
+        registerOverlayKeys,
+        serverData,
+        buildProxyJumpOptions,
+        renderProxyJumpOptions,
+        normalizeProxyJump,
+        attr,
+        esc,
+        invoke,
+        refreshAll,
+        createSshTab: createSshTabFn,
+        toast: window.toast,
       });
+      if (handled) return;
     }
-    proxyTypeSelect.addEventListener('change', syncProxyUi);
-    proxyValueInput.addEventListener('input', () => {
-      if (proxyTypeSelect.value === 'jump') syncProxyJumpSelectFromValue();
-    });
-
-    if (selectedProxyJumpOption && proxyJumpSelect) {
-      proxyJumpSelect.value = selectedProxyJumpOption.spec;
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Connection form module is unavailable.');
     }
-    syncProxyUi();
-
-    // Focus the host field
-    const hostInput = overlay.querySelector('#cf-host');
-    setTimeout(() => hostInput.focus(), 50);
-
-    // Close on overlay background click
-    overlay.addEventListener('mousedown', (e) => {
-      if (e.target === overlay) removeOverlay();
-    });
-
-    // Escape to close
-    const onKey = (e) => {
-      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
-
-    // Button handlers
-    overlay.querySelector('#cf-cancel').addEventListener('click', removeOverlay);
-    overlay.querySelector('#cf-save').addEventListener('click', () => submitForm(overlay, existing, false));
-    overlay.querySelector('#cf-save-connect').addEventListener('click', () => submitForm(overlay, existing, true));
-  }
-
-  async function populateAccountPicker(overlay, selectedId) {
-    const select = overlay.querySelector('#cf-vault-account');
-    if (!select) return;
-
-    let accounts = [];
-    if (window.vault && window.vault.getAccounts) {
-      try {
-        accounts = await window.vault.getAccounts();
-      } catch (_) {
-        // Vault may not exist or be locked — just show manual option.
-      }
-    }
-
-    // Rebuild options: keep Manual + Create New, insert accounts between them.
-    let html = '<option value="">Manual credentials</option>';
-    for (const a of accounts) {
-      const authLabel = a.auth_type === 'password' ? 'password' : a.auth_type === 'key' ? 'key' : 'key+pw';
-      html += `<option value="${attr(a.id)}">${esc(a.display_name)} (${esc(a.username)}, ${authLabel})</option>`;
-    }
-    html += '<option value="__create__">+ Create New Account...</option>';
-    select.innerHTML = html;
-
-    // Restore selection
-    if (selectedId) {
-      select.value = selectedId;
-    }
-
-    updateCredentialFieldsVisibility(overlay);
-  }
-
-  function updateCredentialFieldsVisibility(overlay) {
-    const select = overlay.querySelector('#cf-vault-account');
-    const manualCreds = overlay.querySelector('#cf-manual-creds');
-    const accountInfo = overlay.querySelector('#cf-vault-account-info');
-    if (!select || !manualCreds || !accountInfo) return;
-
-    const val = select.value;
-    if (val && val !== '__create__') {
-      // A vault account is selected — hide manual fields, show info.
-      manualCreds.style.display = 'none';
-      const selectedOption = select.options[select.selectedIndex];
-      accountInfo.style.display = 'block';
-      accountInfo.textContent = 'Using vault account: ' + selectedOption.textContent;
-    } else {
-      // Manual credentials
-      manualCreds.style.display = '';
-      accountInfo.style.display = 'none';
-    }
-  }
-
-  function handleCreateNewAccount(overlay, fallbackId) {
-    if (!window.vault) {
-      window.toast.error('Vault Unavailable', 'Vault module not loaded');
-      const select = overlay.querySelector('#cf-vault-account');
-      if (select) select.value = fallbackId || '';
-      return;
-    }
-
-    window.vault.ensureUnlocked(() => {
-      window.vault.showAccountForm(null);
-      // After the vault overlay is dismissed, re-populate the picker
-      // with a brief delay so the vault save completes first.
-      const checkInterval = setInterval(() => {
-        const vaultOverlay = document.getElementById('vault-overlay');
-        if (!vaultOverlay) {
-          clearInterval(checkInterval);
-          populateAccountPicker(overlay, '');
-        }
-      }, 300);
-    });
-  }
-
-  function submitForm(overlay, existing, andConnect) {
-    const host = overlay.querySelector('#cf-host').value.trim();
-    if (!host) { overlay.querySelector('#cf-host').focus(); return; }
-
-    const label = overlay.querySelector('#cf-label').value.trim();
-    const port = parseInt(overlay.querySelector('#cf-port').value, 10) || 22;
-    const proxyType = overlay.querySelector('#cf-proxy-type').value;
-    const proxyValue = overlay.querySelector('#cf-proxy-value').value.trim();
-    const folderId = overlay.querySelector('#cf-folder').value || null;
-    const proxyJump = proxyType === 'jump' && proxyValue ? proxyValue : null;
-    const proxyCommand = proxyType === 'command' && proxyValue ? proxyValue : null;
-
-    // Check if a vault account is selected.
-    const accountSelect = overlay.querySelector('#cf-vault-account');
-    const vaultAccountId = accountSelect && accountSelect.value && accountSelect.value !== '__create__'
-      ? accountSelect.value
-      : null;
-
-    // When vault account is used, manual credential fields may be hidden.
-    const user = vaultAccountId
-      ? (existing ? existing.user : null)
-      : (overlay.querySelector('#cf-user').value.trim() || 'root');
-    const password = vaultAccountId ? '' : overlay.querySelector('#cf-password').value;
-    const keyPath = vaultAccountId
-      ? null
-      : (overlay.querySelector('#cf-key-path').value.trim() || null);
-    const authMethod = vaultAccountId ? null : (password ? 'password' : 'key');
-
-    const entry = {
-      id: existing ? existing.id : crypto.randomUUID(),
-      label: label || `${user || 'root'}@${host}`,
-      host,
-      port,
-      user: user || null,
-      auth_method: authMethod,
-      key_path: keyPath,
-      vault_account_id: vaultAccountId,
-      proxy_command: proxyCommand,
-      proxy_jump: proxyJump,
-    };
-
-    removeOverlay();
-
-    invoke('remote_save_server', { entry, folderId })
-      .then(() => {
-        refreshAll();
-        if (andConnect) {
-          createSshTabFn({ serverId: entry.id, password: password || undefined });
-        }
-      })
-      .catch((e) => window.toast.error('Save Failed', String(e)));
   }
 
   // ---------------------------------------------------------------------------
@@ -1282,88 +792,38 @@
   // ---------------------------------------------------------------------------
 
   function showAddFolderDialog() {
-    removeOverlay();
-
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">New Folder</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">Name
-            <input type="text" id="fd-name" value="" placeholder="Folder name" spellcheck="false" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="fd-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="fd-create">Create</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    const nameInput = overlay.querySelector('#fd-name');
-    setTimeout(() => nameInput.focus(), 50);
-
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
-    const onKey = (e) => {
-      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
-      if (e.key === 'Enter') { doCreate(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
-
-    const doCreate = () => {
-      const name = nameInput.value.trim();
-      if (!name) { nameInput.focus(); return; }
-      removeOverlay();
-      invoke('remote_add_folder', { name }).then(() => refreshAll()).catch((e) => window.toast.error('Folder Error', String(e)));
-    };
-
-    overlay.querySelector('#fd-cancel').addEventListener('click', removeOverlay);
-    overlay.querySelector('#fd-create').addEventListener('click', doCreate);
+    if (sshDialogsFeature && typeof sshDialogsFeature.showAddFolderDialog === 'function') {
+      const handled = sshDialogsFeature.showAddFolderDialog({
+        removeOverlay,
+        setOverlayDialogAttributes,
+        registerOverlayKeys,
+        invoke,
+        refreshAll,
+        toast: window.toast,
+      });
+      if (handled) return;
+    }
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Folder dialog module is unavailable.');
+    }
   }
 
   function showRenameFolderDialog(folder) {
-    removeOverlay();
-
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">Rename Folder</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">Name
-            <input type="text" id="rf-name" value="${attr(folder.name)}" spellcheck="false" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="rf-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="rf-save">Save</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    const nameInput = overlay.querySelector('#rf-name');
-    setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
-
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
-    const onKey = (e) => {
-      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
-      if (e.key === 'Enter') { doSave(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
-
-    const doSave = () => {
-      const name = nameInput.value.trim();
-      if (!name) { nameInput.focus(); return; }
-      removeOverlay();
-      invoke('remote_rename_folder', { folderId: folder.id, newName: name })
-        .then(() => refreshAll()).catch((e) => window.toast.error('Error', String(e)));
-    };
-
-    overlay.querySelector('#rf-cancel').addEventListener('click', removeOverlay);
-    overlay.querySelector('#rf-save').addEventListener('click', doSave);
+    if (sshDialogsFeature && typeof sshDialogsFeature.showRenameFolderDialog === 'function') {
+      const handled = sshDialogsFeature.showRenameFolderDialog(folder, {
+        removeOverlay,
+        setOverlayDialogAttributes,
+        registerOverlayKeys,
+        invoke,
+        refreshAll,
+        toast: window.toast,
+        attr,
+      });
+      if (handled) return;
+    }
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Rename-folder dialog module is unavailable.');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1375,12 +835,14 @@
       { label: 'Connect', action: () => createSshTabFn({ serverId: server.id }) },
       { label: 'Edit', action: () => showConnectionForm(server, folderId) },
       { label: 'Duplicate', action: () => {
-        invoke('remote_duplicate_server', { serverId: server.id }).then(() => refreshAll()).catch(() => {});
+        if (!sshActions || typeof sshActions.duplicateServer !== 'function') return;
+        sshActions.duplicateServer(invoke, server.id).then(() => refreshAll()).catch(() => {});
       }},
       { type: 'separator' },
       { label: 'Delete', danger: true, action: () => {
         showDeleteConfirmDialog(`Delete "${server.label}"?`, () => {
-          invoke('remote_delete_server', { serverId: server.id }).then(() => refreshAll()).catch(() => {});
+          if (!sshActions || typeof sshActions.deleteServer !== 'function') return;
+          sshActions.deleteServer(invoke, server.id).then(() => refreshAll()).catch(() => {});
         });
       }},
     ]);
@@ -1393,76 +855,45 @@
       { type: 'separator' },
       { label: 'Delete Folder', danger: true, action: () => {
         showDeleteConfirmDialog(`Delete folder "${folder.name}" and all servers in it?`, () => {
-          invoke('remote_delete_folder', { folderId: folder.id }).then(() => refreshAll()).catch(() => {});
+          if (!sshActions || typeof sshActions.deleteFolder !== 'function') return;
+          sshActions.deleteFolder(invoke, folder.id).then(() => refreshAll()).catch(() => {});
         });
       }},
     ]);
   }
 
   function showDeleteConfirmDialog(message, onConfirm) {
-    removeOverlay();
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '5000';
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">Confirm Delete</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">${esc(message)}</div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="dc-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="dc-delete" style="background:var(--red);border-color:var(--red)">Delete</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-
-    const dismiss = () => overlay.remove();
-    overlay.querySelector('#dc-cancel').addEventListener('click', dismiss);
-    overlay.querySelector('#dc-delete').addEventListener('click', () => { dismiss(); onConfirm(); });
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
-    const onKey = (e) => {
-      if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
+    if (sshDialogsFeature && typeof sshDialogsFeature.showDeleteConfirmDialog === 'function') {
+      const handled = sshDialogsFeature.showDeleteConfirmDialog(message, onConfirm, {
+        removeOverlay,
+        setOverlayDialogAttributes,
+        registerOverlayKeys,
+        esc,
+      });
+      if (handled) return;
+    }
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Delete-confirm dialog module is unavailable.');
+    }
   }
 
   function showContextMenu(e, items) {
-    removeContextMenu();
-    const menu = document.createElement('div');
-    menu.className = 'ssh-context-menu';
-    menu.style.left = e.clientX + 'px';
-    menu.style.top = e.clientY + 'px';
-
-    for (const item of items) {
-      if (item.type === 'separator') {
-        const sep = document.createElement('div');
-        sep.className = 'ssh-context-menu-sep';
-        menu.appendChild(sep);
-        continue;
-      }
-      const el = document.createElement('div');
-      el.className = 'ssh-context-menu-item' + (item.danger ? ' danger' : '');
-      el.textContent = item.label;
-      el.addEventListener('click', () => { removeContextMenu(); item.action(); });
-      menu.appendChild(el);
+    if (sshContextMenuFeature && typeof sshContextMenuFeature.showContextMenu === 'function') {
+      sshContextMenuFeature.showContextMenu(e, items, {
+        onOpen: () => {},
+      });
+      return;
     }
-
-    document.body.appendChild(menu);
-
-    // Clamp to viewport
-    requestAnimationFrame(() => {
-      const rect = menu.getBoundingClientRect();
-      if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
-      if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
-    });
-
-    setTimeout(() => document.addEventListener('click', removeContextMenu, { once: true }), 0);
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Context-menu module is unavailable.');
+    }
   }
 
   function removeContextMenu() {
-    document.querySelectorAll('.ssh-context-menu').forEach((el) => el.remove());
+    if (sshContextMenuFeature && typeof sshContextMenuFeature.removeContextMenu === 'function') {
+      sshContextMenuFeature.removeContextMenu();
+      return;
+    }
   }
 
   function removeOverlay() {
@@ -1474,85 +905,33 @@
   // ---------------------------------------------------------------------------
 
   function handleHostKeyPrompt(event) {
-    const { prompt_id, message, detail } = event.payload;
-
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '5000';
-    overlay.innerHTML = `
-      <div class="ssh-form" style="max-width:520px">
-        <div class="ssh-form-title">SSH Host Key Verification</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">${esc(message)}</div>
-          <pre class="ssh-auth-detail">${esc(detail)}</pre>
-          <div class="ssh-auth-question">Do you want to continue connecting and save this key?</div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="hk-reject">Reject</button>
-          <button class="ssh-form-btn primary" id="hk-accept">Accept & Save</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-
-    const respond = (accepted) => {
-      overlay.remove();
-      invoke('auth_respond_host_key', { promptId: prompt_id, accepted }).catch(() => {});
-    };
-
-    overlay.querySelector('#hk-reject').addEventListener('click', () => respond(false));
-    overlay.querySelector('#hk-accept').addEventListener('click', () => respond(true));
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) respond(false); });
-    const onKey = (e) => {
-      if (e.key === 'Escape') { respond(false); document.removeEventListener('keydown', onKey); }
-      if (e.key === 'Enter') { respond(true); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
+    if (sshAuthPromptsFeature && typeof sshAuthPromptsFeature.showHostKeyPrompt === 'function') {
+      const handled = sshAuthPromptsFeature.showHostKeyPrompt(event, {
+        invoke,
+        esc,
+        setOverlayDialogAttributes,
+        registerOverlayKeys,
+      });
+      if (handled) return;
+    }
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Host-key prompt module is unavailable.');
+    }
   }
 
   function handlePasswordPrompt(event) {
-    const { prompt_id, message } = event.payload;
-
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '5000';
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">SSH Authentication</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">${esc(message)}</div>
-          <label class="ssh-form-label">Password
-            <input type="password" id="pw-input" spellcheck="false" autocomplete="off" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="pw-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="pw-connect">Connect</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    setTimeout(() => overlay.querySelector('#pw-input').focus(), 50);
-
-    const respond = (password) => {
-      overlay.remove();
-      invoke('auth_respond_password', { promptId: prompt_id, password }).catch(() => {});
-    };
-
-    overlay.querySelector('#pw-cancel').addEventListener('click', () => respond(null));
-    overlay.querySelector('#pw-connect').addEventListener('click', () => {
-      respond(overlay.querySelector('#pw-input').value || null);
-    });
-    overlay.querySelector('#pw-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') respond(overlay.querySelector('#pw-input').value || null);
-    });
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) respond(null); });
-    const onKey = (e) => {
-      if (e.key === 'Escape') { respond(null); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
+    if (sshAuthPromptsFeature && typeof sshAuthPromptsFeature.showPasswordPrompt === 'function') {
+      const handled = sshAuthPromptsFeature.showPasswordPrompt(event, {
+        invoke,
+        esc,
+        setOverlayDialogAttributes,
+        registerOverlayKeys,
+      });
+      if (handled) return;
+    }
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('SSH Error', 'Password prompt module is unavailable.');
+    }
   }
 
   // ---------------------------------------------------------------------------

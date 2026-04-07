@@ -4,8 +4,8 @@
   'use strict';
 
   let invoke = null;
-  let listenFn = null;
   let escapeHandler = null;
+  let standaloneEscapeHandler = null;
   let currentSection = 'appearance';
   let pendingSettings = null;
   let originalSettings = null;
@@ -21,59 +21,36 @@
   let settingsSidebarResults = [];
   let settingsSidebarSelectionIndex = -1;
   let pendingSettingsJump = null;
+  const settingsFeatureConstants = exports.conchSettingsFeatureConstants || {};
+  const settingsDataService = exports.conchSettingsFeatureDataService || {};
+  const settingsSearchFeature = exports.conchSettingsFeatureSearch || {};
+  const settingsSidebarFeature = exports.conchSettingsSidebar || {};
+  const settingsSectionsAppearance = exports.conchSettingsSectionsAppearance || {};
+  const settingsSectionsBasic = exports.conchSettingsSectionsBasic || {};
+  const settingsSectionsKeyboard = exports.conchSettingsSectionsKeyboard || {};
+  const settingsSectionsTerminal = exports.conchSettingsSectionsTerminal || {};
+  const settingsPluginsSection = exports.conchSettingsPluginsSection || {};
+  const SECTION_DEFS = Array.isArray(settingsFeatureConstants.SECTION_DEFS)
+    ? settingsFeatureConstants.SECTION_DEFS
+    : [];
+  const SETTINGS_SEARCH_INDEX = Array.isArray(settingsFeatureConstants.SETTINGS_SEARCH_INDEX)
+    ? settingsFeatureConstants.SETTINGS_SEARCH_INDEX
+    : [];
 
-  const SECTION_DEFS = [
-    { group: 'Workspace', items: [
-      { id: 'appearance', label: 'Appearance', description: 'Theme, notifications, window chrome, UI fonts', keywords: 'theme colors interface notifications window menu bar fonts typography appearance' },
-      { id: 'keyboard', label: 'Keymap', description: 'Core shortcuts, tool window shortcuts, plugin shortcuts', keywords: 'keyboard shortcuts keymap bindings hotkeys commands tool windows plugins' },
-      { id: 'files', label: 'Files', description: 'File explorer behavior and path following', keywords: 'files explorer path follow cwd directory' },
-    ]},
-    { group: 'Terminal', items: [
-      { id: 'terminal', label: 'Terminal', description: 'Font rendering and scrolling', keywords: 'terminal font size offset scrolling display rendering' },
-      { id: 'cursor', label: 'Cursor', description: 'Cursor shape, blinking, vi mode override', keywords: 'cursor block beam underline blinking vi mode caret' },
-      { id: 'shell', label: 'Shell', description: 'Shell program, arguments, environment variables', keywords: 'shell program launch arguments env environment variables login command' },
-    ]},
-    { group: 'Extensions', items: [
-      { id: 'plugins', label: 'Plugins', description: 'Plugin system, plugin types, search paths, installed plugins', keywords: 'plugins extensions lua java search paths installed permissions' },
-    ]},
-    { group: 'System', items: [
-      { id: 'advanced', label: 'Advanced', description: 'Startup behavior, window defaults, UI density', keywords: 'advanced startup updates default window size ui density font sizes' },
-    ]},
-  ];
+  function registerGlobalKeyHandler(name, onKeyDown, isActive) {
+    const keyboardRouter = window.conchKeyboardRouter;
+    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+      return keyboardRouter.register({
+        name: name || 'settings-key-handler',
+        priority: 210,
+        isActive: typeof isActive === 'function' ? isActive : null,
+        onKeyDown: (event) => onKeyDown(event) === true,
+      });
+    }
 
-  const SETTINGS_SEARCH_INDEX = [
-    { section: 'appearance', label: 'Theme', keywords: 'color theme appearance scheme', targetId: 'appearance:theme' },
-    { section: 'appearance', label: 'Appearance Mode', keywords: 'dark light system mode', targetId: 'appearance:mode' },
-    { section: 'appearance', label: 'Notification Position', keywords: 'toast notifications top bottom', targetId: 'appearance:notification-position' },
-    { section: 'appearance', label: 'Native Notifications', keywords: 'system notifications os notifications', targetId: 'appearance:native-notifications' },
-    { section: 'appearance', label: 'Disable Animations', keywords: 'reduce motion disable animations transitions effects performance', targetId: 'appearance:disable-animations' },
-    { section: 'appearance', label: 'Window Decorations', keywords: 'titlebar transparent buttonless none full window chrome', targetId: 'appearance:window-decorations' },
-    { section: 'appearance', label: 'Native Menu Bar', keywords: 'menu bar macos native menu', targetId: 'appearance:native-menu-bar' },
-    { section: 'appearance', label: 'UI Font Family', keywords: 'ui font family interface typography', targetId: 'appearance:ui-font-family' },
-    { section: 'appearance', label: 'UI Font Size', keywords: 'ui font size interface typography', targetId: 'appearance:ui-font-size' },
-    { section: 'keyboard', label: 'Keyboard Shortcuts', keywords: 'keyboard shortcuts keymap bindings' },
-    { section: 'keyboard', label: 'Tool Window Shortcuts', keywords: 'tool window keyboard shortcuts sidebars panels' },
-    { section: 'keyboard', label: 'Plugin Shortcuts', keywords: 'plugin keyboard shortcuts' },
-    { section: 'files', label: 'Follow Path', keywords: 'files explorer follow path cwd directory sync', targetId: 'files:follow-path' },
-    { section: 'terminal', label: 'Terminal Font Family', keywords: 'terminal font family monospace', targetId: 'terminal:font-family' },
-    { section: 'terminal', label: 'Terminal Font Size', keywords: 'terminal font size', targetId: 'terminal:font-size' },
-    { section: 'terminal', label: 'Font Offset X', keywords: 'font offset horizontal x rendering', targetId: 'terminal:font-offset-x' },
-    { section: 'terminal', label: 'Font Offset Y', keywords: 'font offset vertical y rendering', targetId: 'terminal:font-offset-y' },
-    { section: 'terminal', label: 'Scroll Sensitivity', keywords: 'scrolling trackpad mouse wheel sensitivity', targetId: 'terminal:scroll-sensitivity' },
-    { section: 'shell', label: 'Shell Program', keywords: 'shell program executable login shell', targetId: 'shell:program' },
-    { section: 'shell', label: 'Arguments', keywords: 'shell arguments flags startup command', targetId: 'shell:args' },
-    { section: 'shell', label: 'Environment Variables', keywords: 'env environment variables terminal session', targetId: 'shell:env' },
-    { section: 'cursor', label: 'Cursor Shape', keywords: 'cursor shape block beam underline', targetId: 'cursor:shape' },
-    { section: 'cursor', label: 'Cursor Blinking', keywords: 'cursor blinking blink', targetId: 'cursor:blinking' },
-    { section: 'cursor', label: 'Vi Mode Override', keywords: 'cursor vi mode vim modal', targetId: 'cursor:vi-mode' },
-    { section: 'plugins', label: 'Enable Plugins', keywords: 'plugins enable disable master switch', targetId: 'plugins:enabled' },
-    { section: 'plugins', label: 'Plugin Types', keywords: 'lua java plugins plugin types', targetId: 'plugins:types' },
-    { section: 'plugins', label: 'Extra Search Paths', keywords: 'plugin paths search paths folders directories', targetId: 'plugins:search-paths' },
-    { section: 'plugins', label: 'Installed Plugins', keywords: 'installed plugins rescan enable disable permissions', targetId: 'plugins:installed' },
-    { section: 'advanced', label: 'Check for Updates', keywords: 'updates startup update checks', targetId: 'advanced:check-for-updates' },
-    { section: 'advanced', label: 'Initial Window Size', keywords: 'window size columns lines defaults', targetId: 'advanced:window-size' },
-    { section: 'advanced', label: 'UI Chrome Font Sizes', keywords: 'ui chrome font sizes density text size list normal small', targetId: 'advanced:ui-chrome-font-sizes' },
-  ];
+    console.warn('settings: keyboard router unavailable, skipping handler registration:', name || 'settings-key-handler');
+    return () => {};
+  }
 
   function clearSettingsAutofocusTimer() {
     if (settingsSearchAutofocusTimer) {
@@ -84,7 +61,61 @@
 
   function init(opts) {
     invoke = opts.invoke;
-    listenFn = opts.listen;
+  }
+
+  async function loadSettingsRuntimeData() {
+    if (settingsDataService && typeof settingsDataService.loadRuntimeData === 'function') {
+      return settingsDataService.loadRuntimeData(invoke);
+    }
+    const [settings, themes, plugins, pluginMenuItems, fonts] = await Promise.all([
+      invoke('get_all_settings'),
+      invoke('list_themes'),
+      invoke('scan_plugins'),
+      invoke('get_plugin_menu_items').catch(() => []),
+      invoke('list_system_fonts'),
+    ]);
+    return {
+      settings,
+      themes,
+      plugins: Array.isArray(plugins) ? plugins : [],
+      pluginMenuItems: Array.isArray(pluginMenuItems) ? pluginMenuItems : [],
+      fonts: fonts && typeof fonts === 'object' ? fonts : { all: [], monospace: [] },
+    };
+  }
+
+  async function refreshPluginInventory() {
+    if (settingsDataService && typeof settingsDataService.refreshPluginInventory === 'function') {
+      return settingsDataService.refreshPluginInventory(invoke);
+    }
+    const [plugins, pluginMenuItems] = await Promise.all([
+      invoke('scan_plugins'),
+      invoke('get_plugin_menu_items').catch(() => []),
+    ]);
+    return {
+      plugins: Array.isArray(plugins) ? plugins : [],
+      pluginMenuItems: Array.isArray(pluginMenuItems) ? pluginMenuItems : [],
+    };
+  }
+
+  function applyLoadedSettingsData(payload) {
+    const loaded = payload || {};
+    originalSettings = JSON.parse(JSON.stringify(loaded.settings || {}));
+    pendingSettings = JSON.parse(JSON.stringify(loaded.settings || {}));
+    ensureSettingsShape(originalSettings);
+    ensureSettingsShape(pendingSettings);
+    cachedThemes = Array.isArray(loaded.themes) ? loaded.themes : [];
+    cachedPlugins = Array.isArray(loaded.plugins) ? loaded.plugins : [];
+    cachedPluginMenuItems = Array.isArray(loaded.pluginMenuItems) ? loaded.pluginMenuItems : [];
+    cachedFonts = loaded.fonts && typeof loaded.fonts === 'object' ? loaded.fonts : { all: [], monospace: [] };
+    settingsSidebarQuery = '';
+    keyboardSearchQuery = '';
+    currentSection = 'appearance';
+  }
+
+  function invalidateCommandPaletteCache(reason) {
+    if (typeof window.__conchInvalidateCommandPaletteCache === 'function') {
+      window.__conchInvalidateCommandPaletteCache(reason || 'settings');
+    }
   }
 
   function ensureSettingsShape(settings) {
@@ -104,14 +135,23 @@
   }
 
   function normalizeSearchText(value) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.normalizeSearchText === 'function') {
+      return settingsSearchFeature.normalizeSearchText(value);
+    }
     return String(value || '').trim().toLowerCase();
   }
 
   function tokenizeSearchText(value) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.tokenizeSearchText === 'function') {
+      return settingsSearchFeature.tokenizeSearchText(value);
+    }
     return normalizeSearchText(value).split(/[\s:_-]+/).filter(Boolean);
   }
 
   function levenshteinDistance(a, b) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.levenshteinDistance === 'function') {
+      return settingsSearchFeature.levenshteinDistance(a, b);
+    }
     const left = String(a || '');
     const right = String(b || '');
     if (!left) return right.length;
@@ -135,6 +175,9 @@
   }
 
   function getFuzzyMatchScore(query, haystack, extraTokens) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.getFuzzyMatchScore === 'function') {
+      return settingsSearchFeature.getFuzzyMatchScore(query, haystack, extraTokens);
+    }
     const q = normalizeSearchText(query);
     const text = normalizeSearchText(haystack);
     if (!q || !text) return Number.POSITIVE_INFINITY;
@@ -168,6 +211,9 @@
   }
 
   function isPrintableKeyEvent(event) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.isPrintableKeyEvent === 'function') {
+      return settingsSearchFeature.isPrintableKeyEvent(event);
+    }
     return !!(
       event &&
       !event.metaKey &&
@@ -179,6 +225,9 @@
   }
 
   function isTextLikeElement(el) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.isTextLikeElement === 'function') {
+      return settingsSearchFeature.isTextLikeElement(el);
+    }
     if (!el) return false;
     const tag = String(el.tagName || '').toLowerCase();
     return (
@@ -190,10 +239,16 @@
   }
 
   function escapeRegExp(value) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.escapeRegExp === 'function') {
+      return settingsSearchFeature.escapeRegExp(value);
+    }
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   function appendHighlightedText(container, text, query) {
+    if (settingsSearchFeature && typeof settingsSearchFeature.appendHighlightedText === 'function') {
+      return settingsSearchFeature.appendHighlightedText(container, text, query);
+    }
     const raw = String(text || '');
     const q = normalizeSearchText(query);
     if (!q) {
@@ -342,186 +397,37 @@
   }
 
   function renderSidebarInto(sidebar) {
-    sidebar.innerHTML = '';
-    settingsSidebarResults = [];
-
-    const searchWrap = document.createElement('div');
-    searchWrap.className = 'settings-sidebar-search-wrap';
-    const searchInput = document.createElement('input');
-    searchInput.type = 'search';
-    searchInput.className = 'settings-sidebar-search';
-    searchInput.placeholder = 'Search settings';
-    searchInput.value = settingsSidebarQuery;
-    searchInput.addEventListener('input', () => {
-      settingsSidebarQuery = searchInput.value;
-      settingsSidebarSelectionIndex = -1;
-      const active = document.activeElement === searchInput;
-      renderSidebarInto(sidebar);
-      if (active) {
-        const nextInput = sidebar.querySelector('.settings-sidebar-search');
-        if (nextInput) {
-          nextInput.focus();
-          nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
-        }
-      }
-    });
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        e.stopPropagation();
-        moveSidebarSearchSelection(1);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        e.stopPropagation();
-        moveSidebarSearchSelection(-1);
-        return;
-      }
-      if (e.key === 'Enter') {
-        if (settingsSidebarResults.length === 0) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const idx = settingsSidebarSelectionIndex >= 0 ? settingsSidebarSelectionIndex : 0;
-        const match = settingsSidebarResults[idx];
-        if (match) onSidebarSearchResultSelected(match);
-      }
-    });
-    searchWrap.appendChild(searchInput);
-    sidebar.appendChild(searchWrap);
-
-    const q = normalizeSearchText(settingsSidebarQuery);
-    if (q) {
-      const sectionMatches = [];
-      for (const group of SECTION_DEFS) {
-        for (const item of group.items) {
-          const haystack = `${item.label} ${item.description || ''} ${item.keywords || ''}`;
-          if (!Number.isFinite(getFuzzyMatchScore(q, haystack, [group.group, item.id]))) continue;
-          sectionMatches.push(item);
-        }
-      }
-      const settingMatches = getSidebarSearchResults(q);
-      settingsSidebarResults = [...settingMatches];
-      for (const item of sectionMatches) {
-        settingsSidebarResults.push({
-          section: item.id,
-          label: item.label,
-          path: item.description || item.label,
-          kind: 'section',
-          targetId: null,
-        });
-      }
-      if (settingsSidebarSelectionIndex >= settingsSidebarResults.length) {
-        settingsSidebarSelectionIndex = settingsSidebarResults.length - 1;
-      }
-
-      if (sectionMatches.length > 0) {
-        const header = document.createElement('div');
-        header.className = 'settings-sidebar-group';
-        header.textContent = 'Sections';
-        sidebar.appendChild(header);
-        for (let idx = 0; idx < sectionMatches.length; idx++) {
-          const item = sectionMatches[idx];
-          const row = document.createElement('div');
-          const resultIndex = settingMatches.length + idx;
-          row.className = 'settings-sidebar-item settings-sidebar-item-search' + (item.id === currentSection ? ' active' : '') + (settingsSidebarSelectionIndex === resultIndex ? ' selected' : '');
-          row.dataset.section = item.id;
-          const title = document.createElement('div');
-          title.className = 'settings-sidebar-item-title';
-          appendHighlightedText(title, item.label, q);
-          row.appendChild(title);
-          if (item.description) {
-            const desc = document.createElement('div');
-            desc.className = 'settings-sidebar-item-desc';
-            appendHighlightedText(desc, item.description, q);
-            row.appendChild(desc);
-          }
-          row.addEventListener('click', () => onSidebarSearchResultSelected(settingsSidebarResults[resultIndex]));
-          sidebar.appendChild(row);
-        }
-      }
-
-      if (settingMatches.length > 0) {
-        const header = document.createElement('div');
-        header.className = 'settings-sidebar-group';
-        header.textContent = 'Settings';
-        sidebar.appendChild(header);
-        for (let idx = 0; idx < settingMatches.length; idx++) {
-          const match = settingMatches[idx];
-          const row = document.createElement('div');
-          row.className = 'settings-sidebar-item settings-sidebar-item-search' + (settingsSidebarSelectionIndex === idx ? ' selected' : '');
-          row.dataset.section = match.section;
-          const title = document.createElement('div');
-          title.className = 'settings-sidebar-item-title';
-          appendHighlightedText(title, match.label, q);
-          row.appendChild(title);
-          const desc = document.createElement('div');
-          desc.className = 'settings-sidebar-item-desc';
-          appendHighlightedText(desc, match.path || match.sectionLabel, q);
-          row.appendChild(desc);
-          row.addEventListener('click', () => onSidebarSearchResultSelected(match));
-          sidebar.appendChild(row);
-        }
-      }
-
-      if (sectionMatches.length === 0 && settingMatches.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'settings-sidebar-empty';
-        empty.textContent = 'No settings match your search.';
-        sidebar.appendChild(empty);
+    if (!settingsSidebarFeature || typeof settingsSidebarFeature.renderSidebarInto !== "function") {
+      if (window.toast && typeof window.toast.error === "function") {
+        window.toast.error("Settings Error", "Sidebar section module is unavailable.");
       }
       return;
     }
-
-    settingsSidebarResults = [];
-    settingsSidebarSelectionIndex = -1;
-    for (const group of SECTION_DEFS) {
-      const groupEl = document.createElement('div');
-      groupEl.className = 'settings-sidebar-group';
-      groupEl.textContent = group.group;
-      sidebar.appendChild(groupEl);
-      for (const item of group.items) {
-        const itemEl = document.createElement('div');
-        itemEl.className = 'settings-sidebar-item' + (item.id === currentSection ? ' active' : '');
-        itemEl.dataset.section = item.id;
-        const title = document.createElement('div');
-        title.className = 'settings-sidebar-item-title';
-        title.textContent = item.label;
-        itemEl.appendChild(title);
-        if (item.description) {
-          const desc = document.createElement('div');
-          desc.className = 'settings-sidebar-item-desc';
-          desc.textContent = item.description;
-          itemEl.appendChild(desc);
-        }
-        itemEl.addEventListener('click', () => selectSection(item.id));
-        sidebar.appendChild(itemEl);
-      }
-    }
+    settingsSidebarFeature.renderSidebarInto(sidebar, {
+      sectionDefs: SECTION_DEFS,
+      normalizeSearchText,
+      getFuzzyMatchScore,
+      getSidebarSearchResults,
+      appendHighlightedText,
+      getSidebarQuery: () => settingsSidebarQuery,
+      setSidebarQuery: (value) => { settingsSidebarQuery = value; },
+      getSidebarSelectionIndex: () => settingsSidebarSelectionIndex,
+      setSidebarSelectionIndex: (value) => { settingsSidebarSelectionIndex = value; },
+      getSidebarResults: () => settingsSidebarResults,
+      setSidebarResults: (results) => { settingsSidebarResults = Array.isArray(results) ? results : []; },
+      getCurrentSection: () => currentSection,
+      moveSidebarSearchSelection,
+      onSidebarSearchResultSelected,
+      selectSection,
+    });
   }
 
   async function open() {
     if (document.getElementById('settings-overlay')) { close(); return; }
 
     try {
-      const [settings, themes, plugins, pluginMenuItems, fonts] = await Promise.all([
-        invoke('get_all_settings'),
-        invoke('list_themes'),
-        invoke('scan_plugins'),
-        invoke('get_plugin_menu_items').catch(() => []),
-        invoke('list_system_fonts'),
-      ]);
-      originalSettings = JSON.parse(JSON.stringify(settings));
-      pendingSettings = JSON.parse(JSON.stringify(settings));
-      ensureSettingsShape(originalSettings);
-      ensureSettingsShape(pendingSettings);
-      cachedThemes = themes;
-      cachedPlugins = plugins;
-      cachedPluginMenuItems = Array.isArray(pluginMenuItems) ? pluginMenuItems : [];
-      cachedFonts = fonts;
-      settingsSidebarQuery = '';
-      keyboardSearchQuery = '';
-      currentSection = 'appearance';
+      const loaded = await loadSettingsRuntimeData();
+      applyLoadedSettingsData(loaded);
       renderDialog();
     } catch (e) {
       if (window.toast) window.toast.error('Settings', 'Failed to load settings: ' + e);
@@ -534,24 +440,8 @@
     standaloneRoot = rootEl;
 
     try {
-      const [settings, themes, plugins, pluginMenuItems, fonts] = await Promise.all([
-        invoke('get_all_settings'),
-        invoke('list_themes'),
-        invoke('scan_plugins'),
-        invoke('get_plugin_menu_items').catch(() => []),
-        invoke('list_system_fonts'),
-      ]);
-      originalSettings = JSON.parse(JSON.stringify(settings));
-      pendingSettings = JSON.parse(JSON.stringify(settings));
-      ensureSettingsShape(originalSettings);
-      ensureSettingsShape(pendingSettings);
-      cachedThemes = themes;
-      cachedPlugins = plugins;
-      cachedPluginMenuItems = Array.isArray(pluginMenuItems) ? pluginMenuItems : [];
-      cachedFonts = fonts;
-      settingsSidebarQuery = '';
-      keyboardSearchQuery = '';
-      currentSection = 'appearance';
+      const loaded = await loadSettingsRuntimeData();
+      applyLoadedSettingsData(loaded);
       renderStandalone();
     } catch (e) {
       if (window.toast) window.toast.error('Settings', 'Failed to load settings: ' + e);
@@ -602,13 +492,20 @@
     footer.appendChild(applyBtn);
     root.appendChild(footer);
 
-    // Escape to close the settings window.
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        if (recordingEl) return;  // let recording handler handle it
+    if (standaloneEscapeHandler) {
+      standaloneEscapeHandler();
+      standaloneEscapeHandler = null;
+    }
+    standaloneEscapeHandler = registerGlobalKeyHandler(
+      'settings-standalone-escape',
+      (event) => {
+        if (event.key !== 'Escape') return false;
+        if (recordingEl) return false; // let recording handler handle it
         close();
-      }
-    });
+        return true;
+      },
+      () => standaloneMode && !!standaloneRoot && standaloneRoot.isConnected
+    );
 
     root.addEventListener('keydown', (e) => {
       if (recordingEl) return;
@@ -639,6 +536,10 @@
     stopRecording();
     clearSettingsAutofocusTimer();
     if (standaloneMode) {
+      if (standaloneEscapeHandler) {
+        standaloneEscapeHandler();
+        standaloneEscapeHandler = null;
+      }
       // In standalone window mode, close the window itself.
       const tauri = window.__TAURI__;
       if (tauri) {
@@ -649,7 +550,7 @@
     const el = document.getElementById('settings-overlay');
     if (el) el.remove();
     if (escapeHandler) {
-      document.removeEventListener('keydown', escapeHandler, true);
+      escapeHandler();
       escapeHandler = null;
     }
     pendingSettings = null;
@@ -660,6 +561,9 @@
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
     overlay.id = 'settings-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', 'Settings');
 
     const dialog = document.createElement('div');
     dialog.className = 'ssh-form settings-dialog';
@@ -732,16 +636,21 @@
     document.body.appendChild(overlay);
 
     // Escape handler (capture phase, before xterm.js)
-    escapeHandler = function (e) {
-      if (e.key === 'Escape') {
-        // If a shortcut is being recorded, let the recording handler handle Escape
-        if (recordingEl) return;
-        e.preventDefault();
-        e.stopPropagation();
+    if (escapeHandler) {
+      escapeHandler();
+      escapeHandler = null;
+    }
+    escapeHandler = registerGlobalKeyHandler(
+      'settings-dialog-escape',
+      (event) => {
+        if (event.key !== 'Escape') return false;
+        // If a shortcut is being recorded, let the recording handler handle Escape.
+        if (recordingEl) return false;
         close();
-      }
-    };
-    document.addEventListener('keydown', escapeHandler, true);
+        return true;
+      },
+      () => !!document.getElementById('settings-overlay')
+    );
 
     // Render initial section
     renderCurrentSection();
@@ -869,15 +778,6 @@
     wrap.appendChild(input);
     container.appendChild(wrap);
     return input;
-  }
-
-  function escHtml(value) {
-    return String(value ?? '')
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#39;');
   }
 
   // --- Theme preview helpers ---
@@ -1080,180 +980,25 @@
   // --- Appearance section ---
 
   function renderAppearance(c) {
-    const h = document.createElement('h3');
-    h.textContent = 'Appearance';
-    c.appendChild(h);
-
-    addSectionLabel(c, 'Theme & Color');
-
-    // Theme dropdown
-    const themeSelect = document.createElement('select');
-    themeSelect.className = 'settings-select';
-    for (const t of cachedThemes) {
-      const opt = document.createElement('option');
-      opt.value = t;
-      opt.textContent = t;
-      if (t === pendingSettings.colors.theme) opt.selected = true;
-      themeSelect.appendChild(opt);
-    }
-    setRowTarget(addRow(c, 'Theme', 'Color theme for the terminal and UI', themeSelect), 'appearance:theme');
-
-    // Theme preview box
-    const previewBox = buildThemePreview();
-    c.appendChild(previewBox);
-
-    // Initialize preview from pending selection (not persisted config)
-    let previewSeq = 0;
-    invoke('preview_theme_colors', { name: pendingSettings.colors.theme })
-      .then(tc => updateThemePreview(previewBox, tc))
-      .catch(() => {});
-
-    // Single change handler: update pending + preview with race guard
-    themeSelect.addEventListener('change', () => {
-      pendingSettings.colors.theme = themeSelect.value;
-      const seq = ++previewSeq;
-      invoke('preview_theme_colors', { name: themeSelect.value })
-        .then(tc => { if (seq === previewSeq) updateThemePreview(previewBox, tc); })
-        .catch(() => {});
-    });
-
-    const modes = ['Dark', 'Light', 'System'];
-    const toggleGroup = document.createElement('div');
-    toggleGroup.className = 'settings-toggle-group';
-    for (const mode of modes) {
-      const btn = document.createElement('button');
-      btn.className = 'settings-toggle';
-      if (pendingSettings.colors.appearance_mode === mode) btn.classList.add('active');
-      btn.textContent = mode;
-      btn.addEventListener('click', () => {
-        pendingSettings.colors.appearance_mode = mode;
-        for (const b of toggleGroup.querySelectorAll('.settings-toggle')) {
-          b.classList.toggle('active', b.textContent === mode);
-        }
+    if (settingsSectionsAppearance && typeof settingsSectionsAppearance.renderAppearance === 'function') {
+      const handled = settingsSectionsAppearance.renderAppearance(c, {
+        pendingSettings,
+        cachedThemes,
+        cachedFonts,
+        addSectionLabel,
+        addRow,
+        setRowTarget,
+        addDivider,
+        buildThemePreview,
+        updateThemePreview,
+        invoke,
+        makeSwitch,
       });
-      toggleGroup.appendChild(btn);
+      if (handled) return;
     }
-    setRowTarget(addRow(c, 'Appearance Mode', null, toggleGroup), 'appearance:mode');
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Notifications');
-
-    // Notification position toggle
-    const posOptions = ['Bottom', 'Top'];
-    const posGroup = document.createElement('div');
-    posGroup.className = 'settings-toggle-group';
-    for (const pos of posOptions) {
-      const btn = document.createElement('button');
-      btn.className = 'settings-toggle';
-      if ((pendingSettings.conch.ui.notification_position || 'bottom').toLowerCase() === pos.toLowerCase()) btn.classList.add('active');
-      btn.textContent = pos;
-      btn.addEventListener('click', () => {
-        pendingSettings.conch.ui.notification_position = pos.toLowerCase();
-        for (const b of posGroup.querySelectorAll('.settings-toggle')) {
-          b.classList.toggle('active', b.textContent === pos);
-        }
-      });
-      posGroup.appendChild(btn);
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('Settings Error', 'Appearance section module is unavailable.');
     }
-    setRowTarget(addRow(c, 'Notification Position', 'Where toast notifications appear on screen', posGroup), 'appearance:notification-position');
-
-    // Native notifications toggle
-    const nativeSwitch = makeSwitch(
-      pendingSettings.conch.ui.native_notifications !== false,
-      (val) => { pendingSettings.conch.ui.native_notifications = val; }
-    );
-    setRowTarget(addRow(c, 'Native Notifications', 'Use system notifications when the app is not focused', nativeSwitch), 'appearance:native-notifications');
-
-    const animationsSwitch = makeSwitch(
-      pendingSettings.conch.ui.disable_animations === true,
-      (val) => { pendingSettings.conch.ui.disable_animations = val; }
-    );
-    setRowTarget(
-      addRow(
-        c,
-        'Disable Animations',
-        'Turn off UI motion and toast animations for a snappier experience on lower-end machines.',
-        animationsSwitch
-      ),
-      'appearance:disable-animations'
-    );
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Window Chrome');
-
-    // Window Decorations dropdown
-    const decoOptions = ['Full', 'Transparent', 'Buttonless', 'None'];
-    const decoSelect = document.createElement('select');
-    decoSelect.className = 'settings-select';
-    for (const d of decoOptions) {
-      const opt = document.createElement('option');
-      opt.value = d;
-      opt.textContent = d;
-      if (d === pendingSettings.window.decorations) opt.selected = true;
-      decoSelect.appendChild(opt);
-    }
-    decoSelect.addEventListener('change', () => {
-      pendingSettings.window.decorations = decoSelect.value;
-    });
-    setRowTarget(addRow(c, 'Window Decorations', 'Window title bar style', decoSelect), 'appearance:window-decorations');
-
-    // Native Menu Bar (macOS only)
-    if (navigator.platform.includes('Mac')) {
-      const sw = document.createElement('label');
-      sw.className = 'settings-switch';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = pendingSettings.conch.ui.native_menu_bar;
-      cb.addEventListener('change', () => {
-        pendingSettings.conch.ui.native_menu_bar = cb.checked;
-      });
-      const slider = document.createElement('span');
-      slider.className = 'slider';
-      sw.appendChild(cb);
-      sw.appendChild(slider);
-      setRowTarget(addRow(c, 'Native Menu Bar', 'Use the system menu bar instead of in-app menu', sw), 'appearance:native-menu-bar');
-    }
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Interface Typography');
-
-    // Font Family
-    const fontSelect = document.createElement('select');
-    fontSelect.className = 'settings-select';
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'System Default';
-    if (!pendingSettings.conch.ui.font_family) defaultOpt.selected = true;
-    fontSelect.appendChild(defaultOpt);
-    for (const f of cachedFonts.all) {
-      const opt = document.createElement('option');
-      opt.value = f;
-      opt.textContent = f;
-      if (f === pendingSettings.conch.ui.font_family) opt.selected = true;
-      fontSelect.appendChild(opt);
-    }
-    fontSelect.addEventListener('change', () => {
-      pendingSettings.conch.ui.font_family = fontSelect.value;
-    });
-    setRowTarget(addRow(c, 'UI Font Family', null, fontSelect), 'appearance:ui-font-family');
-
-    // Font Size
-    const sizeInput = document.createElement('input');
-    sizeInput.type = 'number';
-    sizeInput.className = 'settings-input';
-    sizeInput.style.width = '70px';
-    sizeInput.value = pendingSettings.conch.ui.font_size;
-    sizeInput.min = '6';
-    sizeInput.max = '72';
-    sizeInput.step = '0.5';
-    sizeInput.addEventListener('change', () => {
-      const v = parseFloat(sizeInput.value);
-      if (!isNaN(v) && v > 0) pendingSettings.conch.ui.font_size = v;
-    });
-    setRowTarget(addRow(c, 'UI Font Size', null, sizeInput), 'appearance:ui-font-size');
   }
 
   // --- Keyboard Shortcuts section ---
@@ -1298,6 +1043,7 @@
     rename_tab: 'Rename Tab',
     new_window: 'New Window',
     manage_tunnels: 'Manage SSH Tunnels',
+    vault_open: 'Open Credential Vault',
     quit: 'Quit',
     zen_mode: 'Zen Mode',
     toggle_left_panel: 'Toggle Left Panel',
@@ -1319,7 +1065,7 @@
     },
     {
       label: 'Tools',
-      keys: ['manage_tunnels'],
+      keys: ['manage_tunnels', 'vault_open'],
     },
     {
       label: 'View',
@@ -1342,7 +1088,7 @@
   // Currently recording shortcut state
   let recordingEl = null;
   let recordingRef = null;
-  let recordingHandler = null;
+  let recordingUnregister = null;
 
   function ensurePluginShortcutMap() {
     if (!pendingSettings?.conch?.keyboard) return {};
@@ -1403,8 +1149,16 @@
   function makeShortcutKeyBox(ref) {
     const keyBox = document.createElement('span');
     keyBox.className = 'settings-shortcut-key';
+    keyBox.setAttribute('role', 'button');
+    keyBox.tabIndex = 0;
+    keyBox.setAttribute('aria-label', 'Record shortcut');
     keyBox.textContent = shortcutText(getShortcutValue(ref));
     keyBox.addEventListener('click', () => startRecording(keyBox, ref));
+    keyBox.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      startRecording(keyBox, ref);
+    });
     return keyBox;
   }
 
@@ -1421,9 +1175,9 @@
       recordingEl.classList.remove('recording');
       recordingEl.textContent = shortcutText(getShortcutValue(recordingRef));
     }
-    if (recordingHandler) {
-      document.removeEventListener('keydown', recordingHandler, true);
-      recordingHandler = null;
+    if (typeof recordingUnregister === 'function') {
+      recordingUnregister();
+      recordingUnregister = null;
     }
     recordingEl = null;
     recordingRef = null;
@@ -1438,160 +1192,61 @@
     el.classList.add('recording');
     el.textContent = 'Press keys...';
 
-    recordingHandler = function (e) {
+    recordingUnregister = registerGlobalKeyHandler('settings-shortcut-recorder', (e) => {
       e.preventDefault();
       e.stopPropagation();
 
       // Escape cancels recording
       if (e.key === 'Escape') {
         stopRecording();
-        return;
+        return true;
       }
 
       const combo = normalizeKeyEvent(e);
-      if (!combo) return; // bare modifier, keep waiting
+      if (!combo) return true; // bare modifier, keep waiting
 
       setShortcutValue(settingsRef, combo);
       stopRecording();
-    };
-    document.addEventListener('keydown', recordingHandler, true);
+      return true;
+    }, () => !!recordingEl && !!recordingRef);
   }
 
   function renderKeyboard(c) {
-    // Stop any lingering recording when re-rendering
-    stopRecording();
-
-    const h = document.createElement('h3');
-    h.textContent = 'Keyboard Shortcuts';
-    c.appendChild(h);
-
-    addSearchInput(c, 'Search shortcuts', keyboardSearchQuery, (value) => {
-      keyboardSearchQuery = value;
-      renderCurrentSection();
-    });
-
-    const query = normalizeSearchText(keyboardSearchQuery);
-    const matchesShortcut = (label, desc, extra) => {
-      if (!query) return true;
-      return Number.isFinite(getFuzzyMatchScore(query, `${label} ${desc || ''} ${extra || ''}`));
-    };
-    let totalRendered = 0;
-
-    const knownKeys = new Set();
-    for (let gi = 0; gi < KEYBOARD_CORE_GROUPS.length; gi++) {
-      const group = KEYBOARD_CORE_GROUPS[gi];
-      const rows = [];
-
-      for (const key of group.keys) {
-        knownKeys.add(key);
-        const label = KEYBOARD_CORE_LABELS[key] || toTitleCaseWords(key);
-        if (!matchesShortcut(label, group.label, key)) continue;
-        rows.push({ label, key });
-      }
-
-      if (rows.length === 0) continue;
-      addSectionLabel(c, group.label);
-      for (const row of rows) {
-        const rowEl = addRow(c, row.label, null, makeShortcutKeyBox({ kind: 'core', key: row.key }));
-        setRowTarget(rowEl, `keyboard:core:${row.key}`);
-        applyRowSearchHighlight(rowEl, row.label, null, query);
-        totalRendered++;
-      }
-      addDivider(c);
+    if (settingsSectionsKeyboard && typeof settingsSectionsKeyboard.renderKeyboard === 'function') {
+      const handled = settingsSectionsKeyboard.renderKeyboard(c, {
+        stopRecording,
+        addSearchInput,
+        normalizeSearchText,
+        getFuzzyMatchScore,
+        getKeyboardSearchQuery: () => keyboardSearchQuery,
+        setKeyboardSearchQuery: (value) => {
+          keyboardSearchQuery = value;
+        },
+        renderCurrentSection,
+        KEYBOARD_CORE_GROUPS,
+        KEYBOARD_CORE_LABELS,
+        getPendingKeyboardMap: () => pendingSettings?.conch?.keyboard || {},
+        addSectionLabel,
+        addRow,
+        setRowTarget,
+        applyRowSearchHighlight,
+        addDivider,
+        makeShortcutKeyBox,
+        getToolWindowItems: () => (
+          window.toolWindowManager && typeof window.toolWindowManager.listWindows === 'function'
+            ? window.toolWindowManager.listWindows().slice().sort((a, b) => {
+                const typeCmp = String(a.type || '').localeCompare(String(b.type || ''));
+                if (typeCmp !== 0) return typeCmp;
+                return String(a.title || '').localeCompare(String(b.title || ''));
+              })
+            : []
+        ),
+        getPluginMenuItems: () => cachedPluginMenuItems || [],
+      });
+      if (handled) return;
     }
-
-    const keyboard = pendingSettings?.conch?.keyboard || {};
-    const extraKeys = Object.keys(keyboard)
-      .filter((k) => k !== 'plugin_shortcuts' && k !== 'tool_window_shortcuts' && typeof keyboard[k] === 'string' && !knownKeys.has(k))
-      .sort();
-    if (extraKeys.length > 0) {
-      const rows = [];
-      for (const key of extraKeys) {
-        const label = toTitleCaseWords(key);
-        if (!matchesShortcut(label, 'Other', key)) continue;
-        rows.push({ label, key });
-      }
-      if (rows.length > 0) {
-        addSectionLabel(c, 'Other');
-        for (const row of rows) {
-          const rowEl = addRow(c, row.label, null, makeShortcutKeyBox({ kind: 'core', key: row.key }));
-          setRowTarget(rowEl, `keyboard:core:${row.key}`);
-          applyRowSearchHighlight(rowEl, row.label, null, query);
-          totalRendered++;
-        }
-        addDivider(c);
-      }
-    }
-
-    const toolWindowItems = window.toolWindowManager && typeof window.toolWindowManager.listWindows === 'function'
-      ? window.toolWindowManager.listWindows().slice().sort((a, b) => {
-          const typeCmp = String(a.type || '').localeCompare(String(b.type || ''));
-          if (typeCmp !== 0) return typeCmp;
-          return String(a.title || '').localeCompare(String(b.title || ''));
-        })
-      : [];
-    if (toolWindowItems.length > 0) {
-      const rows = [];
-      for (const item of toolWindowItems) {
-        const side = String(item.zone || '').replace('-', ' \u2022 ');
-        const desc = item.type === 'built-in'
-          ? `Built-in \u2022 ${side}`
-          : `Plugin tool window \u2022 ${side}`;
-        if (!matchesShortcut(item.title || item.id, desc, item.id)) continue;
-        rows.push({ label: item.title || item.id, desc, id: item.id });
-      }
-      if (rows.length > 0) {
-        addSectionLabel(c, 'Tool Windows');
-        for (const row of rows) {
-          const rowEl = addRow(c, row.label, row.desc, makeShortcutKeyBox({ kind: 'tool-window', key: row.id }));
-          setRowTarget(rowEl, `keyboard:tool-window:${row.id}`);
-          applyRowSearchHighlight(rowEl, row.label, row.desc, query);
-          totalRendered++;
-        }
-        addDivider(c);
-      }
-    }
-
-    const byPluginAction = new Map();
-    for (const item of cachedPluginMenuItems || []) {
-      if (!item || !item.plugin || !item.action) continue;
-      const uniqueKey = `${item.plugin}:${item.action}`;
-      if (byPluginAction.has(uniqueKey)) continue;
-      byPluginAction.set(uniqueKey, item);
-    }
-    const pluginItems = Array.from(byPluginAction.values()).sort((a, b) => {
-      const pluginCmp = String(a.plugin || '').localeCompare(String(b.plugin || ''));
-      if (pluginCmp !== 0) return pluginCmp;
-      return String(a.label || '').localeCompare(String(b.label || ''));
-    });
-    if (pluginItems.length > 0) {
-      const rows = [];
-      for (const item of pluginItems) {
-        const pluginKey = `${item.plugin}:${item.action}`;
-        const desc = item.menu ? `${item.plugin} \u2022 ${item.menu}` : item.plugin;
-        if (!matchesShortcut(item.label || toTitleCaseWords(item.action), desc, pluginKey)) continue;
-        rows.push({
-          label: item.label || toTitleCaseWords(item.action),
-          desc,
-          key: pluginKey,
-          defaultValue: item.keybind || '',
-        });
-      }
-      if (rows.length > 0) {
-        addSectionLabel(c, 'Plugin Shortcuts');
-        for (const row of rows) {
-          const rowEl = addRow(c, row.label, row.desc, makeShortcutKeyBox({ kind: 'plugin', key: row.key, defaultValue: row.defaultValue }));
-          setRowTarget(rowEl, `keyboard:plugin:${row.key}`);
-          applyRowSearchHighlight(rowEl, row.label, row.desc, query);
-          totalRendered++;
-        }
-      }
-    }
-    if (query && totalRendered === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'settings-search-empty';
-      empty.textContent = 'No shortcuts match your search.';
-      c.appendChild(empty);
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('Settings Error', 'Keyboard section module is unavailable.');
     }
   }
   // --- Shared control helpers ---
@@ -1612,14 +1267,31 @@
   function makeToggleGroup(options, activeValue, onChange) {
     const group = document.createElement('div');
     group.className = 'settings-toggle-group';
+    group.setAttribute('role', 'radiogroup');
+    const setActive = (activeBtn) => {
+      for (const child of group.children) {
+        child.classList.remove('active');
+        child.setAttribute('aria-checked', child === activeBtn ? 'true' : 'false');
+      }
+      activeBtn.classList.add('active');
+      activeBtn.setAttribute('aria-checked', 'true');
+    };
     for (const opt of options) {
       const btn = document.createElement('div');
       btn.className = 'settings-toggle' + (opt.value === activeValue ? ' active' : '');
       btn.textContent = opt.label;
-      btn.addEventListener('click', () => {
+      btn.setAttribute('role', 'radio');
+      btn.setAttribute('aria-checked', opt.value === activeValue ? 'true' : 'false');
+      btn.tabIndex = 0;
+      const activate = () => {
         onChange(opt.value);
-        for (const child of group.children) child.classList.remove('active');
-        btn.classList.add('active');
+        setActive(btn);
+      };
+      btn.addEventListener('click', activate);
+      btn.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        activate();
       });
       group.appendChild(btn);
     }
@@ -1643,639 +1315,136 @@
   // --- Terminal section ---
 
   function renderTerminal(c) {
-    const h = document.createElement('h3');
-    h.textContent = 'Terminal';
-    c.appendChild(h);
-
-    addSectionLabel(c, 'Typography');
-
-    const fontFamilySelect = document.createElement('select');
-    fontFamilySelect.className = 'settings-select';
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'System Default';
-    if (!pendingSettings.terminal.font.normal.family) defaultOpt.selected = true;
-    fontFamilySelect.appendChild(defaultOpt);
-    for (const f of cachedFonts.monospace) {
-      const opt = document.createElement('option');
-      opt.value = f;
-      opt.textContent = f;
-      if (f === pendingSettings.terminal.font.normal.family) opt.selected = true;
-      fontFamilySelect.appendChild(opt);
+    if (!settingsSectionsTerminal || typeof settingsSectionsTerminal.renderTerminal !== 'function') {
+      if (window.toast && typeof window.toast.error === 'function') {
+        window.toast.error('Settings Error', 'Terminal section module is unavailable.');
+      }
+      return;
     }
-    fontFamilySelect.addEventListener('change', () => {
-      pendingSettings.terminal.font.normal.family = fontFamilySelect.value;
+    settingsSectionsTerminal.renderTerminal(c, {
+      pendingSettings,
+      cachedFonts,
+      addSectionLabel,
+      addDivider,
+      addRow,
+      setRowTarget,
+      makeInput,
     });
-    setRowTarget(addRow(c, 'Terminal Font Family', null, fontFamilySelect), 'terminal:font-family');
-
-    const fontSizeInput = makeInput('number', pendingSettings.terminal.font.size);
-    fontSizeInput.addEventListener('input', () => {
-      const v = parseFloat(fontSizeInput.value);
-      if (!isNaN(v)) pendingSettings.terminal.font.size = v;
-    });
-    setRowTarget(addRow(c, 'Terminal Font Size', null, fontSizeInput), 'terminal:font-size');
-
-    const offsetXInput = makeInput('number', pendingSettings.terminal.font.offset.x, { step: '0.5' });
-    offsetXInput.addEventListener('input', () => {
-      const v = parseFloat(offsetXInput.value);
-      if (!isNaN(v)) pendingSettings.terminal.font.offset.x = v;
-    });
-    setRowTarget(addRow(c, 'Font Offset X', null, offsetXInput), 'terminal:font-offset-x');
-
-    const offsetYInput = makeInput('number', pendingSettings.terminal.font.offset.y, { step: '0.5' });
-    offsetYInput.addEventListener('input', () => {
-      const v = parseFloat(offsetYInput.value);
-      if (!isNaN(v)) pendingSettings.terminal.font.offset.y = v;
-    });
-    setRowTarget(addRow(c, 'Font Offset Y', null, offsetYInput), 'terminal:font-offset-y');
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Scrolling');
-
-    const scrollInput = makeInput('number', pendingSettings.terminal.scroll_sensitivity, {
-      step: '0.05', min: 0, max: 1,
-    });
-    scrollInput.addEventListener('input', () => {
-      const v = parseFloat(scrollInput.value);
-      if (!isNaN(v)) pendingSettings.terminal.scroll_sensitivity = v;
-    });
-    setRowTarget(addRow(c, 'Scroll Sensitivity', '0.0 to 1.0 (tuned for macOS trackpads)', scrollInput), 'terminal:scroll-sensitivity');
   }
 
   // --- Shell section ---
 
   function renderShell(c) {
-    const h = document.createElement('h3');
-    h.textContent = 'Shell & Environment';
-    c.appendChild(h);
-
-    addSectionLabel(c, 'Launch');
-
-    const shellInput = makeInput('text', pendingSettings.terminal.shell.program, {
-      placeholder: 'Uses $SHELL login shell',
-    });
-    shellInput.addEventListener('input', () => {
-      pendingSettings.terminal.shell.program = shellInput.value;
-    });
-    setRowTarget(addRow(c, 'Shell Program', null, shellInput), 'shell:program');
-
-    const argsInput = makeInput('text', (pendingSettings.terminal.shell.args || []).join(', '));
-    argsInput.addEventListener('input', () => {
-      pendingSettings.terminal.shell.args = argsInput.value
-        .split(',')
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
-    });
-    setRowTarget(addRow(c, 'Arguments', 'Comma-separated (e.g. -l, -c, echo ok)', argsInput), 'shell:args');
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Environment Variables');
-
-    const envContainer = document.createElement('div');
-    envContainer.dataset.settingId = 'shell:env';
-    envContainer.className = 'settings-env-container';
-    c.appendChild(envContainer);
-
-    function renderEnvRows() {
-      envContainer.innerHTML = '';
-      const env = pendingSettings.terminal.env || {};
-      const keys = Object.keys(env);
-
-      for (const oldKey of keys) {
-        const row = document.createElement('div');
-        row.className = 'settings-env-row';
-
-        const keyInput = makeInput('text', oldKey, { style: 'width:120px;' });
-        row.appendChild(keyInput);
-
-        const eqLabel = document.createElement('span');
-        eqLabel.className = 'settings-env-eq';
-        eqLabel.textContent = '=';
-        row.appendChild(eqLabel);
-
-        const valInput = makeInput('text', env[oldKey], { style: 'flex:1;' });
-        row.appendChild(valInput);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'ssh-form-btn settings-env-remove';
-        removeBtn.textContent = 'X';
-        removeBtn.addEventListener('click', () => {
-          delete pendingSettings.terminal.env[oldKey];
-          renderEnvRows();
-        });
-        row.appendChild(removeBtn);
-
-        // When key changes, rename the entry in the env object
-        keyInput.addEventListener('change', () => {
-          const newKey = keyInput.value.trim();
-          const val = pendingSettings.terminal.env[oldKey];
-          delete pendingSettings.terminal.env[oldKey];
-          if (newKey) pendingSettings.terminal.env[newKey] = val;
-          renderEnvRows();
-        });
-
-        // When value changes, update in place
-        valInput.addEventListener('input', () => {
-          const currentKey = keyInput.value.trim() || oldKey;
-          pendingSettings.terminal.env[currentKey] = valInput.value;
-        });
-
-        envContainer.appendChild(row);
+    if (!settingsSectionsTerminal || typeof settingsSectionsTerminal.renderShell !== "function") {
+      if (window.toast && typeof window.toast.error === "function") {
+        window.toast.error("Settings Error", "Shell section module is unavailable.");
       }
-
-      // Add variable button
-      const addBtn = document.createElement('button');
-      addBtn.className = 'ssh-form-btn settings-env-add';
-      addBtn.textContent = '+ Add Variable';
-      addBtn.addEventListener('click', () => {
-        if (!pendingSettings.terminal.env) pendingSettings.terminal.env = {};
-        // Find a unique empty key name
-        let newKey = '';
-        let i = 0;
-        while (Object.prototype.hasOwnProperty.call(pendingSettings.terminal.env, newKey)) {
-          i++;
-          newKey = 'VAR_' + i;
-        }
-        pendingSettings.terminal.env[newKey] = '';
-        renderEnvRows();
-      });
-      envContainer.appendChild(addBtn);
-
-      // Note about TERM / COLORTERM
-      const note = document.createElement('div');
-      note.className = 'settings-row-desc';
-      note.style.marginTop = '8px';
-      note.textContent = 'TERM and COLORTERM are always set to xterm-256color and truecolor.';
-      envContainer.appendChild(note);
+      return;
     }
-
-    renderEnvRows();
+    settingsSectionsTerminal.renderShell(c, {
+      pendingSettings,
+      addSectionLabel,
+      addDivider,
+      addRow,
+      setRowTarget,
+      makeInput,
+    });
   }
 
   // --- Cursor section ---
 
   function renderCursor(c) {
-    const h = document.createElement('h3');
-    h.textContent = 'Cursor';
-    c.appendChild(h);
-
-    addSectionLabel(c, 'Primary Cursor');
-
-    const shapeToggle = makeToggleGroup(
-      [
-        { label: 'Block', value: 'Block' },
-        { label: 'Underline', value: 'Underline' },
-        { label: 'Beam', value: 'Beam' },
-      ],
-      pendingSettings.terminal.cursor.style.shape,
-      (val) => { pendingSettings.terminal.cursor.style.shape = val; }
-    );
-    setRowTarget(addRow(c, 'Cursor Shape', null, shapeToggle), 'cursor:shape');
-
-    const blinkSwitch = makeSwitch(
-      pendingSettings.terminal.cursor.style.blinking,
-      (val) => { pendingSettings.terminal.cursor.style.blinking = val; }
-    );
-    setRowTarget(addRow(c, 'Cursor Blinking', null, blinkSwitch), 'cursor:blinking');
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Vi Mode Override');
-
-    const viNote = document.createElement('div');
-    viNote.dataset.settingId = 'cursor:vi-mode';
-    viNote.className = 'settings-row-desc';
-    viNote.style.marginBottom = '8px';
-    viNote.textContent = 'Optional cursor style when vi mode is active in your shell.';
-    c.appendChild(viNote);
-
-    const viStyle = pendingSettings.terminal.cursor.vi_mode_style;
-    const viActiveShape = viStyle ? viStyle.shape : null;
-
-    // Container for vi mode blinking toggle (shown/hidden based on shape)
-    const viBlinkRow = document.createElement('div');
-    viBlinkRow.id = 'vi-blink-row';
-
-    const viShapeToggle = makeToggleGroup(
-      [
-        { label: 'None', value: null },
-        { label: 'Block', value: 'Block' },
-        { label: 'Underline', value: 'Underline' },
-        { label: 'Beam', value: 'Beam' },
-      ],
-      viActiveShape,
-      (val) => {
-        if (val === null) {
-          pendingSettings.terminal.cursor.vi_mode_style = null;
-          viBlinkRow.style.display = 'none';
-        } else {
-          if (!pendingSettings.terminal.cursor.vi_mode_style) {
-            pendingSettings.terminal.cursor.vi_mode_style = { shape: val, blinking: false };
-          } else {
-            pendingSettings.terminal.cursor.vi_mode_style.shape = val;
-          }
-          viBlinkRow.style.display = '';
-        }
+    if (!settingsSectionsTerminal || typeof settingsSectionsTerminal.renderCursor !== "function") {
+      if (window.toast && typeof window.toast.error === "function") {
+        window.toast.error("Settings Error", "Cursor section module is unavailable.");
       }
-    );
-    setRowTarget(addRow(c, 'Vi Mode Override', null, viShapeToggle), 'cursor:vi-mode');
-
-    // Vi mode blinking toggle
-    const viBlinkSwitch = makeSwitch(
-      viStyle ? viStyle.blinking : false,
-      (val) => {
-        if (pendingSettings.terminal.cursor.vi_mode_style) {
-          pendingSettings.terminal.cursor.vi_mode_style.blinking = val;
-        }
-      }
-    );
-    viBlinkRow.style.display = viStyle ? '' : 'none';
-    addRow(viBlinkRow, 'Blinking', null, viBlinkSwitch);
-    c.appendChild(viBlinkRow);
+      return;
+    }
+    settingsSectionsTerminal.renderCursor(c, {
+      pendingSettings,
+      addSectionLabel,
+      addDivider,
+      addRow,
+      setRowTarget,
+      makeSwitch,
+      makeToggleGroup,
+    });
   }
 
   // --- Plugins section ---
 
   function renderPlugins(c) {
-    const h = document.createElement('h3');
-    h.textContent = 'Plugins';
-    c.appendChild(h);
-
-    addSectionLabel(c, 'Plugin System');
-
-    const enablePluginsSwitch = makeSwitch(
-      pendingSettings.conch.plugins.enabled,
-      (val) => { pendingSettings.conch.plugins.enabled = val; }
-    );
-    setRowTarget(addRow(c, 'Enable Plugins', 'Master switch \u2014 disable to run as pure terminal', enablePluginsSwitch), 'plugins:enabled');
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Plugin Types');
-    const pluginTypesAnchor = document.createElement('div');
-    pluginTypesAnchor.dataset.settingId = 'plugins:types';
-    c.appendChild(pluginTypesAnchor);
-
-    const luaSwitch = makeSwitch(
-      pendingSettings.conch.plugins.lua,
-      (val) => { pendingSettings.conch.plugins.lua = val; }
-    );
-    addRow(c, 'Lua Plugins', null, luaSwitch);
-
-    const javaSwitch = makeSwitch(
-      pendingSettings.conch.plugins.java,
-      (val) => { pendingSettings.conch.plugins.java = val; }
-    );
-    addRow(c, 'Java Plugins', 'Disabling avoids JVM startup overhead', javaSwitch);
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Extra Search Paths');
-    const searchPathsHint = document.createElement('div');
-    searchPathsHint.dataset.settingId = 'plugins:search-paths';
-    searchPathsHint.className = 'settings-row-desc';
-    searchPathsHint.style.marginBottom = '8px';
-    searchPathsHint.textContent = 'Built-in defaults always include ~/.config/conch/plugins. Add extra directories here.';
-    c.appendChild(searchPathsHint);
-
-    const pathsContainer = document.createElement('div');
-    c.appendChild(pathsContainer);
-
-    function renderSearchPaths() {
-      pathsContainer.innerHTML = '';
-      const paths = pendingSettings.conch.plugins.search_paths || [];
-
-      for (let i = 0; i < paths.length; i++) {
-        const row = document.createElement('div');
-        row.style.cssText = 'display:flex; align-items:center; gap:6px; margin-bottom:4px;';
-
-        const pathInput = makeInput('text', paths[i], { style: 'flex:1;' });
-        pathInput.addEventListener('input', () => {
-          pendingSettings.conch.plugins.search_paths[i] = pathInput.value;
-        });
-        row.appendChild(pathInput);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'ssh-form-btn settings-env-remove';
-        removeBtn.textContent = 'X';
-        removeBtn.addEventListener('click', () => {
-          pendingSettings.conch.plugins.search_paths.splice(i, 1);
-          renderSearchPaths();
-        });
-        row.appendChild(removeBtn);
-
-        pathsContainer.appendChild(row);
-      }
-
-      const addBtn = document.createElement('button');
-      addBtn.className = 'ssh-form-btn settings-env-add';
-      addBtn.textContent = '+ Add Path';
-      addBtn.addEventListener('click', () => {
-        if (!pendingSettings.conch.plugins.search_paths) {
-          pendingSettings.conch.plugins.search_paths = [];
-        }
-        pendingSettings.conch.plugins.search_paths.push('');
-        renderSearchPaths();
+    if (settingsPluginsSection && typeof settingsPluginsSection.createRenderer === 'function') {
+      const renderer = settingsPluginsSection.createRenderer({
+        invoke,
+        getPendingSettings: () => pendingSettings,
+        getCachedPlugins: () => cachedPlugins,
+        setCachedPlugins: (next) => { cachedPlugins = Array.isArray(next) ? next : []; },
+        setCachedPluginMenuItems: (next) => { cachedPluginMenuItems = Array.isArray(next) ? next : []; },
+        refreshPluginInventory: () => refreshPluginInventory(),
+        confirmPluginPermissions: (pluginName, permissions) => confirmPluginPermissions(pluginName, permissions),
+        invalidateCommandPaletteCache: (reason) => invalidateCommandPaletteCache(reason),
+        addSectionLabel,
+        addDivider,
+        addRow,
+        setRowTarget,
+        makeInput,
+        makeSwitch,
       });
-      pathsContainer.appendChild(addBtn);
+      renderer.renderPlugins(c);
+      return;
     }
 
-    renderSearchPaths();
-
-    addDivider(c);
-
-    // Sub-group: Installed Plugins
-    const installedHeader = document.createElement('div');
-    installedHeader.dataset.settingId = 'plugins:installed';
-    installedHeader.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding-right:10px;';
-    const installedLabel = document.createElement('div');
-    installedLabel.className = 'settings-section-label';
-    installedLabel.textContent = 'Installed Plugins';
-    installedHeader.appendChild(installedLabel);
-
-    const rescanLabel = document.createElement('span');
-    rescanLabel.textContent = 'Rescan';
-    rescanLabel.setAttribute('role', 'button');
-    rescanLabel.setAttribute('tabindex', '0');
-    rescanLabel.style.cssText = 'font-size:12px; color:var(--blue, #7aa2f7); cursor:pointer; user-select:none;';
-    const handleRescan = async () => {
-      rescanLabel.style.pointerEvents = 'none';
-      rescanLabel.style.opacity = '0.6';
-      try {
-        cachedPlugins = await invoke('scan_plugins');
-        cachedPluginMenuItems = await invoke('get_plugin_menu_items').catch(() => []);
-        if (window.titlebar && typeof window.titlebar.refresh === 'function') {
-          window.titlebar.refresh().catch(() => {});
-        }
-      } catch (e) {
-        if (window.toast) window.toast.error('Plugin Scan Failed', String(e));
-      }
-      rescanLabel.style.pointerEvents = 'auto';
-      rescanLabel.style.opacity = '1';
-      renderPluginList();
-    };
-    rescanLabel.addEventListener('click', handleRescan);
-    rescanLabel.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        handleRescan();
-      }
-    });
-    installedHeader.appendChild(rescanLabel);
-    c.appendChild(installedHeader);
-
-    const pluginListContainer = document.createElement('div');
-    c.appendChild(pluginListContainer);
-
-    function renderPluginList() {
-      pluginListContainer.innerHTML = '';
-
-      if (!cachedPlugins || cachedPlugins.length === 0) {
-        const empty = document.createElement('div');
-        empty.style.cssText = 'padding:16px; text-align:center; color:var(--dim-fg); font-size:12px;';
-        empty.textContent = 'No plugins found in search paths';
-        pluginListContainer.appendChild(empty);
-        return;
-      }
-
-      for (const plugin of cachedPlugins) {
-        const row = document.createElement('div');
-        row.style.cssText = 'background:var(--bg); border-radius:6px; padding:8px 10px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;';
-
-        const left = document.createElement('div');
-        left.style.cssText = 'display:flex; align-items:center; gap:8px; min-width:0; flex:1; overflow:hidden;';
-
-        // Type badge
-        const badge = document.createElement('span');
-        const pType = (plugin.plugin_type || '').toLowerCase();
-        if (pType === 'lua') {
-          badge.style.cssText = 'background:#a6e3a1; color:#1e1e2e; font-size:9px; padding:1px 6px; border-radius:3px; text-transform:uppercase; font-weight:600; flex-shrink:0;';
-        } else {
-          badge.style.cssText = 'background:#f9e2af; color:#1e1e2e; font-size:9px; padding:1px 6px; border-radius:3px; text-transform:uppercase; font-weight:600; flex-shrink:0;';
-        }
-        badge.textContent = pType;
-        left.appendChild(badge);
-
-        // Name + meta
-        const info = document.createElement('div');
-        info.style.cssText = 'min-width:0;';
-        const nameEl = document.createElement('div');
-        nameEl.style.fontWeight = 'bold';
-        nameEl.textContent = plugin.name;
-        info.appendChild(nameEl);
-        const meta = document.createElement('div');
-        meta.style.cssText = 'color:var(--dim-fg); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
-        meta.textContent = (plugin.version || '') + ' \u2014 ' + (plugin.path || '');
-        info.appendChild(meta);
-        left.appendChild(info);
-
-        row.appendChild(left);
-
-        // Enable/disable checkbox
-        const toggle = document.createElement('input');
-        toggle.type = 'checkbox';
-        toggle.checked = !!plugin.loaded;
-        toggle.style.cssText = 'flex-shrink:0; margin-left:8px;';
-        toggle.setAttribute('aria-label', `${plugin.loaded ? 'Disable' : 'Enable'} ${plugin.name}`);
-        toggle.addEventListener('change', async () => {
-          const nextLoaded = toggle.checked;
-          toggle.disabled = true;
-          try {
-            if (!nextLoaded) {
-              await invoke('disable_plugin', { name: plugin.name, source: plugin.source });
-              await invoke('rebuild_menu').catch(() => {});
-              if (window.toast) window.toast.info('Plugin Disabled', plugin.name);
-            } else {
-              const perms = Array.isArray(plugin.permissions) ? plugin.permissions.filter(Boolean) : [];
-              if (perms.length > 0) {
-                const accepted = await confirmPluginPermissions(plugin.name, perms);
-                if (!accepted) {
-                  toggle.checked = false;
-                  return;
-                }
-              }
-              await invoke('enable_plugin', { name: plugin.name, source: plugin.source, path: plugin.path });
-              await invoke('rebuild_menu').catch(() => {});
-              if (window.toast) window.toast.success('Plugin Enabled', plugin.name);
-            }
-            cachedPlugins = await invoke('scan_plugins');
-            cachedPluginMenuItems = await invoke('get_plugin_menu_items').catch(() => []);
-            if (window.titlebar && typeof window.titlebar.refresh === 'function') {
-              window.titlebar.refresh().catch(() => {});
-            }
-          } catch (e) {
-            toggle.checked = !!plugin.loaded;
-            if (window.toast) window.toast.error('Plugin Action Failed', String(e));
-          }
-          toggle.disabled = false;
-          renderPluginList();
-        });
-        row.appendChild(toggle);
-
-        pluginListContainer.appendChild(row);
-      }
-    }
-
-    renderPluginList();
+    const fallback = document.createElement('div');
+    fallback.className = 'settings-row-desc';
+    fallback.textContent = 'Plugin settings UI module is unavailable.';
+    c.appendChild(fallback);
   }
 
   function confirmPluginPermissions(pluginName, permissions) {
-    return new Promise((resolve) => {
-      const overlay = document.createElement('div');
-      overlay.className = 'ssh-overlay';
-
-      const items = permissions
-        .map((p) => `<div style="font-size:12px; color:var(--fg); line-height:1.5;">• ${escHtml(p)}</div>`)
-        .join('');
-
-      overlay.innerHTML = `
-        <div class="ssh-form" style="min-width:420px; max-width:620px;">
-          <div class="ssh-form-title">Plugin Permissions</div>
-          <div class="ssh-form-body">
-            <div style="margin-bottom:10px; font-size:12px; color:var(--fg);">
-              Plugin "${escHtml(pluginName)}" requests:
-            </div>
-            <div style="display:flex; flex-direction:column; gap:4px; margin-bottom:12px;">
-              ${items}
-            </div>
-            <div style="font-size:12px; color:var(--dim-fg);">
-              Allow and enable this plugin?
-            </div>
-          </div>
-          <div class="ssh-form-buttons">
-            <button class="ssh-form-btn" id="pp-deny">Deny</button>
-            <button class="ssh-form-btn primary" id="pp-allow">Allow</button>
-          </div>
-        </div>`;
-
-      const finish = (accepted) => {
-        document.removeEventListener('keydown', onKey, true);
-        overlay.remove();
-        resolve(accepted);
-      };
-
-      const onKey = (e) => {
-        if (e.key !== 'Escape') return;
-        e.preventDefault();
-        e.stopPropagation();
-        finish(false);
-      };
-
-      overlay.addEventListener('mousedown', (e) => {
-        if (e.target === overlay) finish(false);
-      });
-      overlay.querySelector('#pp-deny').addEventListener('click', () => finish(false));
-      overlay.querySelector('#pp-allow').addEventListener('click', () => finish(true));
-      document.addEventListener('keydown', onKey, true);
-      document.body.appendChild(overlay);
-    });
+    if (window.conchDialogService && typeof window.conchDialogService.confirmPluginPermissions === 'function') {
+      return window.conchDialogService.confirmPluginPermissions(pluginName, permissions);
+    }
+    if (window.toast && typeof window.toast.error === 'function') {
+      window.toast.error('Plugin Permissions', 'Dialog service unavailable; denying permission request.');
+    }
+    return Promise.resolve(false);
   }
 
   // --- Advanced section ---
 
   function renderAdvanced(c) {
-    const h = document.createElement('h3');
-    h.textContent = 'Advanced';
-    c.appendChild(h);
-
-    addSectionLabel(c, 'Startup & Updates');
-
-    const updateSwitch = makeSwitch(
-      pendingSettings.conch.check_for_updates !== false,
-      (val) => { pendingSettings.conch.check_for_updates = val; }
-    );
-    setRowTarget(addRow(c, 'Check for Updates', 'Automatically check for new versions when the app starts (macOS and Windows)', updateSwitch), 'advanced:check-for-updates');
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Window Defaults');
-    const windowDefaultsAnchor = document.createElement('div');
-    windowDefaultsAnchor.dataset.settingId = 'advanced:window-size';
-    c.appendChild(windowDefaultsAnchor);
-
-    const colsInput = makeInput('number', pendingSettings.window.dimensions.columns);
-    colsInput.addEventListener('input', () => {
-      const v = parseInt(colsInput.value, 10);
-      if (!isNaN(v)) pendingSettings.window.dimensions.columns = v;
+    if (!settingsSectionsBasic || typeof settingsSectionsBasic.renderAdvanced !== "function") {
+      if (window.toast && typeof window.toast.error === "function") {
+        window.toast.error("Settings Error", "Advanced section module is unavailable.");
+      }
+      return;
+    }
+    settingsSectionsBasic.renderAdvanced(c, {
+      pendingSettings,
+      addSectionLabel,
+      addDivider,
+      addRow,
+      setRowTarget,
+      makeSwitch,
+      makeInput,
     });
-    addRow(c, 'Columns', 'Width in character cells (0 = system default)', colsInput);
-
-    const linesInput = makeInput('number', pendingSettings.window.dimensions.lines);
-    linesInput.addEventListener('input', () => {
-      const v = parseInt(linesInput.value, 10);
-      if (!isNaN(v)) pendingSettings.window.dimensions.lines = v;
-    });
-    addRow(c, 'Lines', 'Height in character cells (0 = system default)', linesInput);
-
-    addDivider(c);
-
-    addSectionLabel(c, 'Interface Density');
-    const densityAnchor = document.createElement('div');
-    densityAnchor.dataset.settingId = 'advanced:ui-chrome-font-sizes';
-    c.appendChild(densityAnchor);
-
-    const fontNote = document.createElement('div');
-    fontNote.className = 'settings-row-desc';
-    fontNote.style.marginBottom = '8px';
-    fontNote.textContent = 'Fine-tune text sizes for different UI elements (in points)';
-    c.appendChild(fontNote);
-
-    const smallInput = makeInput('number', pendingSettings.conch.ui.font.small, { step: '0.5' });
-    smallInput.addEventListener('input', () => {
-      const v = parseFloat(smallInput.value);
-      if (!isNaN(v)) pendingSettings.conch.ui.font.small = v;
-    });
-    addRow(c, 'Small', 'Tab titles, badges, compact labels', smallInput);
-
-    const listInput = makeInput('number', pendingSettings.conch.ui.font.list, { step: '0.5' });
-    listInput.addEventListener('input', () => {
-      const v = parseFloat(listInput.value);
-      if (!isNaN(v)) pendingSettings.conch.ui.font.list = v;
-    });
-    addRow(c, 'List', 'Tree nodes, table rows, file explorer', listInput);
-
-    const normalInput = makeInput('number', pendingSettings.conch.ui.font.normal, { step: '0.5' });
-    normalInput.addEventListener('input', () => {
-      const v = parseFloat(normalInput.value);
-      if (!isNaN(v)) pendingSettings.conch.ui.font.normal = v;
-    });
-    addRow(c, 'Normal', 'Body text, buttons, inputs, dialogs', normalInput);
-
-    const resetLink = document.createElement('div');
-    resetLink.textContent = 'Reset to Default';
-    resetLink.style.cssText = 'font-size:var(--ui-font-small);color:var(--blue);cursor:pointer;margin-top:4px;text-align:right';
-    resetLink.addEventListener('click', () => {
-      pendingSettings.conch.ui.font.small = 12.0;
-      pendingSettings.conch.ui.font.list = 14.0;
-      pendingSettings.conch.ui.font.normal = 14.0;
-      smallInput.value = 12.0;
-      listInput.value = 14.0;
-      normalInput.value = 14.0;
-    });
-    c.appendChild(resetLink);
   }
 
   function renderFiles(c) {
-    const h = document.createElement('h3');
-    h.textContent = 'Files';
-    c.appendChild(h);
-
-    addSectionLabel(c, 'Explorer');
-    const followSwitch = makeSwitch(
-      pendingSettings.conch.files.follow_path !== false,
-      (val) => { pendingSettings.conch.files.follow_path = val; }
-    );
-    setRowTarget(
-      addRow(
-        c,
-        'Follow Path',
-        'Automatically follow the active terminal working directory in local and remote file panes.',
-        followSwitch
-      ),
-      'files:follow-path'
-    );
+    if (!settingsSectionsBasic || typeof settingsSectionsBasic.renderFiles !== "function") {
+      if (window.toast && typeof window.toast.error === "function") {
+        window.toast.error("Settings Error", "Files section module is unavailable.");
+      }
+      return;
+    }
+    settingsSectionsBasic.renderFiles(c, {
+      pendingSettings,
+      addSectionLabel,
+      addRow,
+      setRowTarget,
+      makeSwitch,
+    });
   }
 
   async function applySettings() {

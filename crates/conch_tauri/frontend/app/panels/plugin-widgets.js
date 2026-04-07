@@ -15,6 +15,33 @@
 
   function log(msg) { console.log('[plugin-widgets] ' + msg); }
 
+  function setDialogOverlayAttributes(overlay, label) {
+    if (!overlay) return;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', String(label || 'Plugin dialog'));
+  }
+
+  function registerOverlayEscape(overlay, name, onEscape) {
+    const keyboardRouter = window.conchKeyboardRouter;
+    if (!keyboardRouter || typeof keyboardRouter.register !== 'function') {
+      console.warn('plugin-widgets: keyboard router unavailable, skipping escape registration:', name || 'plugin-dialog');
+      return () => {};
+    }
+
+    return keyboardRouter.register({
+      name: name || 'plugin-dialog',
+      priority: 220,
+      isActive: () => !!(overlay && overlay.isConnected),
+      onKeyDown: (event) => {
+        if (!overlay || !overlay.isConnected) return false;
+        if (event.key !== 'Escape') return false;
+        onEscape(event);
+        return true;
+      },
+    });
+  }
+
   function init(opts) {
     invoke = opts.invoke;
     listen = opts.listen;
@@ -794,6 +821,7 @@
     overlay.className = 'ssh-overlay';
     overlay.setAttribute('data-plugin-dialog', pluginName);
     overlay.style.zIndex = '4000';
+    setDialogOverlayAttributes(overlay, title || 'Plugin form');
 
     const title = desc.title || 'Form';
     const fields = desc.fields || [];
@@ -848,9 +876,12 @@
       }
     }, 30);
 
+    let unregisterKeys = null;
     const dismiss = (result) => {
       _dialogCooldown.add(pluginName);
       setTimeout(() => _dialogCooldown.delete(pluginName), 600);
+      if (typeof unregisterKeys === 'function') unregisterKeys();
+      unregisterKeys = null;
       overlay.remove();
       invoke('dialog_respond_form', { promptId: prompt_id, result }).catch(() => {});
     };
@@ -871,8 +902,9 @@
       });
     });
 
-    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); dismiss(null); document.removeEventListener('keydown', onKey, true); } };
-    document.addEventListener('keydown', onKey, true);
+    unregisterKeys = registerOverlayEscape(overlay, `plugin-form:${pluginName}`, () => {
+      dismiss(null);
+    });
   }
 
   function handlePromptDialog(event) {
@@ -887,13 +919,17 @@
     overlay.className = 'ssh-overlay';
     overlay.setAttribute('data-plugin-dialog', pluginName);
     overlay.style.zIndex = '4000';
+    setDialogOverlayAttributes(overlay, 'Plugin prompt');
     overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Prompt</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div><input class="pw-text-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false"></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="pd-cancel">Cancel</button><button class="ssh-form-btn primary" id="pd-ok">OK</button></div></div>`;
     document.body.appendChild(overlay);
     setTimeout(() => overlay.querySelector('#pd-input').focus(), 50);
 
+    let unregisterKeys = null;
     const dismiss = (val) => {
       _dialogCooldown.add(pluginName);
       setTimeout(() => _dialogCooldown.delete(pluginName), 600);
+      if (typeof unregisterKeys === 'function') unregisterKeys();
+      unregisterKeys = null;
       overlay.remove();
       invoke('dialog_respond_prompt', { promptId: prompt_id, value: val }).catch(() => {});
     };
@@ -902,8 +938,9 @@
     overlay.querySelector('#pd-ok').addEventListener('click', () => dismiss(overlay.querySelector('#pd-input').value));
     overlay.querySelector('#pd-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') dismiss(overlay.querySelector('#pd-input').value); });
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(null); });
-    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); dismiss(null); document.removeEventListener('keydown', onKey, true); } };
-    document.addEventListener('keydown', onKey, true);
+    unregisterKeys = registerOverlayEscape(overlay, `plugin-prompt:${pluginName}`, () => {
+      dismiss(null);
+    });
   }
 
   function handleConfirmDialog(event) {
@@ -918,12 +955,16 @@
     overlay.className = 'ssh-overlay';
     overlay.setAttribute('data-plugin-dialog', pluginName);
     overlay.style.zIndex = '4000';
+    setDialogOverlayAttributes(overlay, 'Plugin confirmation');
     overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Confirm</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="cd-no">No</button><button class="ssh-form-btn primary" id="cd-yes">Yes</button></div></div>`;
     document.body.appendChild(overlay);
 
+    let unregisterKeys = null;
     const dismiss = (val) => {
       _dialogCooldown.add(pluginName);
       setTimeout(() => _dialogCooldown.delete(pluginName), 600);
+      if (typeof unregisterKeys === 'function') unregisterKeys();
+      unregisterKeys = null;
       overlay.remove();
       invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: val }).catch(() => {});
     };
@@ -931,8 +972,9 @@
     overlay.querySelector('#cd-no').addEventListener('click', () => dismiss(false));
     overlay.querySelector('#cd-yes').addEventListener('click', () => dismiss(true));
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(false); });
-    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); dismiss(false); document.removeEventListener('keydown', onKey, true); } };
-    document.addEventListener('keydown', onKey, true);
+    unregisterKeys = registerOverlayEscape(overlay, `plugin-confirm:${pluginName}`, () => {
+      dismiss(false);
+    });
   }
 
   /// Map a plugin icon name to an <img> tag using the PNG icon set.

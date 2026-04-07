@@ -4,6 +4,7 @@
     const showStatus = deps.showStatus;
     const inputRuntime = deps.inputRuntime;
     const layoutRuntime = deps.layoutRuntime;
+    const listenOnCurrentWindow = deps.listenOnCurrentWindow;
     const currentPane = deps.currentPane;
     const currentTab = deps.currentTab;
     const createSshTab = deps.createSshTab;
@@ -21,6 +22,7 @@
     const commandPaletteRuntime = global.conchCommandPaletteRuntime && global.conchCommandPaletteRuntime.create
       ? global.conchCommandPaletteRuntime.create({
           invoke,
+          listen: listenOnCurrentWindow,
           esc: (text) => global.utils.esc(text),
           handleMenuAction: (action) => getHandleMenuAction()(action),
           createSshTab: (opts) => createSshTab(opts),

@@ -8,6 +8,32 @@
   const esc = window.utils.esc;
   const attr = window.utils.attr;
 
+  function setOverlayDialogAttributes(overlay, label) {
+    if (!overlay) return;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', String(label || 'Dialog'));
+  }
+
+  function registerOverlayEscape(overlay, name, onEscape) {
+    const keyboardRouter = window.conchKeyboardRouter;
+    if (!keyboardRouter || typeof keyboardRouter.register !== 'function') {
+      console.warn('keygen: keyboard router unavailable, skipping escape registration:', name || 'keygen-dialog');
+      return () => {};
+    }
+    return keyboardRouter.register({
+      name: name || 'keygen-dialog',
+      priority: 220,
+      isActive: () => !!(overlay && overlay.isConnected),
+      onKeyDown: (event) => {
+        if (!overlay || !overlay.isConnected) return false;
+        if (event.key !== 'Escape') return false;
+        onEscape(event);
+        return true;
+      },
+    });
+  }
+
   // Key type definitions: value sent to backend, display label, default filename.
   const KEY_TYPES = [
     { value: 'ed25519',    label: 'Ed25519 (recommended)', filename: 'id_ed25519' },
@@ -41,6 +67,7 @@
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
     overlay.id = 'keygen-overlay';
+    setOverlayDialogAttributes(overlay, 'Generate SSH key pair');
 
     const keyTypeOptions = KEY_TYPES.map((kt) =>
       '<option value="' + attr(kt.value) + '">' + esc(kt.label) + '</option>'
@@ -127,25 +154,24 @@
       }
     });
 
+    let dismissed = false;
+    let unregisterEscape = null;
+    const dismissDialog = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (typeof unregisterEscape === 'function') unregisterEscape();
+      unregisterEscape = null;
+      removeOverlay();
+    };
+
     // Click outside to close.
     overlay.addEventListener('mousedown', (e) => {
-      if (e.target === overlay) {
-        removeOverlay();
-        document.removeEventListener('keydown', onKey, true);
-      }
+      if (e.target === overlay) dismissDialog();
     });
-
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        removeOverlay();
-        document.removeEventListener('keydown', onKey, true);
-      }
-    };
-    document.addEventListener('keydown', onKey, true);
+    unregisterEscape = registerOverlayEscape(overlay, 'keygen-form-dialog', () => dismissDialog());
 
     overlay.querySelector('#keygen-cancel').addEventListener('click', () => {
-      removeOverlay();
-      document.removeEventListener('keydown', onKey, true);
+      dismissDialog();
     });
 
     // Helper: actually run the key generation.
@@ -169,8 +195,7 @@
           },
         });
 
-        document.removeEventListener('keydown', onKey, true);
-        removeOverlay();
+        dismissDialog();
         showResultDialog(result, opts);
       } catch (e) {
         generateBtn.disabled = false;
@@ -241,6 +266,7 @@
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
     overlay.id = 'keygen-overlay';
+    setOverlayDialogAttributes(overlay, 'SSH key generated');
 
     overlay.innerHTML = `
       <div class="ssh-form keygen-result-dialog">
@@ -291,29 +317,27 @@
       }
     });
 
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        removeOverlay();
-        document.removeEventListener('keydown', onKey, true);
-      }
+    let dismissed = false;
+    let unregisterEscape = null;
+    const dismissDialog = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (typeof unregisterEscape === 'function') unregisterEscape();
+      unregisterEscape = null;
+      removeOverlay();
     };
-    document.addEventListener('keydown', onKey, true);
+    unregisterEscape = registerOverlayEscape(overlay, 'keygen-result-dialog', () => dismissDialog());
 
     overlay.addEventListener('mousedown', (e) => {
-      if (e.target === overlay) {
-        removeOverlay();
-        document.removeEventListener('keydown', onKey, true);
-      }
+      if (e.target === overlay) dismissDialog();
     });
 
     overlay.querySelector('#keygen-result-close').addEventListener('click', () => {
-      removeOverlay();
-      document.removeEventListener('keydown', onKey, true);
+      dismissDialog();
     });
 
     overlay.querySelector('#keygen-create-vault-account').addEventListener('click', () => {
-      removeOverlay();
-      document.removeEventListener('keydown', onKey, true);
+      dismissDialog();
 
       if (window.vault && window.vault.showAccountForm) {
         // Pre-fill the account form with the generated key path.

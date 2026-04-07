@@ -1,7 +1,6 @@
 (function initConchClipboardRuntime(global) {
   function create(deps) {
     const invoke = deps.invoke;
-    const showStatus = deps.showStatus;
     const isTextInputTarget = deps.isTextInputTarget;
     const getCurrentPane = deps.getCurrentPane;
 
@@ -34,32 +33,43 @@
           return writeTextToCurrentPane(text);
         } catch (_) {}
       }
-      showStatus('Paste failed: clipboard unavailable');
       return false;
     }
 
     function initListeners() {
-      document.addEventListener('keydown', (event) => {
-        const isPasteCombo = (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'v';
-        if (!isPasteCombo) return;
-        if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return;
-        if (!getCurrentPane()) return;
-        event.preventDefault();
-        event.stopPropagation();
-        pasteIntoCurrentPane();
-      }, true);
-
-      document.addEventListener('keydown', (event) => {
-        const isCopyCombo = (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'c';
-        if (!isCopyCombo) return;
-        if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return;
-        const pane = getCurrentPane();
-        const text = pane && pane.term ? pane.term.getSelection() : '';
-        if (!text) return;
-        event.preventDefault();
-        event.stopPropagation();
-        invoke('clipboard_write_text', { text }).catch(() => {});
-      }, true);
+      const keyboardRouter = global.conchKeyboardRouter;
+      if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+        keyboardRouter.register({
+          name: 'clipboard-paste',
+          priority: 125,
+          onKeyDown: (event) => {
+            const key = (event.key || '').toLowerCase();
+            const isPasteCombo = (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && key === 'v';
+            if (!isPasteCombo) return false;
+            if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return false;
+            if (!getCurrentPane()) return false;
+            pasteIntoCurrentPane();
+            return true;
+          },
+        });
+        keyboardRouter.register({
+          name: 'clipboard-copy',
+          priority: 125,
+          onKeyDown: (event) => {
+            const key = (event.key || '').toLowerCase();
+            const isCopyCombo = (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && key === 'c';
+            if (!isCopyCombo) return false;
+            if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return false;
+            const pane = getCurrentPane();
+            const text = pane && pane.term ? pane.term.getSelection() : '';
+            if (!text) return false;
+            invoke('clipboard_write_text', { text }).catch(() => {});
+            return true;
+          },
+        });
+      } else {
+        console.warn('clipboard-runtime: keyboard router unavailable, copy/paste shortcut handlers were not registered');
+      }
 
       document.addEventListener('paste', (event) => {
         if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return;
