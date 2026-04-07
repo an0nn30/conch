@@ -91,7 +91,8 @@ function ui.panel_button(id, label, icon) end
 ---@param id string Unique widget ID
 ---@param value string Current value
 ---@param hint? string Placeholder text
-function ui.panel_text_input(id, value, hint) end
+---@param enabled? boolean Whether input is editable (default true)
+function ui.panel_text_input(id, value, hint, enabled) end
 
 ---Render a multi-line text editor.
 ---@param id string Unique widget ID

@@ -7,7 +7,9 @@
     const getCachedPlugins = deps.getCachedPlugins;
     const setCachedPlugins = deps.setCachedPlugins;
     const setCachedPluginMenuItems = deps.setCachedPluginMenuItems;
+    const setCachedPluginSettingsSections = deps.setCachedPluginSettingsSections || (() => {});
     const refreshPluginInventory = deps.refreshPluginInventory;
+    const onPluginInventoryUpdated = deps.onPluginInventoryUpdated || (() => {});
     const confirmPluginPermissions = deps.confirmPluginPermissions;
     const invalidateCommandPaletteCache = deps.invalidateCommandPaletteCache;
     const addSectionLabel = deps.addSectionLabel;
@@ -155,8 +157,10 @@
           const inventory = await refreshPluginInventory();
           setCachedPlugins(inventory.plugins);
           setCachedPluginMenuItems(inventory.pluginMenuItems);
+          setCachedPluginSettingsSections(inventory.pluginSettingsSections);
           invalidateCommandPaletteCache('plugin-rescan');
           refreshTitlebar();
+          onPluginInventoryUpdated();
         } catch (error) {
           toastError('Plugin Scan Failed', String(error));
         }
@@ -251,8 +255,10 @@
               const inventory = await refreshPluginInventory();
               setCachedPlugins(inventory.plugins);
               setCachedPluginMenuItems(inventory.pluginMenuItems);
+              setCachedPluginSettingsSections(inventory.pluginSettingsSections);
               invalidateCommandPaletteCache('plugin-toggle');
               refreshTitlebar();
+              onPluginInventoryUpdated();
             } catch (error) {
               toggle.checked = !!plugin.loaded;
               toastError('Plugin Action Failed', String(error));

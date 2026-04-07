@@ -2,11 +2,12 @@
   'use strict';
 
   async function loadRuntimeData(invoke) {
-    const [settings, themes, plugins, pluginMenuItems, fonts] = await Promise.all([
+    const [settings, themes, plugins, pluginMenuItems, pluginSettingsSections, fonts] = await Promise.all([
       invoke('get_all_settings'),
       invoke('list_themes'),
       invoke('scan_plugins'),
       invoke('get_plugin_menu_items').catch(() => []),
+      invoke('get_plugin_settings_sections').catch(() => []),
       invoke('list_system_fonts'),
     ]);
     return {
@@ -14,18 +15,21 @@
       themes,
       plugins: Array.isArray(plugins) ? plugins : [],
       pluginMenuItems: Array.isArray(pluginMenuItems) ? pluginMenuItems : [],
+      pluginSettingsSections: Array.isArray(pluginSettingsSections) ? pluginSettingsSections : [],
       fonts: fonts && typeof fonts === 'object' ? fonts : { all: [], monospace: [] },
     };
   }
 
   async function refreshPluginInventory(invoke) {
-    const [plugins, pluginMenuItems] = await Promise.all([
+    const [plugins, pluginMenuItems, pluginSettingsSections] = await Promise.all([
       invoke('scan_plugins'),
       invoke('get_plugin_menu_items').catch(() => []),
+      invoke('get_plugin_settings_sections').catch(() => []),
     ]);
     return {
       plugins: Array.isArray(plugins) ? plugins : [],
       pluginMenuItems: Array.isArray(pluginMenuItems) ? pluginMenuItems : [],
+      pluginSettingsSections: Array.isArray(pluginSettingsSections) ? pluginSettingsSections : [],
     };
   }
 

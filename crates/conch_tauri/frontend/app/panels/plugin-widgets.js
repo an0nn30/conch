@@ -473,6 +473,10 @@
   }
 
   function renderTextInput(w, pn, viewId) {
+    const wrap = document.createElement('div');
+    wrap.className = 'pw-text-input-wrap';
+    wrap.setAttribute('data-plugin-setting-id', w.id || '');
+
     const el = document.createElement('input');
     el.className = 'pw-text-input';
     el.type = 'text';
@@ -481,6 +485,10 @@
     el.value = w.value || '';
     if (w.hint) el.placeholder = w.hint;
     el.spellcheck = false;
+    if (w.enabled === false) {
+      el.disabled = true;
+      el.setAttribute('aria-disabled', 'true');
+    }
     let debounce = null;
     el.addEventListener('input', () => {
       clearTimeout(debounce);
@@ -493,8 +501,9 @@
       if (e.key === 'ArrowDown') sendEvent(pn, { type: 'text_input_arrow_down', id: w.id }, viewId);
       if (e.key === 'ArrowUp') sendEvent(pn, { type: 'text_input_arrow_up', id: w.id }, viewId);
     });
-    if (w.request_focus) setTimeout(() => el.focus(), 50);
-    return el;
+    if (w.request_focus && !el.disabled) setTimeout(() => el.focus(), 50);
+    wrap.appendChild(el);
+    return wrap;
   }
 
   function renderTextEdit(w, pn, viewId) {
@@ -512,16 +521,27 @@
   }
 
   function renderCheckbox(w, pn, viewId) {
+    const textLabel = String(w.label || '').trim();
     const el = document.createElement('label');
-    el.className = 'pw-checkbox';
     const input = document.createElement('input');
     input.type = 'checkbox';
-    input.checked = w.checked;
+    input.checked = !!w.checked;
     input.addEventListener('change', () => {
       sendEvent(pn, { type: 'checkbox_changed', id: w.id, checked: input.checked }, viewId);
     });
+
+    if (!textLabel) {
+      el.className = 'pw-checkbox-switch';
+      const slider = document.createElement('span');
+      slider.className = 'pw-checkbox-switch-slider';
+      el.appendChild(input);
+      el.appendChild(slider);
+      return el;
+    }
+
+    el.className = 'pw-checkbox';
     el.appendChild(input);
-    el.appendChild(document.createTextNode(' ' + w.label));
+    el.appendChild(document.createTextNode(' ' + textLabel));
     return el;
   }
 
@@ -728,22 +748,36 @@
     const eventJson = JSON.stringify(payload);
     invoke('plugin_widget_event', { pluginName, eventJson })
       .then(() => {
-        refreshPanelPlugin(pluginName);
+        refreshPluginView(pluginName, viewId);
       })
       .catch((e) => {
         console.error('plugin_widget_event error:', e);
       });
   }
 
-  /** Re-render a panel plugin by requesting fresh widgets from the backend. */
-  async function refreshPanelPlugin(pluginName) {
-    const container = document.querySelector(`.plugin-panel-content[data-plugin-name="${CSS.escape(pluginName)}"]`);
-    if (!container) return;
+  /** Re-render plugin widgets in whichever host surface dispatched the event. */
+  async function refreshPluginView(pluginName, viewId) {
+    if (viewId) {
+      const selector = `.plugin-settings-content[data-plugin-name="${CSS.escape(pluginName)}"][data-plugin-view-id="${CSS.escape(viewId)}"]`;
+      const settingsContainer = document.querySelector(selector);
+      if (settingsContainer) {
+        try {
+          const result = await invoke('request_plugin_render', { pluginName, viewId });
+          if (result != null) renderWidgets(settingsContainer, result, pluginName, viewId);
+        } catch (e) {
+          console.error('refreshPluginView(settings) error:', e);
+        }
+        return;
+      }
+    }
+
+    const panelContainer = document.querySelector(`.plugin-panel-content[data-plugin-name="${CSS.escape(pluginName)}"]`);
+    if (!panelContainer) return;
     try {
       const result = await invoke('request_plugin_render', { pluginName });
-      if (result != null) renderWidgets(container, result, pluginName);
+      if (result != null) renderWidgets(panelContainer, result, pluginName);
     } catch (e) {
-      console.error('refreshPanelPlugin error:', e);
+      console.error('refreshPluginView(panel) error:', e);
     }
   }
 

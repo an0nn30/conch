@@ -57,6 +57,12 @@ function app.register_service(name) end
 ---@param keybind? string Keyboard shortcut (e.g. "cmd+shift+t")
 function app.register_menu_item(menu, label, action, keybind) end
 
+---Register a plugin-owned settings section in the host Settings UI.
+---Pass a Lua table/object with keys like `id`, `label`, `description`,
+---`keywords`, `view_id`, and searchable `settings`.
+---@param section table Settings section descriptor
+function app.register_settings_section(section) end
+
 ---Send a query to another plugin and wait for a response.
 ---The target plugin must have registered as a service and must handle
 ---the query in its `on_query(method, args)` callback.
@@ -76,5 +82,17 @@ function app.get_config(key) end
 ---@param key string Config key
 ---@param value string JSON string to store
 function app.set_config(key, value) end
+
+---Read the effective value for a plugin setting key.
+---Includes unsaved host Settings drafts when called from a settings view.
+---@param key string Setting key
+---@return string|nil value JSON string, or nil if not set
+function app.get_setting_value(key) end
+
+---Stage a plugin setting draft value for host Settings Apply.
+---Use `nil` to clear the setting value.
+---@param key string Setting key
+---@param value? string JSON string to stage, or nil to clear
+function app.set_setting_draft(key, value) end
 
 return app

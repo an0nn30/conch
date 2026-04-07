@@ -2,7 +2,7 @@
 -- plugin-description: Manage local tmux sessions from a docked tool window and command palette actions.
 -- plugin-version: 1.5.0
 -- plugin-api: ^1.0
--- plugin-permissions: ui.panel, ui.menu, ui.notify, ui.dialog, session.exec, session.new_tab, session.rename_tab, bus.subscribe
+-- plugin-permissions: ui.panel, ui.menu, ui.settings, ui.notify, ui.dialog, session.exec, session.new_tab, session.rename_tab, bus.subscribe, config.read, config.write
 -- plugin-type: tool_window
 -- plugin-location: right
 -- plugin-keybind: tmux_refresh = cmd+shift+alt+t | Refresh Tmux sessions
@@ -12,6 +12,9 @@ local ACTION_ATTACH_EXISTING = "tmux_attach_existing"
 local ACTION_CREATE_NEW = "tmux_create_new"
 local ACTION_RENAME_EXISTING = "tmux_rename_existing"
 local ACTION_DELETE_EXISTING = "tmux_delete_existing"
+local SETTINGS_VIEW_ID = "settings"
+local SETTINGS_CONFIG_KEY = "tmux_binary_path"
+local SETTINGS_PATH_LOOKUP_KEY = "tmux_use_path_lookup"
 
 local state = {
     sessions = {},
@@ -27,6 +30,8 @@ local state = {
     pending_tabs_by_name = {},
     registered_attach_actions = {},
     attach_action_targets = {},
+    draft_tmux_binary_path = "",
+    draft_use_path_lookup = true,
 }
 
 local function trim(s)
@@ -80,6 +85,80 @@ local function run_shell(command)
     return session.exec_local(command)
 end
 
+local function get_persisted_tmux_path()
+    local raw = app.get_config(SETTINGS_CONFIG_KEY)
+    return trim(raw or "")
+end
+
+local function get_effective_tmux_path_for_settings()
+    if type(app.get_setting_value) == "function" then
+        local raw = app.get_setting_value(SETTINGS_CONFIG_KEY)
+        return trim(raw or "")
+    end
+    return get_persisted_tmux_path()
+end
+
+local function get_effective_setting_value(key)
+    if type(app.get_setting_value) == "function" then
+        return app.get_setting_value(key)
+    end
+    return app.get_config(key)
+end
+
+local function parse_boolean_setting(value)
+    if value == nil then
+        return nil
+    end
+    local normalized = trim(tostring(value or "")):lower()
+    if normalized == "true" or normalized == "\"true\"" or normalized == "1" then
+        return true
+    end
+    if normalized == "false" or normalized == "\"false\"" or normalized == "0" then
+        return false
+    end
+    return nil
+end
+
+local function sync_tmux_settings_draft_from_host()
+    local configured = get_effective_tmux_path_for_settings()
+    local lookup_raw = get_effective_setting_value(SETTINGS_PATH_LOOKUP_KEY)
+    local lookup_value = parse_boolean_setting(lookup_raw)
+    state.draft_tmux_binary_path = configured
+    if lookup_value == nil then
+        state.draft_use_path_lookup = (configured == "")
+    else
+        state.draft_use_path_lookup = lookup_value
+    end
+end
+
+local function stage_tmux_settings_draft()
+    local configured = trim(state.draft_tmux_binary_path or "")
+    local next_path_value = nil
+    if not state.draft_use_path_lookup and configured ~= "" then
+        next_path_value = configured
+    end
+    local next_lookup_value = state.draft_use_path_lookup and "true" or "false"
+    if type(app.set_setting_draft) == "function" then
+        app.set_setting_draft(SETTINGS_CONFIG_KEY, next_path_value)
+        app.set_setting_draft(SETTINGS_PATH_LOOKUP_KEY, next_lookup_value)
+        return
+    end
+    if next_path_value == nil then
+        app.set_config(SETTINGS_CONFIG_KEY, "")
+    else
+        app.set_config(SETTINGS_CONFIG_KEY, next_path_value)
+    end
+    app.set_config(SETTINGS_PATH_LOOKUP_KEY, next_lookup_value)
+end
+
+local function tmux_command_path()
+    local configured = get_persisted_tmux_path()
+    if configured ~= "" then
+        return configured
+    end
+    return "tmux"
+end
+
 local function is_command_missing(result)
     local stderr = tostring((result and result.stderr) or "")
     return stderr:find("command not found", 1, true) ~= nil
@@ -87,7 +166,7 @@ local function is_command_missing(result)
 end
 
 local function tmux_available()
-    local result = run_shell("tmux -V")
+    local result = run_shell(sh_quote(tmux_command_path()) .. " -V")
     if tonumber(result.exit_code or -1) == 0 then
         return true
     end
@@ -98,7 +177,7 @@ local function tmux_available()
 end
 
 local function run_tmux(args)
-    return run_shell("tmux " .. args)
+    return run_shell(sh_quote(tmux_command_path()) .. " " .. args)
 end
 
 local function session_by_name(name)
@@ -131,7 +210,7 @@ end
 
 local function launch_tmux_in_plain_tab(args, tab_title)
     -- Prevent "sessions should be nested with care" when Conch inherits TMUX.
-    local cmd = "env -u TMUX tmux " .. args .. "\n"
+    local cmd = "env -u TMUX " .. sh_quote(tmux_command_path()) .. " " .. args .. "\n"
     state.status = "Launching: " .. cmd:gsub("\n$", "")
     return session.new_tab_with_title(cmd, true, tab_title)
 end
@@ -713,6 +792,58 @@ local function render_html()
     ui.panel_html(content, css)
 end
 
+local function render_settings_view()
+    sync_tmux_settings_draft_from_host()
+
+    ui.panel_vertical(function()
+        ui.panel_label("Tmux Binary Path", "normal")
+        ui.panel_label(
+            "Optional explicit path to the tmux executable.",
+            "secondary"
+        )
+        ui.panel_text_input(
+            "tmux_binary_path_input",
+            state.draft_tmux_binary_path or "",
+            "Leave blank to use 'tmux' from PATH",
+            not state.draft_use_path_lookup
+        )
+        ui.panel_horizontal(function()
+            ui.panel_vertical(function()
+                ui.panel_label("Use PATH lookup", "normal")
+                ui.panel_label(
+                    "Use 'tmux' from PATH instead of a custom binary path.",
+                    "secondary"
+                )
+            end, 2)
+            ui.panel_spacer()
+            ui.panel_checkbox(
+                "tmux_use_path_lookup_toggle",
+                "",
+                state.draft_use_path_lookup
+            )
+        end, 10)
+    end, 8)
+end
+
+local function handle_settings_event(event)
+    if event.type == "text_input_changed" and event.id == "tmux_binary_path_input" then
+        state.draft_tmux_binary_path = trim(event.value or "")
+        stage_tmux_settings_draft()
+        return true
+    end
+    if event.type == "text_input_submit" and event.id == "tmux_binary_path_input" then
+        state.draft_tmux_binary_path = trim(event.value or "")
+        stage_tmux_settings_draft()
+        return true
+    end
+    if event.type == "checkbox_changed" and event.id == "tmux_use_path_lookup_toggle" then
+        state.draft_use_path_lookup = event.checked == true
+        stage_tmux_settings_draft()
+        return true
+    end
+    return false
+end
+
 local function rerender()
     render()
     ui.request_render()
@@ -753,6 +884,23 @@ local function handle_button_action(action_id)
 end
 
 function setup()
+    sync_tmux_settings_draft_from_host()
+    app.register_settings_section({
+        id = "tmux-manager",
+        label = "Tmux Manager",
+        description = "Configure Tmux Manager behavior.",
+        keywords = "tmux manager sessions binary path",
+        group = "Extensions",
+        view_id = SETTINGS_VIEW_ID,
+        settings = {
+            {
+                id = "tmux_binary_path_input",
+                label = "Tmux Binary Path",
+                description = "Optional explicit path to the tmux executable.",
+                keywords = "tmux binary path executable command",
+            },
+        },
+    })
     app.register_command("Tmux: Refresh Sessions", ACTION_REFRESH)
     app.register_command("Tmux: Attach Existing Session...", ACTION_ATTACH_EXISTING)
     app.register_command("Tmux: Create New Session...", ACTION_CREATE_NEW)
@@ -775,6 +923,14 @@ function render()
     if state.last_error ~= nil and state.last_error ~= "" then
         ui.panel_text(state.last_error)
     end
+end
+
+function render_view(view_id)
+    if tostring(view_id or "") == SETTINGS_VIEW_ID then
+        render_settings_view()
+        return
+    end
+    render()
 end
 
 function on_event(event)
@@ -832,6 +988,12 @@ function on_event(event)
         local tick_unix = tick_ms > 0 and math.floor(tick_ms / 1000) or now_unix()
         poll_tmux_updates(tick_unix)
         return
+    end
+
+    if event.kind == "widget" and tostring(event.view_id or "") == SETTINGS_VIEW_ID then
+        if handle_settings_event(event) then
+            return
+        end
     end
 
     if event.kind ~= "widget" or event.type ~= "button_click" then

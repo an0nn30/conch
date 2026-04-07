@@ -140,6 +140,19 @@ public interface ConchPlugin {
     String render();
 
     /**
+     * Return the widget tree for a specific host view.
+     *
+     * <p>The host passes a view id (for example, a plugin-defined settings view).
+     * Default implementation falls back to {@link #render()} for compatibility.</p>
+     *
+     * @param viewId host-defined view identifier
+     * @return JSON array of widget objects
+     */
+    default String renderView(String viewId) {
+        return render();
+    }
+
+    /**
      * Clean up before the plugin is unloaded.
      *
      * <p>Called once when the user unloads the plugin or the application

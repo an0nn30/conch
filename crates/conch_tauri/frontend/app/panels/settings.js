@@ -12,6 +12,7 @@
   let cachedThemes = [];
   let cachedPlugins = [];
   let cachedPluginMenuItems = [];
+  let cachedPluginSettingsSections = [];
   let cachedFonts = { all: [], monospace: [] };
   let standaloneMode = false;   // true when running in its own window
   let standaloneRoot = null;    // root element in standalone mode
@@ -21,6 +22,7 @@
   let settingsSidebarResults = [];
   let settingsSidebarSelectionIndex = -1;
   let pendingSettingsJump = null;
+  let skipPluginDraftDiscardOnClose = false;
   const settingsFeatureConstants = exports.conchSettingsFeatureConstants || {};
   const settingsDataService = exports.conchSettingsFeatureDataService || {};
   const settingsSearchFeature = exports.conchSettingsFeatureSearch || {};
@@ -63,15 +65,23 @@
     invoke = opts.invoke;
   }
 
+  async function discardPluginSettingsDrafts() {
+    if (!invoke) return;
+    try {
+      await invoke('discard_plugin_settings_drafts');
+    } catch (_) {}
+  }
+
   async function loadSettingsRuntimeData() {
     if (settingsDataService && typeof settingsDataService.loadRuntimeData === 'function') {
       return settingsDataService.loadRuntimeData(invoke);
     }
-    const [settings, themes, plugins, pluginMenuItems, fonts] = await Promise.all([
+    const [settings, themes, plugins, pluginMenuItems, pluginSettingsSections, fonts] = await Promise.all([
       invoke('get_all_settings'),
       invoke('list_themes'),
       invoke('scan_plugins'),
       invoke('get_plugin_menu_items').catch(() => []),
+      invoke('get_plugin_settings_sections').catch(() => []),
       invoke('list_system_fonts'),
     ]);
     return {
@@ -79,6 +89,7 @@
       themes,
       plugins: Array.isArray(plugins) ? plugins : [],
       pluginMenuItems: Array.isArray(pluginMenuItems) ? pluginMenuItems : [],
+      pluginSettingsSections: Array.isArray(pluginSettingsSections) ? pluginSettingsSections : [],
       fonts: fonts && typeof fonts === 'object' ? fonts : { all: [], monospace: [] },
     };
   }
@@ -87,13 +98,15 @@
     if (settingsDataService && typeof settingsDataService.refreshPluginInventory === 'function') {
       return settingsDataService.refreshPluginInventory(invoke);
     }
-    const [plugins, pluginMenuItems] = await Promise.all([
+    const [plugins, pluginMenuItems, pluginSettingsSections] = await Promise.all([
       invoke('scan_plugins'),
       invoke('get_plugin_menu_items').catch(() => []),
+      invoke('get_plugin_settings_sections').catch(() => []),
     ]);
     return {
       plugins: Array.isArray(plugins) ? plugins : [],
       pluginMenuItems: Array.isArray(pluginMenuItems) ? pluginMenuItems : [],
+      pluginSettingsSections: Array.isArray(pluginSettingsSections) ? pluginSettingsSections : [],
     };
   }
 
@@ -106,6 +119,7 @@
     cachedThemes = Array.isArray(loaded.themes) ? loaded.themes : [];
     cachedPlugins = Array.isArray(loaded.plugins) ? loaded.plugins : [];
     cachedPluginMenuItems = Array.isArray(loaded.pluginMenuItems) ? loaded.pluginMenuItems : [];
+    cachedPluginSettingsSections = Array.isArray(loaded.pluginSettingsSections) ? loaded.pluginSettingsSections : [];
     cachedFonts = loaded.fonts && typeof loaded.fonts === 'object' ? loaded.fonts : { all: [], monospace: [] };
     settingsSidebarQuery = '';
     keyboardSearchQuery = '';
@@ -274,8 +288,56 @@
     }
   }
 
+  function getPluginSettingsSections() {
+    return Array.isArray(cachedPluginSettingsSections)
+      ? cachedPluginSettingsSections.filter((section) => section && section.section_key && section.label)
+      : [];
+  }
+
+  function getPluginSettingsSectionByKey(sectionKey) {
+    if (!sectionKey) return null;
+    const sections = getPluginSettingsSections();
+    for (const section of sections) {
+      if (section.section_key === sectionKey) return section;
+    }
+    return null;
+  }
+
+  function isPluginSettingsSectionId(sectionId) {
+    return !!getPluginSettingsSectionByKey(sectionId);
+  }
+
+  function getSectionDefs() {
+    const pluginSections = getPluginSettingsSections();
+    if (pluginSections.length === 0) {
+      return SECTION_DEFS;
+    }
+
+    const defs = SECTION_DEFS.map((group) => ({
+      group: group.group,
+      items: Array.isArray(group.items) ? group.items.slice() : [],
+    }));
+
+    let extensionsGroup = defs.find((group) => group.group === 'Extensions');
+    if (!extensionsGroup) {
+      extensionsGroup = { group: 'Extensions', items: [] };
+      defs.push(extensionsGroup);
+    }
+
+    for (const section of pluginSections) {
+      extensionsGroup.items.push({
+        id: section.section_key,
+        label: section.label,
+        description: section.description || `Plugin settings for ${section.plugin_name}`,
+        keywords: `plugin ${section.plugin_name} ${section.keywords || ''}`.trim(),
+      });
+    }
+
+    return defs;
+  }
+
   function getSectionById(id) {
-    for (const group of SECTION_DEFS) {
+    for (const group of getSectionDefs()) {
       for (const item of group.items) {
         if (item.id === id) return item;
       }
@@ -285,6 +347,31 @@
 
   function buildSettingsSearchIndex() {
     const entries = SETTINGS_SEARCH_INDEX.map((entry) => ({ ...entry }));
+
+    for (const section of getPluginSettingsSections()) {
+      const sectionPath = `${section.group || 'Extensions'} > ${section.label}`;
+      entries.push({
+        section: section.section_key,
+        label: section.label,
+        keywords: `plugin settings ${section.plugin_name} ${section.keywords || ''}`.trim(),
+        path: sectionPath,
+        kind: 'plugin-section',
+        targetId: `plugin-section:${section.section_key}`,
+      });
+
+      const settings = Array.isArray(section.settings) ? section.settings : [];
+      for (const setting of settings) {
+        if (!setting || !setting.label) continue;
+        entries.push({
+          section: section.section_key,
+          label: setting.label,
+          keywords: `plugin setting ${section.plugin_name} ${setting.keywords || ''} ${setting.description || ''}`.trim(),
+          path: sectionPath,
+          kind: 'plugin-setting',
+          targetId: `plugin-setting:${section.section_key}:${setting.id || ''}`,
+        });
+      }
+    }
 
     for (const group of KEYBOARD_CORE_GROUPS) {
       for (const key of group.keys) {
@@ -396,6 +483,55 @@
     selectSection(match.section);
   }
 
+  function applyPendingSettingsJump(root) {
+    if (!pendingSettingsJump || !root) return false;
+    let row = null;
+    if (pendingSettingsJump.targetId) {
+      row = root.querySelector(`[data-setting-id="${pendingSettingsJump.targetId}"]`);
+    }
+    if (!row && pendingSettingsJump.label) {
+      const normalized = normalizeSearchText(pendingSettingsJump.label);
+      row = root.querySelector(`.settings-row[data-search-label="${normalized}"]`);
+    }
+    if (!row && pendingSettingsJump.query) {
+      const q = normalizeSearchText(pendingSettingsJump.query);
+      row = Array.from(root.querySelectorAll('.settings-row')).find((el) => {
+        const label = el.dataset.searchLabel || '';
+        const desc = el.dataset.searchDesc || '';
+        return label.includes(q) || desc.includes(q);
+      }) || null;
+    }
+    if (!row && pendingSettingsJump.targetId && pendingSettingsJump.targetId.startsWith('plugin-setting:')) {
+      const parts = pendingSettingsJump.targetId.split(':');
+      const widgetId = parts.length >= 3 ? parts[parts.length - 1] : '';
+      if (widgetId) {
+        const widget = root.querySelector(`[data-pw-id="${CSS.escape(widgetId)}"]`);
+        if (widget) {
+          const highlightTarget =
+            widget.closest(`[data-plugin-setting-id="${CSS.escape(widgetId)}"]`)
+            || widget.closest('.plugin-settings-content')
+            || widget;
+          highlightTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          if (typeof widget.focus === 'function' && !widget.disabled) {
+            widget.focus({ preventScroll: true });
+          }
+          highlightTarget.classList.remove('plugin-setting-jump-highlight');
+          void highlightTarget.offsetWidth;
+          highlightTarget.classList.add('plugin-setting-jump-highlight');
+          return true;
+        }
+      }
+    }
+    if (row) {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      row.classList.remove('settings-row-jump-highlight');
+      void row.offsetWidth;
+      row.classList.add('settings-row-jump-highlight');
+      return true;
+    }
+    return false;
+  }
+
   function renderSidebarInto(sidebar) {
     if (!settingsSidebarFeature || typeof settingsSidebarFeature.renderSidebarInto !== "function") {
       if (window.toast && typeof window.toast.error === "function") {
@@ -404,7 +540,7 @@
       return;
     }
     settingsSidebarFeature.renderSidebarInto(sidebar, {
-      sectionDefs: SECTION_DEFS,
+      sectionDefs: getSectionDefs(),
       normalizeSearchText,
       getFuzzyMatchScore,
       getSidebarSearchResults,
@@ -426,6 +562,7 @@
     if (document.getElementById('settings-overlay')) { close(); return; }
 
     try {
+      await discardPluginSettingsDrafts();
       const loaded = await loadSettingsRuntimeData();
       applyLoadedSettingsData(loaded);
       renderDialog();
@@ -440,6 +577,7 @@
     standaloneRoot = rootEl;
 
     try {
+      await discardPluginSettingsDrafts();
       const loaded = await loadSettingsRuntimeData();
       applyLoadedSettingsData(loaded);
       renderStandalone();
@@ -536,6 +674,10 @@
     stopRecording();
     clearSettingsAutofocusTimer();
     if (standaloneMode) {
+      if (!skipPluginDraftDiscardOnClose) {
+        discardPluginSettingsDrafts();
+      }
+      skipPluginDraftDiscardOnClose = false;
       if (standaloneEscapeHandler) {
         standaloneEscapeHandler();
         standaloneEscapeHandler = null;
@@ -555,6 +697,10 @@
     }
     pendingSettings = null;
     originalSettings = null;
+    if (!skipPluginDraftDiscardOnClose) {
+      discardPluginSettingsDrafts();
+    }
+    skipPluginDraftDiscardOnClose = false;
   }
 
   function renderDialog() {
@@ -678,34 +824,21 @@
       case 'cursor': renderCursor(content); break;
       case 'plugins': renderPlugins(content); break;
       case 'advanced': renderAdvanced(content); break;
+      default:
+        if (isPluginSettingsSectionId(currentSection)) {
+          renderPluginSettings(content, currentSection);
+          break;
+        }
+        renderAppearance(content);
+        break;
     }
     if (pendingSettingsJump && pendingSettingsJump.section === currentSection) {
       requestAnimationFrame(() => {
         const root = document.getElementById('settings-content');
         if (!root) return;
-        let row = null;
-        if (pendingSettingsJump.targetId) {
-          row = root.querySelector(`[data-setting-id="${pendingSettingsJump.targetId}"]`);
+        if (applyPendingSettingsJump(root)) {
+          pendingSettingsJump = null;
         }
-        if (!row && pendingSettingsJump.label) {
-          const normalized = normalizeSearchText(pendingSettingsJump.label);
-          row = root.querySelector(`.settings-row[data-search-label="${normalized}"]`);
-        }
-        if (!row && pendingSettingsJump.query) {
-          const q = normalizeSearchText(pendingSettingsJump.query);
-          row = Array.from(root.querySelectorAll('.settings-row')).find((el) => {
-            const label = el.dataset.searchLabel || '';
-            const desc = el.dataset.searchDesc || '';
-            return label.includes(q) || desc.includes(q);
-          }) || null;
-        }
-        if (row) {
-          row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          row.classList.remove('settings-row-jump-highlight');
-          void row.offsetWidth;
-          row.classList.add('settings-row-jump-highlight');
-        }
-        pendingSettingsJump = null;
       });
     }
   }
@@ -1371,6 +1504,65 @@
     });
   }
 
+  function renderPluginSettings(c, sectionKey) {
+    const section = getPluginSettingsSectionByKey(sectionKey);
+    if (!section) {
+      const fallback = document.createElement('div');
+      fallback.className = 'settings-row-desc';
+      fallback.textContent = 'Plugin settings section is unavailable.';
+      c.appendChild(fallback);
+      return;
+    }
+
+    const host = document.createElement('div');
+    host.className = 'plugin-settings-content';
+    host.dataset.pluginName = section.plugin_name || '';
+    host.dataset.pluginViewId = section.view_id || '';
+    c.appendChild(host);
+
+    const loading = document.createElement('div');
+    loading.className = 'settings-row-desc';
+    loading.textContent = 'Loading plugin settings…';
+    host.appendChild(loading);
+
+    const pluginWidgets = window.pluginWidgets;
+    if (!pluginWidgets || typeof pluginWidgets.renderWidgets !== 'function') {
+      host.innerHTML = '';
+      const missing = document.createElement('div');
+      missing.className = 'settings-row-desc';
+      missing.textContent = 'Plugin widget runtime is unavailable.';
+      host.appendChild(missing);
+      return;
+    }
+
+    const pluginName = section.plugin_name || '';
+    const viewId = section.view_id || section.section_id || '';
+    invoke('request_plugin_render', { pluginName, viewId })
+      .then((widgetsJson) => {
+        host.innerHTML = '';
+        pluginWidgets.renderWidgets(host, widgetsJson || '[]', pluginName, viewId);
+        if (pendingSettingsJump && pendingSettingsJump.section === sectionKey) {
+          requestAnimationFrame(() => {
+            const root = document.getElementById('settings-content');
+            if (!root) return;
+            if (applyPendingSettingsJump(root)) {
+              pendingSettingsJump = null;
+            }
+          });
+        }
+      })
+      .catch((error) => {
+        host.innerHTML = '';
+        const failed = document.createElement('div');
+        failed.className = 'settings-row-desc';
+        failed.textContent = 'Failed to load plugin settings UI: ' + String(error);
+        host.appendChild(failed);
+        if (pendingSettingsJump && pendingSettingsJump.section === sectionKey) {
+          pendingSettingsJump = null;
+        }
+      });
+  }
+
   // --- Plugins section ---
 
   function renderPlugins(c) {
@@ -1381,7 +1573,16 @@
         getCachedPlugins: () => cachedPlugins,
         setCachedPlugins: (next) => { cachedPlugins = Array.isArray(next) ? next : []; },
         setCachedPluginMenuItems: (next) => { cachedPluginMenuItems = Array.isArray(next) ? next : []; },
+        setCachedPluginSettingsSections: (next) => { cachedPluginSettingsSections = Array.isArray(next) ? next : []; },
         refreshPluginInventory: () => refreshPluginInventory(),
+        onPluginInventoryUpdated: () => {
+          if (!getSectionById(currentSection)) {
+            currentSection = 'plugins';
+          }
+          const sidebar = document.getElementById('settings-sidebar');
+          if (sidebar) renderSidebarInto(sidebar);
+          renderCurrentSection();
+        },
         confirmPluginPermissions: (pluginName, permissions) => confirmPluginPermissions(pluginName, permissions),
         invalidateCommandPaletteCache: (reason) => invalidateCommandPaletteCache(reason),
         addSectionLabel,
@@ -1450,6 +1651,8 @@
   async function applySettings() {
     try {
       const result = await invoke('save_settings', { settings: pendingSettings });
+      await invoke('commit_plugin_settings_drafts');
+      skipPluginDraftDiscardOnClose = true;
       if (standaloneMode && result && result.restart_required) {
         // Emit to the main window so the toast is visible after this window closes.
         try {

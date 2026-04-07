@@ -127,6 +127,9 @@ export const COMMANDS = {
   TRIGGER_PLUGIN_MENU_ACTION: 'trigger_plugin_menu_action',
   GET_PLUGIN_PANELS: 'get_plugin_panels',
   GET_PANEL_WIDGETS: 'get_panel_widgets',
+  GET_PLUGIN_SETTINGS_SECTIONS: 'get_plugin_settings_sections',
+  COMMIT_PLUGIN_SETTINGS_DRAFTS: 'commit_plugin_settings_drafts',
+  DISCARD_PLUGIN_SETTINGS_DRAFTS: 'discard_plugin_settings_drafts',
   PLUGIN_WIDGET_EVENT: 'plugin_widget_event',
   REQUEST_PLUGIN_RENDER: 'request_plugin_render',
 };

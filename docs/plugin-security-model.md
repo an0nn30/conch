@@ -94,6 +94,8 @@ Java manifest:
 | `clipboard_set` | `clipboard.write` |
 | `get_config` | `config.read` |
 | `set_config` | `config.write` |
+| `get_setting_value` | `config.read` |
+| `set_setting_draft` | `config.write` |
 | `publish_event` | `bus.publish` |
 | `subscribe` | `bus.subscribe` |
 | `query_plugin` | `bus.query` |

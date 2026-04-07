@@ -192,6 +192,20 @@ impl HostApi for PermissionCheckedHostApi {
         self.inner.set_config(key, value)
     }
 
+    fn get_setting_value(&self, key: &str) -> Option<String> {
+        if !self.check_capability("get_setting_value", "config.read") {
+            return None;
+        }
+        self.inner.get_setting_value(key)
+    }
+
+    fn set_setting_draft(&self, key: &str, value: Option<&str>) {
+        if !self.check_capability("set_setting_draft", "config.write") {
+            return;
+        }
+        self.inner.set_setting_draft(key, value)
+    }
+
     fn clipboard_set(&self, text: &str) {
         if !self.check_capability("clipboard_set", "clipboard.write") {
             return;
@@ -229,6 +243,13 @@ impl HostApi for PermissionCheckedHostApi {
             return;
         }
         self.inner.register_menu_item(menu, label, action, keybind)
+    }
+
+    fn register_settings_section(&self, section_json: &str) {
+        if !self.check_capability("register_settings_section", "ui.settings") {
+            return;
+        }
+        self.inner.register_settings_section(section_json)
     }
 
     fn show_form(&self, json: &str) -> Option<String> {

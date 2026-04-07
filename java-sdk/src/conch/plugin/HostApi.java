@@ -24,13 +24,15 @@ import java.util.List;
  * <ul>
  *   <li><b>Logging</b> — {@link #log}, {@link #info}, {@link #warn},
  *       {@link #error}, {@link #debug}, {@link #trace}</li>
- *   <li><b>Menu items</b> — {@link #registerMenuItem}</li>
+ *   <li><b>Menu + settings</b> — {@link #registerMenuItem},
+ *       {@link #registerSettingsSection}</li>
  *   <li><b>Notifications / status</b> — {@link #notify}, {@link #setStatus}</li>
  *   <li><b>Dialogs</b> — {@link #prompt}, {@link #confirm}, {@link #alert},
  *       {@link #showError}, {@link #showForm}</li>
  *   <li><b>Clipboard / theme / config</b> — {@link #clipboardSet},
  *       {@link #clipboardGet}, {@link #getTheme}, {@link #getConfig},
- *       {@link #setConfig}</li>
+ *       {@link #setConfig}, {@link #getSettingValue},
+ *       {@link #setSettingDraft}</li>
  *   <li><b>Inter-plugin bus + RPC</b> — {@link #subscribe},
  *       {@link #publishEvent}, {@link #queryPlugin}, {@link #registerService}</li>
  *   <li><b>Session + terminal</b> — {@link #writeToPty}, {@link #newTab},
@@ -168,6 +170,22 @@ public class HostApi {
     public static native void registerMenuItemWithKeybind(String menu, String label, String action, String keybind);
 
     /**
+     * Register a plugin-owned settings section in the host Settings window.
+     *
+     * <p>The payload must be a JSON object with at least:
+     * {@code {"id":"...","label":"..."}}.
+     * Optional fields:
+     * {@code description}, {@code keywords}, {@code group}, {@code view_id},
+     * and {@code settings} (array of searchable setting metadata objects).</p>
+     *
+     * <p>When the section is opened, Conch requests plugin UI via
+     * {@code renderView(view_id)} (or {@code render()} fallback).</p>
+     *
+     * @param sectionJson settings section registration JSON
+     */
+    public static native void registerSettingsSection(String sectionJson);
+
+    /**
      * Register a command in the default {@code Tools} menu.
      *
      * @param label  command label
@@ -282,6 +300,27 @@ public class HostApi {
      * @param value the JSON value string (null to delete)
      */
     public static native void setConfig(String key, String value);
+
+    /**
+     * Read a plugin setting value, including unsaved Settings-window drafts when present.
+     *
+     * <p>Use this from plugin settings UIs so edits round-trip with the host's Apply/Cancel flow.</p>
+     *
+     * @param key the setting key
+     * @return effective value string, or null when unset
+     */
+    public static native String getSettingValue(String key);
+
+    /**
+     * Stage a plugin setting draft value for the host Settings Apply flow.
+     *
+     * <p>Draft values are only persisted when the user clicks Apply in the host settings window.
+     * Passing null clears the setting draft and removes persisted value on Apply.</p>
+     *
+     * @param key the setting key
+     * @param value value string, or null to clear
+     */
+    public static native void setSettingDraft(String key, String value);
 
     // -----------------------------------------------------------------------
     // Dialogs

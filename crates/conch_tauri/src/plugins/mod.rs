@@ -13,7 +13,7 @@ use conch_plugin::bus::PluginBus;
 use conch_plugin::jvm::runtime::JavaPluginManager;
 use conch_plugin::lua::runner;
 use parking_lot::{Mutex, RwLock};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use ts_rs::TS;
 
@@ -27,6 +27,7 @@ fn supported_capability_set() -> &'static [&'static str] {
     &[
         "ui.menu",
         "ui.panel",
+        "ui.settings",
         "ui.notify",
         "ui.dialog",
         "clipboard.read",
@@ -171,6 +172,145 @@ pub(crate) struct PluginMenuItem {
     pub keybind: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export)]
+pub(crate) struct PluginSettingsSearchEntry {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub keywords: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export)]
+pub(crate) struct PluginSettingsSection {
+    pub plugin_name: String,
+    pub section_id: String,
+    pub section_key: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub keywords: Option<String>,
+    pub group: String,
+    pub view_id: String,
+    pub settings: Vec<PluginSettingsSearchEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginSettingsSectionRegistration {
+    id: String,
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    keywords: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    view_id: Option<String>,
+    #[serde(default)]
+    settings: Vec<PluginSettingsSearchEntryRegistration>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginSettingsSearchEntryRegistration {
+    #[serde(default)]
+    id: Option<String>,
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    keywords: Option<String>,
+}
+
+impl PluginSettingsSection {
+    pub(crate) fn from_registration_json(
+        plugin_name: &str,
+        raw_json: &str,
+    ) -> Result<Self, String> {
+        let registration: PluginSettingsSectionRegistration = serde_json::from_str(raw_json)
+            .map_err(|e| format!("invalid settings section JSON: {e}"))?;
+
+        let section_id = normalize_settings_token(&registration.id, &registration.label, "section");
+        let group = normalize_settings_text(registration.group.as_deref(), "Extensions");
+        let view_id = normalize_settings_text(registration.view_id.as_deref(), &section_id);
+
+        let mut settings = Vec::new();
+        for entry in registration.settings {
+            let id = normalize_settings_token(
+                entry.id.as_deref().unwrap_or(&entry.label),
+                &entry.label,
+                "setting",
+            );
+            let label = normalize_settings_text(Some(&entry.label), "Setting");
+            settings.push(PluginSettingsSearchEntry {
+                id,
+                label,
+                description: normalize_optional_settings_text(entry.description.as_deref()),
+                keywords: normalize_optional_settings_text(entry.keywords.as_deref()),
+            });
+        }
+
+        let label = normalize_settings_text(Some(&registration.label), "Plugin Settings");
+        Ok(Self {
+            plugin_name: plugin_name.to_string(),
+            section_id: section_id.clone(),
+            section_key: format!("plugin:{}:{section_id}", slugify(plugin_name)),
+            label,
+            description: normalize_optional_settings_text(registration.description.as_deref()),
+            keywords: normalize_optional_settings_text(registration.keywords.as_deref()),
+            group,
+            view_id,
+            settings,
+        })
+    }
+}
+
+fn normalize_optional_settings_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+fn normalize_settings_text(value: Option<&str>, fallback: &str) -> String {
+    normalize_optional_settings_text(value).unwrap_or_else(|| fallback.to_string())
+}
+
+fn normalize_settings_token(value: &str, fallback: &str, default_token: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        let slug = slugify(fallback);
+        if slug.is_empty() {
+            default_token.to_string()
+        } else {
+            slug
+        }
+    } else {
+        let slug = slugify(trimmed);
+        if slug.is_empty() {
+            default_token.to_string()
+        } else {
+            slug
+        }
+    }
+}
+
+fn slugify(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in value.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+            last_was_sep = false;
+        } else if !last_was_sep {
+            out.push('-');
+            last_was_sep = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 /// Payload emitted when all panels for a plugin are removed.
 #[derive(Clone, Serialize)]
 struct PluginPanelsRemoved {
@@ -182,6 +322,8 @@ pub(crate) struct PluginState {
     pub bus: Arc<PluginBus>,
     pub panels: Arc<RwLock<HashMap<u64, PanelInfo>>>,
     pub menu_items: Arc<RwLock<Vec<PluginMenuItem>>>,
+    pub settings_sections: Arc<RwLock<HashMap<String, Vec<PluginSettingsSection>>>>,
+    pub settings_drafts: Arc<RwLock<HashMap<String, HashMap<String, Option<String>>>>>,
     pub pending_dialogs: Arc<Mutex<PendingDialogs>>,
     pub permission_profiles: Arc<RwLock<HashMap<String, PermissionProfile>>>,
     pub running_lua: Vec<runner::RunningLuaPlugin>,
@@ -195,6 +337,8 @@ impl PluginState {
             bus: Arc::new(PluginBus::new()),
             panels: Arc::new(RwLock::new(HashMap::new())),
             menu_items: Arc::new(RwLock::new(Vec::new())),
+            settings_sections: Arc::new(RwLock::new(HashMap::new())),
+            settings_drafts: Arc::new(RwLock::new(HashMap::new())),
             pending_dialogs: Arc::new(Mutex::new(PendingDialogs::new())),
             permission_profiles: Arc::new(RwLock::new(HashMap::new())),
             running_lua: Vec::new(),
@@ -229,6 +373,8 @@ impl PluginState {
             bus: Arc::clone(&self.bus),
             panels: Arc::clone(&self.panels),
             menu_items: Arc::clone(&self.menu_items),
+            settings_sections: Arc::clone(&self.settings_sections),
+            settings_drafts: Arc::clone(&self.settings_drafts),
             pending_dialogs: Arc::clone(&self.pending_dialogs),
         });
 
@@ -280,6 +426,10 @@ impl PluginState {
         self.menu_items
             .write()
             .retain(|item| item.plugin != plugin_name);
+
+        // Remove plugin-owned settings sections.
+        self.settings_sections.write().remove(plugin_name);
+        self.settings_drafts.write().remove(plugin_name);
 
         // Drop pending dialog channels owned by this plugin.
         self.pending_dialogs.lock().drain_for_plugin(plugin_name);
@@ -859,6 +1009,71 @@ pub(crate) fn get_panel_widgets(
         .map(|p| p.widgets_json.clone())
 }
 
+/// Get plugin-registered settings sections.
+#[tauri::command]
+pub(crate) fn get_plugin_settings_sections(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+) -> Vec<PluginSettingsSection> {
+    let mut sections: Vec<PluginSettingsSection> = state
+        .lock()
+        .settings_sections
+        .read()
+        .values()
+        .flat_map(|items| items.iter().cloned())
+        .collect();
+    sections.sort_by(|a, b| {
+        a.group
+            .cmp(&b.group)
+            .then_with(|| a.plugin_name.cmp(&b.plugin_name))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    sections
+}
+
+/// Commit all staged plugin settings drafts to plugin config files.
+#[tauri::command]
+pub(crate) fn commit_plugin_settings_drafts(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+) -> Result<(), String> {
+    let drafts = {
+        let s = state.lock();
+        std::mem::take(&mut *s.settings_drafts.write())
+    };
+
+    for (plugin_name, values) in drafts {
+        let dir = conch_core::config::config_dir()
+            .join("plugins")
+            .join(&plugin_name);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!("failed to create plugin settings dir for '{plugin_name}': {e}")
+        })?;
+        for (key, value) in values {
+            let path = dir.join(format!("{key}.json"));
+            match value {
+                Some(v) => {
+                    conch_core::config::atomic_write(&path, v.as_bytes()).map_err(|e| {
+                        format!(
+                            "failed to persist plugin setting '{}:{}': {e}",
+                            plugin_name, key
+                        )
+                    })?;
+                }
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Discard all staged plugin settings drafts.
+#[tauri::command]
+pub(crate) fn discard_plugin_settings_drafts(state: tauri::State<'_, Arc<Mutex<PluginState>>>) {
+    state.lock().settings_drafts.write().clear();
+}
+
 /// Send a widget event to a plugin.
 #[tauri::command]
 pub(crate) fn plugin_widget_event(
@@ -878,6 +1093,7 @@ pub(crate) fn plugin_widget_event(
 pub(crate) async fn request_plugin_render(
     state: tauri::State<'_, Arc<Mutex<PluginState>>>,
     plugin_name: String,
+    view_id: Option<String>,
 ) -> Result<Option<String>, String> {
     let bus = {
         let s = state.lock();
@@ -890,7 +1106,7 @@ pub(crate) async fn request_plugin_render(
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     sender
         .send(conch_plugin::bus::PluginMail::RenderRequest {
-            view_id: None,
+            view_id,
             reply: reply_tx,
         })
         .await
@@ -906,6 +1122,7 @@ mod tests {
     fn plugin_state_new_is_empty() {
         let state = PluginState::new(conch_core::config::PluginsConfig::default());
         assert!(state.panels.read().is_empty());
+        assert!(state.settings_sections.read().is_empty());
         assert!(state.running_lua.is_empty());
     }
 
@@ -1046,6 +1263,55 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_removes_settings_sections_for_plugin() {
+        let state = PluginState::new(conch_core::config::PluginsConfig::default());
+
+        {
+            let mut sections = state.settings_sections.write();
+            sections.insert(
+                "my-plugin".into(),
+                vec![PluginSettingsSection {
+                    plugin_name: "my-plugin".into(),
+                    section_id: "tmux-manager".into(),
+                    section_key: "plugin:my-plugin:tmux-manager".into(),
+                    label: "Tmux Manager".into(),
+                    description: None,
+                    keywords: None,
+                    group: "Extensions".into(),
+                    view_id: "settings".into(),
+                    settings: vec![],
+                }],
+            );
+            sections.insert(
+                "other-plugin".into(),
+                vec![PluginSettingsSection {
+                    plugin_name: "other-plugin".into(),
+                    section_id: "other".into(),
+                    section_key: "plugin:other-plugin:other".into(),
+                    label: "Other".into(),
+                    description: None,
+                    keywords: None,
+                    group: "Extensions".into(),
+                    view_id: "settings".into(),
+                    settings: vec![],
+                }],
+            );
+        }
+
+        state.cleanup_plugin_resources("my-plugin");
+
+        let sections = state.settings_sections.read();
+        assert!(
+            sections.get("my-plugin").is_none(),
+            "my-plugin settings sections should be removed"
+        );
+        assert!(
+            sections.get("other-plugin").is_some(),
+            "other-plugin settings sections should remain"
+        );
+    }
+
+    #[test]
     fn cleanup_drains_pending_dialogs_for_plugin() {
         let state = PluginState::new(conch_core::config::PluginsConfig::default());
 
@@ -1182,5 +1448,29 @@ mod tests {
             out,
             vec!["ui.menu".to_string(), "clipboard.read".to_string()]
         );
+    }
+
+    #[test]
+    fn plugin_settings_section_parses_and_normalizes() {
+        let raw = serde_json::json!({
+            "id": "Tmux Manager",
+            "label": "Tmux Manager",
+            "description": "Configure tmux behavior",
+            "view_id": "settings",
+            "settings": [
+                {
+                    "label": "Tmux Binary Path",
+                    "keywords": "tmux path"
+                }
+            ]
+        })
+        .to_string();
+
+        let section = PluginSettingsSection::from_registration_json("Tmux Plugin", &raw).unwrap();
+        assert_eq!(section.section_id, "tmux-manager");
+        assert_eq!(section.view_id, "settings");
+        assert_eq!(section.section_key, "plugin:tmux-plugin:tmux-manager");
+        assert_eq!(section.settings.len(), 1);
+        assert_eq!(section.settings[0].id, "tmux-binary-path");
     }
 }

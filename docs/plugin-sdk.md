@@ -17,6 +17,7 @@ Plugins are managed via **Settings > Plugins** -- scan, enable, disable, and per
   - [Project Setup (Gradle)](#project-setup-gradle)
   - [ConchPlugin Interface](#conchplugin-interface)
   - [HostApi Reference](#java-hostapi)
+  - [Plugin Settings Sections (Java + Lua)](#plugin-settings-sections-java--lua)
   - [Widget Builder](#widget-builder)
   - [Handling Events](#handling-events-java)
   - [Tool-Window Plugins](#tool-window-plugins-java)
@@ -287,6 +288,7 @@ Every Java plugin must implement `conch.plugin.ConchPlugin`:
 | `void onEvent(String eventJson)` | Handle events -- menu clicks, widget interactions, bus events. |
 | `String onQuery(String method, String argsJson)` | Handle direct RPC queries from other plugins. Return a JSON value string (`"null"` by default). |
 | `String render()` | Return widget tree as JSON array. Called on demand for tool-window plugins. |
+| `String renderView(String viewId)` | Return widget tree for a specific host view (for example, plugin settings sections). Defaults to `render()`. |
 | `void teardown()` | Clean up resources before unload. |
 
 #### Plugin Types
@@ -332,6 +334,7 @@ Static methods on `conch.plugin.HostApi`.
 |--------|-------------|
 | `registerMenuItem(String menu, String label, String action)` | Add a menu item |
 | `registerMenuItemWithKeybind(String menu, String label, String action, String keybind)` | Add a menu item with keyboard shortcut (e.g. `"cmd+shift+j"`) |
+| `registerSettingsSection(String sectionJson)` | Register a plugin-owned settings section in the host Settings window |
 | `registerCommand(String label, String action)` | Convenience alias for adding a command under `"Tools"` |
 | `registerCommand(String label, String action, String keybind)` | `"Tools"` command with keybind |
 
@@ -392,8 +395,60 @@ Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<pl
 |--------|-------------|
 | `getConfig(String key)` | Read a config value (returns JSON string or null) |
 | `setConfig(String key, String value)` | Write a config value (null to delete) |
+| `getSettingValue(String key)` | Read effective value for plugin settings UI (includes unsaved host Settings drafts) |
+| `setSettingDraft(String key, String value)` | Stage a plugin setting draft value (persisted only when host Settings Apply is clicked) |
 
 Config is stored at `~/.config/conch/plugins/<plugin-name>/<key>.json`.
+
+When using plugin-owned settings sections, prefer `getSettingValue` / `setSettingDraft` instead of immediate `getConfig` / `setConfig` writes. This keeps plugin settings aligned with the host Settings Apply/Cancel workflow.
+
+### Plugin Settings Sections (Java + Lua)
+
+Plugins can add first-class sections to the host Settings window.
+
+- Register the section metadata (`id`, `label`, optional `description`, `keywords`, `view_id`, and searchable `settings[]` entries).
+- Render settings UI via `renderView(viewId)` (Java) or `render_view(view_id)` (Lua).
+- Read/write setting values through settings-draft APIs so values persist only on host Settings **Apply**.
+
+Java registration example:
+
+```java
+HostApi.registerSettingsSection("""
+{
+  "id": "tmux-manager",
+  "label": "Tmux Manager",
+  "description": "Configure tmux behavior.",
+  "view_id": "settings",
+  "settings": [
+    {
+      "id": "tmux_binary_path_input",
+      "label": "Tmux Binary Path",
+      "description": "Optional explicit path to the tmux executable.",
+      "keywords": "tmux binary path executable"
+    }
+  ]
+}
+""");
+```
+
+Lua registration example:
+
+```lua
+app.register_settings_section({
+  id = "tmux-manager",
+  label = "Tmux Manager",
+  description = "Configure tmux behavior.",
+  view_id = "settings",
+  settings = {
+    {
+      id = "tmux_binary_path_input",
+      label = "Tmux Binary Path",
+      description = "Optional explicit path to the tmux executable.",
+      keywords = "tmux binary path executable",
+    },
+  },
+})
+```
 
 **Inter-Plugin Communication:**
 
@@ -602,6 +657,7 @@ Each Lua plugin runs on a dedicated OS thread with its own Lua VM. The host mana
 |----------|------------|-------------|
 | `setup()` | Once, after the plugin source is loaded | Initialize state, register menu items, subscribe to events |
 | `render()` | On demand, for tool-window plugins | Build the widget tree using `ui.panel_*` functions |
+| `render_view(view_id)` | On demand, for host-specific views (for example settings sections) | Build widgets for the requested view id; fallback behavior is equivalent to `render()` |
 | `on_event(event)` | When any event targets this plugin | Handle widget interactions, menu actions, bus events. The `event` argument is a native Lua table. |
 | `on_query(method, args_json)` | When another plugin sends an RPC query | Handle inter-plugin queries. `args_json` is a JSON string. Return a JSON string as the response. |
 | `teardown()` | When the plugin is unloaded or the app shuts down | Clean up resources |
@@ -662,11 +718,14 @@ Functions are organized across four global tables: `app`, `ui`, `session`, and `
 | `app.log(level, message)` | Log (level: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`) |
 | `app.register_menu_item(menu, label, action, keybind?)` | Add a menu item (keybind e.g. `"cmd+shift+j"`) |
 | `app.register_command(...)` | Convenience alias for menu commands (defaults to `"Tools"` when menu is omitted) |
+| `app.register_settings_section(section_table)` | Register a plugin-owned settings section in host Settings |
 | `app.register_service(name)` | Register as a named service for inter-plugin queries |
 | `app.subscribe(event_type)` | Subscribe to bus events |
 | `app.publish(event_type, data)` | Publish a bus event (data is a Lua table, serialized to JSON) |
 | `app.get_config(key)` | Read persisted config value (returns string or nil) |
 | `app.set_config(key, value)` | Write persisted config value |
+| `app.get_setting_value(key)` | Read effective value for settings UI (includes unsaved host Settings drafts) |
+| `app.set_setting_draft(key, value?)` | Stage a settings draft value (`nil` clears); persisted on host Settings Apply |
 | `app.notify(title, body, level?, duration_ms?)` | Show a toast notification (level: `"info"`, `"success"`, `"warn"`, `"error"`) |
 | `app.set_status(text?, level?, progress?)` | Update global status bar (`level`: `"info"`, `"warn"`, `"error"`, `"success"`; `progress < 0` hides progress) |
 | `app.clipboard(text)` | Copy text to system clipboard |
@@ -760,7 +819,7 @@ end
 | Function | Arguments | Description |
 |----------|-----------|-------------|
 | `ui.panel_button(id, label, icon?)` | id, label, icon | Clickable button |
-| `ui.panel_text_input(id, value, hint?)` | id, value, hint | Single-line text input (submit on Enter) |
+| `ui.panel_text_input(id, value, hint?, enabled?)` | id, value, hint, enabled | Single-line text input (submit on Enter); set `enabled=false` to disable |
 | `ui.panel_text_edit(id, value, hint?, lines?)` | id, value, hint, lines | Multi-line text editor |
 | `ui.panel_checkbox(id, label, checked)` | id, label, checked | Checkbox toggle |
 | `ui.panel_combobox(id, selected, options)` | id, selected, options | Dropdown (options: array of strings or `{value, label}` tables) |
@@ -832,6 +891,7 @@ void setup();
 void onEvent(String eventJson);
 default String onQuery(String method, String argsJson); // default returns "null"
 String render();
+default String renderView(String viewId); // defaults to render()
 void teardown();
 ```
 
@@ -872,6 +932,7 @@ public static void error(String message);
 // Menu
 public static native void registerMenuItem(String menu, String label, String action);
 public static native void registerMenuItemWithKeybind(String menu, String label, String action, String keybind);
+public static native void registerSettingsSection(String sectionJson);
 public static void registerCommand(String label, String action);
 public static void registerCommand(String label, String action, String keybind);
 
@@ -886,6 +947,8 @@ public static native String clipboardGet();
 public static native String getTheme();
 public static native String getConfig(String key);
 public static native void setConfig(String key, String value);
+public static native String getSettingValue(String key);
+public static native void setSettingDraft(String key, String value);
 
 // Dialogs / forms
 public static native String prompt(String message, String defaultValue);
@@ -970,6 +1033,7 @@ function setup() end                      -- optional
 function on_event(event) end              -- optional
 function on_query(method, args_json) end  -- optional; return JSON string
 function render() end                     -- optional (tool-window plugins usually implement)
+function render_view(view_id) end         -- optional; defaults to render()
 function teardown() end                   -- optional
 ```
 
@@ -997,8 +1061,11 @@ app.register_command(menu, label, action, keybind?)
 -- Example: app.register_command("Plugins", "Open Monitor", "open_monitor", nil)
 
 app.query_plugin(target, method, args?) -> string|nil
+app.register_settings_section(section_table)
 app.get_config(key) -> string|nil
 app.set_config(key, value)
+app.get_setting_value(key) -> string|nil
+app.set_setting_draft(key, value?)        -- nil clears persisted value on Apply
 ```
 
 #### `ui` table
@@ -1021,7 +1088,7 @@ ui.panel_image(id?, src, width?, height?)
 
 -- Interactive
 ui.panel_button(id, label, icon?)
-ui.panel_text_input(id, value, hint?)
+ui.panel_text_input(id, value, hint?, enabled?)
 ui.panel_text_edit(id, value, hint?, lines?)
 ui.panel_checkbox(id, label, checked)
 ui.panel_combobox(id, selected, options)

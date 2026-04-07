@@ -166,6 +166,22 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     )?;
 
     app.set(
+        "register_settings_section",
+        lua.create_function(|lua, section: LuaValue| {
+            let section_json_value = lua_value_to_json(section)?;
+            if !section_json_value.is_object() {
+                return Err(LuaError::RuntimeError(
+                    "register_settings_section expects a table/object".into(),
+                ));
+            }
+            let section_json = serde_json::to_string(&section_json_value)
+                .map_err(|e| LuaError::RuntimeError(format!("encode settings section: {e}")))?;
+            with_host_api(lua, |api| api.register_settings_section(&section_json))?;
+            Ok(())
+        })?,
+    )?;
+
+    app.set(
         "query_plugin",
         lua.create_function(
             |lua, (target, method, args): (String, String, Option<LuaValue>)| {
@@ -193,6 +209,22 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
         "set_config",
         lua.create_function(|lua, (key, value): (String, String)| {
             with_host_api(lua, |api| api.set_config(&key, &value))?;
+            Ok(())
+        })?,
+    )?;
+
+    app.set(
+        "get_setting_value",
+        lua.create_function(|lua, key: String| {
+            let result = with_host_api(lua, |api| api.get_setting_value(&key))?;
+            Ok(result)
+        })?,
+    )?;
+
+    app.set(
+        "set_setting_draft",
+        lua.create_function(|lua, (key, value): (String, Option<String>)| {
+            with_host_api(lua, |api| api.set_setting_draft(&key, value.as_deref()))?;
             Ok(())
         })?,
     )?;

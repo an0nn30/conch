@@ -6,6 +6,7 @@
   <title>Settings — Conch</title>
   <link rel="stylesheet" href="styles/base.css" />
   <link rel="stylesheet" href="styles/panels.css" />
+  <link rel="stylesheet" href="styles/plugin-widgets.css" />
   <link rel="stylesheet" href="styles/dialogs.css" />
   <link rel="stylesheet" href="styles/settings-window.css" />
 </head>
@@ -37,6 +38,7 @@
   <script src="app/core/dialog-service.js"></script>
   <script src="app/core/config-service.js"></script>
   <script src="app/ui/toast.js"></script>
+  <script src="app/panels/plugin-widgets.js"></script>
   <script src="app/features/settings/constants.js"></script>
   <script src="app/features/settings/data-service.js"></script>
   <script src="app/features/settings/search.js"></script>
@@ -57,6 +59,13 @@
     const invoke = tauriClient.invoke;
     const listen = tauriClient.listenOnCurrentWindow;
     const configService = window.conchConfigService || {};
+
+    if (window.pluginWidgets && typeof window.pluginWidgets.init === 'function') {
+      window.pluginWidgets.init({
+        invoke,
+        listen,
+      });
+    }
 
     // Apply theme colors.
     try {

@@ -15,7 +15,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 
-use super::{PanelInfo, PendingDialogs, PluginMenuItem};
+use super::{PanelInfo, PendingDialogs, PluginMenuItem, PluginSettingsSection};
 
 static NEXT_PANEL_HANDLE: AtomicU64 = AtomicU64::new(1);
 
@@ -26,6 +26,8 @@ pub(crate) struct TauriHostApi {
     pub bus: std::sync::Arc<PluginBus>,
     pub panels: std::sync::Arc<RwLock<HashMap<u64, PanelInfo>>>,
     pub menu_items: std::sync::Arc<RwLock<Vec<PluginMenuItem>>>,
+    pub settings_sections: std::sync::Arc<RwLock<HashMap<String, Vec<PluginSettingsSection>>>>,
+    pub settings_drafts: std::sync::Arc<RwLock<HashMap<String, HashMap<String, Option<String>>>>>,
     pub pending_dialogs: std::sync::Arc<Mutex<PendingDialogs>>,
 }
 
@@ -235,6 +237,24 @@ impl HostApi for TauriHostApi {
         }
     }
 
+    fn get_setting_value(&self, key: &str) -> Option<String> {
+        if let Some(plugin_map) = self.settings_drafts.read().get(&self.name)
+            && let Some(value) = plugin_map.get(key)
+        {
+            return value.clone();
+        }
+        self.get_config(key)
+    }
+
+    fn set_setting_draft(&self, key: &str, value: Option<&str>) {
+        let mut drafts = self.settings_drafts.write();
+        let plugin_map = drafts.entry(self.name.clone()).or_default();
+        plugin_map.insert(
+            key.to_string(),
+            value.map(str::to_string).map(|v| v.trim().to_string()),
+        );
+    }
+
     fn clipboard_set(&self, text: &str) {
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
@@ -403,6 +423,33 @@ impl HostApi for TauriHostApi {
 
     fn register_menu_item(&self, menu: &str, label: &str, action: &str, keybind: Option<&str>) {
         self.register_menu_item_as(&self.name, menu, label, action, keybind);
+    }
+
+    fn register_settings_section(&self, section_json: &str) {
+        let section = match PluginSettingsSection::from_registration_json(&self.name, section_json)
+        {
+            Ok(section) => section,
+            Err(e) => {
+                log::warn!(
+                    "[plugin:{}] register_settings_section rejected: {}",
+                    self.name,
+                    e
+                );
+                return;
+            }
+        };
+
+        let mut by_plugin = self.settings_sections.write();
+        let sections = by_plugin.entry(self.name.clone()).or_default();
+        if let Some(existing) = sections
+            .iter_mut()
+            .find(|entry| entry.section_id == section.section_id)
+        {
+            *existing = section;
+        } else {
+            sections.push(section);
+        }
+        sections.sort_by(|a, b| a.label.cmp(&b.label));
     }
 
     fn register_menu_item_as(

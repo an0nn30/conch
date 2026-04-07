@@ -4,6 +4,7 @@
     .pw-scroll-area { overflow-y: auto; }
     .pw-heading { font-size: 14px; font-weight: 600; color: var(--fg); margin: 4px 0 2px; }
     .pw-label { font-size: var(--ui-font-normal); color: var(--text-secondary); }
+    .pw-style-normal { color: var(--fg); }
     .pw-style-secondary { color: var(--text-muted); }
     .pw-style-muted { color: var(--dim-fg); }
     .pw-style-accent { color: var(--blue); }
@@ -31,14 +32,58 @@
     }
     .pw-button:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
     .pw-button:disabled { opacity: 0.4; cursor: default; }
+    .pw-text-input-wrap { display: block; width: 100%; }
     .pw-text-input, .pw-text-edit, .pw-combo-box {
       padding: 4px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
       border-radius: 4px; color: var(--fg); font: 12px "JetBrains Mono", monospace;
       outline: none; width: 100%;
     }
+    .pw-text-input:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      background: color-mix(in srgb, var(--input-bg) 75%, var(--panel-bg));
+    }
     .pw-text-input:focus, .pw-text-edit:focus, .pw-combo-box:focus { border-color: var(--dim-fg); }
     .pw-text-edit { resize: vertical; min-height: 40px; }
     .pw-checkbox { font-size: var(--ui-font-normal); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 4px; }
+    .pw-checkbox-switch {
+      position: relative;
+      display: inline-block;
+      width: 34px;
+      height: 18px;
+      cursor: pointer;
+      flex: 0 0 auto;
+    }
+    .pw-checkbox-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+      position: absolute;
+    }
+    .pw-checkbox-switch-slider {
+      position: absolute;
+      inset: 0;
+      border-radius: 9px;
+      background: var(--tab-border);
+      transition: background 0.2s ease;
+    }
+    .pw-checkbox-switch-slider::before {
+      content: '';
+      position: absolute;
+      left: 2px;
+      top: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--fg);
+      transition: transform 0.2s ease;
+    }
+    .pw-checkbox-switch input:checked + .pw-checkbox-switch-slider {
+      background: var(--blue, #7aa2f7);
+    }
+    .pw-checkbox-switch input:checked + .pw-checkbox-switch-slider::before {
+      transform: translateX(16px);
+    }
     .pw-toolbar { display: flex; align-items: center; gap: 3px; padding: 3px 0; }
     .pw-toolbar-btn { padding: 2px 6px; border: 1px solid transparent; border-radius: 3px; background: none; color: var(--text-muted); cursor: pointer; font-size: var(--ui-font-small); }
     .pw-toolbar-btn:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }

@@ -32,6 +32,18 @@ pub trait HostApi: Send + Sync {
     // -- Config Persistence --
     fn get_config(&self, key: &str) -> Option<String>;
     fn set_config(&self, key: &str, value: &str);
+    /// Returns the effective settings value for a plugin key.
+    ///
+    /// In settings contexts, this may include unsaved draft values.
+    fn get_setting_value(&self, key: &str) -> Option<String> {
+        self.get_config(key)
+    }
+    /// Stage a draft settings value for a plugin key.
+    ///
+    /// Draft values are persisted by the host Settings apply flow.
+    fn set_setting_draft(&self, key: &str, value: Option<&str>) {
+        self.set_config(key, value.unwrap_or(""));
+    }
 
     // -- Clipboard --
     fn clipboard_set(&self, text: &str);
@@ -64,6 +76,11 @@ pub trait HostApi: Send + Sync {
     ) {
         self.register_menu_item(menu, label, action, keybind);
     }
+
+    /// Register a plugin-owned settings section for the host Settings UI.
+    ///
+    /// The payload is JSON for forward-compatible extensibility.
+    fn register_settings_section(&self, _section_json: &str) {}
 
     // -- Dialogs (blocking — called from plugin thread) --
     fn show_form(&self, json: &str) -> Option<String>;

@@ -792,6 +792,11 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             fn_ptr: native_host_register_menu_item_keybind as *mut std::ffi::c_void,
         },
         NativeMethod {
+            name: "registerSettingsSection".into(),
+            sig: "(Ljava/lang/String;)V".into(),
+            fn_ptr: native_host_register_settings_section as *mut std::ffi::c_void,
+        },
+        NativeMethod {
             name: "notify".into(),
             sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V".into(),
             fn_ptr: native_host_notify as *mut std::ffi::c_void,
@@ -825,6 +830,16 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             name: "setConfig".into(),
             sig: "(Ljava/lang/String;Ljava/lang/String;)V".into(),
             fn_ptr: native_host_set_config as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "getSettingValue".into(),
+            sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+            fn_ptr: native_host_get_setting_value as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "setSettingDraft".into(),
+            sig: "(Ljava/lang/String;Ljava/lang/String;)V".into(),
+            fn_ptr: native_host_set_setting_draft as *mut std::ffi::c_void,
         },
         NativeMethod {
             name: "showForm".into(),
@@ -1010,6 +1025,18 @@ extern "system" fn native_host_register_menu_item_keybind(
     }
 }
 
+extern "system" fn native_host_register_settings_section(
+    mut env: JNIEnv,
+    _class: JClass,
+    section_json: JString,
+) {
+    let Some(api) = get_api() else { return };
+    let Some(section) = jstr(&mut env, &section_json) else {
+        return;
+    };
+    api.register_settings_section(&section);
+}
+
 extern "system" fn native_host_notify(
     mut env: JNIEnv,
     _class: JClass,
@@ -1113,6 +1140,44 @@ extern "system" fn native_host_set_config(
         return;
     };
     api.set_config(&k, &v);
+}
+
+extern "system" fn native_host_get_setting_value(
+    mut env: JNIEnv,
+    _class: JClass,
+    key: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(k) = jstr(&mut env, &key) else {
+        return std::ptr::null_mut();
+    };
+    match api.get_setting_value(&k) {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn native_host_set_setting_draft(
+    mut env: JNIEnv,
+    _class: JClass,
+    key: JString,
+    value: JString,
+) {
+    let Some(api) = get_api() else { return };
+    let Some(k) = jstr(&mut env, &key) else {
+        return;
+    };
+    let v = if value.is_null() {
+        None
+    } else {
+        jstr(&mut env, &value)
+    };
+    api.set_setting_draft(&k, v.as_deref());
 }
 
 extern "system" fn native_host_show_form(

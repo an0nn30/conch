@@ -150,6 +150,9 @@ pub enum Widget {
         value: String,
         /// Placeholder text.
         hint: Option<String>,
+        /// Whether the input is editable. None = enabled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
         /// Submit on Enter (generates `text_input_submit` event).
         submit_on_enter: Option<bool>,
         /// If true, request keyboard focus on this input this frame.
@@ -543,6 +546,7 @@ impl Widget {
             id: id.into(),
             value: value.into(),
             hint: None,
+            enabled: None,
             submit_on_enter: Some(true),
             request_focus: None,
         }
@@ -673,6 +677,7 @@ mod tests {
             id: "search".into(),
             value: "foo".into(),
             hint: Some("Search...".into()),
+            enabled: Some(false),
             submit_on_enter: Some(true),
             request_focus: None,
         };
@@ -680,6 +685,7 @@ mod tests {
             id,
             value,
             hint,
+            enabled,
             submit_on_enter,
             ..
         } = roundtrip(&w)
@@ -687,6 +693,7 @@ mod tests {
             assert_eq!(id, "search");
             assert_eq!(value, "foo");
             assert_eq!(hint.as_deref(), Some("Search..."));
+            assert_eq!(enabled, Some(false));
             assert_eq!(submit_on_enter, Some(true));
         } else {
             panic!("Wrong variant");

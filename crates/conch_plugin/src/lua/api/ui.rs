@@ -195,18 +195,21 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
 
     ui.set(
         "panel_text_input",
-        lua.create_function(|lua, (id, value, hint): (String, String, Option<String>)| {
-            with_acc(lua, |acc| {
-                acc.push_widget(Widget::TextInput {
-                    id,
-                    value,
-                    hint,
-                    submit_on_enter: Some(true),
-                    request_focus: None,
-                })
-            })?;
-            Ok(())
-        })?,
+        lua.create_function(
+            |lua, (id, value, hint, enabled): (String, String, Option<String>, Option<bool>)| {
+                with_acc(lua, |acc| {
+                    acc.push_widget(Widget::TextInput {
+                        id,
+                        value,
+                        hint,
+                        enabled,
+                        submit_on_enter: Some(true),
+                        request_focus: None,
+                    })
+                })?;
+                Ok(())
+            },
+        )?,
     )?;
 
     ui.set(
