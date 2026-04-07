@@ -268,6 +268,7 @@
           else tab.button.textContent = nextTitle;
           tab.label = nextTitle;
           tab.hasCustomTitle = true;
+          tab.pluginRenamed = true;
           tab.button.title = nextTitle;
         };
 
