@@ -57,7 +57,32 @@ def test_scheme_to_alacritty():
     assert 'background = "#070A0E"' in toml_text
 
 
+def test_unresolved_reference_warning():
+    """Test that unresolved named references produce warnings."""
+    theme_with_invalid = {
+        "name": "Test",
+        "dark": True,
+        "colors": {"accentColor": "#6B80A1"},
+        "ui": {
+            "*": {
+                "background": "accentColor",
+                "foreground": "invalidColorName",  # typo or unresolved reference
+            },
+        },
+    }
+    warnings = []
+    css = theme_to_css(theme_with_invalid, selector=":root", on_warning=lambda msg: warnings.append(msg))
+
+    # Verify the token is still emitted (warn, don't drop)
+    assert "--tl-base-foreground: invalidColorName;" in css
+    # Verify a warning was generated for the invalid color
+    assert len(warnings) > 0
+    assert "invalidColorName" in warnings[0]
+    assert "--tl-base-foreground" in warnings[0]
+
+
 if __name__ == "__main__":
     test_theme_to_css()
     test_scheme_to_alacritty()
+    test_unresolved_reference_warning()
     print("ok")

@@ -23,6 +23,47 @@ from pathlib import Path
 BANNER = "/* GENERATED FILE — do not edit. Run scripts/extract_intellij_tokens.py */"
 
 
+def _is_valid_css_color(value):
+    """Check if a value is a valid CSS color."""
+    if not isinstance(value, str):
+        return False
+    # Accept hex colors (#rgb, #rrggbb, #rrggbbaa)
+    if re.match(r'^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$', value):
+        return True
+    # Accept rgba() and rgb() functions
+    if re.match(r'^rgba?\s*\(', value):
+        return True
+    # Accept standard CSS named colors (whitelist of common ones)
+    named_colors = {
+        'aliceblue', 'antiquewhite', 'aqua', 'aquamarine', 'azure', 'beige', 'bisque', 'black',
+        'blanchedalmond', 'blue', 'blueviolet', 'brown', 'burlywood', 'cadetblue', 'chartreuse',
+        'chocolate', 'coral', 'cornflowerblue', 'cornsilk', 'crimson', 'cyan', 'darkblue',
+        'darkcyan', 'darkgoldenrod', 'darkgray', 'darkgrey', 'darkgreen', 'darkkhaki',
+        'darkmagenta', 'darkolivegreen', 'darkorange', 'darkorchid', 'darkred', 'darksalmon',
+        'darkseagreen', 'darkslateblue', 'darkslategray', 'darkslategrey', 'darkturquoise',
+        'darkviolet', 'deeppink', 'deepskyblue', 'dimgray', 'dimgrey', 'dodgerblue',
+        'firebrick', 'floralwhite', 'forestgreen', 'fuchsia', 'gainsboro', 'ghostwhite',
+        'gold', 'goldenrod', 'gray', 'grey', 'green', 'greenyellow', 'honeydew', 'hotpink',
+        'indianred', 'indigo', 'ivory', 'khaki', 'lavender', 'lavenderblush', 'lawngreen',
+        'lemonchiffon', 'lightblue', 'lightcoral', 'lightcyan', 'lightgoldenrodyellow',
+        'lightgray', 'lightgrey', 'lightgreen', 'lightpink', 'lightsalmon', 'lightseagreen',
+        'lightskyblue', 'lightslategray', 'lightslategrey', 'lightsteelblue', 'lightyellow',
+        'lime', 'limegreen', 'linen', 'magenta', 'maroon', 'mediumaquamarine', 'mediumblue',
+        'mediumorchid', 'mediumpurple', 'mediumseagreen', 'mediumslateblue', 'mediumspringgreen',
+        'mediumturquoise', 'mediumvioletred', 'midnightblue', 'mintcream', 'mistyrose',
+        'moccasin', 'navajowhite', 'navy', 'oldlace', 'olive', 'olivedrab', 'orange',
+        'orangered', 'orchid', 'palegoldenrod', 'palegreen', 'paleturquoise', 'palevioletred',
+        'papayawhip', 'peachpuff', 'peru', 'pink', 'plum', 'powderblue', 'purple', 'red',
+        'rosybrown', 'royalblue', 'saddlebrown', 'salmon', 'sandybrown', 'seagreen', 'seashell',
+        'sienna', 'silver', 'skyblue', 'slateblue', 'slategray', 'slategrey', 'snow',
+        'springgreen', 'steelblue', 'tan', 'teal', 'thistle', 'tomato', 'turquoise', 'violet',
+        'wheat', 'white', 'whitesmoke', 'yellow', 'yellowgreen',
+    }
+    if value.lower() in named_colors:
+        return True
+    return False
+
+
 def _resolve(value, palette):
     """Resolve a theme.json value to a color string, or None to skip."""
     if isinstance(value, dict):
@@ -32,22 +73,27 @@ def _resolve(value, palette):
     return palette.get(value, value)
 
 
-def _flatten(ui, palette, prefix, out):
+def _flatten(ui, palette, prefix, out, on_warning=None):
     for key, value in ui.items():
         name = "base" if key == "*" else key
         token = f"{prefix}-{name}" if prefix else name
         if isinstance(value, dict) and not ("os.default" in value or "os.mac" in value):
-            _flatten(value, palette, token, out)
+            _flatten(value, palette, token, out, on_warning)
         else:
             resolved = _resolve(value, palette)
             if resolved is not None:
-                out[token.replace(".", "-")] = resolved
+                token_key = token.replace(".", "-")
+                out[token_key] = resolved
+                # Validate that the resolved value is a valid CSS color
+                if not _is_valid_css_color(resolved):
+                    if on_warning:
+                        on_warning(f"--tl-{token_key}: {resolved}")
 
 
-def theme_to_css(theme, selector):
+def theme_to_css(theme, selector, on_warning=None):
     palette = theme.get("colors", {})
     tokens = {}
-    _flatten(theme.get("ui", {}), palette, "", tokens)
+    _flatten(theme.get("ui", {}), palette, "", tokens, on_warning)
     lines = [f"{selector} {{", "  " + BANNER]
     for name, value in sorted(tokens.items()):
         lines.append(f"  --tl-{name}: {value};")
@@ -108,6 +154,8 @@ def scheme_to_alacritty(xml_text):
 
 
 def main():
+    import sys
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--termlab-repo", default=str(Path(__file__).resolve().parents[2] / "TermLab"))
     ap.add_argument("--out-dir", default="crates/termlab_tauri/frontend")
@@ -117,13 +165,16 @@ def main():
     out = Path(args.out_dir)
     themes_dir = repo / "core/resources/themes"
 
+    def warn(msg):
+        print(f"warning: invalid CSS color in token {msg}", file=sys.stderr)
+
     ds = out / "styles/design-system"
     ds.mkdir(parents=True, exist_ok=True)
     dark = json.loads((themes_dir / "TermLabDark.theme.json").read_text())
     light = json.loads((themes_dir / "TermLabLight.theme.json").read_text())
-    (ds / "tokens-dark.css").write_text(theme_to_css(dark, ":root"))
+    (ds / "tokens-dark.css").write_text(theme_to_css(dark, ":root", on_warning=warn))
     (ds / "tokens-light.css").write_text(
-        theme_to_css(light, ':root[data-tl-appearance="light"]'))
+        theme_to_css(light, ':root[data-tl-appearance="light"]', on_warning=warn))
 
     theme_out = out / "themes"
     theme_out.mkdir(parents=True, exist_ok=True)
