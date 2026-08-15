@@ -96,6 +96,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     };
     let window_theme = windows::appearance_to_theme(&config.colors.appearance_mode);
 
+    log::info!("startup: window state loaded, building app");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -113,6 +115,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Arc::clone(&vault_state))
         .manage(updater::PendingUpdate::new())
         .setup(move |app| {
+            log::info!("startup: webview created, running app setup");
             let kb_config = config::load_user_config()
                 .map(|c| c.termlab.keyboard)
                 .unwrap_or_default();
@@ -292,6 +295,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 }
             }
 
+            log::info!("startup: app setup complete");
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
