@@ -120,6 +120,16 @@
       opacity: 0;
       border-color: transparent !important;
     }
+    /* -- Bottom tool-window zone -- */
+    .bottom-zone-wrap {
+      display: flex; flex-direction: column; flex-shrink: 0;
+      height: 312px; min-height: 80px; max-height: 60vh;
+      border-top: 1px solid var(--tl-border);
+    }
+    .bottom-zone-wrap.hidden { display: none; }
+    .bottom-zone-resize { height: 4px; cursor: row-resize; flex-shrink: 0; }
+    #bottom-strip { border-top: 1px solid var(--tl-border); flex-direction: row; }
+    .side-strip--horizontal.hidden { height: 0; width: auto; }
     #app.zen-mode #left-strip,
     #app.zen-mode #right-strip {
       width: 0;

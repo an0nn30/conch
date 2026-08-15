@@ -1,29 +1,33 @@
-.side-strip {
-  background: var(--tl-panel-bg);
-  width: 26px;
-}
+.side-strip { background: var(--tl-panel-bg); width: 22px; }
+.side-strip--horizontal { width: auto; height: 22px; }
+
 .strip-btn {
   writing-mode: vertical-rl;
   text-orientation: mixed;
-  display: flex;
-  align-items: center;
+  display: flex; align-items: center;
   gap: var(--tl-space-1);
   padding: var(--tl-space-2) 0;
-  font: 500 11px var(--tl-font-ui);
+  font: 400 11px var(--tl-font-ui);
   color: var(--tl-fg-muted);
-  background: transparent;
-  border: none;
-  border-left: 2px solid transparent;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
+  background: transparent; border: none;
+  cursor: pointer; user-select: none; white-space: nowrap;
 }
 .strip-btn:hover { color: var(--tl-fg); background: var(--tl-row-hover); }
-.strip-btn.active {
-  color: var(--tl-fg);
-  background: var(--tl-selection-bg);
-  border-left-color: var(--tl-accent);
+/* Side-strip buttons show no fill when their tool window is open — measured
+   off the reference; only bottom tabs get a selected fill. */
+.strip-btn.active { color: var(--tl-fg); }
+
+.strip-btn--horizontal {
+  writing-mode: horizontal-tb;
+  padding: 0 var(--tl-space-2);
+  height: 22px;
 }
+.strip-btn--horizontal.active {
+  background: var(--tl-ToolWindow-Button-selectedBackground);
+  color: var(--tl-fg);
+}
+
 #left-strip .strip-btn { transform: rotate(180deg); }
 .strip-btn .tl-icon { transform: rotate(90deg); }
 #left-strip .strip-btn .tl-icon { transform: rotate(-90deg); }
+.strip-btn--horizontal .tl-icon { transform: none; }

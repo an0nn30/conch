@@ -22,15 +22,17 @@
   const panelState = {
     left: { visible: true },
     right: { visible: true },
+    bottom: { visible: false },
   };
 
-  const strips = { left: null, right: null };
-  const DRAGGABLE_ZONES = ['left-top', 'left-bottom', 'right-top', 'right-bottom'];
+  const strips = { left: null, right: null, bottom: null };
+  const DRAGGABLE_ZONES = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom'];
   const ZONE_LABELS = {
     'left-top': 'Left Top',
     'left-bottom': 'Left Bottom',
     'right-top': 'Right Top',
     'right-bottom': 'Right Bottom',
+    bottom: 'Bottom',
   };
 
   // Last user-set split ratios per side (preserved across toggle cycles)
@@ -38,6 +40,7 @@
 
   let fitActiveTabFn = null;
   let saveLayoutFn = null;
+  let bottomZoneWrapEl = null;
   let savedZoneAssignments = null; // populated from backend before registration
   let savedActiveZoneWindows = null; // populated from backend before registration
   let savedPanelVisibility = { left: null, right: null }; // persisted panel visibility hints
@@ -89,6 +92,8 @@
 
     strips.left  = document.getElementById('left-strip');
     strips.right = document.getElementById('right-strip');
+    strips.bottom = document.getElementById('bottom-strip');
+    bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
 
     initSidebarResize('left');
     initSidebarResize('right');
@@ -168,6 +173,7 @@
         tw.active = true;
         updateZone(zone);
         updateSidebar(side);
+        updateBottomZone();
         updateStrips();
       }
     } else if (zones[zone].activeId === null && shouldAutoActivate) {
@@ -175,6 +181,7 @@
     } else {
       updateZone(zone);
       updateSidebar(side);
+      updateBottomZone();
       updateStrips();
     }
   }
@@ -199,6 +206,7 @@
 
     updateZone(tw.zone);
     updateSidebar(sideForZone(tw.zone));
+    updateBottomZone();
     updateStrips();
   }
 
@@ -251,6 +259,7 @@
 
     updateZone(tw.zone);
     updateSidebar(side);
+    updateBottomZone();
     updateStrips();
     if (fitActiveTabFn) fitActiveTabFn();
     triggerSave();
@@ -268,6 +277,7 @@
 
     updateZone(tw.zone);
     updateSidebar(sideForZone(tw.zone));
+    updateBottomZone();
     updateStrips();
     if (fitActiveTabFn) fitActiveTabFn();
     triggerSave();
@@ -331,6 +341,7 @@
     updateZone(targetZone);
     updateSidebar(sideForZone(oldZoneName));
     updateSidebar(sideForZone(targetZone));
+    updateBottomZone();
     updateStrips();
     if (fitActiveTabFn) fitActiveTabFn();
     triggerSave();
@@ -464,6 +475,13 @@
     }
   }
 
+  function updateBottomZone() {
+    if (!bottomZoneWrapEl) return;
+    const shouldShow = !!(panelState.bottom.visible && zones.bottom.activeId);
+    bottomZoneWrapEl.classList.toggle('hidden', !shouldShow);
+    if (fitActiveTabFn) fitActiveTabFn();
+  }
+
   function clamp(val, min, max) {
     return Math.max(min, Math.min(max, val));
   }
@@ -511,12 +529,15 @@
     const bottomY = clamp(centerY + Math.round(gap / 2), pad, vh - zoneH - pad);
     const leftX = pad;
     const rightX = vw - zoneW - pad;
+    const bottomBarH = clamp(Math.round(vh * 0.12), 70, 140);
+    const bottomBarY = Math.max(bottomY + zoneH + pad, vh - bottomBarH - pad);
 
     return {
       'left-top': { left: leftX, top: topY, width: zoneW, height: zoneH },
       'left-bottom': { left: leftX, top: bottomY, width: zoneW, height: zoneH },
       'right-top': { left: rightX, top: topY, width: zoneW, height: zoneH },
       'right-bottom': { left: rightX, top: bottomY, width: zoneW, height: zoneH },
+      bottom: { left: pad, top: bottomBarY, width: vw - pad * 2, height: Math.min(bottomBarH, Math.max(40, vh - bottomBarY - pad)) },
     };
   }
 
@@ -757,14 +778,25 @@
       }
       stripEl.appendChild(botSection);
     }
+
+    const bottomStripEl = strips.bottom;
+    if (bottomStripEl) {
+      bottomStripEl.innerHTML = '';
+      const bottomZone = zones.bottom;
+      const hasWindows = bottomZone.windows.length > 0;
+      bottomStripEl.classList.toggle('hidden', !hasWindows);
+      for (const wid of bottomZone.windows) {
+        bottomStripEl.appendChild(makeStripBtn(wid, bottomZone, true));
+      }
+    }
   }
 
-  function makeStripBtn(windowId, zone) {
+  function makeStripBtn(windowId, zone, horizontal) {
     const tw = toolWindows.get(windowId);
     if (!tw) return document.createTextNode('');
 
     const btn = document.createElement('button');
-    btn.className = 'strip-btn' + (tw.active ? ' active' : '');
+    btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '') + (tw.active ? ' active' : '');
     if (tw.icon && window.tlIcon) {
       btn.appendChild(window.tlIcon.create(tw.icon, { size: 16, alt: '' }));
     }
@@ -806,6 +838,7 @@
       { zone: 'left-bottom',  label: 'Left (Bottom)' },
       { zone: 'right-top',    label: 'Right (Top)' },
       { zone: 'right-bottom', label: 'Right (Bottom)' },
+      { zone: 'bottom',       label: 'Bottom' },
     ];
 
     for (const t of targets) {
@@ -992,6 +1025,19 @@
   function setPanelVisibility(side, visible, opts) {
     if (!panelState[side]) return;
     panelState[side].visible = !!visible;
+
+    if (side === 'bottom') {
+      if (panelState.bottom.visible && zones.bottom.activeId === null) {
+        const candidate = (zones.bottom.windows && zones.bottom.windows[0]) || null;
+        if (candidate) activate(candidate);
+      }
+      updateZone('bottom');
+      updateBottomZone();
+      updateStrips();
+      if (!opts || opts.save !== false) triggerSave();
+      return;
+    }
+
     if (panelState[side].visible) {
       const topZone = zones[side + '-top'];
       const botZone = zones[side + '-bottom'];
