@@ -129,12 +129,10 @@
       flex-shrink: 0;
       opacity: 0;
       background: var(--tl-panel-bg);
-      border-bottom: 0 solid var(--tl-border);
       transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 160ms ease;
     }
     #app.tabs-visible #tabbar {
       height: 28px;
-      border-bottom-width: 1px;
       opacity: 1;
     }
     .tab-btn {
@@ -144,10 +142,11 @@
       gap: var(--tl-space-2);
       min-width: 0;
       max-width: 220px;
-      height: 27px;
+      height: 28px;
       padding: 0 var(--tl-space-2);
       background: transparent;
       border: none;
+      border-bottom: 1px solid var(--tl-border);
       color: var(--tl-fg);
       font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
       cursor: pointer;
@@ -167,12 +166,15 @@
     /* The active tab is marked by punching a hole in the row's bottom border
        so it merges with the terminal below — measured off the reference,
        which uses no fill and no coloured underline. */
-    .tab-btn.active::after {
+    /* Active tab = a gap punched in the row's bottom rule, so the tab merges
+       with the terminal (measured off the reference: no fill, no underline).
+       The rule lives on the tabs and on a trailing filler rather than on
+       #tabbar, whose overflow:hidden would clip an overhanging pseudo. */
+    .tab-btn.active { border-bottom-color: var(--tl-panel-bg); }
+    #tabbar::after {
       content: '';
-      position: absolute;
-      left: 0; right: 0; bottom: -1px;
-      height: 1px;
-      background: var(--tl-panel-bg);
+      flex: 1 1 auto;
+      border-bottom: 1px solid var(--tl-border);
     }
     .tab-btn.entering {
       opacity: 0;
@@ -293,12 +295,8 @@
       opacity: 0.75;
       filter: saturate(0.9);
     }
-    .terminal-pane.focused {
-      border-top: 2px solid var(--blue);
-    }
-    .terminal-pane:not(.focused) {
-      border-top: 2px solid transparent;
-    }
+    /* No focus bar above the terminal: the reference marks focus with the
+       cursor alone, and a 2px accent stripe here read as a stray blue line. */
     #status {
       position: fixed;
       top: 12px;
