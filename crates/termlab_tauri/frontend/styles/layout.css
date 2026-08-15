@@ -196,6 +196,10 @@
       display: flex;
       flex-direction: column;
       min-width: 0;
+      /* The reference separates the title bar from the editor with a 1px rule
+         whether or not the tab strip is showing — measured at the terminal's
+         top edge with a single tab open. */
+      border-top: 1px solid var(--tl-border);
     }
     #terminal-host {
       position: relative;

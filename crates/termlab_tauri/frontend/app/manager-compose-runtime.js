@@ -176,7 +176,9 @@
           getWorkspaceDir: () => invoke('get_workspace_dir').catch(() => null),
           allocateTabId: () => allocTabId(),
           allocatePaneId: () => allocPaneId(),
-          allocateTabLabel: () => 'Tab ' + allocTabLabel(),
+          // Tabs are named 'Terminal' like the reference app; the ordinal lives in
+          // the Cmd+N shortcut, not the label.
+          allocateTabLabel: () => { allocTabLabel(); return 'Terminal'; },
           tabBarEl,
           terminalHostEl,
           initTerminal: (root) => terminalRuntime.initTerminal(root),

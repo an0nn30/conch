@@ -232,7 +232,7 @@
       const tabs = getTabs();
       let n = 1;
       for (const tab of tabs.values()) {
-        const newLabel = 'Tab ' + n;
+        const newLabel = 'Terminal';
         tab.label = newLabel;
         if (!tab.hasCustomTitle) {
           setTabLabel(tab.button, newLabel);

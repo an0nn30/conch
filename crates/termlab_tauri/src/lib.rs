@@ -45,9 +45,11 @@ pub(crate) struct TauriState {
 
 /// Launch the Tauri-based UI.
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
-    let workspace_dir = std::env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
+    // The workspace is the directory the user works in — the same value the
+    // shell starts in — not wherever the binary happened to be launched from
+    // (current_dir() titled the window after the build directory). Mirrors the
+    // reference app, whose title segment is its launch workspace.
+    let workspace_dir = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
 
     let (transfer_tx, mut transfer_rx) =
         tokio::sync::mpsc::unbounded_channel::<termlab_remote::transfer::TransferProgress>();
