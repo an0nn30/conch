@@ -430,6 +430,40 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    // -- Docked views --
+
+    ui.set(
+        "open_docked_view",
+        lua.create_function(|lua, opts: LuaValue| {
+            let req_json = serde_json::to_string(&lua_value_to_json(opts)?)
+                .unwrap_or_else(|_| "{}".to_string());
+            let result = with_host_api(lua, |api| api.open_docked_view(&req_json))?;
+            let Some(result_json) = result else {
+                return Ok(None::<LuaTable>);
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(&result_json).unwrap_or(serde_json::Value::Null);
+            let tbl = json_to_lua_table(lua, &value)?;
+            Ok(Some(tbl))
+        })?,
+    )?;
+
+    ui.set(
+        "close_docked_view",
+        lua.create_function(|lua, view_id: String| {
+            let ok = with_host_api(lua, |api| api.close_docked_view(&view_id))?;
+            Ok(ok)
+        })?,
+    )?;
+
+    ui.set(
+        "focus_docked_view",
+        lua.create_function(|lua, view_id: String| {
+            let ok = with_host_api(lua, |api| api.focus_docked_view(&view_id))?;
+            Ok(ok)
+        })?,
+    )?;
+
     lua.globals().set("ui", ui)?;
     Ok(())
 }

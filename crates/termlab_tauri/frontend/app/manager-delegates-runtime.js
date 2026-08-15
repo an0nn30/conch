@@ -36,6 +36,9 @@
       allPanesInTab(tabId) {
         return requirePaneManager('allPanesInTab')(tabId);
       },
+      rememberPluginViewSize(pane) {
+        return requirePaneManager('rememberPluginViewSize')(pane);
+      },
       setFocusedPane(paneId) {
         return requirePaneManager('setFocusedPane')(paneId);
       },

@@ -7,6 +7,7 @@
   let invoke = null;
   let listen = null;
   const pluginMenuItems = [];
+  const dockedViewRefreshTimers = new Map();
   // Tracks plugins whose dialog was recently dismissed to reject queued duplicates.
   const _dialogCooldown = new Set();
   // Tracks handles for panels registered at the bottom location.
@@ -783,6 +784,21 @@
           if (result != null) renderWidgets(settingsContainer, result, pluginName, viewId);
         } catch (e) {
           console.error('refreshPluginView(settings) error:', e);
+        }
+        return;
+      }
+
+      // Docked plugin views render into split-tree pane containers keyed by
+      // view id; route view-scoped renders there before the panel fallback.
+      const dockedContainer = document.querySelector(
+        `.plugin-panel-content[data-plugin-view-id="${CSS.escape(viewId)}"]`
+      );
+      if (dockedContainer) {
+        try {
+          const result = await invoke('request_plugin_view_render', { pluginName, viewId });
+          if (result != null) renderWidgets(dockedContainer, result, pluginName, viewId);
+        } catch (e) {
+          console.error('refreshPluginView(docked) error:', e);
         }
         return;
       }

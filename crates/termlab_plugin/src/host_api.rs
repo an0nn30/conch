@@ -17,6 +17,9 @@ pub trait HostApi: Send + Sync {
     // -- Panel Management --
     fn register_panel(&self, location: PanelLocation, name: &str, icon: Option<&str>) -> u64;
     fn set_widgets(&self, handle: u64, widgets_json: &str);
+    fn open_docked_view(&self, req_json: &str) -> Option<String>;
+    fn close_docked_view(&self, view_id: &str) -> bool;
+    fn focus_docked_view(&self, view_id: &str) -> bool;
 
     // -- Logging & Notifications --
     fn log(&self, level: u8, msg: &str);
@@ -138,6 +141,15 @@ mod tests {
             1
         }
         fn set_widgets(&self, _: u64, _: &str) {}
+        fn open_docked_view(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn close_docked_view(&self, _: &str) -> bool {
+            false
+        }
+        fn focus_docked_view(&self, _: &str) -> bool {
+            false
+        }
         fn log(&self, _: u8, _: &str) {}
         fn notify(&self, _: &str) {}
         fn set_status(&self, _: Option<&str>, _: u8, _: f32) {}

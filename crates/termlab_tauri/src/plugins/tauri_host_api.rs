@@ -12,12 +12,13 @@ use termlab_plugin::HostApi;
 use termlab_plugin::bus::PluginBus;
 use termlab_plugin_sdk::PanelLocation;
 use parking_lot::{Mutex, RwLock};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
-use super::{PanelInfo, PendingDialogs, PluginMenuItem, PluginSettingsSection};
+use super::{PanelInfo, PendingDialogs, PluginMenuItem, PluginSettingsSection, PluginViewInfo};
 
 static NEXT_PANEL_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_DOCKED_VIEW_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Per-plugin HostApi implementation for the Tauri UI.
 pub(crate) struct TauriHostApi {
@@ -25,6 +26,8 @@ pub(crate) struct TauriHostApi {
     pub app_handle: tauri::AppHandle,
     pub bus: std::sync::Arc<PluginBus>,
     pub panels: std::sync::Arc<RwLock<HashMap<u64, PanelInfo>>>,
+    pub views_by_id: std::sync::Arc<RwLock<HashMap<String, PluginViewInfo>>>,
+    pub pane_to_view: std::sync::Arc<RwLock<HashMap<u32, String>>>,
     pub menu_items: std::sync::Arc<RwLock<Vec<PluginMenuItem>>>,
     pub settings_sections: std::sync::Arc<RwLock<HashMap<String, Vec<PluginSettingsSection>>>>,
     pub settings_drafts: std::sync::Arc<RwLock<HashMap<String, HashMap<String, Option<String>>>>>,
@@ -64,6 +67,32 @@ struct PluginWidgetsUpdated {
     handle: u64,
     plugin: String,
     widgets_json: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PluginViewOpenRequested {
+    plugin: String,
+    view_id: String,
+    request_json: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PluginViewFocusRequested {
+    plugin: String,
+    view_id: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PluginViewCloseRequested {
+    plugin: String,
+    view_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenDockedViewRequest {
+    id: Option<String>,
+    title: Option<String>,
+    icon: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -141,7 +170,111 @@ impl HostApi for TauriHostApi {
         );
     }
 
+    fn open_docked_view(&self, req_json: &str) -> Option<String> {
+        let req: OpenDockedViewRequest =
+            serde_json::from_str(req_json).unwrap_or(OpenDockedViewRequest {
+                id: None,
+                title: None,
+                icon: None,
+            });
+        let stable = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let view_id = if let Some(stable_id) = stable {
+            format!("plugin:{}:view:{}", self.name, stable_id)
+        } else {
+            let n = NEXT_DOCKED_VIEW_ID.fetch_add(1, Ordering::Relaxed);
+            format!("plugin:{}:view:{n}", self.name)
+        };
+
+        // v1 scaffolding: tab/pane binding is completed by the frontend in Phase D.
+        if let Some(existing) = self.views_by_id.read().get(&view_id) {
+            let _ = self.app_handle.emit(
+                "plugin-view-focus-requested",
+                PluginViewFocusRequested {
+                    plugin: self.name.clone(),
+                    view_id: existing.view_id.clone(),
+                },
+            );
+            return Some(
+                serde_json::json!({
+                    "view_id": existing.view_id,
+                    "pane_id": existing.pane_id,
+                    "tab_id": existing.tab_id,
+                })
+                .to_string(),
+            );
+        }
+
+        let info = PluginViewInfo {
+            view_id: view_id.clone(),
+            plugin_name: self.name.clone(),
+            pane_id: 0,
+            tab_id: 0,
+            title: req.title.unwrap_or_else(|| self.name.clone()),
+            icon: req.icon,
+            last_widgets_json: "[]".to_string(),
+        };
+        self.views_by_id.write().insert(view_id.clone(), info);
+
+        let _ = self.app_handle.emit(
+            "plugin-view-open-requested",
+            PluginViewOpenRequested {
+                plugin: self.name.clone(),
+                view_id: view_id.clone(),
+                request_json: req_json.to_string(),
+            },
+        );
+
+        Some(
+            serde_json::json!({
+                "view_id": view_id,
+                "pane_id": 0,
+                "tab_id": 0,
+            })
+            .to_string(),
+        )
+    }
+
+    fn close_docked_view(&self, view_id: &str) -> bool {
+        let mut removed = false;
+        if let Some(info) = self.views_by_id.write().remove(view_id) {
+            if info.pane_id != 0 {
+                self.pane_to_view.write().remove(&info.pane_id);
+            }
+            removed = true;
+        }
+        let _ = self.app_handle.emit(
+            "plugin-view-close-requested",
+            PluginViewCloseRequested {
+                plugin: self.name.clone(),
+                view_id: view_id.to_string(),
+            },
+        );
+        removed
+    }
+
+    fn focus_docked_view(&self, view_id: &str) -> bool {
+        if !self.views_by_id.read().contains_key(view_id) {
+            return false;
+        }
+        let _ = self.app_handle.emit(
+            "plugin-view-focus-requested",
+            PluginViewFocusRequested {
+                plugin: self.name.clone(),
+                view_id: view_id.to_string(),
+            },
+        );
+        true
+    }
+
     fn log(&self, level: u8, msg: &str) {
+        let level_str = match level {
+            0 => "TRACE",
+            1 => "DEBUG",
+            2 => "INFO",
+            3 => "WARN",
+            4 => "ERROR",
+            _ => "INFO",
+        };
         log::log!(
             match level {
                 0 => log::Level::Trace,

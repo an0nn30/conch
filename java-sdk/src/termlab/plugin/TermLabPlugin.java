@@ -142,10 +142,11 @@ public interface TermLabPlugin {
     /**
      * Return the widget tree for a specific host view.
      *
-     * <p>The host passes a view id (for example, a plugin-defined settings view).
-     * Default implementation falls back to {@link #render()} for compatibility.</p>
+     * <p>The host passes a view id: either a plugin-defined settings view or a
+     * docked view instance. Default implementation falls back to
+     * {@link #render()} for compatibility.</p>
      *
-     * @param viewId host-defined view identifier
+     * @param viewId host-defined view identifier (settings or docked view)
      * @return JSON array of widget objects
      */
     default String renderView(String viewId) {

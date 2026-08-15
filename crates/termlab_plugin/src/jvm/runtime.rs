@@ -888,6 +888,21 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             fn_ptr: native_host_register_service as *mut std::ffi::c_void,
         },
         NativeMethod {
+            name: "openDockedView".into(),
+            sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+            fn_ptr: native_host_open_docked_view as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "closeDockedView".into(),
+            sig: "(Ljava/lang/String;)Z".into(),
+            fn_ptr: native_host_close_docked_view as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "focusDockedView".into(),
+            sig: "(Ljava/lang/String;)Z".into(),
+            fn_ptr: native_host_focus_docked_view as *mut std::ffi::c_void,
+        },
+        NativeMethod {
             name: "writeToPty".into(),
             sig: "(Ljava/lang/String;)V".into(),
             fn_ptr: native_host_write_to_pty as *mut std::ffi::c_void,
@@ -1324,6 +1339,58 @@ extern "system" fn native_host_register_service(mut env: JNIEnv, _class: JClass,
         return;
     };
     api.register_service(&svc);
+}
+
+extern "system" fn native_host_open_docked_view(
+    mut env: JNIEnv,
+    _class: JClass,
+    request_json: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(req) = jstr(&mut env, &request_json) else {
+        return std::ptr::null_mut();
+    };
+    match api.open_docked_view(&req) {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn native_host_close_docked_view(
+    mut env: JNIEnv,
+    _class: JClass,
+    view_id: JString,
+) -> jboolean {
+    let Some(api) = get_api() else { return 0 };
+    let Some(view_id) = jstr(&mut env, &view_id) else {
+        return 0;
+    };
+    if api.close_docked_view(&view_id) {
+        1
+    } else {
+        0
+    }
+}
+
+extern "system" fn native_host_focus_docked_view(
+    mut env: JNIEnv,
+    _class: JClass,
+    view_id: JString,
+) -> jboolean {
+    let Some(api) = get_api() else { return 0 };
+    let Some(view_id) = jstr(&mut env, &view_id) else {
+        return 0;
+    };
+    if api.focus_docked_view(&view_id) {
+        1
+    } else {
+        0
+    }
 }
 
 extern "system" fn native_host_write_to_pty(mut env: JNIEnv, _class: JClass, text: JString) {

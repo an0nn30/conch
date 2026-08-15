@@ -132,6 +132,27 @@ impl HostApi for PermissionCheckedHostApi {
         self.inner.set_widgets(handle, widgets_json)
     }
 
+    fn open_docked_view(&self, req_json: &str) -> Option<String> {
+        if !self.check_capability("open_docked_view", "ui.dock") {
+            return None;
+        }
+        self.inner.open_docked_view(req_json)
+    }
+
+    fn close_docked_view(&self, view_id: &str) -> bool {
+        if !self.check_capability("close_docked_view", "ui.dock") {
+            return false;
+        }
+        self.inner.close_docked_view(view_id)
+    }
+
+    fn focus_docked_view(&self, view_id: &str) -> bool {
+        if !self.check_capability("focus_docked_view", "ui.dock") {
+            return false;
+        }
+        self.inner.focus_docked_view(view_id)
+    }
+
     fn log(&self, level: u8, msg: &str) {
         self.inner.log(level, msg)
     }
@@ -402,6 +423,15 @@ mod tests {
             1
         }
         fn set_widgets(&self, _: u64, _: &str) {}
+        fn open_docked_view(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn close_docked_view(&self, _: &str) -> bool {
+            false
+        }
+        fn focus_docked_view(&self, _: &str) -> bool {
+            false
+        }
         fn log(&self, _: u8, _: &str) {}
         fn notify(&self, _: &str) {}
         fn set_status(&self, _: Option<&str>, _: u8, _: f32) {}

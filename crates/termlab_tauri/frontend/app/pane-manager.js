@@ -4,11 +4,15 @@
     const getTabs = deps.getTabs;
     const getFocusedPaneId = deps.getFocusedPaneId;
     const setFocusedPaneId = deps.setFocusedPaneId;
+    const getPaneRatio = deps.getPaneRatio;
+    const setPluginViewSize = deps.setPluginViewSize;
     const rebuildTreeDOM = deps.rebuildTreeDOM;
     const onTerminalFocused = deps.onTerminalFocused;
     const unregisterPaneDnd = deps.unregisterPaneDnd;
     const notifyTerminalClosed = deps.notifyTerminalClosed;
     const refreshSshSessions = deps.refreshSshSessions;
+    const notifyPluginViewClosed = deps.notifyPluginViewClosed;
+    const deletePluginViewPane = deps.deletePluginViewPane;
     const closeTab = deps.closeTab;
     const initTerminal = deps.initTerminal;
     const setupTmuxRightClickBridge = deps.setupTmuxRightClickBridge;
@@ -49,6 +53,15 @@
       const tab = tabs.get(tabId);
       if (!tab || !global.splitTree) return [];
       return global.splitTree.allLeaves(tab.treeRoot);
+    }
+
+    function rememberPluginViewSize(pane) {
+      if (!pane || pane.kind !== 'plugin_view' || !pane.viewId) return;
+      const tabs = getTabs();
+      const tab = tabs.get(pane.tabId);
+      const ratio = getPaneRatio(tab, pane.paneId);
+      if (ratio == null) return;
+      setPluginViewSize(pane.viewId, ratio);
     }
 
     function setFocusedPane(paneId) {
@@ -138,7 +151,61 @@
 
       const tab = tabs.get(pane.tabId);
       if (!tab || !global.splitTree) return;
+      if (pane.kind === 'plugin_view') rememberPluginViewSize(pane);
+
       if (global.splitTree.leafCount(tab.treeRoot) <= 1) {
+        if (pane.kind === 'plugin_view') {
+          if (pane.viewId) {
+            notifyPluginViewClosed(pane.viewId);
+            deletePluginViewPane(pane.viewId);
+          }
+          if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
+          if (pane.resizeObserver) pane.resizeObserver.disconnect();
+          if (pane.term) pane.term.dispose();
+
+          const paneEl = pane.root;
+          paneEl.innerHTML = '';
+          delete paneEl.dataset.pluginViewId;
+
+          const { term, fitAddon } = initTerminal(paneEl);
+          const nextPane = {
+            paneId: pane.paneId,
+            tabId: tab.id,
+            kind: 'terminal',
+            type: 'local',
+            connectionId: null,
+            term,
+            fitAddon,
+            root: paneEl,
+            spawned: false,
+            lastCols: 0,
+            lastRows: 0,
+            cleanupMouseBridge: setupTmuxRightClickBridge(term, paneEl),
+            resizeObserver: null,
+            debounceTimer: null,
+          };
+          panes.set(paneId, nextPane);
+          nextPane.resizeObserver = createPaneResizeObserver(nextPane, fitAndResizePane);
+          paneEl.addEventListener('mousedown', () => setFocusedPane(paneId));
+          term.onData((data) => {
+            if (!nextPane.spawned) return;
+            onLocalTerminalData(paneId, data);
+          });
+
+          setFocusedPane(paneId);
+          const dims = fitAddon.proposeDimensions();
+          const cols = dims ? dims.cols : 80;
+          const rows = dims ? dims.rows : 24;
+          spawnShell(paneId, cols, rows)
+            .then(() => {
+              nextPane.spawned = true;
+              fitAndResizePane(nextPane);
+            })
+            .catch((error) => {
+              term.writeln('\\x1b[31mFailed to spawn shell: ' + error + '\\x1b[0m');
+            });
+          return;
+        }
         closeTab(tab.id);
         return;
       }
@@ -147,6 +214,9 @@
       if (pane.kind === 'terminal' && pane.spawned) {
         if (pane.type === 'ssh') closedSshPane = true;
         notifyTerminalClosed(paneId, pane.type);
+      } else if (pane.kind === 'plugin_view' && pane.viewId) {
+        notifyPluginViewClosed(pane.viewId);
+        deletePluginViewPane(pane.viewId);
       }
 
       if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
@@ -244,6 +314,7 @@
       refocusActiveTerminal,
       getTabForPane,
       allPanesInTab,
+      rememberPluginViewSize,
       setFocusedPane,
       movePaneByDrop,
       closePane,

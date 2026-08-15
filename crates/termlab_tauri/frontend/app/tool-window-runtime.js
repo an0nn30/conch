@@ -12,6 +12,10 @@
     const getCurrentPane = deps.getCurrentPane;
     const createSshTab = deps.createSshTab;
     const activateTab = deps.activateTab;
+    const openPluginDockedViewFromRequest = deps.openPluginDockedViewFromRequest;
+    const setFocusedPane = deps.setFocusedPane;
+    const closePane = deps.closePane;
+    const getPluginViewPaneById = deps.getPluginViewPaneById;
     const registeredPluginToolWindows = new Set();
     let resizeDragDepth = 0;
 
@@ -257,6 +261,38 @@
 
       listenOnCurrentWindow('settings-restart-required', () => {
         if (global.toast) global.toast.warn('Restart Required', 'Some changes require a restart to take effect.');
+      });
+
+      listenOnCurrentWindow('plugin-view-open-requested', (event) => {
+        openPluginDockedViewFromRequest(event.payload).catch((error) => {
+          console.error('Failed to open plugin docked view:', error);
+        });
+      });
+
+      listenOnCurrentWindow('plugin-view-focus-requested', (event) => {
+        const viewId = event && event.payload ? event.payload.view_id : null;
+        const map = getPluginViewPaneById();
+        if (!viewId || !map.has(viewId)) return;
+        setFocusedPane(map.get(viewId));
+      });
+
+      listenOnCurrentWindow('plugin-view-close-requested', (event) => {
+        const viewId = event && event.payload ? event.payload.view_id : null;
+        const map = getPluginViewPaneById();
+        if (!viewId || !map.has(viewId)) return;
+        closePane(map.get(viewId));
+      });
+
+      listenOnCurrentWindow('plugin-views-removed', (event) => {
+        if (global.titlebar && typeof global.titlebar.refresh === 'function') {
+          global.titlebar.refresh().catch(() => {});
+        }
+        const viewIds = (event && event.payload && event.payload.view_ids) || [];
+        const map = getPluginViewPaneById();
+        for (const viewId of viewIds) {
+          if (!map.has(viewId)) continue;
+          closePane(map.get(viewId));
+        }
       });
 
       if (global.pluginWidgets) {

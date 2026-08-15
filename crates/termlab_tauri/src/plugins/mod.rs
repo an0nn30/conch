@@ -28,6 +28,7 @@ fn supported_capability_set() -> &'static [&'static str] {
         "ui.menu",
         "ui.panel",
         "ui.settings",
+        "ui.dock",
         "ui.notify",
         "ui.dialog",
         "clipboard.read",
@@ -124,6 +125,19 @@ pub(crate) struct PanelInfo {
     pub location: String,
     pub icon: Option<String>,
     pub widgets_json: String,
+}
+
+/// Metadata for a plugin-owned docked split view.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub(crate) struct PluginViewInfo {
+    pub view_id: String,
+    pub plugin_name: String,
+    pub pane_id: u32,
+    pub tab_id: u32,
+    pub title: String,
+    pub icon: Option<String>,
+    pub last_widgets_json: String,
 }
 
 /// Shared plugin state accessible from Tauri commands.
@@ -318,9 +332,17 @@ struct PluginPanelsRemoved {
     handles: Vec<u64>,
 }
 
+#[derive(Clone, Serialize)]
+struct PluginViewsRemoved {
+    plugin: String,
+    view_ids: Vec<String>,
+}
+
 pub(crate) struct PluginState {
     pub bus: Arc<PluginBus>,
     pub panels: Arc<RwLock<HashMap<u64, PanelInfo>>>,
+    pub views_by_id: Arc<RwLock<HashMap<String, PluginViewInfo>>>,
+    pub pane_to_view: Arc<RwLock<HashMap<u32, String>>>,
     pub menu_items: Arc<RwLock<Vec<PluginMenuItem>>>,
     pub settings_sections: Arc<RwLock<HashMap<String, Vec<PluginSettingsSection>>>>,
     pub settings_drafts: Arc<RwLock<HashMap<String, HashMap<String, Option<String>>>>>,
@@ -336,6 +358,8 @@ impl PluginState {
         Self {
             bus: Arc::new(PluginBus::new()),
             panels: Arc::new(RwLock::new(HashMap::new())),
+            views_by_id: Arc::new(RwLock::new(HashMap::new())),
+            pane_to_view: Arc::new(RwLock::new(HashMap::new())),
             menu_items: Arc::new(RwLock::new(Vec::new())),
             settings_sections: Arc::new(RwLock::new(HashMap::new())),
             settings_drafts: Arc::new(RwLock::new(HashMap::new())),
@@ -372,6 +396,8 @@ impl PluginState {
             app_handle: app_handle.clone(),
             bus: Arc::clone(&self.bus),
             panels: Arc::clone(&self.panels),
+            views_by_id: Arc::clone(&self.views_by_id),
+            pane_to_view: Arc::clone(&self.pane_to_view),
             menu_items: Arc::clone(&self.menu_items),
             settings_sections: Arc::clone(&self.settings_sections),
             settings_drafts: Arc::clone(&self.settings_drafts),
@@ -409,8 +435,8 @@ impl PluginState {
     }
 
     /// Remove plugin-owned UI/runtime resources.
-    /// Returns removed panel handles.
-    fn cleanup_plugin_resources(&self, plugin_name: &str) -> Vec<u64> {
+    /// Returns removed panel handles and removed view ids.
+    fn cleanup_plugin_resources(&self, plugin_name: &str) -> (Vec<u64>, Vec<String>) {
         // Collect and remove panels owned by this plugin.
         let mut removed_handles = Vec::new();
         self.panels.write().retain(|handle, info| {
@@ -421,6 +447,21 @@ impl PluginState {
                 true
             }
         });
+
+        // Collect and remove docked views owned by this plugin.
+        let mut removed_view_ids = Vec::new();
+        self.views_by_id.write().retain(|view_id, info| {
+            if info.plugin_name == plugin_name {
+                removed_view_ids.push(view_id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !removed_view_ids.is_empty() {
+            let mut pane_to_view = self.pane_to_view.write();
+            pane_to_view.retain(|_, vid| !removed_view_ids.contains(vid));
+        }
 
         // Remove menu items registered by this plugin.
         self.menu_items
@@ -437,7 +478,7 @@ impl PluginState {
         // Remove runtime permission profile for this plugin.
         self.permission_profiles.write().remove(plugin_name);
 
-        removed_handles
+        (removed_handles, removed_view_ids)
     }
 
     /// Auto-enable plugins that were enabled in the previous session.
@@ -820,7 +861,7 @@ pub(crate) fn disable_plugin(
             ps.running_lua.remove(idx);
             ps.bus.unregister_plugin(&name);
 
-            let removed_handles = ps.cleanup_plugin_resources(&name);
+            let (removed_handles, removed_view_ids) = ps.cleanup_plugin_resources(&name);
             if !removed_handles.is_empty() {
                 let _ = app.emit(
                     "plugin-panels-removed",
@@ -830,6 +871,16 @@ pub(crate) fn disable_plugin(
                     },
                 );
             }
+            if !removed_view_ids.is_empty() {
+                let _ = app.emit(
+                    "plugin-views-removed",
+                    PluginViewsRemoved {
+                        plugin: name.clone(),
+                        view_ids: removed_view_ids,
+                    },
+                );
+            }
+
             ps.persist_enabled_plugins();
             Ok(())
         } else {
@@ -840,13 +891,22 @@ pub(crate) fn disable_plugin(
             mgr.unload_plugin(&name)
                 .map_err(|e| format!("Failed to unload: {e}"))?;
 
-            let removed_handles = ps.cleanup_plugin_resources(&name);
+            let (removed_handles, removed_view_ids) = ps.cleanup_plugin_resources(&name);
             if !removed_handles.is_empty() {
                 let _ = app.emit(
                     "plugin-panels-removed",
                     PluginPanelsRemoved {
                         plugin: name.clone(),
                         handles: removed_handles,
+                    },
+                );
+            }
+            if !removed_view_ids.is_empty() {
+                let _ = app.emit(
+                    "plugin-views-removed",
+                    PluginViewsRemoved {
+                        plugin: name.clone(),
+                        view_ids: removed_view_ids,
                     },
                 );
             }
@@ -1074,6 +1134,60 @@ pub(crate) fn discard_plugin_settings_drafts(state: tauri::State<'_, Arc<Mutex<P
     state.lock().settings_drafts.write().clear();
 }
 
+/// Record the frontend pane/tab binding for a plugin docked view.
+#[tauri::command]
+pub(crate) fn register_plugin_view_binding(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    view_id: String,
+    pane_id: u32,
+    tab_id: u32,
+) -> bool {
+    let state = state.lock();
+    let mut views = state.views_by_id.write();
+    let Some(info) = views.get_mut(&view_id) else {
+        return false;
+    };
+    info.pane_id = pane_id;
+    info.tab_id = tab_id;
+    let payload = serde_json::json!({
+        "view_id": info.view_id,
+        "plugin": info.plugin_name,
+        "pane_id": info.pane_id,
+        "tab_id": info.tab_id,
+        "title": info.title,
+        "icon": info.icon,
+    });
+    let _ = app.emit("plugin-view-opened", payload);
+    state.pane_to_view.write().insert(pane_id, view_id);
+    true
+}
+
+/// Notify backend that a docked view was closed in the frontend.
+#[tauri::command]
+pub(crate) fn plugin_view_closed(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    view_id: String,
+) -> bool {
+    let state = state.lock();
+    let mut views = state.views_by_id.write();
+    let Some(info) = views.remove(&view_id) else {
+        return false;
+    };
+    if info.pane_id != 0 {
+        state.pane_to_view.write().remove(&info.pane_id);
+    }
+    let payload = serde_json::json!({
+        "view_id": info.view_id,
+        "plugin": info.plugin_name,
+        "pane_id": info.pane_id,
+        "tab_id": info.tab_id,
+    });
+    let _ = app.emit("plugin-view-closed", payload);
+    true
+}
+
 /// Send a widget event to a plugin.
 #[tauri::command]
 pub(crate) fn plugin_widget_event(
@@ -1107,6 +1221,32 @@ pub(crate) async fn request_plugin_render(
     sender
         .send(termlab_plugin::bus::PluginMail::RenderRequest {
             view_id,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|e| format!("send failed: {e}"))?;
+    Ok(reply_rx.await.ok())
+}
+
+/// Request a plugin to re-render widgets for a specific view.
+#[tauri::command]
+pub(crate) async fn request_plugin_view_render(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    plugin_name: String,
+    view_id: String,
+) -> Result<Option<String>, String> {
+    let bus = {
+        let s = state.lock();
+        Arc::clone(&s.bus)
+    };
+    let sender = match bus.sender_for(&plugin_name) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(termlab_plugin::bus::PluginMail::RenderRequest {
+            view_id: Some(view_id),
             reply: reply_tx,
         })
         .await
@@ -1211,12 +1351,16 @@ mod tests {
             );
         }
 
-        let removed = state.cleanup_plugin_resources("my-plugin");
+        let (removed, removed_views) = state.cleanup_plugin_resources("my-plugin");
 
         assert_eq!(
             removed.len(),
             2,
             "should remove exactly 2 panels for my-plugin"
+        );
+        assert!(
+            removed_views.is_empty(),
+            "no docked views removed in this test"
         );
         assert!(removed.contains(&1));
         assert!(removed.contains(&3));
@@ -1387,10 +1531,14 @@ mod tests {
     #[test]
     fn cleanup_with_no_resources_returns_empty() {
         let state = PluginState::new(termlab_core::config::PluginsConfig::default());
-        let removed = state.cleanup_plugin_resources("nonexistent");
+        let (removed, removed_views) = state.cleanup_plugin_resources("nonexistent");
         assert!(
             removed.is_empty(),
             "should return empty vec when plugin has no resources"
+        );
+        assert!(
+            removed_views.is_empty(),
+            "no docked views should be removed"
         );
     }
 

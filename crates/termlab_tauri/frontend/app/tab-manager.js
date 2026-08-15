@@ -12,8 +12,11 @@
     const fitAndResizeTab = deps.fitAndResizeTab;
     const onTabChanged = deps.onTabChanged;
     const allPanesInTab = deps.allPanesInTab;
+    const rememberPluginViewSize = deps.rememberPluginViewSize;
     const unregisterPaneDnd = deps.unregisterPaneDnd;
     const notifyTerminalClosed = deps.notifyTerminalClosed;
+    const notifyPluginViewClosed = deps.notifyPluginViewClosed;
+    const deletePluginViewPane = deps.deletePluginViewPane;
     const showStatus = deps.showStatus;
     const destroyCurrentWindow = deps.destroyCurrentWindow;
     const allocateTabId = deps.allocateTabId;
@@ -201,9 +204,13 @@
         const pane = panes.get(pid);
         if (!pane) continue;
         unregisterPaneDnd(pid);
+        if (pane.kind === 'plugin_view') rememberPluginViewSize(pane);
         if (notifyBackend && pane.kind === 'terminal' && pane.spawned) {
           if (pane.type === 'ssh') closedSshPane = true;
           notifyTerminalClosed(pid, pane.type);
+        } else if (notifyBackend && pane.kind === 'plugin_view' && pane.viewId) {
+          notifyPluginViewClosed(pane.viewId);
+          deletePluginViewPane(pane.viewId);
         }
         if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
         if (pane.resizeObserver) pane.resizeObserver.disconnect();

@@ -22,6 +22,8 @@
           nextTabId: 1,
           nextTabLabel: 1,
           panes: new Map(),
+          pluginViewPaneById: new Map(),
+          pluginViewSizeMemory: new Map(),
           nextPaneId: 1,
           focusedPaneId: null,
         };
@@ -85,6 +87,7 @@
           refocusActiveTerminal: () => { throw new Error('managerDelegates.refocusActiveTerminal is unavailable'); },
           getTabForPane: () => { throw new Error('managerDelegates.getTabForPane is unavailable'); },
           allPanesInTab: () => { throw new Error('managerDelegates.allPanesInTab is unavailable'); },
+          rememberPluginViewSize: () => { throw new Error('managerDelegates.rememberPluginViewSize is unavailable'); },
           setFocusedPane: () => { throw new Error('managerDelegates.setFocusedPane is unavailable'); },
           closePane: () => { throw new Error('managerDelegates.closePane is unavailable'); },
           splitPane: () => { throw new Error('managerDelegates.splitPane is unavailable'); },

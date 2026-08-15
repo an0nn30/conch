@@ -333,7 +333,7 @@
       if (e.button !== 0) return;
       if (e.target && e.target.closest('button,input,textarea,select,a')) return;
       const pane = getPaneById(paneId);
-      if (!pane) return;
+      if (!pane || pane.kind !== 'plugin_view') return;
 
       e.preventDefault();
       e.stopPropagation();
@@ -359,7 +359,7 @@
 
     function registerDraggablePaneHeader(paneId, headerEl, paneKind) {
       unregisterPane(paneId);
-      if (!headerEl) return;
+      if (!headerEl || paneKind !== 'plugin_view') return;
 
       headerEl.style.cursor = 'grab';
       const onPointerDown = (e) => beginDrag(e, paneId);

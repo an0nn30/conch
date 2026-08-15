@@ -455,6 +455,37 @@ public class HostApi {
     public static native void registerService(String name);
 
     // -----------------------------------------------------------------------
+    // Docked Plugin Views
+    // -----------------------------------------------------------------------
+
+    /**
+     * Open (or focus) a docked plugin view in the active tab.
+     *
+     * <p>The request JSON describes desired dock behavior and metadata.
+     * Returns a JSON object including at least {@code view_id} when accepted.</p>
+     *
+     * @param requestJson JSON request envelope
+     * @return JSON response envelope, or null if rejected
+     */
+    public static native String openDockedView(String requestJson);
+
+    /**
+     * Request close of a previously opened docked plugin view.
+     *
+     * @param viewId docked view ID returned by {@link #openDockedView(String)}
+     * @return true if the view was known and close was accepted
+     */
+    public static native boolean closeDockedView(String viewId);
+
+    /**
+     * Request focus of a previously opened docked plugin view.
+     *
+     * @param viewId docked view ID returned by {@link #openDockedView(String)}
+     * @return true if the view exists and focus was requested
+     */
+    public static native boolean focusDockedView(String viewId);
+
+    // -----------------------------------------------------------------------
     // Terminal / Session
     // -----------------------------------------------------------------------
 
