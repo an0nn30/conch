@@ -105,3 +105,17 @@ window (native title bar, centred title), not an in-page overlay.
   under some rows.
 - Footer: `?` help button bottom-left; `Cancel`, `Apply`, `OK` bottom-right
   with `OK` filled (primary) and `Apply` disabled until changes exist.
+
+## Settings window (measured from `jvm-termlab-settings.png`, 1934x1424 device = 967x712 logical)
+
+Sidebar/content divider at x=386 device = **193 logical (~20% of width)**.
+
+| Element | Measured | Notes |
+|---|---|---|
+| Checkbox box | 28 device = **14 logical** square, 1px border `#424854`, fill `#292C33` | unchecked = empty box, no accent |
+| Checked checkbox | same box, tick drawn in `#ACB2BE` | **no accent fill** — the tick is foreground-coloured |
+| Sidebar selected row | fill `#627190`, height 48 device = **24 logical** | a muted blue, lighter than `--tl-accent` `#6B80A1` |
+| Primary button (`OK`) | fill `#6F7F9E`, label `#FFFFFF` | ≈ `--tl-accent`; white label, not `selectionForeground` |
+| Panel background | `#22252A` | same as everywhere else |
+
+Design notes not visible in tokens: checkboxes are **outline + foreground tick**, not accent-filled (my earlier read of the screenshot was wrong); section headers (`Accessibility`, `UI Options`, `Tree Views`) are plain-case labels followed by a 1px rule running to the right edge; helper text sits under its row in muted grey; inline links (`Reset to default`, `How it works`) render in the accent blue; the footer holds `?` bottom-left and `Cancel` / `Apply` (disabled until dirty) / `OK` bottom-right.
