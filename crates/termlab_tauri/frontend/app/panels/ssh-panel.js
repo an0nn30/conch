@@ -912,10 +912,9 @@
 
   // Hosts panel context menus (New / server / folder) render through the
   // shared window.tlMenu component (styles/design-system/components/menu.css,
-  // app/ui/tl-menu.js) — same popup used by the SFTP row context menu. The
-  // tunnels row menu (tunnels-panel.js) intentionally still goes through
-  // app/features/ssh/context-menu.js / .ssh-context-menu and is unaffected by
-  // this switch; see .superpowers/sdd design-system-phase-4 shared-menu report.
+  // app/ui/tl-menu.js) — same popup used by every other menu in the app,
+  // including the tunnels row menu (tunnels-panel.js, tunnel-manager.js),
+  // which used to go through the now-deleted app/features/ssh/context-menu.js.
   function showContextMenu(e, items) {
     if (!window.tlMenu || typeof window.tlMenu.open !== 'function') {
       if (window.toast && typeof window.toast.error === 'function') {
@@ -939,7 +938,7 @@
       y: e.clientY,
       items: menuItems,
       ariaLabel: 'SSH context menu',
-      routerName: 'ssh-context-menu',
+      routerName: 'ssh-panel-context-menu',
     });
   }
 

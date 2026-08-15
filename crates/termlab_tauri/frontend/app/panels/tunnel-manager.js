@@ -280,67 +280,37 @@
     unregisterEscape = registerOverlayEscape(overlay, 'tunnel-delete-dialog', () => dismiss());
   }
 
+  // Renders through the shared window.tlMenu component
+  // (styles/design-system/components/menu.css, app/ui/tl-menu.js), which
+  // owns positioning, dismissal, single-instance behavior, and (since
+  // design-system-phase-4) auto-focusing the first item — replacing the
+  // first-item .focus() call this function used to do by hand.
   function showRowMenu(e, tunnel, status, errorMsg) {
-    removeContextMenu();
+    if (!window.tlMenu || typeof window.tlMenu.open !== 'function') {
+      console.error('tunnel-manager: window.tlMenu is unavailable');
+      return;
+    }
 
     const items = [];
     if (status === 'active' || status === 'connecting') {
-      items.push({ label: 'Stop', action: () => doStop(tunnel.id) });
+      items.push({ label: 'Stop', onSelect: () => doStop(tunnel.id) });
     } else {
-      items.push({ label: errorMsg ? 'Retry' : 'Start', action: () => doStart(tunnel) });
+      items.push({ label: errorMsg ? 'Retry' : 'Start', onSelect: () => doStart(tunnel) });
     }
-    items.push({ label: 'Edit', action: () => showEditTunnelForm(tunnel) });
+    items.push({ label: 'Edit', icon: 'edit', onSelect: () => showEditTunnelForm(tunnel) });
     if (errorMsg) {
-      items.push({ label: 'View Error', action: () => showErrorDialog('Tunnel Error', errorMsg, () => doStart(tunnel), () => showEditTunnelForm(tunnel)) });
+      items.push({ label: 'View Error', onSelect: () => showErrorDialog('Tunnel Error', errorMsg, () => doStart(tunnel), () => showEditTunnelForm(tunnel)) });
     }
-    items.push({ type: 'separator' });
-    items.push({ label: 'Delete', danger: true, action: () => showDeleteDialog(tunnel) });
+    items.push({ separator: true });
+    items.push({ label: 'Delete', icon: 'remove', danger: true, onSelect: () => showDeleteDialog(tunnel) });
 
-    const menu = document.createElement('div');
-    menu.className = 'ssh-context-menu';
-    menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', 'Tunnel actions');
-    menu.style.left = e.clientX + 'px';
-    menu.style.top = e.clientY + 'px';
-
-    for (const item of items) {
-      if (item.type === 'separator') {
-        const sep = document.createElement('div');
-        sep.className = 'ssh-context-menu-sep';
-        menu.appendChild(sep);
-        continue;
-      }
-      const el = document.createElement('div');
-      el.className = 'ssh-context-menu-item' + (item.danger ? ' danger' : '');
-      el.textContent = item.label;
-      el.setAttribute('role', 'menuitem');
-      el.tabIndex = 0;
-      const activate = () => {
-        removeContextMenu();
-        item.action();
-      };
-      el.addEventListener('click', activate);
-      el.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        activate();
-      });
-      menu.appendChild(el);
-    }
-
-    document.body.appendChild(menu);
-    requestAnimationFrame(() => {
-      const rect = menu.getBoundingClientRect();
-      if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
-      if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
-      const firstItem = menu.querySelector('.ssh-context-menu-item[role="menuitem"]');
-      if (firstItem && typeof firstItem.focus === 'function') firstItem.focus();
+    window.tlMenu.open({
+      x: e.clientX,
+      y: e.clientY,
+      items,
+      ariaLabel: 'Tunnel actions',
+      routerName: 'tunnel-manager-row-context-menu',
     });
-    setTimeout(() => document.addEventListener('click', removeContextMenu, { once: true }), 0);
-  }
-
-  function removeContextMenu() {
-    document.querySelectorAll('.ssh-context-menu').forEach((el) => el.remove());
   }
 
   // ---------------------------------------------------------------------------

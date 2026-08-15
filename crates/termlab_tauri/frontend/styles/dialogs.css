@@ -687,8 +687,3 @@
       font: 11px/1.5 "JetBrains Mono", "Menlo", monospace;
       word-break: break-all; white-space: pre-wrap;
     }
-    #terminal-context-menu button:hover,
-    #tab-context-menu button:hover {
-      background: var(--blue);
-      color: #fff;
-    }

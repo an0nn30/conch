@@ -1,3 +1,9 @@
+// Terminal-pane and tab-strip right-click menus. Both render through the
+// shared window.tlMenu component (styles/design-system/components/menu.css,
+// app/ui/tl-menu.js) — previously these were static <div id="..."> elements
+// baked into index.html and toggled via style.display; tlMenu now owns
+// positioning, outside-click/Escape dismissal, and single-instance behavior,
+// so this module only needs to build each item list at click time.
 (function initTermLabContextMenuRuntime(global) {
   function init(deps) {
     const terminalHostEl = deps.terminalHostEl;
@@ -10,14 +16,10 @@
     const startTabRenameById = deps.startTabRenameById;
     const closeTab = deps.closeTab;
 
-    const termContextMenu = document.getElementById('terminal-context-menu');
-    const tabContextMenu = document.getElementById('tab-context-menu');
-    let tabContextMenuTabId = null;
-    const hideContextMenus = () => {
-      if (termContextMenu.style.display !== 'none') termContextMenu.style.display = 'none';
-      if (tabContextMenu.style.display !== 'none') tabContextMenu.style.display = 'none';
-      tabContextMenuTabId = null;
-    };
+    if (!global.tlMenu || typeof global.tlMenu.open !== 'function') {
+      console.error('context-menu-runtime: window.tlMenu is unavailable');
+      return;
+    }
 
     terminalHostEl.addEventListener('contextmenu', (event) => {
       const paneEl = event.target.closest('.terminal-pane');
@@ -30,19 +32,17 @@
       event.preventDefault();
       event.stopPropagation();
 
-      termContextMenu.style.left = event.clientX + 'px';
-      termContextMenu.style.top = event.clientY + 'px';
-      termContextMenu.style.display = 'block';
       setFocusedPane(paneId);
-    });
-
-    termContextMenu.addEventListener('click', (event) => {
-      const btn = event.target.closest('.context-item');
-      if (!btn) return;
-      hideContextMenus();
-      const action = btn.dataset.action;
-      if (action === 'split-vertical') splitPane('vertical');
-      if (action === 'split-horizontal') splitPane('horizontal');
+      global.tlMenu.open({
+        x: event.clientX,
+        y: event.clientY,
+        items: [
+          { label: 'Split Vertically', onSelect: () => splitPane('vertical') },
+          { label: 'Split Horizontally', onSelect: () => splitPane('horizontal') },
+        ],
+        ariaLabel: 'Terminal actions',
+        routerName: 'terminal-context-menu',
+      });
     });
 
     tabBarEl.addEventListener('contextmenu', (event) => {
@@ -50,51 +50,26 @@
       if (!btn) return;
       event.preventDefault();
 
+      let tabId = null;
       for (const [id, tab] of getTabs()) {
         if (tab.button === btn) {
-          tabContextMenuTabId = id;
+          tabId = id;
           break;
         }
       }
+      if (tabId == null) return;
 
-      tabContextMenu.style.left = event.clientX + 'px';
-      tabContextMenu.style.top = event.clientY + 'px';
-      tabContextMenu.style.display = 'block';
-    });
-
-    tabContextMenu.addEventListener('click', (event) => {
-      const btn = event.target.closest('.context-item');
-      if (!btn) return;
-      hideContextMenus();
-      const action = btn.dataset.action;
-      if (action === 'rename-tab' && tabContextMenuTabId != null) {
-        startTabRenameById(tabContextMenuTabId);
-      }
-      if (action === 'close-tab' && tabContextMenuTabId != null) {
-        closeTab(tabContextMenuTabId);
-      }
-    });
-
-    document.addEventListener('mousedown', (event) => {
-      if (termContextMenu.style.display !== 'none' && !termContextMenu.contains(event.target)) hideContextMenus();
-      if (tabContextMenu.style.display !== 'none' && !tabContextMenu.contains(event.target)) hideContextMenus();
-    });
-
-    const keyboardRouter = global.termlabKeyboardRouter;
-    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
-      keyboardRouter.register({
-        name: 'context-menu-dismiss',
-        priority: 180,
-        isActive: () => termContextMenu.style.display !== 'none' || tabContextMenu.style.display !== 'none',
-        onKeyDown: (event) => {
-          if (event.key !== 'Escape') return false;
-          hideContextMenus();
-          return true;
-        },
+      global.tlMenu.open({
+        x: event.clientX,
+        y: event.clientY,
+        items: [
+          { label: 'Rename Tab', onSelect: () => startTabRenameById(tabId) },
+          { label: 'Close Tab', onSelect: () => closeTab(tabId) },
+        ],
+        ariaLabel: 'Tab actions',
+        routerName: 'tab-context-menu',
       });
-    } else {
-      console.warn('context-menu-runtime: keyboard router unavailable, Escape dismiss handler not registered');
-    }
+    });
   }
 
   global.termlabContextMenuRuntime = {

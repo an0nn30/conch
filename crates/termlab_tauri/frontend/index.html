@@ -128,7 +128,6 @@
   <script src="app/features/ssh/store.js"></script>
   <script src="app/features/ssh/actions.js"></script>
   <script src="app/features/ssh/view.js"></script>
-  <script src="app/features/ssh/context-menu.js"></script>
   <script src="app/features/ssh/auth-prompts.js"></script>
   <script src="app/features/ssh/dependency-prompt.js"></script>
   <script src="app/features/ssh/connection-form.js"></script>
@@ -168,13 +167,5 @@
   <script src="app/terminal-runtime.js"></script>
   <script src="app/startup-runtime.js"></script>
   <script src="app/main-runtime.js"></script>
-  <div id="terminal-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--tab-border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
-    <button class="context-item" data-action="split-vertical" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Vertically</button>
-    <button class="context-item" data-action="split-horizontal" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Horizontally</button>
-  </div>
-  <div id="tab-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--tab-border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
-    <button class="context-item" data-action="rename-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Rename Tab</button>
-    <button class="context-item" data-action="close-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Close Tab</button>
-  </div>
 </body>
 </html>

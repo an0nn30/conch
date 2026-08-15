@@ -1,11 +1,20 @@
 // Shared popup menu (window.tlMenu) — renders the .tl-menu* component
-// (styles/design-system/components/menu.css) used by every context/dropdown
-// menu in the app that has adopted the shared look. Single-instance: opening
-// a menu closes any other tlMenu popup that's still open. Positioning,
-// outside-click dismissal, and Escape handling (via window.termlabKeyboardRouter
-// when available) mirror the pattern established by
-// app/features/files/pane-view.js showRowContextMenu and
-// app/features/ssh/context-menu.js showContextMenu.
+// (styles/design-system/components/menu.css) used by every popup/context
+// menu in the app. Single-instance: opening a menu closes any other tlMenu
+// popup that's still open. Positioning, outside-click dismissal, and Escape
+// handling (via window.termlabKeyboardRouter when available) mirror the
+// pattern established by the original app/features/files/pane-view.js
+// showRowContextMenu and app/features/ssh/context-menu.js showContextMenu
+// (both since folded into this shared component; context-menu.js itself
+// was deleted once its last consumer, tunnels-panel.js, was converted).
+//
+// Item shape: {label, icon?, checked?, disabled?, danger?, title?, onSelect}
+// or {separator: true}. `checked` (boolean, when present) renders a
+// checkable item (role="menuitemcheckbox") with a check glyph in the icon
+// gutter when true — used by the SFTP column-chooser menu and the
+// tool-window "Move to" menu's current-zone indicator. There is no vendored
+// check icon in vendor/intellij-icons, so the glyph is a plain "✓" character
+// styled with tokens (currentColor), not an image.
 (function initTermLabMenu(global) {
   'use strict';
 
@@ -29,16 +38,23 @@
   }
 
   function buildItemEl(item) {
+    const isCheckable = typeof item.checked === 'boolean';
     const el = document.createElement('div');
     el.className = 'tl-menu__item' + (item.disabled ? ' is-disabled' : '') + (item.danger ? ' is-danger' : '');
-    el.setAttribute('role', 'menuitem');
+    el.setAttribute('role', isCheckable ? 'menuitemcheckbox' : 'menuitem');
+    if (isCheckable) el.setAttribute('aria-checked', item.checked ? 'true' : 'false');
     if (item.disabled) el.setAttribute('aria-disabled', 'true');
     if (item.title) el.title = item.title;
     el.tabIndex = item.disabled ? -1 : 0;
 
     const iconWrap = document.createElement('span');
     iconWrap.className = 'tl-menu__icon';
-    if (item.icon && global.tlIcon && typeof global.tlIcon.create === 'function') {
+    if (isCheckable) {
+      if (item.checked) {
+        iconWrap.classList.add('tl-menu__icon--check');
+        iconWrap.textContent = '✓';
+      }
+    } else if (item.icon && global.tlIcon && typeof global.tlIcon.create === 'function') {
       iconWrap.appendChild(global.tlIcon.create(item.icon, { size: 16, alt: '' }));
     }
     el.appendChild(iconWrap);
@@ -93,6 +109,8 @@
       const rect = menu.getBoundingClientRect();
       if (rect.right > window.innerWidth) menu.style.left = Math.max(4, window.innerWidth - rect.width - 4) + 'px';
       if (rect.bottom > window.innerHeight) menu.style.top = Math.max(4, window.innerHeight - rect.height - 4) + 'px';
+      const firstFocusable = menu.querySelector('.tl-menu__item:not(.is-disabled)');
+      if (firstFocusable && typeof firstFocusable.focus === 'function') firstFocusable.focus();
     });
 
     activeOutsideClickHandler = () => close();

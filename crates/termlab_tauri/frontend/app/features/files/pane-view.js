@@ -148,16 +148,16 @@
     });
   }
 
+  // Column-visibility toggle menu — renders through the shared window.tlMenu
+  // component. Items are checkable (tlMenu's `checked` item property renders
+  // a "✓" glyph in the icon gutter); clicking one toggles the column and
+  // closes the menu, same as before.
   function showColumnMenu(event, pane, deps) {
     const d = deps || {};
-    document.querySelectorAll('.fp-col-menu').forEach((menu) => menu.remove());
-
-    const menu = document.createElement('div');
-    menu.className = 'fp-col-menu';
-    menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', 'File columns');
-    menu.style.left = event.clientX + 'px';
-    menu.style.top = event.clientY + 'px';
+    if (!global.tlMenu || typeof global.tlMenu.open !== 'function') {
+      console.error('files-pane-view: window.tlMenu is unavailable');
+      return null;
+    }
 
     const cols = [
       { key: 'colExt', label: 'Extension' },
@@ -165,28 +165,22 @@
       { key: 'colModified', label: 'Modified' },
     ];
 
-    for (const col of cols) {
-      const item = document.createElement('div');
-      item.className = 'fp-col-menu-item';
-      item.innerHTML = `<span class="fp-col-check">${pane[col.key] ? '✓' : ''}</span> ${col.label}`;
-      item.setAttribute('role', 'menuitemcheckbox');
-      item.setAttribute('aria-checked', pane[col.key] ? 'true' : 'false');
-      item.tabIndex = 0;
-      const toggle = () => {
+    const items = cols.map((col) => ({
+      label: col.label,
+      checked: !!pane[col.key],
+      onSelect: () => {
         if (typeof d.onToggleColumn === 'function') d.onToggleColumn(col.key);
-        menu.remove();
-      };
-      item.addEventListener('click', toggle);
-      item.addEventListener('keydown', (keyEvent) => {
-        if (keyEvent.key !== 'Enter' && keyEvent.key !== ' ') return;
-        keyEvent.preventDefault();
-        toggle();
-      });
-      menu.appendChild(item);
-    }
+      },
+    }));
 
-    document.body.appendChild(menu);
-    setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
+    return global.tlMenu.open({
+      x: event.clientX,
+      y: event.clientY,
+      items,
+      ariaLabel: 'File columns',
+      routerName: 'fp-col-context-menu',
+      routerPriority: 220,
+    });
   }
 
   // ---------------------------------------------------------------------------

@@ -401,7 +401,13 @@
       }
       gearBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (zone.activeId) showContextMenu(e, zone.activeId);
+        if (!zone.activeId) return;
+        // Position from the button's own rect, not e.clientX/Y — a
+        // keyboard-activated click (Enter/Space) synthesizes a click event
+        // with clientX/clientY at 0,0 in most webviews, which would open the
+        // menu at the top-left corner instead of near the button.
+        const rect = gearBtn.getBoundingClientRect();
+        showContextMenu(rect.left, rect.bottom, zone.activeId);
       });
       const hideBtn = document.createElement('button');
       hideBtn.className = 'tl-icon-btn';
@@ -419,7 +425,7 @@
       actionsEl.appendChild(hideBtn);
       headerEl.appendChild(titleSpan);
       headerEl.appendChild(actionsEl);
-      headerEl.oncontextmenu = (e) => { e.preventDefault(); if (zone.activeId) showContextMenu(e, zone.activeId); };
+      headerEl.oncontextmenu = (e) => { e.preventDefault(); if (zone.activeId) showContextMenu(e.clientX, e.clientY, zone.activeId); };
     } else if (headerEl) {
       headerEl.style.display = 'none';
     }
@@ -830,23 +836,25 @@
       toggle(windowId);
     });
     btn.addEventListener('pointerdown', (e) => beginStripDrag(e, windowId, zone && zone.el ? zone.el.dataset.zone : tw.zone, btn));
-    btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e, windowId); });
+    btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, windowId); });
     return btn;
   }
 
-  // ---- Context menu (Phase 3 stub — simple implementation) ------------------
-
-  function showContextMenu(event, windowId) {
-    // Remove any existing context menu
-    const old = document.getElementById('twm-ctx-menu');
-    if (old) old.remove();
+  // ---- Context menu ("Move to <zone>" + Hide) --------------------------------
+  // Renders through the shared window.tlMenu component
+  // (styles/design-system/components/menu.css, app/ui/tl-menu.js). The
+  // current zone is included in the target list (rather than omitted, as the
+  // old hand-rolled menu did) so it can carry a checked/current indicator via
+  // tlMenu's `checked` item property; it's also disabled since moving a
+  // window to the zone it's already in is a no-op.
+  function showContextMenu(x, y, windowId) {
+    if (!window.tlMenu || typeof window.tlMenu.open !== 'function') {
+      console.error('tool-window-manager: window.tlMenu is unavailable');
+      return;
+    }
 
     const tw = toolWindows.get(windowId);
     if (!tw) return;
-
-    const menu = document.createElement('div');
-    menu.id = 'twm-ctx-menu';
-    menu.className = 'twm-context-menu';
 
     const targets = [
       { zone: 'left-top',     label: 'Left (Top)' },
@@ -856,46 +864,26 @@
       { zone: 'bottom',       label: 'Bottom' },
     ];
 
-    for (const t of targets) {
-      if (t.zone === tw.zone) continue;
-      const item = document.createElement('div');
-      item.className = 'twm-ctx-item';
-      item.textContent = 'Move to ' + t.label;
-      item.addEventListener('click', () => { menu.remove(); moveTo(windowId, t.zone); });
-      menu.appendChild(item);
-    }
+    const items = targets.map((t) => {
+      const isCurrent = t.zone === tw.zone;
+      return {
+        label: 'Move to ' + t.label,
+        checked: isCurrent,
+        disabled: isCurrent,
+        onSelect: () => moveTo(windowId, t.zone),
+      };
+    });
 
-    // Separator + Hide
-    const sep = document.createElement('div');
-    sep.className = 'twm-ctx-sep';
-    menu.appendChild(sep);
+    items.push({ separator: true });
+    items.push({ label: 'Hide', onSelect: () => deactivate(windowId) });
 
-    const hideItem = document.createElement('div');
-    hideItem.className = 'twm-ctx-item';
-    hideItem.textContent = 'Hide';
-    hideItem.addEventListener('click', () => { menu.remove(); deactivate(windowId); });
-    menu.appendChild(hideItem);
-
-    menu.style.position = 'fixed';
-    menu.style.left = event.clientX + 'px';
-    menu.style.top  = event.clientY + 'px';
-    menu.style.visibility = 'hidden';
-    document.body.appendChild(menu);
-
-    // Clamp to viewport so the menu doesn't clip off-screen
-    const rect = menu.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    if (rect.right > vw) menu.style.left = Math.max(0, vw - rect.width - 4) + 'px';
-    if (rect.bottom > vh) menu.style.top = Math.max(0, vh - rect.height - 4) + 'px';
-    if (rect.left < 0) menu.style.left = '4px';
-    if (rect.top < 0) menu.style.top = '4px';
-    menu.style.visibility = '';
-
-    const dismiss = (e) => {
-      if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', dismiss, true); }
-    };
-    setTimeout(() => document.addEventListener('pointerdown', dismiss, true), 0);
+    window.tlMenu.open({
+      x,
+      y,
+      items,
+      ariaLabel: 'Tool window actions',
+      routerName: 'twm-move-menu',
+    });
   }
 
   // ---- Sidebar edge resize --------------------------------------------------

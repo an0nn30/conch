@@ -1,9 +1,11 @@
 // Tunnels Panel — standalone tool window listing SSH tunnels (start/stop/edit/delete).
 //
-// Reuses app/features/ssh/{view,data-service,actions,context-menu}.js and
+// Reuses app/features/ssh/{view,data-service,actions}.js and
 // app/panels/tunnel-manager.js. This tool window previously lived as a section
 // inside ssh-panel.js's sidebar; that wiring (removed in an earlier design-system
-// task) is mirrored here, minus the sidebar-specific chrome.
+// task) is mirrored here, minus the sidebar-specific chrome. The row context
+// menu renders through the shared window.tlMenu component
+// (styles/design-system/components/menu.css, app/ui/tl-menu.js).
 
 (function (exports) {
   'use strict';
@@ -11,7 +13,6 @@
   const sshDataService = exports.termlabSshFeatureDataService || {};
   const sshActions = exports.termlabSshActions || {};
   const sshView = exports.termlabSshView || {};
-  const sshContextMenuFeature = exports.termlabSshContextMenu || {};
 
   const esc = (exports.utils && exports.utils.esc) || ((value) => String(value == null ? '' : value));
 
@@ -127,8 +128,8 @@
   }
 
   function showTunnelContextMenu(e, tunnel, status) {
-    if (typeof sshContextMenuFeature.showContextMenu !== 'function') {
-      console.error('tunnelsPanel: ssh context-menu feature unavailable');
+    if (!exports.tlMenu || typeof exports.tlMenu.open !== 'function') {
+      console.error('tunnelsPanel: window.tlMenu is unavailable');
       return;
     }
 
@@ -136,7 +137,7 @@
     if (status === 'active' || status === 'connecting') {
       items.push({
         label: 'Stop',
-        action: async () => {
+        onSelect: async () => {
           if (typeof sshActions.stopTunnel !== 'function') return;
           try { await sshActions.stopTunnel(invoke, tunnel.id); } catch (err) { console.error(err); }
           setTimeout(refresh, 300);
@@ -145,7 +146,7 @@
     } else {
       items.push({
         label: 'Start',
-        action: async () => {
+        onSelect: async () => {
           if (typeof sshActions.startTunnel !== 'function') return;
           try {
             await sshActions.startTunnel(invoke, tunnel.id);
@@ -158,22 +159,30 @@
     }
     items.push({
       label: 'Edit',
-      action: () => {
+      icon: 'edit',
+      onSelect: () => {
         if (exports.tunnelManager) exports.tunnelManager.showEdit(tunnel);
       },
     });
-    items.push({ type: 'separator' });
+    items.push({ separator: true });
     items.push({
       label: 'Delete',
+      icon: 'remove',
       danger: true,
-      action: async () => {
+      onSelect: async () => {
         if (typeof sshActions.deleteTunnel !== 'function') return;
         try { await sshActions.deleteTunnel(invoke, tunnel.id); } catch (err) { console.error(err); }
         refresh();
       },
     });
 
-    sshContextMenuFeature.showContextMenu(e, items);
+    exports.tlMenu.open({
+      x: e.clientX,
+      y: e.clientY,
+      items,
+      ariaLabel: 'Tunnel actions',
+      routerName: 'tunnels-row-context-menu',
+    });
   }
 
   exports.tunnelsPanel = { init, refresh };

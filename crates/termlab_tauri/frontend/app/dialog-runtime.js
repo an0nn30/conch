@@ -13,12 +13,9 @@
         const overlay = document.querySelector('.ssh-overlay');
         if (overlay) return false;
 
-        const ctxMenu = document.querySelector('.ssh-context-menu');
-        if (ctxMenu) {
-          ctxMenu.remove();
-          return true;
-        }
-
+        // Popup menus (window.tlMenu) own their own Escape dismissal via the
+        // keyboard router at a higher priority than this handler, so there is
+        // no longer a menu class to check for here.
         refocusActiveTerminal();
         return false;
       };

@@ -242,15 +242,8 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* -- TWM context menu -- */
-    .twm-context-menu {
-      background: var(--panel-bg); border: 1px solid var(--tab-border);
-      border-radius: 6px; padding: 4px 0; z-index: 9999; min-width: 160px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    }
-    .twm-ctx-item {
-      padding: 5px 14px; cursor: pointer; font-size: 12px; color: var(--fg);
-      white-space: nowrap;
-    }
-    .twm-ctx-item:hover { background: var(--selection, rgba(255,255,255,0.08)); }
-    .twm-ctx-sep { height: 1px; background: var(--tab-border); margin: 4px 8px; }
+    /* -- TWM context menu ("Move to <zone>" + Hide) -- now renders through
+       the shared .tl-menu component (styles/design-system/components/menu.css,
+       app/ui/tl-menu.js); see app/layout/tool-window-manager.js
+       showContextMenu. The old .twm-context-menu*/.twm-ctx-* rules that used
+       to live here have been removed. */
