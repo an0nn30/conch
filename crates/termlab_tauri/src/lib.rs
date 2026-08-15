@@ -36,19 +36,21 @@ pub(crate) struct TauriState {
     ptys: Arc<Mutex<HashMap<String, PtyBackend>>>,
     active_panes: Arc<Mutex<HashMap<String, u32>>>,
     config: RwLock<UserConfig>,
-    /// The process's working directory at launch — the app's "workspace".
-    /// Captured once here and never re-read, so it stays static for the
-    /// window's lifetime even if a PTY's shell later `cd`s elsewhere (see
-    /// `commands::get_workspace_dir`).
+    /// The user's home directory, used as a stable label for the app's
+    /// "workspace" (see `commands::get_workspace_dir`). Captured once via
+    /// `dirs::home_dir()` at startup — not the process's actual working
+    /// directory — and never re-read, so it stays static for the window's
+    /// lifetime even if a PTY's shell later `cd`s elsewhere.
     workspace_dir: Option<String>,
 }
 
 /// Launch the Tauri-based UI.
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
-    // The workspace is the directory the user works in — the same value the
-    // shell starts in — not wherever the binary happened to be launched from
-    // (current_dir() titled the window after the build directory). Mirrors the
-    // reference app, whose title segment is its launch workspace.
+    // Use the user's home directory as a stable "workspace" label rather than
+    // the process's actual cwd (current_dir() titled the window after the
+    // build directory) or a PTY's shell cwd (pty_backend spawns shells with
+    // no explicit cwd, so where they actually start isn't tracked here).
+    // Mirrors the reference app, whose title segment is its launch workspace.
     let workspace_dir = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
 
     let (transfer_tx, mut transfer_rx) =

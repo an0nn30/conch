@@ -21,6 +21,12 @@
   let activeMenu = null;
   let activeOutsideClickHandler = null;
   let activeUnregisterEscape = null;
+  // Element focused right before the currently-open menu grabbed focus
+  // (open() auto-focuses its first enabled item). Restored on close() so
+  // Escape/outside-click/item-selection don't strand focus on a node that's
+  // about to be removed from the document — see close() for the ordering
+  // contract with an item's onSelect.
+  let lastActiveElement = null;
 
   function close() {
     if (activeOutsideClickHandler) {
@@ -32,9 +38,24 @@
       activeUnregisterEscape = null;
     }
     if (activeMenu) {
+      const current = document.activeElement;
+      // Only restore focus if nothing else has already deliberately claimed
+      // it. If the dismissal itself moved focus elsewhere (outside click on
+      // another focusable control, xterm re-focusing itself on click), the
+      // active element right before removal will be neither body nor inside
+      // this menu — leave that alone rather than fighting it. Otherwise
+      // (focus was still on a menu item, or nothing much is focused) restore
+      // it. Item selection (buildItemEl.activate) calls close() BEFORE
+      // invoking onSelect(), so this restore always happens first and an
+      // onSelect that moves focus itself (e.g. opening a dialog) still wins.
+      const stolen = current && current !== document.body && !activeMenu.contains(current);
       activeMenu.remove();
       activeMenu = null;
+      if (!stolen && lastActiveElement && lastActiveElement.isConnected && typeof lastActiveElement.focus === 'function') {
+        lastActiveElement.focus();
+      }
     }
+    lastActiveElement = null;
   }
 
   function buildItemEl(item) {
@@ -82,7 +103,12 @@
 
   function open(opts) {
     const o = opts || {};
-    close(); // single-instance: opening one closes any other tlMenu popup
+    close(); // single-instance: opening one closes any other tlMenu popup (restoring its focus first)
+
+    // Captured after the close() above so a menu opened from within another
+    // menu still anchors to the original pre-menu element, not the just-closed
+    // menu's item.
+    lastActiveElement = document.activeElement;
 
     const menu = document.createElement('div');
     menu.className = 'tl-menu';

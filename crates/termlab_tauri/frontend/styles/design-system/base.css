@@ -26,6 +26,26 @@
   --tl-selection-fg: var(--tl-base-selectionForeground);
   --tl-row-hover: var(--tl-ActionButton-hoverBackground);
 
+  /* Danger/error text (e.g. destructive menu items). tokens-dark.css has
+     --tl-base-errorForeground; tokens-light.css defines no error-ish raw
+     token at all, so the fallback below is a literal color (matching the
+     current dark value) rather than another var() reference — chaining to
+     an undefined light token would just move the same gap one level down.
+     This replaces components reaching for the legacy, user-customizable
+     terminal ANSI --red (styles/base.css) for UI chrome, which drifts away
+     from "red" entirely if the user picks a different terminal palette. */
+  --tl-danger: var(--tl-base-errorForeground, #cd3359);
+
+  /* Active-tab fill + underline (styles/layout.css .tab-btn.active). The raw
+     --tl-EditorTabs-underlinedTabBackground / --tl-DefaultTabs-underlineColor
+     tokens only exist in tokens-dark.css — tokens-light.css defines no
+     EditorTabs/DefaultTabs block. Fall back to --tl-row-hover / --tl-accent
+     (both real semantic aliases above, guaranteed to resolve in light too)
+     rather than another dark-only raw token, so the light theme still shows
+     a visible active tab instead of resolving to nothing. */
+  --tl-tab-active-bg: var(--tl-EditorTabs-underlinedTabBackground, var(--tl-row-hover));
+  --tl-tab-active-underline: var(--tl-DefaultTabs-underlineColor, var(--tl-accent));
+
   /* The JVM dark theme (TermLabDark.theme.json) defines no ScrollBar block
      at all, so tokens-dark.css has no --tl-ScrollBar-* keys; the light
      theme only partially defines one (thumbColor, no hover variant). A
