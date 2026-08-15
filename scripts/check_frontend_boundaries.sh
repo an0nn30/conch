@@ -104,6 +104,15 @@ else
   echo "frontend-boundary-check: ok (get_saved_layout usage constrained to approved adapters/fallbacks)"
 fi
 
+echo "frontend-boundary-check: scanning design-system component css for raw hex colors"
+if rg -n "#[0-9a-fA-F]{3,8}" "$FRONTEND_DIR/styles/design-system/components" >/tmp/frontend-boundary-ds-hex.txt; then
+  echo "frontend-boundary-check: raw hex found in design-system components (use tokens):" >&2
+  cat /tmp/frontend-boundary-ds-hex.txt >&2
+  fail=1
+else
+  echo "frontend-boundary-check: ok (design-system components use tokens only)"
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo "frontend-boundary-check: FAILED" >&2
   exit 1
