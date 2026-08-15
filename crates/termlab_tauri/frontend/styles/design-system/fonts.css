@@ -1,0 +1,32 @@
+/* Design-system fonts: bundled so the look is identical on every machine. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../../vendor/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../../vendor/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-weight: 700; font-style: normal;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../../vendor/fonts/JetBrainsMono-Italic.woff2") format("woff2");
+  font-weight: 400; font-style: italic;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../../vendor/fonts/JetBrainsMono-BoldItalic.woff2") format("woff2");
+  font-weight: 700; font-style: italic;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("../../vendor/fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900; font-style: normal;
+}
+
+:root {
+  --tl-font-ui: "Inter", -apple-system, "Segoe UI", sans-serif;
+  --tl-font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --tl-font-size-ui: 13px;
+}
