@@ -352,7 +352,7 @@
       color: var(--tl-fg);
     }
     .ssh-folder-header:hover { background: var(--tl-row-hover); }
-    .ssh-folder-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--dim-fg); }
+    .ssh-folder-arrow { font-size: 9px; width: 16px; flex-shrink: 0; text-align: center; color: var(--dim-fg); }
     .ssh-folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .ssh-folder-count { font-size: var(--ui-font-small); color: var(--tl-fg-muted); }
     .ssh-folder-entries { }
