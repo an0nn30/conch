@@ -13,7 +13,7 @@
 .tl-btn--primary {
   background: var(--tl-accent);
   border-color: var(--tl-accent);
-  color: var(--tl-selection-fg);
+  color: var(--tl-Button-default-foreground);
 }
 .tl-icon-btn {
   display: inline-flex; align-items: center; justify-content: center;

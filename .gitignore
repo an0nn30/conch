@@ -41,3 +41,6 @@ build.ps1
 .worktrees/
 plugins/
 .codex
+
+# Python bytecode cache
+scripts/__pycache__/

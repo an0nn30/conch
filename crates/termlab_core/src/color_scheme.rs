@@ -125,6 +125,12 @@ impl Default for ColorScheme {
 /// Return the bundled themes directory shipped with the frontend:
 /// `crates/termlab_tauri/frontend/themes/`, resolved at compile time relative
 /// to this crate's manifest dir (siblings under `crates/`).
+// TODO(packaging): env!("CARGO_MANIFEST_DIR") only resolves inside a source
+// checkout — it is dev-only and will not point at the right location in a
+// packaged/release build. Before shipping any bundled or release build,
+// replace this with Tauri's resource resolver (bundle themes as Tauri
+// resources) or read from an installed config/resource directory, or
+// bundled themes will silently vanish at runtime.
 fn bundled_themes_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")

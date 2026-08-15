@@ -1,8 +1,16 @@
 /* Semantic alias layer: the only hand-written mapping from generated raw
    tokens to what components consume. Metrics measured against the JVM app.
 
-   All eight var(--tl-...) references below were verified present in
-   tokens-dark.css (242 tokens) via grep; no substitutions were required.
+   Presence of a token is not sufficient to alias to it — the VALUE must
+   match design intent. All var(--tl-...) references below were verified
+   present in tokens-dark.css AND checked against the spec's intended
+   color. --tl-accent was originally aliased to
+   --tl-ActionButton-hoverBorderColor, which exists in tokens-dark.css but
+   holds #3d424b (gray) — a phantom-correct, value-wrong reference that
+   silently resolved to the wrong color instead of falling back. Substituted
+   --tl-Button-default-startBackground, which holds #6B80A1, matching the
+   spec's accent color.
+
    Two generated tokens are known-invalid upstream (--tl-StatusBar-background
    holds the literal string "baseBackground" rather than a color, and
    --tl-ComboPopup-border holds an insets string) — neither is referenced
@@ -13,7 +21,7 @@
   --tl-fg: var(--tl-base-foreground);
   --tl-fg-muted: var(--tl-base-infoForeground);
   --tl-border: var(--tl-base-borderColor);
-  --tl-accent: var(--tl-ActionButton-hoverBorderColor, #6b80a1);
+  --tl-accent: var(--tl-Button-default-startBackground);
   --tl-selection-bg: var(--tl-base-selectionBackground);
   --tl-selection-fg: var(--tl-base-selectionForeground);
   --tl-row-hover: var(--tl-ActionButton-hoverBackground);
