@@ -353,16 +353,13 @@
 
   function mapThemeCssVars(themeColors) {
     if (!themeColors || typeof themeColors !== 'object') return null;
+    // UI chrome (--bg, --panel-bg, --fg, --dim-fg, borders, inputs, selection,
+    // secondary/muted text) is owned by the design-system tokens and must NOT
+    // be set from the terminal color scheme: that coupling painted the entire
+    // window with the console background. Terminal colors reach the terminal
+    // itself through toTerminalTheme(). Only the accent palette below stays
+    // theme-driven, so status dots keep the active palette's flavor.
     const vars = {
-      '--bg': themeColors.background,
-      '--fg': themeColors.foreground,
-      '--dim-fg': themeColors.dim_fg,
-      '--panel-bg': themeColors.panel_bg,
-      '--tab-bar-bg': themeColors.tab_bar_bg,
-      '--tab-border': themeColors.tab_border,
-      '--active-highlight': themeColors.active_highlight,
-      '--input-bg': themeColors.input_bg,
-      '--hover-bg': themeColors.input_bg,
       '--red': themeColors.red,
       '--green': themeColors.green,
       '--yellow': themeColors.yellow,
@@ -370,8 +367,6 @@
       '--cyan': themeColors.cyan,
       '--magenta': themeColors.magenta,
     };
-    if (themeColors.text_secondary) vars['--text-secondary'] = themeColors.text_secondary;
-    if (themeColors.text_muted) vars['--text-muted'] = themeColors.text_muted;
     return vars;
   }
 

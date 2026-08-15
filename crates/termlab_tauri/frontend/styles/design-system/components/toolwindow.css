@@ -1,11 +1,20 @@
 .tl-toolwindow { display: flex; flex-direction: column; background: var(--tl-panel-bg); }
+/* Header bar is a lighter band than the panel, framed top and bottom —
+   measured off the reference app at 27-28px tall with ToolWindow.Header
+   colors. The inactive shade is what both apps show at rest; the active
+   shade is applied when the tool window holds focus. */
 .tl-toolwindow__header {
   display: flex; align-items: center; justify-content: space-between;
   height: var(--tl-header-h);
   padding: 0 var(--tl-space-2);
-  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
   color: var(--tl-fg);
+  background: var(--tl-ToolWindow-Header-inactiveBackground);
+  border-top: 1px solid var(--tl-border);
   border-bottom: 1px solid var(--tl-border);
+}
+.tl-toolwindow__header.is-active {
+  background: var(--tl-ToolWindow-Header-background);
 }
 .tl-toolwindow__header-actions { display: inline-flex; gap: var(--tl-space-1); }
 .tl-toolwindow__toolbar {

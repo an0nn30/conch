@@ -37,8 +37,8 @@
   --tl-scrollbar-thumb: rgba(128, 134, 146, 0.4);
   --tl-scrollbar-thumb-hover: rgba(128, 134, 146, 0.6);
 
-  --tl-header-h: 28px;   /* tool window title row */
-  --tl-toolbar-h: 26px;  /* icon toolbar row */
+  --tl-header-h: 29px;   /* tool window title row: 27px content + 1px borders, measured */
+  --tl-toolbar-h: 28px;  /* icon toolbar row */
   --tl-row-h: 24px;      /* table/tree compact row */
   --tl-space-1: 4px;
   --tl-space-2: 8px;

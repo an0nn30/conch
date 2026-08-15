@@ -376,7 +376,7 @@
       gearBtn.className = 'tl-icon-btn';
       gearBtn.title = 'Options';
       if (window.tlIcon) {
-        gearBtn.appendChild(window.tlIcon.create('settings', { size: 16, alt: 'Options' }));
+        gearBtn.appendChild(window.tlIcon.create('gear', { size: 16, alt: 'Options' }));
       } else {
         gearBtn.textContent = '⚙';
       }

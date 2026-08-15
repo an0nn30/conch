@@ -62,3 +62,4 @@ For Task 5's icon helper: the following 6 of 15 logical names have **no** `_dark
 directory (`<name>.svg` only) — `close`, `search`, `chevronDown`, `chevronRight`, `folder`, `file`.
 The other 9 (`add`, `edit`, `remove`, `refresh`, `web`, `settings`, `hideToolWindow`, `notifications`,
 `moreVertical`) each have both `<name>.svg` and `<name>_dark.svg`.
+gear ← platform/icons/src/general/gearPlain.svg (Apache-2.0)

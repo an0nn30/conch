@@ -4,14 +4,26 @@
       font-weight: normal;
       font-style: normal;
     }
+    /* Legacy chrome variables are ALIASES onto the design-system tokens
+       (styles/design-system/, generated from the IntelliJ theme). UI chrome
+       and terminal colors are separate concerns, exactly as in IntelliJ:
+       the terminal color scheme paints the terminal only — it must never
+       drive these. Accent colors (--red…--magenta) still come from the
+       active terminal palette; see config-service.js mapThemeCssVars. */
     :root {
-      --bg: #282a36; --fg: #f8f8f2; --dim-fg: #6272a4;
-      --panel-bg: #21222c; --tab-bar-bg: #1f212b; --tab-border: #3a3d4f;
-      --active-highlight: #44475a;
+      --bg: var(--tl-base-background);
+      --fg: var(--tl-base-foreground);
+      --dim-fg: var(--tl-base-infoForeground);
+      --panel-bg: var(--tl-Panel-background);
+      --tab-bar-bg: var(--tl-base-background);
+      --tab-border: var(--tl-base-borderColor);
+      --active-highlight: var(--tl-base-selectionBackground);
       --red: #ff5555; --green: #50fa7b; --yellow: #f1fa8c; --blue: #bd93f9;
       --cyan: #8be9fd; --magenta: #ff79c6;
-      --input-bg: #2b2e3a; --hover-bg: #2b2e3a;
-      --text-secondary: #c5c8d5; --text-muted: #8b8fa3;
+      --input-bg: var(--tl-TextField-background);
+      --hover-bg: var(--tl-ActionButton-hoverBackground);
+      --text-secondary: var(--tl-base-foreground);
+      --text-muted: var(--tl-base-infoForeground);
       --ui-font-small: 12px; --ui-font-list: 14px; --ui-font-normal: 14px;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }

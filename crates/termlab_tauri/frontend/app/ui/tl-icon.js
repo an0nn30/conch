@@ -4,8 +4,8 @@
   // the webview cannot stat files; regenerate with:
   //   ls crates/termlab_tauri/frontend/vendor/intellij-icons | grep _dark
   let darkVariants = new Set([
-    'add', 'edit', 'remove', 'refresh', 'web', 'settings', 'hideToolWindow',
-    'notifications', 'moreVertical',
+    'add', 'edit', 'remove', 'refresh', 'web', 'settings', 'gear',
+    'hideToolWindow', 'notifications', 'moreVertical',
   ]);
 
   function resolve(name, isDark) {
