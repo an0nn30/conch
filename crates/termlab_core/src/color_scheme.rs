@@ -147,14 +147,14 @@ pub fn load_theme(path: &Path) -> Result<ColorScheme> {
     Ok(theme_file.colors)
 }
 
-/// Scan the bundled themes directory and the user themes directory, returning
-/// a map of `name -> path`. The bundled dir is scanned first and the user dir
-/// second, so a user theme with the same name overwrites (wins over) a
-/// bundled theme of that name.
-pub fn list_themes() -> HashMap<String, PathBuf> {
+/// Scan `dirs` in order and return a map of `name -> path` for every `.toml`
+/// file found. Directories earlier in the slice are scanned first; a file
+/// with the same stem in a later directory overwrites (wins over) one from
+/// an earlier directory, since `HashMap::insert` replaces on duplicate keys.
+fn list_themes_in(dirs: &[PathBuf]) -> HashMap<String, PathBuf> {
     let mut themes = HashMap::new();
-    for dir in [bundled_themes_dir(), themes_dir()] {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
+    for dir in dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|ext| ext == "toml") {
@@ -168,13 +168,21 @@ pub fn list_themes() -> HashMap<String, PathBuf> {
     themes
 }
 
+/// Scan the bundled themes directory and the user themes directory, returning
+/// a map of `name -> path`. The bundled dir is scanned first and the user dir
+/// second, so a user theme with the same name overwrites (wins over) a
+/// bundled theme of that name.
+pub fn list_themes() -> HashMap<String, PathBuf> {
+    list_themes_in(&[bundled_themes_dir(), themes_dir()])
+}
+
 /// Resolve a theme by name or path: load from disk or fall back to built-in Dracula.
 ///
 /// If `value` is a file path (contains `/`, `\`, or ends with `.toml`), it is
 /// loaded directly. A leading `~` is expanded to the home directory.
-/// Otherwise `value` is treated as a theme name and looked up in the themes
-/// directory (`~/.config/termlab/themes/{name}.toml`).
-pub fn resolve_theme(value: &str) -> ColorScheme {
+/// Otherwise `value` is treated as a theme name and looked up in `dirs`, in
+/// order (later directories win on name collision — see [`list_themes_in`]).
+fn resolve_theme_in(value: &str, dirs: &[PathBuf]) -> ColorScheme {
     let is_path = value.contains('/') || value.contains('\\') || value.ends_with(".toml");
 
     if is_path {
@@ -198,7 +206,7 @@ pub fn resolve_theme(value: &str) -> ColorScheme {
             }
         }
     } else {
-        let themes = list_themes();
+        let themes = list_themes_in(dirs);
         if let Some(path) = themes.get(value) {
             match load_theme(path) {
                 Ok(scheme) => {
@@ -222,24 +230,113 @@ pub fn resolve_theme(value: &str) -> ColorScheme {
     ColorScheme::default()
 }
 
+/// Resolve a theme by name or path against the production theme directories:
+/// the bundled frontend `themes/` dir first, then `~/.config/termlab/themes/`
+/// (user themes win on name collision). See [`resolve_theme_in`].
+pub fn resolve_theme(value: &str) -> ColorScheme {
+    resolve_theme_in(value, &[bundled_themes_dir(), themes_dir()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Minimal valid Alacritty theme TOML with the given background.
+    fn theme_toml(background: &str) -> String {
+        format!(
+            r##"
+[colors.primary]
+background = "{background}"
+foreground = "#ffffff"
+[colors.normal]
+black = "#000000"
+red = "#000000"
+green = "#000000"
+yellow = "#000000"
+blue = "#000000"
+magenta = "#000000"
+cyan = "#000000"
+white = "#000000"
+[colors.bright]
+black = "#000000"
+red = "#000000"
+green = "#000000"
+yellow = "#000000"
+blue = "#000000"
+magenta = "#000000"
+cyan = "#000000"
+white = "#000000"
+"##
+        )
+    }
+
     #[test]
     fn list_themes_finds_bundled_frontend_theme() {
-        let themes = list_themes();
+        // Hermetic: use a fake "bundled" dir (a tempdir seeded with a copy of
+        // the real generated toml) plus an empty fake user dir, rather than
+        // the real production dirs — the real ~/.config/termlab/themes may or
+        // may not exist on the machine running this test.
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bundled.path().join("TermLab Dark.toml"),
+            theme_toml("#070A0E"),
+        )
+        .unwrap();
+        let user = tempfile::tempdir().unwrap();
+
+        let themes = list_themes_in(&[bundled.path().to_path_buf(), user.path().to_path_buf()]);
         assert!(
             themes.contains_key("TermLab Dark"),
-            "expected bundled 'TermLab Dark' theme from crates/termlab_tauri/frontend/themes to be discoverable, found: {:?}",
+            "expected 'TermLab Dark' theme to be discoverable, found: {:?}",
             themes.keys().collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn resolve_theme_loads_bundled_frontend_theme() {
-        let scheme = resolve_theme("TermLab Dark");
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bundled.path().join("TermLab Dark.toml"),
+            theme_toml("#070A0E"),
+        )
+        .unwrap();
+        let user = tempfile::tempdir().unwrap();
+
+        let scheme = resolve_theme_in(
+            "TermLab Dark",
+            &[bundled.path().to_path_buf(), user.path().to_path_buf()],
+        );
         assert_eq!(scheme.primary.background, "#070A0E");
+    }
+
+    #[test]
+    fn resolve_theme_prefers_user_dir_over_bundled_dir_on_name_collision() {
+        // Seed a same-named theme in both a fake bundled dir and a fake user
+        // dir, with different backgrounds. The user copy must win, per the
+        // documented precedence (bundled dir scanned first, user dir second,
+        // later insert wins).
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join("Shadowed.toml"), theme_toml("#111111")).unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("Shadowed.toml"), theme_toml("#222222")).unwrap();
+
+        let scheme = resolve_theme_in(
+            "Shadowed",
+            &[bundled.path().to_path_buf(), user.path().to_path_buf()],
+        );
+        assert_eq!(
+            scheme.primary.background, "#222222",
+            "user theme dir must take precedence over the bundled theme dir on name collision"
+        );
+
+        // Also assert directly on the merged map, which is what production
+        // list_themes()/resolve_theme() actually iterate over — this pins
+        // the *order* passed to list_themes_in, not just the outcome.
+        let themes = list_themes_in(&[bundled.path().to_path_buf(), user.path().to_path_buf()]);
+        assert_eq!(
+            themes.get("Shadowed").unwrap(),
+            &user.path().join("Shadowed.toml")
+        );
     }
 
     #[test]
