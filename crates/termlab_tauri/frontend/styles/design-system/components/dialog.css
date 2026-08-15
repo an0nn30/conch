@@ -1,0 +1,55 @@
+/* Shared modal dialog shell (window.tlDialog.open) — replaces the ad-hoc
+   .ssh-overlay/.ssh-form* rules in styles/dialogs.css and the various
+   feature-local overlay/panel pairs (files-panel.js, plugin-widgets.js,
+   ssh/auth-prompts.js, ssh/dialogs.js, tunnel-manager.js, vault/account-form.js)
+   one dialog at a time as each is migrated. See app/ui/tl-dialog.js for the
+   stacking/focus-trap/escape contract; z-index per instance is set inline by
+   that module (3000 + depth*10), not here.
+
+   BEM-ish naming, matching tl-menu.css: .tl-dialog__overlay is the
+   fixed backdrop, .tl-dialog is the panel, .tl-dialog__* are its parts. */
+.tl-dialog__overlay {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--tl-dialog-scrim);
+}
+.tl-dialog {
+  display: flex; flex-direction: column;
+  max-height: 84vh;
+  background: var(--tl-dialog-bg);
+  border: 1px solid var(--tl-dialog-border);
+  border-radius: var(--tl-radius);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+.tl-dialog--sm { width: 380px; }
+.tl-dialog--md { width: 520px; }
+.tl-dialog--lg { width: 720px; }
+.tl-dialog__title {
+  flex-shrink: 0;
+  text-align: center;
+  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  padding: var(--tl-space-3) var(--tl-space-4);
+}
+.tl-dialog__body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 0 var(--tl-space-4) var(--tl-space-3);
+}
+.tl-dialog__footer {
+  flex-shrink: 0;
+  display: flex; justify-content: flex-end; gap: var(--tl-space-2);
+  padding: var(--tl-space-3) var(--tl-space-4);
+}
+/* Footer buttons reuse the shared .tl-btn/.tl-btn--primary component
+   (design-system/components/button.css); the danger variant (a destructive
+   default action, e.g. "Delete") is dialog-footer-specific so it lives here
+   rather than growing button.css for a single caller. */
+.tl-dialog__footer .tl-btn.is-danger {
+  border-color: var(--tl-danger);
+  color: var(--tl-danger);
+}
+.tl-dialog__footer .tl-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}

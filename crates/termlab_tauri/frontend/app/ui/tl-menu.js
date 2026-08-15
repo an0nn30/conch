@@ -28,6 +28,28 @@
   // contract with an item's onSelect.
   let lastActiveElement = null;
 
+  // The highest ad-hoc dialog z-index used anywhere in the app today
+  // (ssh/auth-prompts.js, ssh/dialogs.js — see the dialog audit in
+  // design-system-phase-5a task 1). Once every dialog has migrated onto
+  // window.tlDialog this constant stops mattering (menuZIndex() will always
+  // clear the tlDialog stack on its own) but until then it's the floor that
+  // keeps a menu opened from one of those legacy dialogs from rendering
+  // behind it.
+  const LEGACY_DIALOG_MAX_Z = 5000;
+
+  // tl-menu must always render above the topmost open dialog, whether that
+  // dialog is one of the legacy ad-hoc overlays above or a window.tlDialog
+  // instance (z-index 3000 + depth*10 — see app/ui/tl-dialog.js). Replaces
+  // the previous hardcoded 3200, which sat *below* the 4000/4500/5000
+  // legacy dialogs and caused menus opened from them to render behind.
+  function menuZIndex() {
+    const dialogCount = (global.tlDialog && typeof global.tlDialog.count === 'function')
+      ? global.tlDialog.count()
+      : 0;
+    const aboveTlDialogStack = 3000 + dialogCount * 10 + 10;
+    return Math.max(LEGACY_DIALOG_MAX_Z + 10, aboveTlDialogStack);
+  }
+
   function close() {
     if (activeOutsideClickHandler) {
       document.removeEventListener('click', activeOutsideClickHandler);
@@ -116,6 +138,7 @@
     menu.setAttribute('aria-label', o.ariaLabel || 'Menu');
     menu.style.left = o.x + 'px';
     menu.style.top = o.y + 'px';
+    menu.style.zIndex = String(menuZIndex());
 
     for (const item of (Array.isArray(o.items) ? o.items : [])) {
       if (item.separator) {

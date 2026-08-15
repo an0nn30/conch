@@ -13,6 +13,10 @@
    rather than an image, matching every other rule in this file. */
 .tl-menu {
   position: fixed;
+  /* z-index is set inline by app/ui/tl-menu.js (menuZIndex()), computed to
+     always sit above the topmost open dialog — legacy ad-hoc overlay or
+     tl-dialog-shell. This value is a fallback only, for the unlikely case
+     that JS fails to set the inline style. */
   z-index: 3200;
   background: var(--tl-panel-bg);
   border: 1px solid var(--tl-border);

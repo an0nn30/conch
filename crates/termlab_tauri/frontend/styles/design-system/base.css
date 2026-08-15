@@ -65,4 +65,15 @@
   --tl-space-3: 12px;
   --tl-space-4: 16px;
   --tl-radius: 3px;
+
+  /* Dialog + control tokens: the JVM theme defines none of these, so the
+     values below are measured from the reference app (see METRICS.md). */
+  --tl-dialog-bg: var(--tl-Panel-background);
+  --tl-dialog-border: var(--tl-base-borderColor);
+  --tl-dialog-scrim: rgba(0, 0, 0, 0.5);
+  --tl-control-border: var(--tl-Component-borderColor, #424854);
+  --tl-control-bg: var(--tl-TextField-background);
+  --tl-control-tick: var(--tl-base-foreground);
+  --tl-primary-fg: #ffffff;
+  --tl-z-dialog: 3000;
 }
