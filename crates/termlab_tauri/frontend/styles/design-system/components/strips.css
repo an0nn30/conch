@@ -1,0 +1,26 @@
+.side-strip {
+  background: var(--tl-panel-bg);
+  width: 26px;
+}
+.strip-btn {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  padding: var(--tl-space-2) 0;
+  font: 500 11px var(--tl-font-ui);
+  color: var(--tl-fg-muted);
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+}
+.strip-btn:hover { color: var(--tl-fg); background: var(--tl-row-hover); }
+.strip-btn.active {
+  color: var(--tl-fg);
+  background: var(--tl-selection-bg);
+  border-left-color: var(--tl-accent);
+}
+#left-strip .strip-btn { transform: rotate(180deg); }
+.strip-btn .tl-icon { transform: rotate(90deg); }
+#left-strip .strip-btn .tl-icon { transform: rotate(-90deg); }

@@ -362,7 +362,7 @@
     if (hasActive && wins.length >= 1) {
       if (!headerEl) {
         headerEl = document.createElement('div');
-        headerEl.className = 'zone-header';
+        headerEl.className = 'zone-header tl-toolwindow__header';
         zone.el.insertBefore(headerEl, zone.el.firstChild);
       }
       headerEl.style.display = '';
@@ -370,7 +370,28 @@
       const titleSpan = document.createElement('span');
       titleSpan.className = 'zone-header-title';
       titleSpan.textContent = activeTw ? activeTw.title : '';
+      const actionsEl = document.createElement('span');
+      actionsEl.className = 'tl-toolwindow__header-actions';
+      const gearBtn = document.createElement('button');
+      gearBtn.className = 'tl-icon-btn';
+      gearBtn.title = 'Options';
+      gearBtn.appendChild(window.tlIcon.create('settings', { size: 16, alt: 'Options' }));
+      gearBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (zone.activeId) showContextMenu(e, zone.activeId);
+      });
+      const hideBtn = document.createElement('button');
+      hideBtn.className = 'tl-icon-btn';
+      hideBtn.title = 'Hide';
+      hideBtn.appendChild(window.tlIcon.create('hideToolWindow', { size: 16, alt: 'Hide' }));
+      hideBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (zone.activeId) deactivate(zone.activeId);
+      });
+      actionsEl.appendChild(gearBtn);
+      actionsEl.appendChild(hideBtn);
       headerEl.appendChild(titleSpan);
+      headerEl.appendChild(actionsEl);
       headerEl.oncontextmenu = (e) => { e.preventDefault(); if (zone.activeId) showContextMenu(e, zone.activeId); };
     } else if (headerEl) {
       headerEl.style.display = 'none';
@@ -736,7 +757,13 @@
 
     const btn = document.createElement('button');
     btn.className = 'strip-btn' + (tw.active ? ' active' : '');
-    btn.textContent = tw.title;
+    if (tw.icon && window.tlIcon) {
+      btn.appendChild(window.tlIcon.create(tw.icon, { size: 16, alt: '' }));
+    }
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'strip-btn-label';
+    labelSpan.textContent = tw.title;
+    btn.appendChild(labelSpan);
     btn.dataset.toolWindow = windowId;
     btn.addEventListener('click', (e) => {
       if (btn.dataset.suppressClick === '1') {
