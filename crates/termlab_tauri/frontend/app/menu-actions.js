@@ -173,6 +173,14 @@
           if (appRoot) appRoot.classList.add('zen-mode');
           zenState.active = true;
         } else {
+          // Drop the zen-mode class before restoring visibility: updateSidebar
+          // and updateBottomZone both treat an active zen-mode class as "stay
+          // hidden" regardless of the requested visibility, so calling
+          // setPanelVisibility(..., true) while the class is still present
+          // would silently no-op and leave that zone's chrome stuck hidden
+          // (with its strip tab, whose 'active' class only tracks the
+          // requested visibility, then rendering active over hidden content).
+          if (appRoot) appRoot.classList.remove('zen-mode');
           if (global.toolWindowManager) {
             global.toolWindowManager.setPanelVisibility('left', !!zenState.leftVisible);
             global.toolWindowManager.setPanelVisibility('right', !!zenState.rightVisible);
@@ -183,7 +191,6 @@
             if (global.sshPanel && zenState.rightVisible && global.sshPanel.isHidden()) global.sshPanel.togglePanel();
             if (global.sshPanel && !zenState.rightVisible && !global.sshPanel.isHidden()) global.sshPanel.togglePanel();
           }
-          if (appRoot) appRoot.classList.remove('zen-mode');
           zenState.active = false;
           global.__termlabZenRestoreState = null;
         }

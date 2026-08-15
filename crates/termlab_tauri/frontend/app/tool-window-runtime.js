@@ -149,10 +149,25 @@
             // pinned side zone would override the new default forever. Once
             // any window is recorded in 'bottom' the layout knows about the
             // zone and the user's own arrangement is left alone.
+            //
+            // This must run at most once. Without a durable marker, a user
+            // who deliberately moves SFTP back out of 'bottom' (and leaves
+            // nothing else there) would get force-migrated back on every
+            // restart, defeating their own choice. A localStorage flag makes
+            // the one-time-ness durable across restarts without a persisted-
+            // layout schema change; the knowsBottomZone check below remains
+            // as a second guard so a cleared flag still won't re-migrate a
+            // layout that already knows about the bottom zone.
+            const SFTP_BOTTOM_MIGRATION_KEY = 'termlab.migration.sftpBottomZone';
+            let sftpBottomMigrationAlreadyRan = false;
+            try {
+              sftpBottomMigrationAlreadyRan = global.localStorage.getItem(SFTP_BOTTOM_MIGRATION_KEY) === '1';
+            } catch (_) {}
+
             const savedZones = initialLayoutData.tool_window_zones;
             const knowsBottomZone = Object.keys(savedZones)
               .some((id) => savedZones[id] === 'bottom');
-            if (!knowsBottomZone && savedZones['file-explorer']) {
+            if (!sftpBottomMigrationAlreadyRan && !knowsBottomZone && savedZones['file-explorer']) {
               const previousZone = savedZones['file-explorer'];
               savedZones['file-explorer'] = 'bottom';
               global.toolWindowManager.setPersistedZones(savedZones);
@@ -168,6 +183,9 @@
               // would silently swallow the panel we just moved, so reveal the
               // zone once, on this migration only.
               initialLayoutData.bottom_panel_visible = true;
+              try {
+                global.localStorage.setItem(SFTP_BOTTOM_MIGRATION_KEY, '1');
+              } catch (_) {}
             }
           }
           if (initialLayoutData.active_tool_windows && Object.keys(initialLayoutData.active_tool_windows).length > 0) {

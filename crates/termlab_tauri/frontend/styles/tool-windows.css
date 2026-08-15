@@ -136,6 +136,11 @@
       opacity: 0;
       border-color: transparent !important;
     }
+    #app.zen-mode #bottom-strip {
+      height: 0;
+      opacity: 0;
+      border-color: transparent !important;
+    }
     .strip-section { display: flex; flex-direction: column; }
     .strip-section-bottom { margin-top: auto; }
     /* .strip-btn base/hover/active/left-strip-transform rules owned by

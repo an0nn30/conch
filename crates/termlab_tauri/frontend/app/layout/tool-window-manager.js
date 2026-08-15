@@ -252,6 +252,8 @@
     const side = sideForZone(tw.zone);
     if (side === 'left' || side === 'right') {
       panelState[side].visible = true;
+    } else if (side === 'bottom') {
+      panelState.bottom.visible = true;
     }
 
     if (!shouldDeferRender(tw)) ensureWindowElement(tw, zone);
@@ -289,6 +291,10 @@
     const side = sideForZone(tw.zone);
     if (tw.active && (side === 'left' || side === 'right') && !isPanelVisible(side)) {
       setPanelVisibility(side, true);
+      return;
+    }
+    if (tw.active && side === 'bottom' && !isPanelVisible('bottom')) {
+      setPanelVisibility('bottom', true);
       return;
     }
     if (tw.active) deactivate(id); else activate(id);
@@ -335,6 +341,8 @@
     const targetSide = sideForZone(targetZone);
     if (targetSide === 'left' || targetSide === 'right') {
       panelState[targetSide].visible = true;
+    } else if (targetSide === 'bottom') {
+      panelState.bottom.visible = true;
     }
 
     updateZone(oldZoneName);
@@ -477,7 +485,9 @@
 
   function updateBottomZone() {
     if (!bottomZoneWrapEl) return;
-    const shouldShow = !!(panelState.bottom.visible && zones.bottom.activeId);
+    const appRoot = document.getElementById('app');
+    const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
+    const shouldShow = !zenActive && !!(panelState.bottom.visible && zones.bottom.activeId);
     bottomZoneWrapEl.classList.toggle('hidden', !shouldShow);
     if (fitActiveTabFn) fitActiveTabFn();
   }
@@ -766,7 +776,7 @@
       const topSection = document.createElement('div');
       topSection.className = 'strip-section';
       for (const wid of topZone.windows) {
-        topSection.appendChild(makeStripBtn(wid, topZone));
+        topSection.appendChild(makeStripBtn(wid, topZone, false, side));
       }
       stripEl.appendChild(topSection);
 
@@ -774,7 +784,7 @@
       const botSection = document.createElement('div');
       botSection.className = 'strip-section strip-section-bottom';
       for (const wid of botZone.windows) {
-        botSection.appendChild(makeStripBtn(wid, botZone));
+        botSection.appendChild(makeStripBtn(wid, botZone, false, side));
       }
       stripEl.appendChild(botSection);
     }
@@ -786,17 +796,22 @@
       const hasWindows = bottomZone.windows.length > 0;
       bottomStripEl.classList.toggle('hidden', !hasWindows);
       for (const wid of bottomZone.windows) {
-        bottomStripEl.appendChild(makeStripBtn(wid, bottomZone, true));
+        bottomStripEl.appendChild(makeStripBtn(wid, bottomZone, true, 'bottom'));
       }
     }
   }
 
-  function makeStripBtn(windowId, zone, horizontal) {
+  // `side` is the panel side ('left' | 'right' | 'bottom') this button's zone
+  // belongs to. The `active` class must reflect real on-screen visibility —
+  // not just tw.active — so a strip tab for a zone whose panel is currently
+  // hidden (e.g. bottom zone toggled closed) never renders as filled/active.
+  function makeStripBtn(windowId, zone, horizontal, side) {
     const tw = toolWindows.get(windowId);
     if (!tw) return document.createTextNode('');
 
+    const isActive = tw.active && isPanelVisible(side);
     const btn = document.createElement('button');
-    btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '') + (tw.active ? ' active' : '');
+    btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '') + (isActive ? ' active' : '');
     if (tw.icon && window.tlIcon) {
       btn.appendChild(window.tlIcon.create(tw.icon, { size: 16, alt: '' }));
     }
