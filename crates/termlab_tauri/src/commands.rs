@@ -63,6 +63,20 @@ pub(crate) fn get_home_dir() -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
+/// Return the directory the app was launched from — its "workspace".
+///
+/// This is intentionally static: captured once from the process's cwd at
+/// startup (`TauriState::workspace_dir`) and never re-read afterward, so it
+/// keeps matching the reference app's project-name window-title semantics
+/// (a fixed label for the window) rather than drifting if a terminal pane
+/// later `cd`s elsewhere. Frontend callers should treat `None` as "no
+/// workspace known" and fall back to another source (e.g. a pane's live cwd)
+/// rather than treating it as an error.
+#[tauri::command]
+pub(crate) fn get_workspace_dir(state: tauri::State<'_, TauriState>) -> Option<String> {
+    state.workspace_dir.clone()
+}
+
 #[tauri::command]
 pub(crate) fn clipboard_read_text() -> Option<String> {
     let mut clipboard = arboard::Clipboard::new().ok()?;

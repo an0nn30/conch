@@ -85,6 +85,9 @@
       createSshTab(opts) {
         return requireTabManager('createSshTab')(opts);
       },
+      refreshWindowTitle() {
+        return requireTabManager('refreshWindowTitle')();
+      },
     };
   }
 

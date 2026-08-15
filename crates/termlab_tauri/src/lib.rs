@@ -36,10 +36,19 @@ pub(crate) struct TauriState {
     ptys: Arc<Mutex<HashMap<String, PtyBackend>>>,
     active_panes: Arc<Mutex<HashMap<String, u32>>>,
     config: RwLock<UserConfig>,
+    /// The process's working directory at launch — the app's "workspace".
+    /// Captured once here and never re-read, so it stays static for the
+    /// window's lifetime even if a PTY's shell later `cd`s elsewhere (see
+    /// `commands::get_workspace_dir`).
+    workspace_dir: Option<String>,
 }
 
 /// Launch the Tauri-based UI.
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
+    let workspace_dir = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+
     let (transfer_tx, mut transfer_rx) =
         tokio::sync::mpsc::unbounded_channel::<termlab_remote::transfer::TransferProgress>();
     let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
@@ -95,6 +104,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             active_panes: Arc::new(Mutex::new(HashMap::new())),
             config: RwLock::new(config),
+            workspace_dir,
         })
         .manage(Arc::clone(&remote_state))
         .manage(Arc::clone(&plugin_state))
@@ -493,6 +503,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::get_app_config,
             commands::get_about_info,
             commands::get_home_dir,
+            commands::get_workspace_dir,
             commands::clipboard_read_text,
             commands::clipboard_write_text,
             windows::open_new_window,
@@ -602,6 +613,7 @@ mod tests {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             active_panes: Arc::new(Mutex::new(HashMap::new())),
             config: RwLock::new(UserConfig::default()),
+            workspace_dir: None,
         };
         assert!(state.ptys.lock().is_empty());
     }

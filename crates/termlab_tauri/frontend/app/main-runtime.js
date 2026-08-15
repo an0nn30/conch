@@ -168,6 +168,7 @@
             startTabRename: () => { throw new Error('managerDelegates.startTabRename is unavailable'); },
             createTab: () => { throw new Error('managerDelegates.createTab is unavailable'); },
             createSshTab: () => { throw new Error('managerDelegates.createSshTab is unavailable'); },
+            refreshWindowTitle: () => { throw new Error('managerDelegates.refreshWindowTitle is unavailable'); },
           };
 
       let paneDnd = null;
@@ -222,6 +223,7 @@
       const createSshTab = (...args) => managerDelegates.createSshTab(...args);
       const closePane = (...args) => managerDelegates.closePane(...args);
       const splitPane = (...args) => managerDelegates.splitPane(...args);
+      const refreshWindowTitle = (...args) => managerDelegates.refreshWindowTitle(...args);
 
       let handleMenuAction = () => {
         throw new Error('handleMenuAction is unavailable');
@@ -355,6 +357,7 @@
           createSshTab: (opts) => createSshTab(opts),
           activateTab: (tabId) => activateTab(tabId),
           splitPane: (direction) => splitPane(direction),
+          refreshWindowTitle: () => refreshWindowTitle(),
           getPaneManager: () => paneManager,
           isDebugEnabled: () => shortcutDebugEnabled,
           debugLog: (...args) => console.log(...args),

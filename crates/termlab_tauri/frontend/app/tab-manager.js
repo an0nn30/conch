@@ -41,14 +41,22 @@
     const refreshSshSessions = deps.refreshSshSessions;
     const setWindowTitle = deps.setWindowTitle;
     const getLocalPaneCwd = deps.getLocalPaneCwd;
+    const getWorkspaceDir = deps.getWorkspaceDir;
 
     // Window title = "<workspace basename> – <active tab title>", falling
-    // back to "TermLab" when there is no active tab. The workspace basename is
-    // resolved once (from the first local tab's initial cwd) and cached for
-    // the lifetime of this window, since no dedicated workspace command
-    // exists on the backend (see task brief).
+    // back to "TermLab" when there is no active tab.
+    //
+    // The workspace basename is intentionally static for the window's
+    // lifetime, matching the reference app's project-name semantics (a fixed
+    // label, not something that tracks the shell's current directory as the
+    // user `cd`s around). It is resolved once, preferring the backend's
+    // `get_workspace_dir` command (the app's launch cwd, captured once in
+    // Rust — see `commands::get_workspace_dir`); if that's unavailable or
+    // returns nothing, it falls back to the first local tab's initial pane
+    // cwd. Do not "fix" this into live cwd tracking.
     let workspaceBasename = null;
-    let workspaceResolved = false;
+    let workspaceFromLaunch = false; // true once the authoritative launch-cwd source has resolved
+    let workspaceFallbackAttempted = false;
 
     function basenameOf(path) {
       if (!path) return null;
@@ -75,12 +83,28 @@
       }
     }
 
-    async function resolveWorkspaceBasename(paneId) {
-      if (workspaceResolved || typeof getLocalPaneCwd !== 'function') return;
-      workspaceResolved = true;
+    async function resolveWorkspaceFromLaunch() {
+      if (typeof getWorkspaceDir !== 'function') return;
+      try {
+        const dir = await getWorkspaceDir();
+        if (dir) {
+          workspaceBasename = basenameOf(dir);
+          workspaceFromLaunch = true;
+          updateWindowTitle();
+        }
+      } catch (_) {
+        // Leave unresolved; the pane-cwd fallback (or plain tab title) still applies.
+      }
+    }
+
+    async function resolveWorkspaceBasenameFallback(paneId) {
+      if (workspaceFromLaunch || workspaceFallbackAttempted || typeof getLocalPaneCwd !== 'function') return;
+      workspaceFallbackAttempted = true;
       try {
         const cwd = await getLocalPaneCwd(paneId);
-        if (cwd) {
+        // Re-check workspaceFromLaunch: the authoritative launch-cwd lookup
+        // may have resolved while this fallback was in flight, and it wins.
+        if (cwd && !workspaceFromLaunch) {
           workspaceBasename = basenameOf(cwd);
           updateWindowTitle();
         }
@@ -88,6 +112,10 @@
         // Leave workspaceBasename unset; title still falls back to the tab title alone.
       }
     }
+
+    // Kick off the authoritative (launch-cwd) resolution immediately; the
+    // per-tab fallback below only fires if this hasn't produced a value yet.
+    resolveWorkspaceFromLaunch();
 
     function makeTabButton(label, onClose) {
       const button = document.createElement('button');
@@ -403,7 +431,7 @@
         }
         pane.spawned = true;
         fitAndResizePane(pane);
-        resolveWorkspaceBasename(paneId);
+        resolveWorkspaceBasenameFallback(paneId);
       } catch (error) {
         term.writeln('\x1b[31mFailed to spawn shell: ' + error + '\x1b[0m');
         await closeTab(tabId, { notifyBackend: false, closeWindowWhenLast: false });
@@ -539,6 +567,10 @@
       getTabLabel,
       renameActiveTab,
       startTabRename,
+      // Exposed so callers outside this module that mutate a tab's label
+      // directly (e.g. plugin-driven renames in tool-window-runtime.js) can
+      // resync the window title afterward.
+      refreshWindowTitle: updateWindowTitle,
     };
   }
 

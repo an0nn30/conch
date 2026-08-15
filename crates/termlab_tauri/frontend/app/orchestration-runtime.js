@@ -20,6 +20,7 @@
     const createSshTab = deps.createSshTab;
     const activateTab = deps.activateTab;
     const splitPane = deps.splitPane;
+    const refreshWindowTitle = deps.refreshWindowTitle;
     const getPaneManager = deps.getPaneManager;
     const isDebugEnabled = deps.isDebugEnabled;
     const debugLog = deps.debugLog;
@@ -118,6 +119,7 @@
           createTab: (options) => createTab(options),
           createSshTab: (opts) => createSshTab(opts),
           activateTab: (tabId) => activateTab(tabId),
+          refreshWindowTitle: () => { if (typeof refreshWindowTitle === 'function') refreshWindowTitle(); },
           openPluginDockedViewFromRequest: async (payload) => {
             if (!pluginRuntime || !pluginRuntime.openPluginDockedViewFromRequest) {
               throw new Error('pluginRuntime.openPluginDockedViewFromRequest is unavailable');

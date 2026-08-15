@@ -434,6 +434,9 @@
           tab.hasCustomTitle = true;
           tab.pluginRenamed = true;
           tab.button.title = nextTitle;
+          // This mutates the tab label directly (bypassing tab-manager's
+          // setTabLabel), so the window title needs an explicit resync.
+          if (typeof deps.refreshWindowTitle === 'function') deps.refreshWindowTitle();
         };
 
         global.pluginWidgets.init({

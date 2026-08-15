@@ -173,6 +173,7 @@
             }
           },
           getLocalPaneCwd: (paneId) => invoke('get_local_pane_cwd', { paneId }).catch(() => null),
+          getWorkspaceDir: () => invoke('get_workspace_dir').catch(() => null),
           allocateTabId: () => allocTabId(),
           allocatePaneId: () => allocPaneId(),
           allocateTabLabel: () => 'Tab ' + allocTabLabel(),
