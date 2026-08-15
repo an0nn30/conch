@@ -63,7 +63,10 @@
       tab.treeRoot = splitLeaf(tab.treeRoot, anchor.paneId, newPaneId, direction);
       const parent = findParent(tab.treeRoot, anchor.paneId);
       if (parent && parent.parent && parent.parent.type === 'split') {
-        parent.parent.ratio = ratio;
+        // split ratio is children[0]'s (the anchor's) share; `ratio` is the
+        // view's share and the view is children[1], so invert it here. The
+        // close-time size memory also stores the view's own share.
+        parent.parent.ratio = 1 - ratio;
       }
 
       const paneEl = document.createElement('div');

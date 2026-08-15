@@ -86,6 +86,9 @@ Reduce `crates/conch_tauri/frontend/index.html` from a monolithic page into main
 - `app/main-runtime.js` now primarily coordinates runtime composition and startup flow.
 - Completed: final tidy pass on `app/main-runtime.js` (removed dead locals/wrappers, preserved behavior).
 - Next: transition to commit/review or address follow-up product questions.
+- Completed (2026-08-14): plan closed out. `index.html` is a 160-line DOM
+  shell; all runtime logic lives under `app/`. Docked plugin view
+  orchestration re-landed in `app/plugin-runtime.js` on `frontend-finish`.
 
 ## Guardrails
 - No feature work mixed with modularization PRs.

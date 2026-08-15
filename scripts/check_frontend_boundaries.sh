@@ -9,6 +9,13 @@ if [[ ! -d "$FRONTEND_DIR" ]]; then
   exit 2
 fi
 
+# Every check below treats a non-zero rg exit as "no violations", so a missing
+# rg binary would make the whole script pass vacuously. Fail closed instead.
+if ! command -v rg >/dev/null 2>&1; then
+  echo "frontend-boundary-check: ripgrep (rg) is required but not installed" >&2
+  exit 2
+fi
+
 fail=0
 
 echo "frontend-boundary-check: scanning for direct Tauri core.invoke usage"

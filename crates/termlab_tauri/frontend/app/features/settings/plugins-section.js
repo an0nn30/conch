@@ -227,20 +227,9 @@
             const nextLoaded = toggle.checked;
             toggle.disabled = true;
             try {
-              let result = null;
-              if (global.termlabSettingsFeatureDataService && typeof global.termlabSettingsFeatureDataService.setPluginLoadedState === 'function') {
-                result = await global.termlabSettingsFeatureDataService.setPluginLoadedState(invoke, plugin, nextLoaded, {
-                  confirmPermissions: (pluginName, permissions) => confirmPluginPermissions(pluginName, permissions),
-                });
-              } else if (!nextLoaded) {
-                await invoke('disable_plugin', { name: plugin.name, source: plugin.source });
-                await invoke('rebuild_menu').catch(() => {});
-                result = { status: 'disabled' };
-              } else {
-                await invoke('enable_plugin', { name: plugin.name, source: plugin.source, path: plugin.path });
-                await invoke('rebuild_menu').catch(() => {});
-                result = { status: 'enabled' };
-              }
+              const result = await global.termlabSettingsFeatureDataService.setPluginLoadedState(invoke, plugin, nextLoaded, {
+                confirmPermissions: (pluginName, permissions) => confirmPluginPermissions(pluginName, permissions),
+              });
 
               if (result && result.status === 'cancelled') {
                 toggle.checked = false;

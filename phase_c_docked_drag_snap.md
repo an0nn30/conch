@@ -1,5 +1,15 @@
 # Phase C: Docked Drag + Snap (Branch Status + Next Plan)
 
+> **Status update (2026-08-14):** Complete. C-Next-1 (target-pane hit testing
+> with nearest-pane fallback) and C-Next-2 (hysteresis lock, zone overlay,
+> dock labels) are implemented in `app/layout/pane-dnd.js`; C-Next-3
+> (tool-window strip drag with zone guides, Escape cancel, animated drop)
+> is implemented in `app/layout/tool-window-manager.js`. The docked plugin
+> view feature that pane drag depends on was removed pre-RC (f0c960f) and
+> re-landed on the `frontend-finish` branch, which re-activates
+> `registerDraggablePaneHeader`. Remaining validation is the manual
+> checklist in C-Next-4.
+
 ## Goal
 Enable users to reposition docked plugin views and tool windows by dragging their tabs/headers, with clear snap hints before drop.
 

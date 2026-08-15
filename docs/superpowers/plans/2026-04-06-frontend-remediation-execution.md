@@ -54,6 +54,7 @@ Scope: `crates/conch_tauri/frontend`
 - [x] Extract settings keyboard section renderer into `app/features/settings/sections-keyboard.js` and delegate from `settings.js`.
 - [x] Extract settings section renderers (`terminal`, `shell`, `cursor`) into `app/features/settings/sections-terminal.js` and delegate from `settings.js`.
 - [x] Extract settings plugin section renderer into `app/features/settings/plugins-section.js`.
+- [x] Decompose remaining `settings.js` ownership into `app/features/settings/{store,actions,renderers}.js` (dialog/session/search-index/shortcut-map state into `store.js`; apply/save/restart, plugin-draft, permission-confirm, and palette-cache flows into `actions.js`; shared row/control helpers, theme preview, shortcut recorder, dialog/standalone shells, plugin-settings renderer, and section dispatch into `renderers.js`), leaving `settings.js` a ~310-line orchestrator.
 - [x] Align standalone settings window with shared style/system scripts (`settings-window.css` now limited to window-specific titlebar/layout chrome; shared settings/tokens/forms/styles sourced from `styles/{base,dialogs}.css`).
 
 ### Phase 3: SSH/Files/Vault Extraction Prep
@@ -89,7 +90,7 @@ Scope: `crates/conch_tauri/frontend`
 
 ### Phase 5: Cleanup and Integration
 - [x] Command palette indexing cache + invalidation optimization.
-- [~] Dead-path deletion progressed (removed legacy inline SSH server/session/tunnel and auth dialog render fallbacks, Vault setup/unlock/section fallbacks, Settings sidebar/basic/terminal/appearance/keyboard fallback render paths, duplicate plugin-permission fallback dialog implementations in Settings/Command Palette, router-fallback document key handlers in startup/context/shortcut/dialog/clipboard/titlebar runtimes, and unused helper state in settings/tunnel modules); broader cleanup pending.
+- [x] Dead-path deletion progressed (removed legacy inline SSH server/session/tunnel and auth dialog render fallbacks, Vault setup/unlock/section fallbacks, Settings sidebar/basic/terminal/appearance/keyboard fallback render paths, duplicate plugin-permission fallback dialog implementations in Settings/Command Palette, router-fallback document key handlers in startup/context/shortcut/dialog/clipboard/titlebar runtimes, and unused helper state in settings/tunnel modules); completed during `settings.js` decomposition by deleting the last dead inline fallbacks (runtime-load/plugin-inventory duplicates of `data-service.js`, search-helper duplicates of `features/settings/search.js`, and the inline enable/disable plugin fallback in `plugins-section.js`) — remaining `typeof` guards are deliberate fail-loud module-availability checks, not legacy paths.
 - [x] Boundary script expanded to guard raw layout persistence callsites (`save_window_layout`/`get_saved_layout`), inline `settings.html` style regressions, and direct document keydown listeners outside `keyboard-router`.
 - [~] Final integration QA checklist prepared (`docs/superpowers/plans/2026-04-06-frontend-regression-checklist.md`) with automated checks complete; manual scenario sign-off pending.
 
@@ -157,13 +158,13 @@ Scope: `crates/conch_tauri/frontend`
 - `docs/superpowers/plans/2026-04-06-frontend-regression-checklist.md`
 
 ## Open Risks
-1. Full decomposition of `settings.js` remains outstanding.
+1. ~~Full decomposition of `settings.js` remains outstanding.~~ Resolved: `settings.js` is now a thin orchestrator over `features/settings/{store,actions,renderers}.js`.
 2. Command strings are still present in many legacy call sites; boundary is now available and wired for incremental migration.
 3. Standalone settings style alignment is complete; remaining UI-style risk is broader cross-surface token normalization outside settings-only scope.
 4. Manual end-to-end regression scenarios are still pending completion in the Phase 5 checklist artifact.
 
 ## Next Execution Targets
-1. Extract `settings.js` into `features/settings/{store,sections,search-index,actions,renderers}`.
-2. Continue `settings.js` decomposition to reduce single-file ownership and enable dead-path deletion completion in Phase 5.
+1. Done — `settings.js` extracted into `features/settings/{store,actions,renderers}.js` (state/search-index in `store.js`, save/apply/permission/palette flows in `actions.js`, shared DOM helpers/shells/section dispatch in `renderers.js`).
+2. Done — `settings.js` reduced to a ~310-line orchestrator; final dead inline fallbacks deleted (data-service/search duplicates in `settings.js`, plugin enable/disable fallback in `plugins-section.js`).
 3. Execute checklist-driven manual regression verification for startup, tabs/splits, ssh/files/vault/settings/plugin flows using `docs/superpowers/plans/2026-04-06-frontend-regression-checklist.md`.
-4. Close Phase 5 by final dead-path cleanup plus checklist sign-off package.
+4. Close Phase 5 by checklist sign-off package (dead-path cleanup complete).

@@ -1,5 +1,16 @@
 # Phase: Next Plugin Docked View
 
+> **Status update (2026-08-14):** Implemented (phases A–E) on 2026-03-31,
+> removed pre-RC in f0c960f (2026-04-01), and re-landed on the
+> `frontend-finish` branch reconciled with the post-removal runtime
+> (settings sections/drafts, orchestration init timing, TermLab rebrand).
+> `refreshPluginView` in `app/panels/plugin-widgets.js` now routes
+> view-scoped renders to docked containers alongside settings views.
+> Phase F docs/examples exist (`docs/plugin-sdk.md`, examples/plugins/
+> lua-docked-view-example.lua, plugins/lua-docked-view-smoke.lua).
+> The feature was removed for unrecorded problems — validate against the
+> Testing Checklist below before shipping.
+
 ## Goal
 Enable plugins to create dockable split leaves inside terminal tabs (for example, terminal on top + plugin form/monitor on bottom) using the existing split pane system, without PTY content in plugin leaves.
 
