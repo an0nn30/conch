@@ -177,6 +177,25 @@
             }
           },
         });
+
+        global.toolWindowManager.register('tunnels', {
+          title: 'Tunnels',
+          icon: null, // no vendored plug-like icon yet; label suffices — Phase 2 known gap
+          type: 'built-in',
+          defaultZone: 'right-bottom',
+          renderFn: (container) => {
+            const panelEl = document.createElement('div');
+            panelEl.id = 'tunnels-panel';
+            container.appendChild(panelEl);
+            if (global.tunnelsPanel) {
+              global.tunnelsPanel.init({
+                invoke,
+                listen: listenOnCurrentWindow,
+                panelEl,
+              });
+            }
+          },
+        });
         if (initialLayoutData && initialLayoutData.zen_mode === true) {
           global.toolWindowManager.setPanelVisibility('left', false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', false, { save: false });

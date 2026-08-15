@@ -244,6 +244,19 @@
       min-height: 0;
       overflow: hidden;
     }
+    #tunnels-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .tunnels-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
     .ssh-quick-connect-input {
       flex: 1;
       min-width: 0;

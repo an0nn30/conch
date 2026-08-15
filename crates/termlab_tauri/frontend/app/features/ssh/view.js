@@ -246,5 +246,6 @@
     renderServerList,
     renderSessions,
     renderTunnels,
+    createTunnelNode,
   };
 })(window);
