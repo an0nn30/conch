@@ -144,18 +144,56 @@ fn legacy_config_dir() -> PathBuf {
 
 /// One-time migration of the legacy `conch` config directory to `termlab`.
 ///
-/// Runs before anything reads [`config_dir`]: if the new directory does not
-/// exist yet and the old one does, the old directory (config, state, themes,
-/// vault, plugins, connections) is moved wholesale. A rename failure (e.g.
-/// cross-device link) falls back to leaving the legacy directory untouched so
-/// the app still starts — with default settings — rather than failing.
+/// Runs before anything reads [`config_dir`]. Two steps:
+///
+/// 1. The IntelliJ-era TermLab app used the same `termlab` directory name
+///    with incompatible file formats (its own `vault.enc`, `ssh-hosts.json`,
+///    `tunnels.json`). If the target dir holds that app's data, archive it to
+///    `termlab-jvm-backup` first — the two apps must never share files.
+/// 2. If the target is then free and a legacy `conch` dir exists, move it
+///    (config, state, themes, vault, plugins) wholesale.
+///
+/// Every failure path leaves directories untouched so the app still starts —
+/// with default settings — rather than failing or corrupting either data set.
 pub fn migrate_legacy_config_dir() {
-    let new_dir = config_dir();
-    let old_dir = legacy_config_dir();
+    migrate_config_dirs(&legacy_config_dir(), &config_dir());
+}
+
+fn migrate_config_dirs(old_dir: &std::path::Path, new_dir: &std::path::Path) {
+    // Java-era TermLab data: has its stores, lacks this app's config.toml.
+    let target_is_jvm_data = new_dir.exists()
+        && new_dir.join("ssh-hosts.json").exists()
+        && !new_dir.join("config.toml").exists();
+    if target_is_jvm_data {
+        let backup = new_dir.with_file_name("termlab-jvm-backup");
+        if backup.exists() {
+            log::warn!(
+                "Config dir {} holds IntelliJ TermLab data but backup {} already exists; leaving both untouched",
+                new_dir.display(),
+                backup.display()
+            );
+            return;
+        }
+        match fs::rename(new_dir, &backup) {
+            Ok(()) => log::info!(
+                "Archived IntelliJ TermLab data {} -> {}",
+                new_dir.display(),
+                backup.display()
+            ),
+            Err(e) => {
+                log::warn!(
+                    "Could not archive IntelliJ TermLab data {}: {e}; leaving untouched",
+                    new_dir.display()
+                );
+                return;
+            }
+        }
+    }
+
     if new_dir.exists() || !old_dir.exists() {
         return;
     }
-    match fs::rename(&old_dir, &new_dir) {
+    match fs::rename(old_dir, new_dir) {
         Ok(()) => log::info!(
             "Migrated legacy config dir {} -> {}",
             old_dir.display(),
@@ -235,6 +273,63 @@ pub fn save_persistent_state(state: &PersistentState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn touch(path: &std::path::Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn migrate_moves_legacy_dir_when_target_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("conch");
+        let new = tmp.path().join("termlab");
+        touch(&old.join("config.toml"));
+        migrate_config_dirs(&old, &new);
+        assert!(!old.exists());
+        assert!(new.join("config.toml").exists());
+    }
+
+    #[test]
+    fn migrate_archives_jvm_data_then_moves_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("conch");
+        let new = tmp.path().join("termlab");
+        touch(&old.join("vault.enc"));
+        touch(&new.join("ssh-hosts.json"));
+        touch(&new.join("vault.enc"));
+        migrate_config_dirs(&old, &new);
+        let backup = tmp.path().join("termlab-jvm-backup");
+        assert!(backup.join("ssh-hosts.json").exists(), "jvm data archived");
+        assert!(new.join("vault.enc").exists(), "conch data moved in");
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn migrate_leaves_rust_owned_target_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("conch");
+        let new = tmp.path().join("termlab");
+        touch(&old.join("config.toml"));
+        touch(&new.join("config.toml"));
+        touch(&new.join("ssh-hosts.json"));
+        migrate_config_dirs(&old, &new);
+        assert!(old.exists(), "legacy dir untouched when target is owned");
+        assert!(!tmp.path().join("termlab-jvm-backup").exists());
+    }
+
+    #[test]
+    fn migrate_refuses_second_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("conch");
+        let new = tmp.path().join("termlab");
+        touch(&old.join("config.toml"));
+        touch(&new.join("ssh-hosts.json"));
+        fs::create_dir_all(tmp.path().join("termlab-jvm-backup")).unwrap();
+        migrate_config_dirs(&old, &new);
+        assert!(new.join("ssh-hosts.json").exists(), "nothing moved");
+        assert!(old.exists());
+    }
 
     #[test]
     fn terminal_font_preferred_over_legacy() {
