@@ -1,0 +1,63 @@
+"""Golden tests for the IntelliJ theme token extractor. Run directly:
+python3 scripts/tests/test_extract_tokens.py"""
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from extract_intellij_tokens import theme_to_css, scheme_to_alacritty
+
+THEME = {
+    "name": "TermLab Dark",
+    "dark": True,
+    "colors": {"accentColor": "#6B80A1", "backgroundColor": "#21252b"},
+    "ui": {
+        "*": {
+            "background": "backgroundColor",
+            "foreground": "#abb2bf",
+            "selectionBackground": {"os.default": "#111111", "os.mac": "#323844"},
+        },
+        "ActionButton": {"hoverBackground": "#3d424b"},
+        "ToolWindow": {"Header": {"background": "accentColor"}},
+    },
+}
+
+SCHEME_XML = """<?xml version="1.0"?>
+<scheme name="TermLab Dark" version="142">
+  <colors>
+    <option name="CONSOLE_BACKGROUND_KEY" value="070A0E" />
+  </colors>
+  <attributes>
+    <option name="CONSOLE_BLACK_OUTPUT">
+      <value><option name="FOREGROUND" value="3c4048" /></value>
+    </option>
+    <option name="CONSOLE_RED_OUTPUT">
+      <value><option name="FOREGROUND" value="e06c75" /></value>
+    </option>
+  </attributes>
+</scheme>"""
+
+
+def test_theme_to_css():
+    css = theme_to_css(THEME, selector=":root")
+    assert "--tl-base-background: #21252b;" in css, css          # named ref resolved
+    assert "--tl-base-foreground: #abb2bf;" in css               # literal passthrough
+    assert "--tl-base-selectionBackground: #323844;" in css      # os.mac wins
+    assert "--tl-ActionButton-hoverBackground: #3d424b;" in css  # component key
+    assert "--tl-ToolWindow-Header-background: #6B80A1;" in css  # nested + named ref
+    assert css.strip().startswith(":root {")
+    assert "GENERATED FILE" in css                               # do-not-edit banner
+
+
+def test_scheme_to_alacritty():
+    toml_text = scheme_to_alacritty(SCHEME_XML)
+    assert 'black = "#3c4048"' in toml_text
+    assert 'red = "#e06c75"' in toml_text
+    assert 'background = "#070A0E"' in toml_text
+
+
+if __name__ == "__main__":
+    test_theme_to_css()
+    test_scheme_to_alacritty()
+    print("ok")
