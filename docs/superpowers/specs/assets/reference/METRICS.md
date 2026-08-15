@@ -27,8 +27,8 @@ when their tool window is open. Bottom-strip tabs **do** get
 |---|---|
 | Tool window header | 27 content + 1px border top and bottom = 29 total |
 | Tool window icon toolbar row | 28 |
-| Text field (path bar, quick connect) | 22 |
-| Table column-header row | 24.5 (~24) |
+| Text field (path bar, quick connect) | 22 of background + 1px borders = 24 total |
+| Table column-header row | 24.5 between borders (CSS height 22 + padding) |
 | Side strip width | **22** (ours was 26) |
 | Bottom strip height | **22** |
 | Bottom strip tab | icon + label, ~67 wide for "SFTP", ~12 gap between tabs, ~21 left inset |

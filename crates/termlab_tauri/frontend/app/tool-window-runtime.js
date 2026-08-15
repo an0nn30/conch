@@ -41,10 +41,27 @@
         }
       };
 
+      // A collapsed sidebar measures ~0-1px wide. Persisting that would wipe
+      // the user's real width — and a side with no tool windows (as left is
+      // once SFTP moves to the bottom zone) collapses on every launch, so the
+      // damage compounds. Remember the last width that looked like a real
+      // sidebar and save that instead; the restore guard also ignores <= 100.
+      const MIN_REAL_SIDEBAR_WIDTH = 100;
+      const lastRealWidths = { left: 0, right: 0 };
+
+      function rememberRealWidth(side, value) {
+        if (value > MIN_REAL_SIDEBAR_WIDTH) lastRealWidths[side] = value;
+        return lastRealWidths[side] > MIN_REAL_SIDEBAR_WIDTH ? lastRealWidths[side] : value;
+      }
+
       function saveLayoutNow() {
         const twm = global.toolWindowManager;
         if (!twm) return;
-        const widths = twm.getSidebarWidths();
+        const measured = twm.getSidebarWidths();
+        const widths = {
+          left: rememberRealWidth('left', measured.left),
+          right: rememberRealWidth('right', measured.right),
+        };
         const appRoot = document.getElementById('app');
         const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
         const zenRestore = global.__termlabZenRestoreState || {};
@@ -97,9 +114,11 @@
             ? await layoutService.getSavedLayout()
             : await invoke('get_saved_layout');
           if (initialLayoutData.files_panel_width > 100) {
+            rememberRealWidth('left', initialLayoutData.files_panel_width);
             global.toolWindowManager.setSidebarWidth('left', initialLayoutData.files_panel_width);
           }
           if (initialLayoutData.ssh_panel_width > 100) {
+            rememberRealWidth('right', initialLayoutData.ssh_panel_width);
             global.toolWindowManager.setSidebarWidth('right', initialLayoutData.ssh_panel_width);
           }
           if (initialLayoutData.tool_window_zones && Object.keys(initialLayoutData.tool_window_zones).length > 0) {
@@ -122,6 +141,33 @@
               if (!Object.prototype.hasOwnProperty.call(initialLayoutData.active_tool_windows, 'right-bottom')) {
                 initialLayoutData.active_tool_windows['right-bottom'] = 'tunnels';
               }
+            }
+
+            // Migration: SFTP (still id 'file-explorer') moved out of a side
+            // zone into the bottom zone, which did not exist before. A layout
+            // that records no window in 'bottom' predates the move, so its
+            // pinned side zone would override the new default forever. Once
+            // any window is recorded in 'bottom' the layout knows about the
+            // zone and the user's own arrangement is left alone.
+            const savedZones = initialLayoutData.tool_window_zones;
+            const knowsBottomZone = Object.keys(savedZones)
+              .some((id) => savedZones[id] === 'bottom');
+            if (!knowsBottomZone && savedZones['file-explorer']) {
+              const previousZone = savedZones['file-explorer'];
+              savedZones['file-explorer'] = 'bottom';
+              global.toolWindowManager.setPersistedZones(savedZones);
+              if (!initialLayoutData.active_tool_windows || typeof initialLayoutData.active_tool_windows !== 'object') {
+                initialLayoutData.active_tool_windows = {};
+              }
+              if (initialLayoutData.active_tool_windows[previousZone] === 'file-explorer') {
+                delete initialLayoutData.active_tool_windows[previousZone];
+              }
+              initialLayoutData.active_tool_windows['bottom'] = 'file-explorer';
+              // bottom_panel_visible used to describe the notifications bar,
+              // which most layouts recorded as hidden. Honouring that here
+              // would silently swallow the panel we just moved, so reveal the
+              // zone once, on this migration only.
+              initialLayoutData.bottom_panel_visible = true;
             }
           }
           if (initialLayoutData.active_tool_windows && Object.keys(initialLayoutData.active_tool_windows).length > 0) {

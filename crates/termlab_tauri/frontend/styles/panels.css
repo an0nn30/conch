@@ -15,7 +15,7 @@
     .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
     .fp-tb-btn.active { color: var(--green); }
     .fp-path-input {
-      flex: 1; min-width: 0; height: 22px; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
+      flex: 1; min-width: 0; height: 24px; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
       border-radius: 3px; color: var(--fg); font: 11px "JetBrains Mono", monospace; outline: none;
     }
     .fp-path-input:focus { border-color: var(--dim-fg); }
@@ -24,7 +24,7 @@
     .fp-table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; }
     .fp-table { width: 100%; border-collapse: collapse; font-size: var(--ui-font-list); }
     .fp-table th {
-      position: sticky; top: 0; z-index: 1; height: 24px; padding: 3px 6px; text-align: left;
+      position: sticky; top: 0; z-index: 1; height: 22px; padding: 3px 6px; text-align: left;
       font-size: var(--ui-font-small); font-weight: 500; color: var(--dim-fg); background: var(--panel-bg);
       border-bottom: 1px solid var(--tab-border); white-space: nowrap; user-select: none;
     }
