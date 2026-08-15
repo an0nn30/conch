@@ -104,6 +104,25 @@
           }
           if (initialLayoutData.tool_window_zones && Object.keys(initialLayoutData.tool_window_zones).length > 0) {
             global.toolWindowManager.setPersistedZones(initialLayoutData.tool_window_zones);
+
+            // Migration: saved layouts from before the Tunnels tool window
+            // existed have no 'tunnels' entry in tool_window_zones. Such a
+            // layout's active_tool_windows map predates the window too, so
+            // hasPersistedActiveForSide('right') would otherwise suppress
+            // auto-activating Tunnels on first boot after upgrading (the
+            // right-bottom zone would just sit on whatever it last knew
+            // about, or nothing). Only step in when right-bottom truly has
+            // no recorded active window — if it does, this is either an
+            // up-to-date layout (leave it alone) or the user deliberately
+            // hid Tunnels after it existed (also leave it alone).
+            if (!Object.prototype.hasOwnProperty.call(initialLayoutData.tool_window_zones, 'tunnels')) {
+              if (!initialLayoutData.active_tool_windows || typeof initialLayoutData.active_tool_windows !== 'object') {
+                initialLayoutData.active_tool_windows = {};
+              }
+              if (!Object.prototype.hasOwnProperty.call(initialLayoutData.active_tool_windows, 'right-bottom')) {
+                initialLayoutData.active_tool_windows['right-bottom'] = 'tunnels';
+              }
+            }
           }
           if (initialLayoutData.active_tool_windows && Object.keys(initialLayoutData.active_tool_windows).length > 0) {
             global.toolWindowManager.setPersistedActiveZoneWindows(initialLayoutData.active_tool_windows);

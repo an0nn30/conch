@@ -116,8 +116,29 @@
 
   function addPluginTab(id, name, renderFn) {
     if (pluginTabs.has(id)) return;
+    const hadNoTabs = pluginTabs.size === 0;
     pluginTabs.set(id, { name, renderFn });
     addTab(id, name);
+
+    if (hadNoTabs) {
+      // The bottom panel starts hidden when it has zero tabs (see
+      // startup-runtime.js). Now that the first tab is arriving, un-hide it
+      // — but only if the user's saved preference allows the bottom panel
+      // to be visible at all (matches the same fields startup-runtime.js
+      // reads from the saved layout).
+      const layoutData = window.__termlabInitialLayout;
+      const allowed = !layoutData || (layoutData.zen_mode !== true && layoutData.bottom_panel_visible !== false);
+      if (allowed) {
+        const panelEl = document.getElementById('bottom-panel');
+        if (panelEl) panelEl.classList.remove('hidden');
+      }
+    }
+
+    // If nothing is active yet in the bottom panel, activate the newly
+    // added tab so plugin tabs aren't stuck invisible behind an empty view.
+    if (activeTabId === null) {
+      activateTab(id);
+    }
   }
 
   function removePluginTab(id) {
@@ -132,6 +153,13 @@
     }
   }
 
+  // Whether the bottom panel currently has any tabs (plugin tabs only —
+  // there is no built-in tab anymore). Used by startup-runtime.js to decide
+  // whether the bottom panel should be unhidden on boot.
+  function hasTabs() {
+    return pluginTabs.size > 0;
+  }
+
   exports.notificationPanel = {
     init,
     activateTab,
@@ -139,5 +167,6 @@
     removePluginTab,
     updatePluginTab,
     renderInto,
+    hasTabs,
   };
 })(window);

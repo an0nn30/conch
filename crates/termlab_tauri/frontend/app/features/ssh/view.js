@@ -121,6 +121,12 @@
           frag.appendChild(createServerNode(server, true, null, false, c));
         }
       }
+      if (!hasServers) {
+        const empty = document.createElement('div');
+        empty.className = 'tl-empty-state';
+        empty.textContent = 'Nothing to show';
+        frag.appendChild(empty);
+      }
     }
 
     serverListEl.innerHTML = '';

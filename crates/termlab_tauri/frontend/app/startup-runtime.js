@@ -139,7 +139,21 @@
           if (layoutData.zen_mode === true || layoutData.bottom_panel_visible === false) {
             document.getElementById('bottom-panel').classList.add('hidden');
           } else {
-            document.getElementById('bottom-panel').classList.remove('hidden');
+            // The bottom panel now only ever holds plugin tabs (the built-in
+            // Notifications tab moved to a right-bottom tool window). On a
+            // fresh launch — or whenever no plugin has added a tab yet —
+            // there is nothing to show, so leave it hidden rather than
+            // unhiding a blank panel. addPluginTab() in notification-panel.js
+            // un-hides it later once the first tab actually arrives.
+            const tabsEl = document.getElementById('bottom-panel-tabs');
+            const hasTabs = (global.notificationPanel && typeof global.notificationPanel.hasTabs === 'function')
+              ? global.notificationPanel.hasTabs()
+              : !!(tabsEl && tabsEl.children.length > 0);
+            if (hasTabs) {
+              document.getElementById('bottom-panel').classList.remove('hidden');
+            } else {
+              document.getElementById('bottom-panel').classList.add('hidden');
+            }
           }
           if (layoutData.bottom_panel_height > 0) {
             document.getElementById('bottom-panel').style.height = layoutData.bottom_panel_height + 'px';

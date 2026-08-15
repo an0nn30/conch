@@ -375,7 +375,11 @@
       const gearBtn = document.createElement('button');
       gearBtn.className = 'tl-icon-btn';
       gearBtn.title = 'Options';
-      gearBtn.appendChild(window.tlIcon.create('settings', { size: 16, alt: 'Options' }));
+      if (window.tlIcon) {
+        gearBtn.appendChild(window.tlIcon.create('settings', { size: 16, alt: 'Options' }));
+      } else {
+        gearBtn.textContent = '⚙';
+      }
       gearBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (zone.activeId) showContextMenu(e, zone.activeId);
@@ -383,7 +387,11 @@
       const hideBtn = document.createElement('button');
       hideBtn.className = 'tl-icon-btn';
       hideBtn.title = 'Hide';
-      hideBtn.appendChild(window.tlIcon.create('hideToolWindow', { size: 16, alt: 'Hide' }));
+      if (window.tlIcon) {
+        hideBtn.appendChild(window.tlIcon.create('hideToolWindow', { size: 16, alt: 'Hide' }));
+      } else {
+        hideBtn.textContent = '—';
+      }
       hideBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (zone.activeId) deactivate(zone.activeId);
