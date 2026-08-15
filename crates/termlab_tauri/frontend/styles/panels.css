@@ -49,30 +49,10 @@
     .fp-footer { padding: 3px 8px; font-size: var(--ui-font-small); color: var(--dim-fg); flex-shrink: 0; }
     .fp-transfer-pct { margin-left: 6px; color: var(--green); font-weight: 600; font-size: var(--ui-font-small); }
     /* Row context menu (right-click on a file/dir row) — New Folder, Rename,
-       Delete, Copy Path, Upload/Download, Refresh. Icons sit in a fixed-width
-       left gutter; disabled items (no active SSH session) are muted text with
-       a native title-attribute tooltip. Positioning/dismiss mechanics mirror
-       .fp-col-menu below; see app/features/files/pane-view.js showRowContextMenu. */
-    .fp-context-menu {
-      position: fixed; z-index: 2000; background: var(--tl-panel-bg); border: 1px solid var(--tl-border);
-      border-radius: var(--tl-radius); padding: var(--tl-space-1) 0; min-width: 200px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-    }
-    .fp-context-menu-item {
-      display: flex; align-items: center; gap: var(--tl-space-2);
-      padding: var(--tl-space-1) var(--tl-space-2) var(--tl-space-1) var(--tl-space-1);
-      cursor: pointer; font: 400 var(--tl-font-size-ui) var(--tl-font-ui); color: var(--tl-fg);
-      white-space: nowrap;
-    }
-    .fp-context-menu-item:hover:not(.disabled) { background: var(--tl-row-hover); }
-    .fp-context-menu-item.disabled { color: var(--tl-fg-muted); cursor: default; }
-    .fp-context-menu-icon {
-      width: 16px; height: 16px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
-    }
-    .fp-context-menu-icon img { display: block; width: 16px; height: 16px; }
-    .fp-context-menu-item.disabled .fp-context-menu-icon img { opacity: 0.4; }
-    .fp-context-menu-label { flex: 1; }
-    .fp-context-menu-sep { height: 1px; background: var(--tl-border); margin: var(--tl-space-1) 0; }
+       Delete, Copy Path, Upload/Download, Refresh — now renders through the
+       shared .tl-menu component (styles/design-system/components/menu.css,
+       app/ui/tl-menu.js) rather than .fp-context-menu*, which has been
+       removed; see app/features/files/pane-view.js showRowContextMenu. */
     .fp-col-menu {
       position: fixed; z-index: 2000; background: var(--input-bg); border: 1px solid var(--active-highlight);
       border-radius: 6px; padding: 4px 0; min-width: 130px; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
@@ -346,6 +326,12 @@
       flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .ssh-server-detail { font-size: var(--ui-font-small); color: var(--tl-fg-muted); flex-shrink: 0; }
+    /* Legacy popup styling — the Hosts panel's own context menus (New /
+       server / folder, app/panels/ssh-panel.js) now render through the
+       shared .tl-menu component (styles/design-system/components/menu.css)
+       instead. Still used by the tunnels row menu (app/panels/tunnels-panel.js
+       via app/features/ssh/context-menu.js) and by tunnel-manager.js's own
+       inline context menu — do not remove. */
     .ssh-context-menu {
       position: fixed; z-index: 3200; background: var(--input-bg); border: 1px solid var(--active-highlight);
       border-radius: 6px; padding: 4px 0; min-width: 140px;

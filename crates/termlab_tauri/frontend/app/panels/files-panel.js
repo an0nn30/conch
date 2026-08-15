@@ -640,7 +640,7 @@
       { icon: 'newFolder', label: 'New Folder…', action: () => doNewFolder(pane) },
       { type: 'separator' },
       { icon: 'edit', label: 'Rename…', action: () => doRename(pane, entry) },
-      { icon: 'remove', label: 'Delete', action: () => doDelete(pane, entry) },
+      { icon: 'remove', label: 'Delete', danger: true, action: () => doDelete(pane, entry) },
       { type: 'separator' },
       { icon: 'copy', label: 'Copy Path', action: () => doCopyPath(pane, entry) },
       { type: 'separator' },

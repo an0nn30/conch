@@ -190,102 +190,39 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Row context menu (right-click on a file/dir row) — pattern mirrors
-  // showColumnMenu above (fixed-position popup, viewport-clamped, dismissed on
-  // outside click) plus icon gutter, disabled items, and separators, matching
-  // the ssh-context-menu / tunnel row-menu popups elsewhere in the app. Items
-  // are pre-built by the caller (files-panel.js), which owns the business
-  // logic (invoke, session state); this module only knows how to render them.
-  let unregisterRowMenuEscape = null;
-
-  function removeRowContextMenu() {
-    document.querySelectorAll('.fp-context-menu').forEach((menu) => menu.remove());
-    if (typeof unregisterRowMenuEscape === 'function') {
-      unregisterRowMenuEscape();
-      unregisterRowMenuEscape = null;
-    }
-  }
-
+  // Row context menu (right-click on a file/dir row) — renders through the
+  // shared window.tlMenu component (styles/design-system/components/menu.css,
+  // app/ui/tl-menu.js), which owns positioning, dismissal, and single-instance
+  // behavior. Items are pre-built by the caller (files-panel.js), which owns
+  // the business logic (invoke, session state); this module only translates
+  // that item shape ({type: 'separator'} / {action}) into tlMenu's
+  // ({separator: true} / {onSelect}).
   function showRowContextMenu(event, items) {
-    removeRowContextMenu();
-
-    const menu = document.createElement('div');
-    menu.className = 'fp-context-menu';
-    menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', 'File actions');
-    menu.style.left = event.clientX + 'px';
-    menu.style.top = event.clientY + 'px';
-
-    for (const item of (Array.isArray(items) ? items : [])) {
-      if (item.type === 'separator') {
-        const sep = document.createElement('div');
-        sep.className = 'fp-context-menu-sep';
-        menu.appendChild(sep);
-        continue;
-      }
-
-      const el = document.createElement('div');
-      el.className = 'fp-context-menu-item' + (item.disabled ? ' disabled' : '');
-      el.setAttribute('role', 'menuitem');
-      if (item.disabled) el.setAttribute('aria-disabled', 'true');
-      if (item.title) el.title = item.title;
-      el.tabIndex = item.disabled ? -1 : 0;
-
-      const iconWrap = document.createElement('span');
-      iconWrap.className = 'fp-context-menu-icon';
-      if (item.icon && global.tlIcon && typeof global.tlIcon.create === 'function') {
-        iconWrap.appendChild(global.tlIcon.create(item.icon, { size: 16, alt: '' }));
-      }
-      el.appendChild(iconWrap);
-
-      const label = document.createElement('span');
-      label.className = 'fp-context-menu-label';
-      label.textContent = item.label;
-      el.appendChild(label);
-
-      if (!item.disabled) {
-        const activate = () => {
-          removeRowContextMenu();
-          if (typeof item.action === 'function') item.action();
-        };
-        el.addEventListener('click', activate);
-        el.addEventListener('keydown', (keyEvent) => {
-          if (keyEvent.key !== 'Enter' && keyEvent.key !== ' ') return;
-          keyEvent.preventDefault();
-          activate();
-        });
-      }
-
-      menu.appendChild(el);
+    if (!global.tlMenu || typeof global.tlMenu.open !== 'function') {
+      console.error('files-pane-view: window.tlMenu is unavailable');
+      return null;
     }
 
-    document.body.appendChild(menu);
-    requestAnimationFrame(() => {
-      const rect = menu.getBoundingClientRect();
-      if (rect.right > window.innerWidth) menu.style.left = Math.max(4, window.innerWidth - rect.width - 4) + 'px';
-      if (rect.bottom > window.innerHeight) menu.style.top = Math.max(4, window.innerHeight - rect.height - 4) + 'px';
+    const menuItems = (Array.isArray(items) ? items : []).map((item) => {
+      if (item.type === 'separator') return { separator: true };
+      return {
+        label: item.label,
+        icon: item.icon,
+        disabled: item.disabled,
+        danger: item.danger,
+        title: item.title,
+        onSelect: item.action,
+      };
     });
 
-    setTimeout(() => document.addEventListener('click', removeRowContextMenu, { once: true }), 0);
-
-    const keyboardRouter = global.termlabKeyboardRouter;
-    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
-      unregisterRowMenuEscape = keyboardRouter.register({
-        name: 'fp-row-context-menu',
-        priority: 220,
-        isActive: () => menu.isConnected,
-        onKeyDown: (keyEvent) => {
-          if (!menu.isConnected) return false;
-          if (keyEvent.key !== 'Escape') return false;
-          removeRowContextMenu();
-          return true;
-        },
-      });
-    } else {
-      console.warn('files-pane-view: keyboard router unavailable, row context menu Escape handler not registered');
-    }
-
-    return menu;
+    return global.tlMenu.open({
+      x: event.clientX,
+      y: event.clientY,
+      items: menuItems,
+      ariaLabel: 'File actions',
+      routerName: 'fp-row-context-menu',
+      routerPriority: 220,
+    });
   }
 
   global.termlabFilesPaneView = {

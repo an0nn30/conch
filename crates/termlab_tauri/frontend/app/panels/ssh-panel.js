@@ -14,7 +14,6 @@
   const sshStore = exports.termlabSshStore || {};
   const sshActions = exports.termlabSshActions || {};
   const sshView = exports.termlabSshView || {};
-  const sshContextMenuFeature = exports.termlabSshContextMenu || {};
   const sshAuthPromptsFeature = exports.termlabSshAuthPrompts || {};
   const sshDialogsFeature = exports.termlabSshDialogs || {};
   const sshDependencyPromptFeature = exports.termlabSshDependencyPrompt || {};
@@ -283,8 +282,8 @@
     const rect = anchorBtn.getBoundingClientRect();
     const fakeEvent = { clientX: rect.left, clientY: rect.bottom + 4 };
     showContextMenu(fakeEvent, [
-      { label: 'New Connection', action: () => showConnectionForm() },
-      { label: 'New Folder', action: () => showAddFolderDialog() },
+      { icon: 'add', label: 'New Connection', action: () => showConnectionForm() },
+      { icon: 'newFolder', label: 'New Folder', action: () => showAddFolderDialog() },
       { label: 'New Tunnel', action: () => { if (window.tunnelManager) window.tunnelManager.show(); } },
     ]);
   }
@@ -866,14 +865,14 @@
 
   function showServerContextMenu(e, server, folderId) {
     showContextMenu(e, [
-      { label: 'Connect', action: () => createSshTabFn({ serverId: server.id }) },
-      { label: 'Edit', action: () => showConnectionForm(server, folderId) },
-      { label: 'Duplicate', action: () => {
+      { icon: 'web', label: 'Connect', action: () => createSshTabFn({ serverId: server.id }) },
+      { icon: 'edit', label: 'Edit', action: () => showConnectionForm(server, folderId) },
+      { icon: 'copy', label: 'Duplicate', action: () => {
         if (!sshActions || typeof sshActions.duplicateServer !== 'function') return;
         sshActions.duplicateServer(invoke, server.id).then(() => refreshAll()).catch(() => {});
       }},
       { type: 'separator' },
-      { label: 'Delete', danger: true, action: () => {
+      { icon: 'remove', label: 'Delete', danger: true, action: () => {
         showDeleteConfirmDialog(`Delete "${server.label}"?`, () => {
           if (!sshActions || typeof sshActions.deleteServer !== 'function') return;
           sshActions.deleteServer(invoke, server.id).then(() => refreshAll()).catch(() => {});
@@ -884,10 +883,10 @@
 
   function showFolderContextMenu(e, folder) {
     showContextMenu(e, [
-      { label: 'Add Server Here', action: () => showConnectionForm(null, folder.id) },
-      { label: 'Rename', action: () => showRenameFolderDialog(folder) },
+      { icon: 'add', label: 'Add Server Here', action: () => showConnectionForm(null, folder.id) },
+      { icon: 'edit', label: 'Rename', action: () => showRenameFolderDialog(folder) },
       { type: 'separator' },
-      { label: 'Delete Folder', danger: true, action: () => {
+      { icon: 'remove', label: 'Delete Folder', danger: true, action: () => {
         showDeleteConfirmDialog(`Delete folder "${folder.name}" and all servers in it?`, () => {
           if (!sshActions || typeof sshActions.deleteFolder !== 'function') return;
           sshActions.deleteFolder(invoke, folder.id).then(() => refreshAll()).catch(() => {});
@@ -911,23 +910,41 @@
     }
   }
 
+  // Hosts panel context menus (New / server / folder) render through the
+  // shared window.tlMenu component (styles/design-system/components/menu.css,
+  // app/ui/tl-menu.js) — same popup used by the SFTP row context menu. The
+  // tunnels row menu (tunnels-panel.js) intentionally still goes through
+  // app/features/ssh/context-menu.js / .ssh-context-menu and is unaffected by
+  // this switch; see .superpowers/sdd design-system-phase-4 shared-menu report.
   function showContextMenu(e, items) {
-    if (sshContextMenuFeature && typeof sshContextMenuFeature.showContextMenu === 'function') {
-      sshContextMenuFeature.showContextMenu(e, items, {
-        onOpen: () => {},
-      });
+    if (!window.tlMenu || typeof window.tlMenu.open !== 'function') {
+      if (window.toast && typeof window.toast.error === 'function') {
+        window.toast.error('SSH Error', 'Menu module is unavailable.');
+      }
       return;
     }
-    if (window.toast && typeof window.toast.error === 'function') {
-      window.toast.error('SSH Error', 'Context-menu module is unavailable.');
-    }
+    const menuItems = (Array.isArray(items) ? items : []).map((item) => {
+      if (item.type === 'separator') return { separator: true };
+      return {
+        label: item.label,
+        icon: item.icon,
+        disabled: item.disabled,
+        danger: item.danger,
+        title: item.title,
+        onSelect: item.action,
+      };
+    });
+    window.tlMenu.open({
+      x: e.clientX,
+      y: e.clientY,
+      items: menuItems,
+      ariaLabel: 'SSH context menu',
+      routerName: 'ssh-context-menu',
+    });
   }
 
   function removeContextMenu() {
-    if (sshContextMenuFeature && typeof sshContextMenuFeature.removeContextMenu === 'function') {
-      sshContextMenuFeature.removeContextMenu();
-      return;
-    }
+    if (window.tlMenu && typeof window.tlMenu.close === 'function') window.tlMenu.close();
   }
 
   function removeOverlay() {
