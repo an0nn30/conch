@@ -11,14 +11,12 @@
   'use strict';
 
   let tabsEl = null;
-  let actionsEl = null;
   let contentEl = null;
   let activeTabId = null;
   const pluginTabs = new Map();
 
   function init() {
     tabsEl = document.getElementById('bottom-panel-tabs');
-    actionsEl = document.getElementById('bottom-panel-actions');
     contentEl = document.getElementById('bottom-panel-content');
 
     if (window.toast && window.toast.onNotification) {
