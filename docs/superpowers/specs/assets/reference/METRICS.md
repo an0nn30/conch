@@ -70,3 +70,38 @@ Sits between the title bar and the terminal, spanning only the editor area
 
 Inactive and active labels render at the same brightness; only the border gap
 distinguishes them.
+
+## Dialogs and settings (structure from reference screenshots, 2026-08-15)
+
+Pixel values still to be measured — the JVM theme defines **no** tokens for
+CheckBox, RadioButton, Dialog or Separator, so those come from Swing defaults
+and must be sampled from a live dialog window. Each dialog is its own OS
+window (native title bar, centred title), not an in-page overlay.
+
+### Modal dialog shell (`Add SSH Host`, `Add SSH Tunnel`, `Unlock Vault`)
+- Native title bar with centred bold title; body on the panel background.
+- Two-column form: right-aligned label column, control column filling the rest.
+- Buttons bottom-right: secondary (`Cancel`) then primary (`Add` / `Unlock`)
+  filled with the accent; generous padding above the button row.
+- Controls seen: text field, spinner (numeric + up/down stepper), combo box
+  (full width, arrow at right), radio group, file-picker field with a folder
+  button, a full-width secondary toggle button (`Advanced >`).
+- The focused field carries an accent border; unfocused fields are flat.
+
+### Combo popup (open dropdown)
+- Anchored under the control, same width, 1px border, panel background.
+- Selected row filled with the accent (`#6B80A1`-family), white-ish text.
+- Scrollbar appears when the list overflows; items left-aligned, single line.
+
+### Settings window
+- Left sidebar (~25% width) with a search field at top, a disclosure tree
+  (`Appearance & Behavior` > children), and the selected row filled.
+- Content pane: breadcrumb header (`Appearance & Behavior > Appearance`),
+  then labelled rows; section headers (`Accessibility`, `UI Options`,
+  `Tree Views`) are small caps-ish labels followed by a horizontal rule.
+- Checkboxes: square, checked state filled with the accent and a white tick;
+  two-column checkbox layout in `UI Options`.
+- Inline blue links (`Reset to default`, `How it works`), muted helper text
+  under some rows.
+- Footer: `?` help button bottom-left; `Cancel`, `Apply`, `OK` bottom-right
+  with `OK` filled (primary) and `Apply` disabled until changes exist.
