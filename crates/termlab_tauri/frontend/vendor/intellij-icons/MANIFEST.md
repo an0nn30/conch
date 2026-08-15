@@ -28,6 +28,7 @@ classic set has no dark counterpart (verified by search — Task 5's icon helper
 - `notifications` ← `toolwindows/notifications.svg` (Apache-2.0) `[+ _dark]`
 - `moreVertical` ← `actions/more.svg` (Apache-2.0) `[+ _dark]`
 - `sftp` ← `runConfigurations/remote.svg` (Apache-2.0) `[+ _dark]`
+- `terminal` ← `nodes/console.svg` (Apache-2.0) `[no dark variant]`
 
 ## Notes on non-exact-name choices
 
@@ -64,11 +65,21 @@ the closest classic icon was chosen after reading the SVG source:
   project/terminal" than "remote host connection"). `runConfigurations/remote.svg` has a classic
   `remote_dark.svg` counterpart and is the closest classic glyph to "connecting to a remote machine",
   which is what the SFTP tool window represents.
+- **terminal** (Task 1, `design-system-phase-4`): neither `toolwindows/toolWindowTerminal.svg` nor
+  `general/console.svg` (the brief's first two candidates) exist in the classic set — the only
+  terminal-branded glyph lives under `plugins/terminal/resources/icons/expui/toolwindow/terminal.svg`,
+  which was avoided per the classic-icon-set convention. `nodes/console.svg` (the brief's third
+  candidate, `AllIcons.Nodes.Console`) does exist: a solid square with a chevron-shaped cutout,
+  produced by a single evenodd path (outer 12x10 rect XOR the chevron polygon). Compared against
+  `assets/reference/jvm-termlab-tabs.png` (small square with a `>`), this is a close match — same
+  silhouette, solid fill with the chevron reading as a punched-through mark — so it was used as-is
+  rather than falling back to `folder`. No classic dark variant exists.
 
 ## Icons with NO dark variant
 
 For Task 5's icon helper: the following 6 of 15 logical names have **no** `_dark.svg` file in this
 directory (`<name>.svg` only) — `close`, `search`, `chevronDown`, `chevronRight`, `folder`, `file`.
 The other 9 (`add`, `edit`, `remove`, `refresh`, `web`, `settings`, `hideToolWindow`, `notifications`,
-`moreVertical`) each have both `<name>.svg` and `<name>_dark.svg`.
+`moreVertical`) each have both `<name>.svg` and `<name>_dark.svg`. `terminal` (added in Task 1,
+`design-system-phase-4`) also has no dark variant — see its entry above.
 gear ← platform/icons/src/general/gearPlain.svg (Apache-2.0)

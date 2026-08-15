@@ -125,74 +125,77 @@
       height: 0;
       display: flex;
       align-items: stretch;
-      gap: 0;
-      padding: 0;
-      background: var(--tab-bar-bg);
-      border-bottom: 0 solid #3a3d4f;
-      overflow-x: hidden;
-      overflow-y: hidden;
+      overflow: hidden;
       flex-shrink: 0;
       opacity: 0;
-      transition:
-        height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-        padding 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-        border-bottom-width 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-        opacity 160ms ease;
+      background: var(--tl-panel-bg);
+      border-bottom: 0 solid var(--tl-border);
+      transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 160ms ease;
     }
     #app.tabs-visible #tabbar {
-      height: 36px;
-      padding: 3px 0 0;
+      height: 28px;
       border-bottom-width: 1px;
       opacity: 1;
     }
     .tab-btn {
-      flex: 1 1 0;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: var(--tl-space-2);
       min-width: 0;
-      max-width: none;
-      padding: 0 4px 0 12px;
-      border: 1px solid var(--tab-border);
-      border-left-width: 0;
-      border-bottom: none;
-      border-radius: 0;
-      background: var(--input-bg);
-      color: var(--text-secondary);
-      font-size: var(--ui-font-small); line-height: 1.1; font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+      max-width: 220px;
+      height: 27px;
+      padding: 0 var(--tl-space-2);
+      background: transparent;
+      border: none;
+      color: var(--tl-fg);
+      font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
       cursor: pointer;
-      white-space: nowrap;
-      overflow: hidden;
-      display: flex; align-items: center; gap: 4px;
-      opacity: 1;
+      position: relative;
+      /* Entering-tab animation kept (below): only opacity/transform are
+         animated, which don't conflict with the fixed-height flex sizing
+         above, so the fade-and-drop-in on tab creation still works. */
       transform: translateY(0) scaleY(1);
       transform-origin: top center;
       transition:
         background 130ms ease,
         color 130ms ease,
-        border-color 130ms ease,
         opacity 180ms ease,
         transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
     }
-    .tab-btn:first-child {
-      border-left-width: 1px;
+    .tab-btn:hover { background: var(--tl-row-hover); }
+    /* The active tab is marked by punching a hole in the row's bottom border
+       so it merges with the terminal below — measured off the reference,
+       which uses no fill and no coloured underline. */
+    .tab-btn.active::after {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; bottom: -1px;
+      height: 1px;
+      background: var(--tl-panel-bg);
     }
     .tab-btn.entering {
       opacity: 0;
       transform: translateY(-8px) scaleY(0.88);
     }
-    .tab-btn-label { flex: 1; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+    .tab-btn-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tab-btn-close {
-      flex-shrink: 0; border: none; background: none; color: var(--text-muted);
-      cursor: pointer; padding: 2px 4px; border-radius: 3px; font-size: 11px; line-height: 1;
+      color: var(--tl-fg-muted);
+      flex-shrink: 0;
+      border-radius: var(--tl-radius);
+      padding: 0 2px;
     }
-    .tab-btn-close:hover { background: var(--active-highlight); color: var(--fg); }
-    .tab-btn.active {
-      background: var(--bg);
-      color: var(--fg);
-      border-color: var(--active-highlight);
-    }
+    .tab-btn-close:hover { background: var(--tl-row-hover); color: var(--tl-fg); }
     #main-area {
       display: flex;
       flex: 1;
       min-height: 0;
+    }
+    #editor-column {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
     }
     #terminal-host {
       position: relative;

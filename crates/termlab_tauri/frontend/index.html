@@ -25,7 +25,6 @@
 <body>
   <div id="app">
     <div id="drag-handle" data-tauri-drag-region></div>
-    <div id="tabbar"></div>
     <div id="main-area">
       <div id="left-strip" class="side-strip"></div>
       <div id="left-sidebar" class="sidebar-wrap hidden">
@@ -42,7 +41,10 @@
         </div>
         <div id="left-sidebar-resize" class="sidebar-resize"></div>
       </div>
-      <div id="terminal-host"></div>
+      <div id="editor-column">
+        <div id="tabbar"></div>
+        <div id="terminal-host"></div>
+      </div>
       <div id="right-sidebar" class="sidebar-wrap hidden">
         <div id="right-sidebar-resize" class="sidebar-resize"></div>
         <div id="right-panel-container" class="sidebar-panel">

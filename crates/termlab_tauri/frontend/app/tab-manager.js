@@ -44,6 +44,9 @@
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'tab-btn';
+      if (global.tlIcon) {
+        button.appendChild(global.tlIcon.create('terminal', { size: 16, alt: '' }));
+      }
       const labelSpan = document.createElement('span');
       labelSpan.className = 'tab-btn-label';
       labelSpan.textContent = label;
