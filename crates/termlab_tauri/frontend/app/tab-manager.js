@@ -39,6 +39,55 @@
     const ensureVaultUnlocked = deps.ensureVaultUnlocked;
     const getCurrentWindowLabel = deps.getCurrentWindowLabel;
     const refreshSshSessions = deps.refreshSshSessions;
+    const setWindowTitle = deps.setWindowTitle;
+    const getLocalPaneCwd = deps.getLocalPaneCwd;
+
+    // Window title = "<workspace basename> – <active tab title>", falling
+    // back to "TermLab" when there is no active tab. The workspace basename is
+    // resolved once (from the first local tab's initial cwd) and cached for
+    // the lifetime of this window, since no dedicated workspace command
+    // exists on the backend (see task brief).
+    let workspaceBasename = null;
+    let workspaceResolved = false;
+
+    function basenameOf(path) {
+      if (!path) return null;
+      const trimmed = String(path).replace(/[\\/]+$/, '');
+      const parts = trimmed.split(/[\\/]/);
+      const last = parts[parts.length - 1];
+      return last || trimmed;
+    }
+
+    function updateWindowTitle() {
+      if (typeof setWindowTitle !== 'function') return;
+      const tab = currentTab();
+      let title;
+      if (!tab) {
+        title = 'TermLab';
+      } else {
+        const tabTitle = getTabLabel(tab.button) || tab.label || 'Terminal';
+        title = workspaceBasename ? (workspaceBasename + ' – ' + tabTitle) : tabTitle;
+      }
+      try {
+        Promise.resolve(setWindowTitle(title)).catch(() => {});
+      } catch (_) {
+        // A missing/denied Tauri window API must never break tab switching.
+      }
+    }
+
+    async function resolveWorkspaceBasename(paneId) {
+      if (workspaceResolved || typeof getLocalPaneCwd !== 'function') return;
+      workspaceResolved = true;
+      try {
+        const cwd = await getLocalPaneCwd(paneId);
+        if (cwd) {
+          workspaceBasename = basenameOf(cwd);
+          updateWindowTitle();
+        }
+      } catch (_) {
+        // Leave workspaceBasename unset; title still falls back to the tab title alone.
+      }
+    }
 
     function makeTabButton(label, onClose) {
       const button = document.createElement('button');
@@ -107,6 +156,7 @@
           tab.label = newName;
           tab.hasCustomTitle = true;
           tab.button.title = newName;
+          updateWindowTitle();
         } else {
           labelSpan.textContent = currentText;
         }
@@ -191,6 +241,7 @@
 
       const pane = panes.get(tab.focusedPaneId);
       onTabChanged(pane || tab);
+      updateWindowTitle();
     }
 
     async function closeTab(tabId, options = {}) {
@@ -237,6 +288,8 @@
           activateTab(next.value.id);
         }
       }
+
+      updateWindowTitle();
 
       if (tabs.size === 0 && closeWindowWhenLast) {
         try {
@@ -328,6 +381,7 @@
         tab.hasCustomTitle = true;
         setTabLabel(tab.button, tabTitle);
         tab.button.title = tabTitle;
+        updateWindowTitle();
       });
       term.onData((data) => {
         if (!pane.spawned) return;
@@ -349,6 +403,7 @@
         }
         pane.spawned = true;
         fitAndResizePane(pane);
+        resolveWorkspaceBasename(paneId);
       } catch (error) {
         term.writeln('\x1b[31mFailed to spawn shell: ' + error + '\x1b[0m');
         await closeTab(tabId, { notifyBackend: false, closeWindowWhenLast: false });
@@ -429,6 +484,7 @@
         tab.hasCustomTitle = true;
         setTabLabel(tab.button, tabTitle);
         tab.button.title = tabTitle;
+        updateWindowTitle();
       });
       term.onData((data) => {
         if (!pane.spawned) return;

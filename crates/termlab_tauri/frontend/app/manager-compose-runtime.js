@@ -162,6 +162,17 @@
               await win.destroy();
             }
           },
+          setWindowTitle: async (title) => {
+            try {
+              const windowApi = tauri.window;
+              if (windowApi && typeof windowApi.getCurrentWindow === 'function') {
+                await windowApi.getCurrentWindow().setTitle(title);
+              }
+            } catch (_) {
+              // Missing/denied Tauri window API must never break tab switching.
+            }
+          },
+          getLocalPaneCwd: (paneId) => invoke('get_local_pane_cwd', { paneId }).catch(() => null),
           allocateTabId: () => allocTabId(),
           allocatePaneId: () => allocPaneId(),
           allocateTabLabel: () => 'Tab ' + allocTabLabel(),
