@@ -2,12 +2,12 @@
 .tl-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
 .tl-scroll::-webkit-scrollbar-track { background: transparent; }
 .tl-scroll::-webkit-scrollbar-thumb {
-  background: var(--tl-ScrollBar-thumbColor, rgba(128, 134, 146, 0.4));
+  background: var(--tl-scrollbar-thumb);
   border-radius: 5px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 .tl-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--tl-ScrollBar-hoverThumbColor, rgba(128, 134, 146, 0.6));
+  background: var(--tl-scrollbar-thumb-hover);
   background-clip: content-box;
 }

@@ -18,6 +18,17 @@
   --tl-selection-fg: var(--tl-base-selectionForeground);
   --tl-row-hover: var(--tl-ActionButton-hoverBackground);
 
+  /* The JVM dark theme (TermLabDark.theme.json) defines no ScrollBar block
+     at all, so tokens-dark.css has no --tl-ScrollBar-* keys; the light
+     theme only partially defines one (thumbColor, no hover variant). A
+     var(..., fallback) in scrollbar.css against those raw names would be a
+     phantom reference under the default (dark) appearance — the fallback
+     would always fire silently. Defined here as real semantic aliases
+     instead, carrying the same values scrollbar.css previously used as
+     fallbacks, so scrollbar.css can reference them with no fallback. */
+  --tl-scrollbar-thumb: rgba(128, 134, 146, 0.4);
+  --tl-scrollbar-thumb-hover: rgba(128, 134, 146, 0.6);
+
   --tl-header-h: 28px;   /* tool window title row */
   --tl-toolbar-h: 26px;  /* icon toolbar row */
   --tl-row-h: 24px;      /* table/tree compact row */
