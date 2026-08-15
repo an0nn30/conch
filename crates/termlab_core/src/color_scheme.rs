@@ -122,7 +122,18 @@ impl Default for ColorScheme {
     }
 }
 
-/// Return the themes directory: `~/.config/termlab/themes/`.
+/// Return the bundled themes directory shipped with the frontend:
+/// `crates/termlab_tauri/frontend/themes/`, resolved at compile time relative
+/// to this crate's manifest dir (siblings under `crates/`).
+fn bundled_themes_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("termlab_tauri")
+        .join("frontend")
+        .join("themes")
+}
+
+/// Return the user themes directory: `~/.config/termlab/themes/`.
 pub fn themes_dir() -> PathBuf {
     crate::config::config_dir().join("themes")
 }
@@ -136,16 +147,20 @@ pub fn load_theme(path: &Path) -> Result<ColorScheme> {
     Ok(theme_file.colors)
 }
 
-/// Scan the themes directory and return a map of `name -> path`.
+/// Scan the bundled themes directory and the user themes directory, returning
+/// a map of `name -> path`. The bundled dir is scanned first and the user dir
+/// second, so a user theme with the same name overwrites (wins over) a
+/// bundled theme of that name.
 pub fn list_themes() -> HashMap<String, PathBuf> {
-    let dir = themes_dir();
     let mut themes = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "toml") {
-                if let Some(stem) = path.file_stem() {
-                    themes.insert(stem.to_string_lossy().into_owned(), path);
+    for dir in [bundled_themes_dir(), themes_dir()] {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "toml") {
+                    if let Some(stem) = path.file_stem() {
+                        themes.insert(stem.to_string_lossy().into_owned(), path);
+                    }
                 }
             }
         }
@@ -210,6 +225,22 @@ pub fn resolve_theme(value: &str) -> ColorScheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_themes_finds_bundled_frontend_theme() {
+        let themes = list_themes();
+        assert!(
+            themes.contains_key("TermLab Dark"),
+            "expected bundled 'TermLab Dark' theme from crates/termlab_tauri/frontend/themes to be discoverable, found: {:?}",
+            themes.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn resolve_theme_loads_bundled_frontend_theme() {
+        let scheme = resolve_theme("TermLab Dark");
+        assert_eq!(scheme.primary.background, "#070A0E");
+    }
 
     #[test]
     fn default_color_scheme_primary_colors() {

@@ -1,0 +1,22 @@
+# GENERATED — scripts/extract_intellij_tokens.py
+[colors.primary]
+background = "#070A0E"
+foreground = "#C2C7CC"
+[colors.normal]
+black = "#070A0E"
+red = "#B37A80"
+green = "#89A885"
+yellow = "#B7A07A"
+blue = "#7A92B3"
+magenta = "#9A88B5"
+cyan = "#7FA8AA"
+white = "#C2C7CC"
+[colors.bright]
+black = "#838B95"
+red = "#C6989D"
+green = "#9BB896"
+yellow = "#C9B38E"
+blue = "#8DA4C3"
+magenta = "#AC9BC4"
+cyan = "#90B8BA"
+white = "#DEDFDF"
