@@ -34,7 +34,9 @@
   let searchQuery = '';
   let searchSelectedIndex = 0;
   let selectedServer = null;
-  let showSshConfigHosts = false;
+  // Preserves the pre-Phase-2 behavior of always listing ~/.ssh/config hosts by
+  // default; the toggle button lets the user *hide* them instead of show them.
+  let showSshConfigHosts = true;
 
   function setOverlayDialogAttributes(overlay, label) {
     if (!overlay) return;
@@ -119,6 +121,7 @@
 
     editHostBtn.disabled = true;
     removeHostBtn.disabled = true;
+    updateConfigToggleUI();
 
     // Selection — event delegation so it survives server-list re-renders.
     serverListEl.addEventListener('click', handleServerListClick);
@@ -209,7 +212,7 @@
     });
     configToggleBtn.addEventListener('click', () => {
       showSshConfigHosts = !showSshConfigHosts;
-      configToggleBtn.classList.toggle('active', showSshConfigHosts);
+      updateConfigToggleUI();
       renderServerList();
     });
 
@@ -266,6 +269,14 @@
     if (!quickConnectEl) return;
     quickConnectEl.focus();
     quickConnectEl.select();
+  }
+
+  function updateConfigToggleUI() {
+    if (!configToggleBtn) return;
+    configToggleBtn.classList.toggle('active', showSshConfigHosts);
+    configToggleBtn.title = showSshConfigHosts
+      ? 'Hide ~/.ssh/config hosts'
+      : 'Show ~/.ssh/config hosts';
   }
 
   function showNewMenu(anchorBtn) {
@@ -713,11 +724,14 @@
       onServerContextMenu: (event, server, folderId) => showServerContextMenu(event, server, folderId),
       onServerDblClick: (server) => createSshTabFn({ serverId: server.id }),
     });
+    reapplySelection();
   }
 
   // ---------------------------------------------------------------------------
   // Selection state
   // ---------------------------------------------------------------------------
+
+  function serverKey(s) { return `${s.user}@${s.host}:${s.port}`; }
 
   // Server tree nodes (see features/ssh/view.js#createServerNode) don't carry a
   // data-id attribute, but each node's title is the unique "user@host:port"
@@ -726,7 +740,7 @@
   // to its server record without modifying the view module.
   function findServerByNodeTitle(title) {
     const servers = getAllServers();
-    return servers.find((s) => `${s.user}@${s.host}:${s.port}` === title) || null;
+    return servers.find((s) => serverKey(s) === title) || null;
   }
 
   function handleServerListClick(event) {
@@ -749,6 +763,26 @@
     const disabled = !selectedServer;
     if (editHostBtn) editHostBtn.disabled = disabled;
     if (removeHostBtn) removeHostBtn.disabled = disabled;
+  }
+
+  // Re-resolves the current selection against freshly-rendered DOM/data. Server
+  // objects are wholesale-replaced on every refreshAll() (new objects from
+  // remote_get_servers), so a stale `selectedServer` reference would let the
+  // toolbar Edit button reopen outdated field values. Called after every
+  // renderServerList() (data refresh, folder toggle, config-hosts toggle,
+  // search) so it also re-applies the `.selected` class the DOM rebuild wipes.
+  function reapplySelection() {
+    if (!selectedServer) {
+      updateSelectionButtons();
+      return;
+    }
+    const fresh = getAllServers().find((s) => s.id === selectedServer.id) || null;
+    selectedServer = fresh;
+    updateSelectionButtons();
+    if (!fresh || !serverListEl) return;
+    const key = serverKey(fresh);
+    const node = Array.from(serverListEl.querySelectorAll('.ssh-server-node')).find((n) => n.title === key);
+    if (node) node.classList.add('selected');
   }
 
   function renderSessions(sessions) {
