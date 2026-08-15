@@ -108,6 +108,7 @@
       add('core:toggle-left', 'Toggle Left Panel', 'View', 'panel left sidebar files explorer tool windows', () => handleMenuAction('toggle-left-panel'));
       add('core:toggle-right', 'Toggle Right Panel', 'View', 'panel right sidebar sessions ssh tool windows', () => handleMenuAction('toggle-right-panel'));
       add('core:toggle-bottom', 'Toggle Bottom Panel', 'View', 'panel bottom', () => handleMenuAction('toggle-bottom-panel'));
+      add('core:notifications', 'Show Notifications', 'View', 'notifications history alerts toast tool window', () => handleMenuAction('notifications'));
 
       for (const item of (pluginItems || [])) {
         add(

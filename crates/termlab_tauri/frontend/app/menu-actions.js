@@ -237,6 +237,18 @@
         }
         return;
       }
+      if (action === 'notifications' && global.toolWindowManager) {
+        // Notifications moved out of the bottom panel into its own right-bottom
+        // tool window (design-system Phase 2); this activates it the same way
+        // 'focus-sessions' activates the Hosts tool window above.
+        if (!global.toolWindowManager.isPanelVisible('right')) {
+          global.toolWindowManager.setPanelVisibility('right', true);
+        }
+        if (!global.toolWindowManager.isVisible('notifications')) {
+          global.toolWindowManager.activate('notifications');
+        }
+        return;
+      }
       if (action === 'about') {
         showAboutDialog();
         return;

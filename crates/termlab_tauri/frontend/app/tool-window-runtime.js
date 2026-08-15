@@ -196,6 +196,26 @@
             }
           },
         });
+
+        // Registered after 'tunnels' so tunnels stays the right-bottom zone's
+        // auto-activated window on first boot; notifications starts inactive
+        // with a strip button (per tool-window-manager.js's first-registrant-
+        // activates-the-zone rule).
+        global.toolWindowManager.register('notifications', {
+          title: 'Notifications',
+          icon: 'notifications',
+          type: 'built-in',
+          defaultZone: 'right-bottom',
+          renderFn: (container) => {
+            const panelEl = document.createElement('div');
+            panelEl.id = 'notifications-panel';
+            container.appendChild(panelEl);
+            if (global.notificationsPanel) {
+              global.notificationsPanel.init({ panelEl });
+            }
+          },
+        });
+
         if (initialLayoutData && initialLayoutData.zen_mode === true) {
           global.toolWindowManager.setPanelVisibility('left', false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', false, { save: false });

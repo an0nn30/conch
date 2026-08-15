@@ -1,4 +1,11 @@
-// Bottom panel with tabbed interface — built-in Notifications tab + plugin tabs.
+// Bottom panel with tabbed interface — plugin tabs only.
+//
+// The built-in Notifications tab that used to live here has moved to its own
+// right-bottom tool window (see app/panels/notifications-panel.js). This module
+// still owns the entry-rendering logic (exported as renderInto so the new tool
+// window can reuse it) and the toast-history live-update hook, plus all of the
+// plugin-tab machinery (addPluginTab/removePluginTab/updatePluginTab) that
+// plugin-widgets.js relies on for bottom-location plugin panels.
 
 (function (exports) {
   'use strict';
@@ -6,7 +13,7 @@
   let tabsEl = null;
   let actionsEl = null;
   let contentEl = null;
-  let activeTabId = 'notifications';
+  let activeTabId = null;
   const pluginTabs = new Map();
 
   function init() {
@@ -14,21 +21,9 @@
     actionsEl = document.getElementById('bottom-panel-actions');
     contentEl = document.getElementById('bottom-panel-content');
 
-    addTab('notifications', 'Notifications');
-    activateTab('notifications');
-
-    const clearBtn = document.createElement('button');
-    clearBtn.className = 'bottom-panel-action-btn';
-    clearBtn.textContent = 'Clear';
-    clearBtn.title = 'Clear notification history';
-    clearBtn.addEventListener('click', () => {
-      if (window.toast && window.toast.clearHistory) window.toast.clearHistory();
-    });
-    actionsEl.appendChild(clearBtn);
-
     if (window.toast && window.toast.onNotification) {
-      window.toast.onNotification((record) => {
-        if (activeTabId === 'notifications') renderNotifications();
+      window.toast.onNotification(() => {
+        if (window.notificationsPanel) window.notificationsPanel.refresh();
       });
     }
   }
@@ -46,7 +41,15 @@
     const btn = tabsEl.querySelector('[data-tab-id="' + id + '"]');
     if (btn) btn.remove();
     pluginTabs.delete(id);
-    if (activeTabId === id) activateTab('notifications');
+    if (activeTabId === id) {
+      const remaining = tabsEl.querySelector('.bottom-tab');
+      if (remaining && remaining.dataset.tabId) {
+        activateTab(remaining.dataset.tabId);
+      } else {
+        activeTabId = null;
+        if (contentEl) contentEl.innerHTML = '';
+      }
+    }
   }
 
   function activateTab(id) {
@@ -54,30 +57,26 @@
     for (const btn of tabsEl.querySelectorAll('.bottom-tab')) {
       btn.classList.toggle('active', btn.dataset.tabId === id);
     }
-    if (actionsEl) {
-      actionsEl.style.display = id === 'notifications' ? '' : 'none';
-    }
-    if (id === 'notifications') {
-      renderNotifications();
-    } else {
-      const plugin = pluginTabs.get(id);
-      if (plugin && plugin.renderFn) {
-        contentEl.innerHTML = '';
-        plugin.renderFn(contentEl);
-      }
+    const plugin = pluginTabs.get(id);
+    if (plugin && plugin.renderFn && contentEl) {
+      contentEl.innerHTML = '';
+      plugin.renderFn(contentEl);
     }
   }
 
-  function renderNotifications() {
-    if (!contentEl) return;
-    contentEl.innerHTML = '';
+  // Renders the notification-history entries into an arbitrary container.
+  // Used by the notifications tool window (app/panels/notifications-panel.js);
+  // this module no longer owns a bottom-panel tab for notifications itself.
+  function renderInto(containerEl) {
+    if (!containerEl) return;
+    containerEl.innerHTML = '';
 
     const history = (window.toast && window.toast.getHistory) ? window.toast.getHistory() : [];
     if (history.length === 0) {
       const empty = document.createElement('div');
-      empty.className = 'notif-empty';
-      empty.textContent = 'No notifications yet.';
-      contentEl.appendChild(empty);
+      empty.className = 'tl-empty-state notif-empty';
+      empty.textContent = 'Nothing to show';
+      containerEl.appendChild(empty);
       return;
     }
 
@@ -114,7 +113,7 @@
 
       frag.appendChild(row);
     }
-    contentEl.appendChild(frag);
+    containerEl.appendChild(frag);
   }
 
   function addPluginTab(id, name, renderFn) {
@@ -141,5 +140,6 @@
     addPluginTab,
     removePluginTab,
     updatePluginTab,
+    renderInto,
   };
 })(window);
