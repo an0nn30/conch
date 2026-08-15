@@ -10,9 +10,6 @@
   const dockedViewRefreshTimers = new Map();
   // Tracks plugins whose dialog was recently dismissed to reject queued duplicates.
   const _dialogCooldown = new Set();
-  // Tracks handles for panels registered at the bottom location.
-  // Maps handle (number) → plugin name (string).
-  const bottomPanelHandles = new Map();
   // Tracks when a plugin last pushed panel widget updates via host events.
   const panelUpdateAt = new Map();
 
@@ -49,62 +46,14 @@
     invoke = opts.invoke;
     listen = opts.listen;
 
-    function ensureBottomPanelTab(panelInfo) {
-      const { handle, plugin, name, location, widgets_json } = panelInfo || {};
-      if (location !== 'bottom' || !plugin || !window.notificationPanel) return;
-      if (handle != null) {
-        bottomPanelHandles.set(handle, plugin);
-      }
-      const tabId = 'plugin-' + plugin;
-      window.notificationPanel.addPluginTab(
-        tabId,
-        name || plugin,
-        (container) => {
-          renderWidgets(container, widgets_json || '[]', plugin);
-        }
-      );
-      window.notificationPanel.updatePluginTab(
-        tabId,
-        (container) => {
-          renderWidgets(container, widgets_json || '[]', plugin);
-        }
-      );
-    }
-
-    // Track panel registrations so we know which handles belong to bottom panels.
-    listen('plugin-panel-registered', (event) => {
-      ensureBottomPanelTab(event.payload);
-    });
-
-    // Listen for plugin panel removal (batch event) and clean up bottom panel tabs.
-    listen('plugin-panels-removed', (event) => {
-      const { plugin, handles } = event.payload;
-      for (const handle of handles) {
-        if (bottomPanelHandles.has(handle)) {
-          bottomPanelHandles.delete(handle);
-        }
-      }
-      if (window.notificationPanel) {
-        window.notificationPanel.removePluginTab('plugin-' + plugin);
-      }
-    });
-
-    // Listen for widget updates from plugins.
+    // Listen for widget updates from plugins. Bottom-location panels now
+    // register as ordinary tool windows (see tool-window-runtime.js's
+    // registerPluginToolWindow), so there is no separate bottom-panel routing
+    // here anymore — every plugin panel, regardless of location, renders into
+    // a `.plugin-panel-content[data-plugin-name]` container.
     listen('plugin-widgets-updated', (event) => {
       const { handle, plugin, widgets_json } = event.payload;
       if (plugin) panelUpdateAt.set(plugin, Date.now());
-      if (bottomPanelHandles.has(handle)) {
-        // Route bottom-panel plugin widgets to the notification panel tab system.
-        if (window.notificationPanel) {
-          window.notificationPanel.updatePluginTab(
-            'plugin-' + plugin,
-            (container) => {
-              renderWidgets(container, widgets_json, plugin);
-            }
-          );
-        }
-        return;
-      }
       let container = document.querySelector(`[data-plugin-handle="${handle}"]`);
       if (!container && plugin) {
         container = document.querySelector(`.plugin-panel-content[data-plugin-name="${CSS.escape(plugin)}"]`);
@@ -201,21 +150,6 @@
       if (!opts.focusTabById) return;
       opts.focusTabById(String(payload.tab_id));
     });
-
-    if (invoke) {
-      invoke('get_plugin_panels').then((panels) => {
-        if (!Array.isArray(panels)) return;
-        for (const panel of panels) {
-          ensureBottomPanelTab({
-            handle: panel.handle,
-            plugin: panel.plugin_name,
-            name: panel.panel_name,
-            location: panel.location,
-            widgets_json: panel.widgets_json,
-          });
-        }
-      }).catch(() => {});
-    }
   }
 
   // ---------------------------------------------------------------------------

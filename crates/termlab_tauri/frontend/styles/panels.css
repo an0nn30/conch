@@ -167,54 +167,16 @@
     .pm-col-action { width: 1%; white-space: nowrap; text-align: right; }
     .pm-empty { padding: 24px; text-align: center; color: var(--dim-fg); font-size: 13px; }
 
-    /* -- Bottom panel & Status bar -- */
-    #bottom-panel {
-      height: 120px; min-height: 40px; max-height: 300px;
-      background: var(--panel-bg); border-top: 1px solid var(--tab-border);
-      display: flex; flex-direction: column; overflow: hidden;
-      font-size: var(--ui-font-normal); line-height: 1.4; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: var(--fg);
-      opacity: 1;
-      transition:
-        height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
-        opacity 140ms ease,
-        border-top-color 140ms ease;
-    }
-    body.panel-resize-dragging #bottom-panel {
-      transition: none !important;
-    }
-    #bottom-panel.hidden {
-      height: 0 !important;
-      min-height: 0;
-      opacity: 0;
-      border-top-color: transparent;
-      pointer-events: none;
-    }
-    #bottom-panel-resize {
-      height: 4px; cursor: row-resize; background: transparent; flex-shrink: 0;
-      transition: background 150ms;
-    }
-    body.panel-resize-dragging #bottom-panel-resize {
-      transition: none !important;
-    }
-    #bottom-panel-resize:hover, #bottom-panel-resize.dragging { background: var(--dim-fg); }
-    #bottom-panel-header {
-      display: flex; align-items: center; flex-shrink: 0;
-      border-bottom: 1px solid var(--tab-border); padding: 0;
-    }
-    #bottom-panel-tabs {
-      display: flex; flex: 1; overflow-x: auto; min-width: 0;
-    }
-    .bottom-tab {
-      padding: 5px 14px; cursor: pointer; border: none; background: none;
-      color: var(--text-muted); font-size: var(--ui-font-small);
-      border-bottom: 2px solid transparent; white-space: nowrap;
-    }
-    .bottom-tab:hover { color: var(--fg); }
-    .bottom-tab.active { color: var(--fg); border-bottom-color: var(--blue); }
-    #bottom-panel-actions {
-      display: flex; align-items: center; gap: 4px; padding: 0 8px; flex-shrink: 0;
-    }
+    /* -- Status bar / notifications --
+       The bottom-panel container rules that used to live here were removed
+       once #bottom-panel was retired (design-system Phase 3); the bottom
+       zone's own layout rules live in styles/tool-windows.css. The .notif-*
+       rules below are still used by the notifications tool window
+       (app/panels/notifications-panel.js via notification-panel.js's
+       renderInto). .bottom-panel-action-btn is kept too — despite the name,
+       it's not bottom-panel-specific: plugin-runtime.js reuses it for the
+       minimize/close buttons on docked plugin-view pane headers, and
+       skins.css has per-skin overrides for it. */
     .bottom-panel-action-btn {
       border: none; background: none; color: var(--text-muted); cursor: pointer;
       font-size: var(--ui-font-small); padding: 2px 6px; border-radius: 3px;
@@ -236,7 +198,6 @@
     .notif-title { color: var(--fg); font-weight: 500; }
     .notif-body { color: var(--text-muted); margin-left: 4px; }
     .notif-empty { color: var(--text-muted); font-style: italic; padding: 12px 0; }
-    #bottom-panel-content { flex: 1; overflow-y: auto; padding: 4px 8px; }
     #ssh-panel {
       flex: 1;
       display: flex;

@@ -32,8 +32,8 @@
     }
 
     async function init() {
-      const bottomPanelEl = document.getElementById('bottom-panel');
-      const bottomResizeEl = document.getElementById('bottom-panel-resize');
+      const bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
+      const bottomZoneResizeEl = document.getElementById('bottom-zone-resize');
       let initialLayoutData = null;
       const refreshShortcutFallbacks = () => {
         if (typeof global.__termlabRefreshKeyboardShortcutFallbacks === 'function') {
@@ -56,14 +56,14 @@
           : (typeof twm.isPanelOpen === 'function' ? twm.isPanelOpen('right') : twm.isPanelVisible('right'));
         const bottomVisible = zenActive && typeof zenRestore.bottomVisible === 'boolean'
           ? !!zenRestore.bottomVisible
-          : !bottomPanelEl.classList.contains('hidden');
+          : twm.isPanelVisible('bottom');
         const payload = {
           ssh_panel_width: widths.right,
           ssh_panel_visible: rightVisible,
           files_panel_width: widths.left,
           files_panel_visible: leftVisible,
           bottom_panel_visible: bottomVisible,
-          bottom_panel_height: bottomPanelEl.offsetHeight,
+          bottom_panel_height: bottomZoneWrapEl.offsetHeight,
           zen_mode: !!(appRoot && appRoot.classList.contains('zen-mode')),
           tool_window_zones: twm.getZoneAssignments(),
           active_tool_windows: typeof twm.getActiveZoneAssignments === 'function'
@@ -144,6 +144,10 @@
         if (initialLayoutData) {
           global.toolWindowManager.setPanelVisibility('left', initialLayoutData.files_panel_visible !== false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', initialLayoutData.ssh_panel_visible !== false, { save: false });
+          global.toolWindowManager.setPanelVisibility('bottom', initialLayoutData.bottom_panel_visible !== false, { save: false });
+          if (initialLayoutData.bottom_panel_height > 0 && bottomZoneWrapEl) {
+            bottomZoneWrapEl.style.height = initialLayoutData.bottom_panel_height + 'px';
+          }
         }
 
         global.toolWindowManager.register('file-explorer', {
@@ -238,7 +242,7 @@
         if (initialLayoutData && initialLayoutData.zen_mode === true) {
           global.toolWindowManager.setPanelVisibility('left', false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', false, { save: false });
-          bottomPanelEl.classList.add('hidden');
+          global.toolWindowManager.setPanelVisibility('bottom', false, { save: false });
         }
         refreshShortcutFallbacks();
       }
@@ -254,40 +258,40 @@
         let dragging = false;
         let startY = 0;
         let startHeight = 0;
-        bottomResizeEl.addEventListener('dragstart', (event) => event.preventDefault());
-        bottomResizeEl.style.touchAction = 'none';
-        bottomResizeEl.addEventListener('pointerdown', (event) => {
+        bottomZoneResizeEl.addEventListener('dragstart', (event) => event.preventDefault());
+        bottomZoneResizeEl.style.touchAction = 'none';
+        bottomZoneResizeEl.addEventListener('pointerdown', (event) => {
           event.preventDefault();
-          bottomResizeEl.setPointerCapture(event.pointerId);
+          bottomZoneResizeEl.setPointerCapture(event.pointerId);
           dragging = true;
           startY = event.clientY;
-          startHeight = bottomPanelEl.offsetHeight;
-          bottomResizeEl.classList.add('dragging');
+          startHeight = bottomZoneWrapEl.offsetHeight;
+          bottomZoneResizeEl.classList.add('dragging');
           beginResizeDrag();
           document.body.style.cursor = 'row-resize';
           document.body.style.userSelect = 'none';
         });
-        bottomResizeEl.addEventListener('pointermove', (event) => {
+        bottomZoneResizeEl.addEventListener('pointermove', (event) => {
           if (!dragging) return;
           const delta = startY - event.clientY;
-          const newHeight = Math.max(40, Math.min(300, startHeight + delta));
-          bottomPanelEl.style.height = newHeight + 'px';
+          const newHeight = Math.max(80, Math.min(window.innerHeight * 0.6, startHeight + delta));
+          bottomZoneWrapEl.style.height = newHeight + 'px';
           debouncedFitAndResize();
         });
-        bottomResizeEl.addEventListener('pointerup', (event) => {
+        bottomZoneResizeEl.addEventListener('pointerup', (event) => {
           if (!dragging) return;
-          bottomResizeEl.releasePointerCapture(event.pointerId);
+          bottomZoneResizeEl.releasePointerCapture(event.pointerId);
           dragging = false;
-          bottomResizeEl.classList.remove('dragging');
+          bottomZoneResizeEl.classList.remove('dragging');
           endResizeDrag();
           document.body.style.cursor = '';
           document.body.style.userSelect = '';
           saveLayoutNow();
         });
-        bottomResizeEl.addEventListener('pointercancel', () => {
+        bottomZoneResizeEl.addEventListener('pointercancel', () => {
           if (!dragging) return;
           dragging = false;
-          bottomResizeEl.classList.remove('dragging');
+          bottomZoneResizeEl.classList.remove('dragging');
           endResizeDrag();
           document.body.style.cursor = '';
           document.body.style.userSelect = '';
@@ -413,9 +417,7 @@
           if (global.titlebar && typeof global.titlebar.refresh === 'function') {
             global.titlebar.refresh().catch(() => {});
           }
-          if (location === 'bottom') return;
-
-          const zoneMap = { left: 'left-top', right: 'right-top' };
+          const zoneMap = { left: 'left-top', right: 'right-top', bottom: 'bottom' };
           const defaultZone = zoneMap[location] || 'right-bottom';
           const twmId = 'plugin:' + plugin;
           if (global.toolWindowManager && plugin && !registeredPluginToolWindows.has(twmId)) {
