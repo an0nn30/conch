@@ -27,6 +27,7 @@ classic set has no dark counterpart (verified by search — Task 5's icon helper
 - `file` ← `fileTypes/text.svg` (Apache-2.0) `[no dark variant]`
 - `notifications` ← `toolwindows/notifications.svg` (Apache-2.0) `[+ _dark]`
 - `moreVertical` ← `actions/more.svg` (Apache-2.0) `[+ _dark]`
+- `sftp` ← `runConfigurations/remote.svg` (Apache-2.0) `[+ _dark]`
 
 ## Notes on non-exact-name choices
 
@@ -55,6 +56,14 @@ the closest classic icon was chosen after reading the SVG source:
 - **moreVertical**: no classic icon is named `moreVertical`; `actions/more.svg` is a 3-dot vertical
   kebab glyph (`<circle>` stack) matching the intended "more actions" toolbar affordance, and it does
   have a classic `actions/more_dark.svg` counterpart.
+- **sftp** (Task 3, `design-system-phase-3`): no `nodes/ftp.svg` or `general/remote.svg` exists in the
+  classic set (the brief's candidate names). `runConfigurations/remote.svg` — the classic
+  `AllIcons.RunConfigurations.Remote` two-monitors glyph — was chosen instead of
+  `actions/download.svg` (a single-direction arrow, which misrepresents SFTP's two-way transfer) or
+  `welcome/recentProjects/remoteProject.svg` (a window+chevron glyph read more as "open remote
+  project/terminal" than "remote host connection"). `runConfigurations/remote.svg` has a classic
+  `remote_dark.svg` counterpart and is the closest classic glyph to "connecting to a remote machine",
+  which is what the SFTP tool window represents.
 
 ## Icons with NO dark variant
 

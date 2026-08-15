@@ -7,9 +7,6 @@
 
     const isRemote = !pane.isLocal;
     const noSession = isRemote && !d.activeRemotePaneId;
-    const label = isRemote
-      ? (noSession ? 'Remote — No SSH session' : 'Remote')
-      : 'Local';
 
     const esc = typeof d.esc === 'function' ? d.esc : (value) => String(value == null ? '' : value);
     const attr = typeof d.attr === 'function' ? d.attr : esc;
@@ -22,12 +19,13 @@
     const visibleEntries = (Array.isArray(pane.entries) ? pane.entries : [])
       .filter((entry) => pane.showHidden || !String(entry.name || '').startsWith('.'));
     const hiddenCount = (pane.entries || []).length - visibleEntries.length;
-    const footerText = hiddenCount > 0
-      ? `${visibleEntries.length} items (${hiddenCount} hidden)`
-      : `${visibleEntries.length} items`;
+    const footerText = noSession
+      ? 'Not connected'
+      : (hiddenCount > 0
+        ? `${visibleEntries.length} items (${hiddenCount} hidden)`
+        : `${visibleEntries.length} items`);
 
     el.innerHTML = `
-      <div class="fp-pane-label">${esc(label)}</div>
       <div class="fp-toolbar">
         <button class="fp-tb-btn" data-action="back" ${pane.backStack.length === 0 ? 'disabled' : ''} title="Back">${d.iconBack || ''}</button>
         <button class="fp-tb-btn" data-action="forward" ${pane.forwardStack.length === 0 ? 'disabled' : ''} title="Forward">${d.iconForward || ''}</button>
@@ -48,7 +46,7 @@
           <tbody></tbody>
         </table>
       </div>
-      <div class="fp-footer">${noSession ? '' : footerText}</div>
+      <div class="fp-footer">${esc(footerText)}</div>
     `;
 
     const tbody = el.querySelector('tbody');

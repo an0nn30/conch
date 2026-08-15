@@ -104,20 +104,17 @@
 
     panelEl.innerHTML = `
       <div class="fp-pane-container">
-        <div class="fp-pane" id="fp-remote"></div>
-        <div class="fp-transfer-bar">
-          <button class="fp-transfer-btn" id="fp-download" title="Download selected file from remote to local"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="m 2.001 8.211 1.386 -1.385 3.635 3.635 -0.021 -8.461 h 2 l 0.021 8.461 3.634 -3.635 1.385 1.385 -6.041 6.001 z"/></svg></button>
-          <button class="fp-transfer-btn" id="fp-upload" title="Upload selected file from local to remote"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="m 2.001 7.789 1.386 1.385 3.635 -3.635 -0.021 8.461 h 2 l 0.021 -8.461 3.634 3.635 1.385 -1.385 -6.041 -6.001 z"/></svg></button>
-        </div>
         <div class="fp-pane" id="fp-local"></div>
+        <div class="fp-transfer-bar">
+          <button class="fp-transfer-btn" id="fp-upload" title="Upload selected file from local to remote"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="m 2.001 7.789 1.386 1.385 3.635 -3.635 -0.021 8.461 h 2 l 0.021 -8.461 3.634 3.635 1.385 -1.385 -6.041 -6.001 z"/></svg></button>
+          <button class="fp-transfer-btn" id="fp-download" title="Download selected file from remote to local"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="m 2.001 8.211 1.386 -1.385 3.635 3.635 -0.021 -8.461 h 2 l 0.021 8.461 3.634 -3.635 1.385 1.385 -6.041 6.001 z"/></svg></button>
+        </div>
+        <div class="fp-pane" id="fp-remote"></div>
       </div>
     `;
 
     panelEl.querySelector('#fp-download').addEventListener('click', doDownload);
     panelEl.querySelector('#fp-upload').addEventListener('click', doUpload);
-
-    initResize();
-    restoreLayout();
 
     // Start local pane at home
     const homePromise = filesDataService && typeof filesDataService.getHomeDir === 'function'
@@ -168,84 +165,16 @@
   // ---------------------------------------------------------------------------
 
   function isHidden() {
-    if (window.toolWindowManager) return !window.toolWindowManager.isVisible('file-explorer');
-    if (!panelWrapEl) return true;
-    return panelWrapEl.classList.contains('hidden');
+    return !window.toolWindowManager.isVisible('file-explorer');
   }
   function showPanel() {
-    if (window.toolWindowManager) { window.toolWindowManager.activate('file-explorer'); return; }
-    panelWrapEl.classList.remove('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState();
+    window.toolWindowManager.activate('file-explorer');
   }
   function hidePanel() {
-    if (window.toolWindowManager) { window.toolWindowManager.deactivate('file-explorer'); return; }
-    panelWrapEl.classList.add('hidden'); if (fitActiveTabFn) fitActiveTabFn(); saveLayoutState();
+    window.toolWindowManager.deactivate('file-explorer');
   }
   function togglePanel() {
-    if (window.toolWindowManager) { window.toolWindowManager.toggle('file-explorer'); return; }
-    if (isHidden()) showPanel(); else hidePanel();
-  }
-
-  function initResize() {
-    if (!resizeHandleEl) return;
-    let dragging = false, startX = 0, startWidth = 0;
-
-    // Prevent native drag-and-drop from hijacking the resize gesture.
-    resizeHandleEl.addEventListener('dragstart', (e) => e.preventDefault());
-    resizeHandleEl.style.touchAction = 'none';
-
-    resizeHandleEl.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      resizeHandleEl.setPointerCapture(e.pointerId);
-      dragging = true;
-      startX = e.clientX;
-      startWidth = panelEl.offsetWidth;
-      resizeHandleEl.classList.add('dragging');
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-    });
-    resizeHandleEl.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const delta = e.clientX - startX; // left panel: drag right = wider
-      const newWidth = Math.max(200, Math.min(600, startWidth + delta));
-      panelEl.style.width = newWidth + 'px';
-      if (fitActiveTabFn) fitActiveTabFn();
-    });
-    resizeHandleEl.addEventListener('pointerup', (e) => {
-      if (!dragging) return;
-      resizeHandleEl.releasePointerCapture(e.pointerId);
-      dragging = false;
-      resizeHandleEl.classList.remove('dragging');
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      saveLayoutState();
-    });
-  }
-
-  let saveTimer = null;
-  function saveLayoutState() {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      if (!panelEl) return;
-      const patch = { files_panel_width: panelEl.offsetWidth, files_panel_visible: !isHidden() };
-      if (layoutService && typeof layoutService.savePartialLayout === 'function') {
-        layoutService.savePartialLayout(patch);
-      } else {
-        invoke('save_window_layout', { layout: patch }).catch(() => {});
-      }
-    }, 300);
-  }
-
-  async function restoreLayout() {
-    if (window.toolWindowManager) return;
-    try {
-      const saved = layoutService && typeof layoutService.getSavedLayout === 'function'
-        ? await layoutService.getSavedLayout()
-        : await invoke('get_saved_layout');
-      if (saved.files_panel_width > 100) panelEl.style.width = saved.files_panel_width + 'px';
-      if (saved.files_panel_visible === false) panelWrapEl.classList.add('hidden');
-      else panelWrapEl.classList.remove('hidden');
-      if (fitActiveTabFn) setTimeout(fitActiveTabFn, 100);
-    } catch (e) { console.error('Failed to restore files layout:', e); }
+    window.toolWindowManager.toggle('file-explorer');
   }
 
   // ---------------------------------------------------------------------------

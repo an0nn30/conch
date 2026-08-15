@@ -151,9 +151,10 @@
         }
 
         global.toolWindowManager.register('file-explorer', {
-          title: 'Files',
+          title: 'SFTP',
+          icon: 'sftp',
           type: 'built-in',
-          defaultZone: 'left-top',
+          defaultZone: 'bottom',
           renderFn: (container) => {
             const panelEl = document.createElement('div');
             panelEl.id = 'files-panel';

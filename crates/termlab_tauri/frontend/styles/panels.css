@@ -2,12 +2,8 @@
     #files-panel {
       flex: 1; display: flex; flex-direction: column; overflow: hidden;
     }
-    .fp-pane-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
-    .fp-pane-label {
-      padding: 6px 8px 2px; font-size: var(--ui-font-small); font-weight: 600; color: var(--text-muted);
-      text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0;
-    }
+    .fp-pane-container { flex: 1; display: flex; flex-direction: row; overflow: hidden; }
+    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; }
     .fp-toolbar {
       display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0;
     }
@@ -19,7 +15,7 @@
     .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
     .fp-tb-btn.active { color: var(--green); }
     .fp-path-input {
-      flex: 1; min-width: 0; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
+      flex: 1; min-width: 0; height: 22px; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
       border-radius: 3px; color: var(--fg); font: 11px "JetBrains Mono", monospace; outline: none;
     }
     .fp-path-input:focus { border-color: var(--dim-fg); }
@@ -28,12 +24,13 @@
     .fp-table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; }
     .fp-table { width: 100%; border-collapse: collapse; font-size: var(--ui-font-list); }
     .fp-table th {
-      position: sticky; top: 0; z-index: 1; padding: 3px 6px; text-align: left;
+      position: sticky; top: 0; z-index: 1; height: 24px; padding: 3px 6px; text-align: left;
       font-size: var(--ui-font-small); font-weight: 500; color: var(--dim-fg); background: var(--panel-bg);
       border-bottom: 1px solid var(--tab-border); white-space: nowrap; user-select: none;
     }
     .fp-table td { padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .fp-row { cursor: default; }
+    .fp-table tbody { background: var(--tl-Table-background); }
+    .fp-row { height: var(--tl-row-h); cursor: default; }
     .fp-row:hover td { background: var(--input-bg); }
     .fp-row.selected td { background: var(--active-highlight); }
     .fp-row.fp-transferring td { opacity: 0.6; }
@@ -50,9 +47,10 @@
     .fp-th-mod { width: 110px; }
     .fp-footer { padding: 3px 8px; font-size: var(--ui-font-small); color: var(--dim-fg); flex-shrink: 0; }
     .fp-transfer-bar {
-      display: flex; justify-content: center; gap: 8px;
-      padding: 4px 8px; border-top: 1px solid var(--tab-border); border-bottom: 1px solid var(--tab-border);
-      flex-shrink: 0;
+      display: flex; flex-direction: column; justify-content: center; flex-shrink: 0;
+      gap: var(--tl-space-2); padding: 0 var(--tl-space-1);
+      border-left: 1px solid var(--tl-border); border-right: 1px solid var(--tl-border);
+      border-top: none; border-bottom: none;
     }
     .fp-transfer-btn {
       padding: 3px 12px; border: 1px solid var(--tab-border); border-radius: 4px;

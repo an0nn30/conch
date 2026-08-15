@@ -5,7 +5,7 @@
   //   ls crates/termlab_tauri/frontend/vendor/intellij-icons | grep _dark
   let darkVariants = new Set([
     'add', 'edit', 'remove', 'refresh', 'web', 'settings', 'gear',
-    'hideToolWindow', 'notifications', 'moreVertical',
+    'hideToolWindow', 'notifications', 'moreVertical', 'sftp',
   ]);
 
   function resolve(name, isDark) {
