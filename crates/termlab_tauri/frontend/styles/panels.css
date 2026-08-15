@@ -273,13 +273,16 @@
     }
     .ssh-active-sessions { }
     .ssh-section-header {
-      padding: 6px 10px 3px; font-size: var(--ui-font-small); text-transform: uppercase;
-      letter-spacing: 0.5px; color: var(--dim-fg);
+      padding: var(--tl-space-2) var(--tl-space-2) var(--tl-space-1);
+      font: 600 11px var(--tl-font-ui); text-transform: uppercase;
+      letter-spacing: 0.5px; color: var(--tl-fg-muted);
     }
     .ssh-session-node {
-      display: flex; align-items: center; gap: 6px;
-      padding: 3px 10px 3px 14px; cursor: pointer;
-      font-size: var(--ui-font-list);
+      height: var(--tl-row-h);
+      display: flex; align-items: center; gap: var(--tl-space-1);
+      padding: 0 var(--tl-space-2); cursor: pointer;
+      font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+      color: var(--tl-fg);
     }
     .ssh-session-node:hover { background: var(--input-bg); }
     .ssh-session-dot {
@@ -292,12 +295,15 @@
       padding: 0 10px 2px;
     }
     .ssh-section-header-inline {
-      font-size: var(--ui-font-small); text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg);
+      font: 600 11px var(--tl-font-ui); text-transform: uppercase; letter-spacing: 0.5px; color: var(--tl-fg-muted);
     }
     .ssh-icon-btn-sm { font-size: var(--ui-font-small); padding: 1px 5px; }
     .ssh-tunnel-node {
-      display: flex; align-items: center; gap: 6px;
-      padding: 3px 10px 3px 14px; cursor: pointer; user-select: none;
+      height: var(--tl-row-h);
+      display: flex; align-items: center; gap: var(--tl-space-1);
+      padding: 0 var(--tl-space-2); cursor: pointer; user-select: none;
+      font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+      color: var(--tl-fg);
     }
     .ssh-tunnel-node:hover { background: var(--input-bg); }
     .ssh-tunnel-label {
@@ -339,29 +345,33 @@
     .ssh-server-list { overflow: visible; }
     .ssh-folder { }
     .ssh-folder-header {
-      display: flex; align-items: center; gap: 4px;
-      padding: 4px 10px; cursor: pointer; user-select: none;
-      font-size: var(--ui-font-list);
+      height: var(--tl-row-h);
+      display: flex; align-items: center; gap: var(--tl-space-1);
+      padding: 0 var(--tl-space-2); cursor: pointer; user-select: none;
+      font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+      color: var(--tl-fg);
     }
-    .ssh-folder-header:hover { background: var(--input-bg); }
+    .ssh-folder-header:hover { background: var(--tl-row-hover); }
     .ssh-folder-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--dim-fg); }
     .ssh-folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ssh-folder-count { font-size: var(--ui-font-small); color: var(--dim-fg); }
+    .ssh-folder-count { font-size: var(--ui-font-small); color: var(--tl-fg-muted); }
     .ssh-folder-entries { }
     .ssh-server-node {
-      display: flex; align-items: center; gap: 6px;
-      padding: 3px 10px 3px 22px; cursor: pointer; user-select: none;
-      font-size: var(--ui-font-list);
+      height: var(--tl-row-h);
+      display: flex; align-items: center; gap: var(--tl-space-1);
+      padding: 0 var(--tl-space-2); cursor: pointer; user-select: none;
+      font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+      color: var(--tl-fg);
     }
-    .ssh-server-node:hover { background: var(--input-bg); }
+    .ssh-server-node:hover { background: var(--tl-row-hover); }
     .ssh-server-node.highlighted { background: var(--active-highlight); color: var(--fg); }
-    .ssh-server-node.selected { background: var(--active-highlight); color: var(--fg); }
+    .ssh-server-node.selected { background: var(--tl-selection-bg); color: var(--tl-selection-fg); }
     .ssh-server-node.dimmed { opacity: 0.6; }
     .ssh-search-hint { padding: 8px 14px; font-size: var(--ui-font-small); color: var(--dim-fg); font-style: italic; }
     .ssh-server-label {
       flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .ssh-server-detail { font-size: var(--ui-font-small); color: var(--dim-fg); flex-shrink: 0; }
+    .ssh-server-detail { font-size: var(--ui-font-small); color: var(--tl-fg-muted); flex-shrink: 0; }
     .ssh-context-menu {
       position: fixed; z-index: 3200; background: var(--input-bg); border: 1px solid var(--active-highlight);
       border-radius: 6px; padding: 4px 0; min-width: 140px;

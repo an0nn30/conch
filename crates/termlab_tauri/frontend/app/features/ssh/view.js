@@ -43,9 +43,17 @@
     header.className = 'ssh-folder-header';
     const expanded = folder.expanded !== false;
     header.innerHTML =
-      `<span class="ssh-folder-arrow">${expanded ? '▼' : '▶'}</span>` +
+      `<span class="ssh-folder-arrow"></span>` +
       `<span class="ssh-folder-name">${esc(folder.name)}</span>` +
       `<span class="ssh-folder-count">${folder.entries.length}</span>`;
+
+    const arrowEl = header.querySelector('.ssh-folder-arrow');
+    if (global.tlIcon) {
+      arrowEl.appendChild(global.tlIcon.create(expanded ? 'chevronDown' : 'chevronRight', { size: 16 }));
+      header.insertBefore(global.tlIcon.create('folder', { size: 16 }), header.querySelector('.ssh-folder-name'));
+    } else {
+      arrowEl.textContent = expanded ? '▼' : '▶';
+    }
 
     header.addEventListener('click', () => {
       if (typeof d.onFolderToggle === 'function') d.onFolderToggle(folder, !expanded);
