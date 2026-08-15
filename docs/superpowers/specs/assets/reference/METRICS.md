@@ -52,3 +52,21 @@ Tool-window tabs, left-aligned: `SFTP`, `Proxmox`, `SysInfo`, `Script Output`
 — each an icon plus a label, active one filled. This is the same mechanism as
 the side strips, laid out horizontally: the bottom area is a tool-window zone,
 not a bespoke panel.
+
+## Tab bar (measured from `jvm-termlab-tabs.png`, two tabs open)
+
+Sits between the title bar and the terminal, spanning only the editor area
+(not under the tool windows). Hidden entirely when a single tab is open.
+
+| Element | Value |
+|---|---|
+| Tab row height | 28 (including its 1px bottom border) |
+| Tab row background | `#22252A` — the panel background; tabs are NOT filled |
+| Tab width | ~97 for the label "Terminal" (content-driven) |
+| Bottom border | 1px `#343840` (`--tl-base-borderColor`) |
+| **Active tab marker** | the bottom border is **omitted** beneath the active tab, so it merges with the terminal below — there is no fill and no colored underline |
+| Tab contents | 16px terminal icon, label, then a muted `x` close button |
+| Right end | keyboard hint (e.g. `⌘2`) in muted text |
+
+Inactive and active labels render at the same brightness; only the border gap
+distinguishes them.
