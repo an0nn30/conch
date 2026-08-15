@@ -1,0 +1,21 @@
+.tl-toolwindow { display: flex; flex-direction: column; background: var(--tl-panel-bg); }
+.tl-toolwindow__header {
+  display: flex; align-items: center; justify-content: space-between;
+  height: var(--tl-header-h);
+  padding: 0 var(--tl-space-2);
+  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  border-bottom: 1px solid var(--tl-border);
+}
+.tl-toolwindow__header-actions { display: inline-flex; gap: var(--tl-space-1); }
+.tl-toolwindow__toolbar {
+  display: flex; align-items: center; gap: var(--tl-space-1);
+  height: var(--tl-toolbar-h);
+  padding: 0 var(--tl-space-1);
+  border-bottom: 1px solid var(--tl-border);
+}
+.tl-empty-state {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--tl-fg-muted);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+}

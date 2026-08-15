@@ -1,0 +1,24 @@
+.tl-btn {
+  font: 500 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  background: var(--tl-Button-startBackground, var(--tl-panel-bg));
+  border: 1px solid var(--tl-Button-startBorderColor, var(--tl-border));
+  border-radius: var(--tl-radius);
+  height: 26px;
+  padding: 0 14px;
+  cursor: default;
+}
+.tl-btn:hover { border-color: var(--tl-accent); }
+.tl-btn:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+.tl-btn--primary {
+  background: var(--tl-accent);
+  border-color: var(--tl-accent);
+  color: var(--tl-selection-fg);
+}
+.tl-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--tl-radius);
+}
+.tl-icon-btn:hover { background: var(--tl-row-hover); }

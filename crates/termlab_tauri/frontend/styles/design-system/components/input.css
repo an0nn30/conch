@@ -1,0 +1,14 @@
+.tl-input {
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  background: var(--tl-TextField-background, var(--tl-bg));
+  border: 1px solid var(--tl-Component-borderColor, var(--tl-border));
+  border-radius: var(--tl-radius);
+  height: 26px;
+  padding: 0 var(--tl-space-2);
+}
+.tl-input:focus {
+  outline: none;
+  border-color: var(--tl-Component-focusedBorderColor, var(--tl-accent));
+}
+.tl-input::placeholder { color: var(--tl-fg-muted); }

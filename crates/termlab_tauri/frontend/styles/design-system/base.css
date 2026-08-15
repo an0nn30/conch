@@ -1,0 +1,29 @@
+/* Semantic alias layer: the only hand-written mapping from generated raw
+   tokens to what components consume. Metrics measured against the JVM app.
+
+   All eight var(--tl-...) references below were verified present in
+   tokens-dark.css (242 tokens) via grep; no substitutions were required.
+   Two generated tokens are known-invalid upstream (--tl-StatusBar-background
+   holds the literal string "baseBackground" rather than a color, and
+   --tl-ComboPopup-border holds an insets string) — neither is referenced
+   here or by any component in this task. */
+:root {
+  --tl-bg: var(--tl-base-background);
+  --tl-panel-bg: var(--tl-base-background);
+  --tl-fg: var(--tl-base-foreground);
+  --tl-fg-muted: var(--tl-base-infoForeground);
+  --tl-border: var(--tl-base-borderColor);
+  --tl-accent: var(--tl-ActionButton-hoverBorderColor, #6b80a1);
+  --tl-selection-bg: var(--tl-base-selectionBackground);
+  --tl-selection-fg: var(--tl-base-selectionForeground);
+  --tl-row-hover: var(--tl-ActionButton-hoverBackground);
+
+  --tl-header-h: 28px;   /* tool window title row */
+  --tl-toolbar-h: 26px;  /* icon toolbar row */
+  --tl-row-h: 24px;      /* table/tree compact row */
+  --tl-space-1: 4px;
+  --tl-space-2: 8px;
+  --tl-space-3: 12px;
+  --tl-space-4: 16px;
+  --tl-radius: 3px;
+}
