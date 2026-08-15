@@ -170,7 +170,15 @@
        with the terminal (measured off the reference: no fill, no underline).
        The rule lives on the tabs and on a trailing filler rather than on
        #tabbar, whose overflow:hidden would clip an overhanging pseudo. */
-    .tab-btn.active { border-bottom-color: var(--tl-panel-bg); }
+    /* Focused window: the selected tab is filled and carries an accent
+       underline (EditorTabs.underlinedTabBackground + DefaultTabs.
+       underlineColor). An unfocused window drops both in the reference, which
+       is why a capture taken while it was in the background showed only a gap
+       in the row rule. */
+    .tab-btn.active {
+      background: var(--tl-EditorTabs-underlinedTabBackground);
+      border-bottom: 2px solid var(--tl-DefaultTabs-underlineColor);
+    }
     #tabbar::after {
       content: '';
       flex: 1 1 auto;

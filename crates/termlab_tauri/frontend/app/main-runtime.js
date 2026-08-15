@@ -390,6 +390,17 @@
         showStatus('Failed to show window: ' + String(e));
       }
 
+      // The restored bottom-zone height and sidebar widths are applied after
+      // the terminal's first fit, so xterm keeps its pre-restore rows and
+      // leaves a gap ("chin") under the terminal until something forces a
+      // refit — which is why resizing the window cleared it. Re-fit once the
+      // window is shown and layout has settled, with a late pass for slow
+      // first paints.
+      requestAnimationFrame(() => {
+        debouncedFitAndResize();
+        setTimeout(debouncedFitAndResize, 250);
+      });
+
       startupTermConfigPromise.then((termConfig) => {
         if (!termConfig) return;
         termFontFamily = termConfig.fontFamily;

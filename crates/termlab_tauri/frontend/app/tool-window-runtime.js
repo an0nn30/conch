@@ -47,11 +47,20 @@
       // damage compounds. Remember the last width that looked like a real
       // sidebar and save that instead; the restore guard also ignores <= 100.
       const MIN_REAL_SIDEBAR_WIDTH = 100;
+      const MIN_REAL_BOTTOM_HEIGHT = 60;
       const lastRealWidths = { left: 0, right: 0 };
+      let lastRealBottomHeight = 0;
 
       function rememberRealWidth(side, value) {
         if (value > MIN_REAL_SIDEBAR_WIDTH) lastRealWidths[side] = value;
         return lastRealWidths[side] > MIN_REAL_SIDEBAR_WIDTH ? lastRealWidths[side] : value;
+      }
+
+      // Same trap as the sidebar widths: a hidden or zen-collapsed bottom zone
+      // measures 0, and persisting that wipes the user's height for good.
+      function rememberRealBottomHeight(value) {
+        if (value > MIN_REAL_BOTTOM_HEIGHT) lastRealBottomHeight = value;
+        return lastRealBottomHeight > MIN_REAL_BOTTOM_HEIGHT ? lastRealBottomHeight : value;
       }
 
       function saveLayoutNow() {
@@ -80,7 +89,7 @@
           files_panel_width: widths.left,
           files_panel_visible: leftVisible,
           bottom_panel_visible: bottomVisible,
-          bottom_panel_height: bottomZoneWrapEl.offsetHeight,
+          bottom_panel_height: rememberRealBottomHeight(bottomZoneWrapEl ? bottomZoneWrapEl.offsetHeight : 0),
           zen_mode: !!(appRoot && appRoot.classList.contains('zen-mode')),
           tool_window_zones: twm.getZoneAssignments(),
           active_tool_windows: typeof twm.getActiveZoneAssignments === 'function'
@@ -210,6 +219,7 @@
           global.toolWindowManager.setPanelVisibility('right', initialLayoutData.ssh_panel_visible !== false, { save: false });
           global.toolWindowManager.setPanelVisibility('bottom', initialLayoutData.bottom_panel_visible !== false, { save: false });
           if (initialLayoutData.bottom_panel_height > 0 && bottomZoneWrapEl) {
+            rememberRealBottomHeight(initialLayoutData.bottom_panel_height);
             bottomZoneWrapEl.style.height = initialLayoutData.bottom_panel_height + 'px';
           }
         }
