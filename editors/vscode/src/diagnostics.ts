@@ -2,20 +2,20 @@ import * as vscode from "vscode";
 import { execFile } from "child_process";
 
 /**
- * Runs `conch check` on Lua plugin files and maps the output to
+ * Runs `termlab check` on Lua plugin files and maps the output to
  * VS Code diagnostics (squiggly underlines, Problems panel).
  *
- * Output format from `conch check`:
+ * Output format from `termlab check`:
  *   file.lua:7:1: error: session.exec() expects 1 argument(s), got 2
  *   file.lua: warning: missing plugin-description header comment
  */
-export class ConchDiagnostics implements vscode.Disposable {
+export class TermLabDiagnostics implements vscode.Disposable {
   private collection: vscode.DiagnosticCollection;
   private running = new Map<string, AbortController>();
 
   constructor() {
     this.collection =
-      vscode.languages.createDiagnosticCollection("conch");
+      vscode.languages.createDiagnosticCollection("termlab");
   }
 
   dispose() {
@@ -42,8 +42,8 @@ export class ConchDiagnostics implements vscode.Disposable {
     const controller = new AbortController();
     this.running.set(fsPath, controller);
 
-    const config = vscode.workspace.getConfiguration("conch");
-    const executable = config.get<string>("executablePath", "conch");
+    const config = vscode.workspace.getConfiguration("termlab");
+    const executable = config.get<string>("executablePath", "termlab");
 
     execFile(
       executable,
@@ -56,7 +56,7 @@ export class ConchDiagnostics implements vscode.Disposable {
           return;
         }
 
-        // `conch check` writes diagnostics to stderr for errors/warnings,
+        // `termlab check` writes diagnostics to stderr for errors/warnings,
         // and "file: ok" to stdout for clean files.
         const output = (stderr || "") + (stdout || "");
         const diagnostics = parseDiagnostics(output, doc);
@@ -104,7 +104,7 @@ function parseDiagnostics(
         : vscode.DiagnosticSeverity.Warning;
 
     const diag = new vscode.Diagnostic(range, message, diagSeverity);
-    diag.source = "conch";
+    diag.source = "termlab";
     diagnostics.push(diag);
   }
 

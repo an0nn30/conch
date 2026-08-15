@@ -253,7 +253,7 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Diagnostic logging (sandbox-safe: uses exec_local instead of os/io)
--- Log file: ~/.config/conch/tmux-manager-diag.log
+-- Log file: ~/.config/termlab/tmux-manager-diag.log
 -- ---------------------------------------------------------------------------
 local DIAG_LOG = nil
 
@@ -262,7 +262,7 @@ local function diag_log_path()
     local r = session.exec_local("echo $HOME")
     local home = trim(r.stdout or "")
     if home == "" then home = "/tmp" end
-    DIAG_LOG = home .. "/.config/conch/tmux-manager-diag.log"
+    DIAG_LOG = home .. "/.config/termlab/tmux-manager-diag.log"
     return DIAG_LOG
 end
 
@@ -418,7 +418,7 @@ local function sync_session_attach_commands()
 end
 
 local function launch_tmux_in_plain_tab(args, tab_title)
-    -- Prevent "sessions should be nested with care" when Conch inherits TMUX.
+    -- Prevent "sessions should be nested with care" when TermLab inherits TMUX.
     local cmd = "env -u TMUX " .. sh_quote(tmux_command_path()) .. " " .. args .. "\n"
     state.status = "Launching: " .. cmd:gsub("\n$", "")
     return session.new_tab_with_title(cmd, true, tab_title)
@@ -642,8 +642,8 @@ local function ensure_session_persistence(name, opts)
         run_tmux("set-window-option -q -t " .. sh_quote(name) .. " remain-on-exit on")
 
         -- Auto-respawn dead panes at the tmux-server level so the session
-        -- stays alive even after Conch is closed.  The hook fires inside the
-        -- tmux server and does not require Conch to be running.
+        -- stays alive even after TermLab is closed.  The hook fires inside the
+        -- tmux server and does not require TermLab to be running.
         run_tmux("set-hook -t " .. sh_quote(name) .. " " .. sh_quote("pane-died[99]") .. " " .. sh_quote("respawn-pane -k"))
         dlog("  installed per-session pane-died auto-respawn hook")
 
@@ -710,7 +710,7 @@ local function is_no_server(result)
 end
 
 local function detect_current_session_best_effort(sessions)
-    -- Resolve active session from the currently focused Conch pane only.
+    -- Resolve active session from the currently focused TermLab pane only.
     local current_name = active_tmux_session_in_active_pane()
     if current_name == nil then
         return nil

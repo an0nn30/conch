@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${1:-.}"
-FRONTEND_DIR="$ROOT/crates/conch_tauri/frontend"
+FRONTEND_DIR="$ROOT/crates/termlab_tauri/frontend"
 
 if [[ ! -d "$FRONTEND_DIR" ]]; then
   echo "frontend-boundary-check: missing directory: $FRONTEND_DIR" >&2

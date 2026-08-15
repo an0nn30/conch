@@ -1,11 +1,11 @@
-# Conch — Example Configuration
+# TermLab — Example Configuration
 #
 # All values shown are the defaults. Uncomment and modify as needed.
 # Config location:
-#   macOS / Linux: ~/.config/conch/config.toml
-#   Windows:       %APPDATA%\conch\config.toml
+#   macOS / Linux: ~/.config/termlab/config.toml
+#   Windows:       %APPDATA%\termlab\config.toml
 #
-# Conch uses an Alacritty-compatible TOML format with additional [conch.*] sections.
+# TermLab uses an Alacritty-compatible TOML format with additional [termlab.*] sections.
 
 # ---------------------------------------------------------------------------
 # Window
@@ -60,7 +60,7 @@ y = 0.0
 
 [colors]
 
-# Color scheme name. Themes are loaded from ~/.config/conch/themes/<name>.toml.
+# Color scheme name. Themes are loaded from ~/.config/termlab/themes/<name>.toml.
 # Built-in fallback: dracula.
 theme = "dracula"
 
@@ -112,7 +112,7 @@ blinking = true
 # blinking = false
 
 # ---------------------------------------------------------------------------
-# Conch — Keyboard Shortcuts
+# TermLab — Keyboard Shortcuts
 # ---------------------------------------------------------------------------
 #
 # Format: "mod+key" where mod is cmd, ctrl, alt, shift (combine with +).
@@ -122,7 +122,7 @@ blinking = true
 # - Use `cmd` for cross-platform "primary modifier" shortcuts.
 # - Use `ctrl` for the literal Control key (for example on macOS: Ctrl+Option+4).
 
-[conch.keyboard]
+[termlab.keyboard]
 
 new_tab = "cmd+t"
 close_tab = "cmd+w"
@@ -144,14 +144,14 @@ navigate_pane_right = "cmd+alt+right"
 # Optional per-plugin shortcut overrides.
 # Key format: "<plugin_name>:<action>".
 #
-# [conch.keyboard.plugin_shortcuts]
+# [termlab.keyboard.plugin_shortcuts]
 # "My Plugin:do_thing" = "ctrl+alt+4"
 
 # ---------------------------------------------------------------------------
-# Conch — UI Settings
+# TermLab — UI Settings
 # ---------------------------------------------------------------------------
 
-[conch.ui]
+[termlab.ui]
 
 # UI font family (sidebars, menus, dialogs). Empty string = system default.
 font_family = ""
@@ -163,7 +163,7 @@ font_size = 13.0
 # Only applies on macOS; ignored on other platforms. Default: true.
 native_menu_bar = true
 
-[conch.ui.font]
+[termlab.ui.font]
 
 # UI chrome font sizes in points. These control the text size of panels,
 # trees, tables, buttons, and labels throughout the application.
@@ -176,7 +176,7 @@ list = 14.0
 normal = 14.0
 
 # ---------------------------------------------------------------------------
-# Conch — Plugin System
+# TermLab — Plugin System
 # ---------------------------------------------------------------------------
 #
 # Control which plugin types are loaded. Disabling plugins you don't use
@@ -186,7 +186,7 @@ normal = 14.0
 # Set enabled = false to disable the entire plugin engine for a lean
 # terminal with no plugin overhead.
 
-[conch.plugins]
+[termlab.plugins]
 
 # Master switch: false disables all plugin discovery, loading, and the
 # plugin bus. The app runs as a pure terminal emulator.
@@ -199,6 +199,6 @@ lua = true        # Lua script plugins (.lua)
 java = true       # Java JAR plugins (.jar) — disabling skips JVM startup
 
 # Extra directories to scan for plugins. The app always checks built-in
-# paths (~/.config/conch/plugins/, exe directory, etc.). Paths here are
+# paths (~/.config/termlab/plugins/, exe directory, etc.). Paths here are
 # appended to those defaults.
-# search_paths = ["~/my-conch-plugins"]
+# search_paths = ["~/my-termlab-plugins"]

@@ -24,12 +24,12 @@ labels: plugins
 
 ## Actual behavior
 
-<!-- Include any error output from `conch check yourplugin.lua` if applicable. -->
+<!-- Include any error output from `termlab check yourplugin.lua` if applicable. -->
 
 ## Environment
 
 - **OS:**
-- **Conch version:**
+- **TermLab version:**
 
 ## Plugin source (if relevant)
 

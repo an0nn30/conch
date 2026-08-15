@@ -8,11 +8,11 @@
 #
 # Environment:
 #   ANTHROPIC_API_KEY  — required for AI summary (skipped if unset)
-#   GITHUB_REPOSITORY  — e.g. "an0nn30/rusty_conch" (auto-set in Actions)
+#   GITHUB_REPOSITORY  — e.g. "an0nn30/conch" (auto-set in Actions)
 
 set -euo pipefail
 
-REPO="${GITHUB_REPOSITORY:-an0nn30/rusty_conch}"
+REPO="${GITHUB_REPOSITORY:-an0nn30/conch}"
 CURRENT_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 
 # Determine previous tag.
@@ -89,7 +89,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -n "$ALL_CHANGES" ]; then
     echo "Generating AI summary..." >&2
 
     # Build the prompt.
-    PROMPT="You are writing release notes for Conch, an open-source terminal emulator and SSH manager built with Rust and Tauri. Given the following list of changes since the last release, write a concise, user-friendly summary in 2-4 bullet points. Focus on what matters to users (new features, bug fixes, improvements). Do not use markdown headers — just bullet points. Do not mention PR numbers.
+    PROMPT="You are writing release notes for TermLab, an open-source terminal emulator and SSH manager built with Rust and Tauri. Given the following list of changes since the last release, write a concise, user-friendly summary in 2-4 bullet points. Focus on what matters to users (new features, bug fixes, improvements). Do not use markdown headers — just bullet points. Do not mention PR numbers.
 
 Changes:
 ${ALL_CHANGES}"

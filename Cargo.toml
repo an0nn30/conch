@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/conch_core",
-    "crates/conch_plugin_sdk",
-    "crates/conch_plugin",
-    "crates/conch_remote",
-    "crates/conch_tauri",
-    "crates/conch_vault",
+    "crates/termlab_core",
+    "crates/termlab_plugin_sdk",
+    "crates/termlab_plugin",
+    "crates/termlab_remote",
+    "crates/termlab_tauri",
+    "crates/termlab_vault",
 ]
 
 [workspace.package]
@@ -16,11 +16,11 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Workspace crates
-conch_core = { path = "crates/conch_core" }
-conch_plugin_sdk = { path = "crates/conch_plugin_sdk" }
-conch_plugin = { path = "crates/conch_plugin" }
-conch_remote = { path = "crates/conch_remote" }
-conch_tauri = { path = "crates/conch_tauri" }
+termlab_core = { path = "crates/termlab_core" }
+termlab_plugin_sdk = { path = "crates/termlab_plugin_sdk" }
+termlab_plugin = { path = "crates/termlab_plugin" }
+termlab_remote = { path = "crates/termlab_remote" }
+termlab_tauri = { path = "crates/termlab_tauri" }
 
 # Serialization (shared)
 serde_json = "1"

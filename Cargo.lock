@@ -731,125 +731,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "conch_core"
-version = "3.0.0-rc.1"
-dependencies = [
- "anyhow",
- "dirs",
- "log",
- "serde",
- "tempfile",
- "toml 0.8.2",
-]
-
-[[package]]
-name = "conch_plugin"
-version = "3.0.0-rc.1"
-dependencies = [
- "conch_plugin_sdk",
- "jni",
- "log",
- "mlua",
- "parking_lot",
- "serde_json",
- "tempfile",
- "tokio",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "conch_plugin_sdk"
-version = "3.0.0-rc.1"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "conch_remote"
-version = "3.0.0-rc.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "conch_vault",
- "dirs",
- "log",
- "parking_lot",
- "russh",
- "russh-keys",
- "russh-sftp",
- "serde",
- "serde_json",
- "ssh-key",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "ts-rs",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "conch_tauri"
-version = "3.0.0-rc.1"
-dependencies = [
- "anyhow",
- "arboard",
- "async-trait",
- "conch_core",
- "conch_plugin",
- "conch_plugin_sdk",
- "conch_remote",
- "conch_vault",
- "core-foundation 0.9.4",
- "core-text",
- "dirs",
- "env_logger",
- "font-kit",
- "libc",
- "log",
- "objc2",
- "objc2-foundation",
- "parking_lot",
- "portable-pty",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-updater",
- "tempfile",
- "tokio",
- "ts-rs",
- "uuid",
- "vergen-git2",
-]
-
-[[package]]
-name = "conch_vault"
-version = "3.0.0-rc.1"
-dependencies = [
- "aes-gcm",
- "argon2",
- "base64 0.22.1",
- "bincode",
- "chrono",
- "log",
- "parking_lot",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "ssh-key",
- "tempfile",
- "thiserror 2.0.18",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6216,6 +6097,125 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5d9cf598a6d7ce700a4e6a9199da127e6819a61e64b68609683cc9a01b5683a"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "termlab_core"
+version = "3.0.0-rc.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "log",
+ "serde",
+ "tempfile",
+ "toml 0.8.2",
+]
+
+[[package]]
+name = "termlab_plugin"
+version = "3.0.0-rc.1"
+dependencies = [
+ "jni",
+ "log",
+ "mlua",
+ "parking_lot",
+ "serde_json",
+ "tempfile",
+ "termlab_plugin_sdk",
+ "tokio",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "termlab_plugin_sdk"
+version = "3.0.0-rc.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "termlab_remote"
+version = "3.0.0-rc.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "dirs",
+ "log",
+ "parking_lot",
+ "russh",
+ "russh-keys",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "ssh-key",
+ "tempfile",
+ "termlab_vault",
+ "thiserror 2.0.18",
+ "tokio",
+ "ts-rs",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "termlab_tauri"
+version = "3.0.0-rc.1"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "core-foundation 0.9.4",
+ "core-text",
+ "dirs",
+ "env_logger",
+ "font-kit",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "parking_lot",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-updater",
+ "tempfile",
+ "termlab_core",
+ "termlab_plugin",
+ "termlab_plugin_sdk",
+ "termlab_remote",
+ "termlab_vault",
+ "tokio",
+ "ts-rs",
+ "uuid",
+ "vergen-git2",
+]
+
+[[package]]
+name = "termlab_vault"
+version = "3.0.0-rc.1"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "base64 0.22.1",
+ "bincode",
+ "chrono",
+ "log",
+ "parking_lot",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "ssh-key",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

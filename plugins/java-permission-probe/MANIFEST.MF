@@ -1,4 +1,4 @@
 Manifest-Version: 1.0
-Plugin-Class: conch.plugin.probe.PermissionProbePlugin
+Plugin-Class: termlab.plugin.probe.PermissionProbePlugin
 Plugin-Api: ^1.0
 Plugin-Permissions: ui.menu,ui.notify

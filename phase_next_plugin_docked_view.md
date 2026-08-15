@@ -10,10 +10,10 @@ Enable plugins to create dockable split leaves inside terminal tabs (for example
 
 ## Current Architecture Summary
 - Split tree is generic and can host any leaf keyed by `paneId`.
-  - Frontend: `crates/conch_tauri/frontend/split-tree.js`, `split-pane.js`.
+  - Frontend: `crates/termlab_tauri/frontend/split-tree.js`, `split-pane.js`.
 - Pane lifecycle is currently terminal-centric in `frontend/index.html`.
 - Plugin panels are currently side-panel/bottom-panel surfaces, keyed mostly by plugin name + handle.
-  - Backend metadata: `crates/conch_tauri/src/plugins/mod.rs` (`PanelInfo`).
+  - Backend metadata: `crates/termlab_tauri/src/plugins/mod.rs` (`PanelInfo`).
   - Widget updates/event routing: `frontend/plugin-widgets.js`.
 - Permission-gated host API is centralized via `HostApi` + `PermissionCheckedHostApi`.
 
@@ -33,7 +33,7 @@ Existing `ui.panel` remains for side/bottom static panel registration.
 ## API Signatures (Host API)
 These are additive and must be parity-implemented for Lua + Java + Rust trait.
 
-### Rust trait (`conch_plugin::HostApi`)
+### Rust trait (`termlab_plugin::HostApi`)
 ```rust
 fn open_docked_view(&self, req_json: &str) -> Option<String>;
 fn close_docked_view(&self, view_id: &str) -> bool;
@@ -78,7 +78,7 @@ Notes:
 - `ratio`: fraction for new view leaf.
 - `render.mode=view` signals view-scoped rendering path.
 
-### Java (`java-sdk/src/conch/plugin/HostApi.java`)
+### Java (`java-sdk/src/termlab/plugin/HostApi.java`)
 ```java
 public static native String openDockedView(String requestJson);
 public static native boolean closeDockedView(String viewId);
@@ -106,7 +106,7 @@ end
 ```
 Fallback to existing `render()` when `render_view` missing.
 
-### Java (`ConchPlugin` default method)
+### Java (`TermLabPlugin` default method)
 ```java
 default String renderView(String viewId) {
     return render();

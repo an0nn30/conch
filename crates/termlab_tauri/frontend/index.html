@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TermLab</title>
+  <link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
+  <link rel="stylesheet" href="styles/base.css" />
+  <link rel="stylesheet" href="styles/layout.css" />
+  <link rel="stylesheet" href="styles/tool-windows.css" />
+  <link rel="stylesheet" href="styles/panels.css" />
+  <link rel="stylesheet" href="styles/plugin-widgets.css" />
+  <link rel="stylesheet" href="styles/dialogs.css" />
+  <link rel="stylesheet" href="styles/skins.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="drag-handle" data-tauri-drag-region></div>
+    <div id="tabbar"></div>
+    <div id="main-area">
+      <div id="left-strip" class="side-strip"></div>
+      <div id="left-sidebar" class="sidebar-wrap hidden">
+        <div id="left-panel-container" class="sidebar-panel">
+          <div class="tool-zone" data-zone="left-top">
+            <div class="zone-tab-strip hidden"></div>
+            <div class="zone-content"></div>
+          </div>
+          <div id="left-zone-divider" class="zone-divider hidden"></div>
+          <div class="tool-zone empty" data-zone="left-bottom">
+            <div class="zone-tab-strip hidden"></div>
+            <div class="zone-content"></div>
+          </div>
+        </div>
+        <div id="left-sidebar-resize" class="sidebar-resize"></div>
+      </div>
+      <div id="terminal-host"></div>
+      <div id="right-sidebar" class="sidebar-wrap hidden">
+        <div id="right-sidebar-resize" class="sidebar-resize"></div>
+        <div id="right-panel-container" class="sidebar-panel">
+          <div class="tool-zone" data-zone="right-top">
+            <div class="zone-tab-strip hidden"></div>
+            <div class="zone-content"></div>
+          </div>
+          <div id="right-zone-divider" class="zone-divider hidden"></div>
+          <div class="tool-zone empty" data-zone="right-bottom">
+            <div class="zone-tab-strip hidden"></div>
+            <div class="zone-content"></div>
+          </div>
+        </div>
+      </div>
+      <div id="right-strip" class="side-strip"></div>
+    </div>
+    <div id="bottom-panel" class="hidden">
+      <div id="bottom-panel-resize"></div>
+      <div id="bottom-panel-header">
+        <div id="bottom-panel-tabs"></div>
+        <div id="bottom-panel-actions"></div>
+      </div>
+      <div id="bottom-panel-content"></div>
+    </div>
+  </div>
+  <div id="status">
+    <div id="status-message"></div>
+    <button id="status-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+  </div>
+
+  <!-- Vendored xterm.js (pinned: xterm 5.5.0, fit 0.10.0, web-links 0.11.0,
+       unicode11 0.8.0) — see vendor/xterm/LICENSE. -->
+  <script src="vendor/xterm/xterm.min.js"></script>
+  <script src="vendor/xterm/addon-fit.min.js"></script>
+  <script src="vendor/xterm/addon-web-links.min.js"></script>
+  <script src="vendor/xterm/addon-unicode11.min.js"></script>
+  <!-- WebGL addon removed: system fonts don't reliably load in WebKit's
+       canvas context before the WebGL texture atlas is built, causing the
+       terminal to render with a fallback font.  The canvas renderer in
+       xterm.js 5.x is fast enough for interactive use. -->
+  <script src="app/core/utils.js"></script>
+  <script src="app/core/tauri-client.js"></script>
+  <script src="app/core/keyboard-router.js"></script>
+  <script src="app/core/dialog-service.js"></script>
+  <script src="app/core/layout-service.js"></script>
+  <script src="app/core/config-service.js"></script>
+  <script src="app/ui/titlebar.js"></script>
+  <script src="app/ui/toast.js"></script>
+  <script src="app/ui/notification-panel.js"></script>
+  <script src="app/panels/plugin-widgets.js"></script>
+  <script src="app/features/settings/constants.js"></script>
+  <script src="app/features/settings/data-service.js"></script>
+  <script src="app/features/settings/search.js"></script>
+  <script src="app/features/settings/sidebar.js"></script>
+  <script src="app/features/settings/sections-appearance.js"></script>
+  <script src="app/features/settings/sections-basic.js"></script>
+  <script src="app/features/settings/sections-keyboard.js"></script>
+  <script src="app/features/settings/sections-terminal.js"></script>
+  <script src="app/features/settings/plugins-section.js"></script>
+  <script src="app/panels/settings.js"></script>
+  <script src="app/panels/file-icons.js"></script>
+  <script src="app/features/files/data-service.js"></script>
+  <script src="app/features/files/pane-store.js"></script>
+  <script src="app/features/files/actions.js"></script>
+  <script src="app/features/files/pane-view.js"></script>
+  <script src="app/features/files/transfers.js"></script>
+  <script src="app/panels/files-panel.js"></script>
+  <script src="app/features/vault/data-service.js"></script>
+  <script src="app/features/vault/dialogs.js"></script>
+  <script src="app/features/vault/account-form.js"></script>
+  <script src="app/features/vault/sections.js"></script>
+  <script src="app/panels/vault.js"></script>
+  <script src="app/core/keygen.js"></script>
+  <script src="app/features/ssh/data-service.js"></script>
+  <script src="app/features/ssh/store.js"></script>
+  <script src="app/features/ssh/actions.js"></script>
+  <script src="app/features/ssh/view.js"></script>
+  <script src="app/features/ssh/context-menu.js"></script>
+  <script src="app/features/ssh/auth-prompts.js"></script>
+  <script src="app/features/ssh/dependency-prompt.js"></script>
+  <script src="app/features/ssh/connection-form.js"></script>
+  <script src="app/features/ssh/dialogs.js"></script>
+  <script src="app/panels/ssh-panel.js"></script>
+  <script src="app/layout/tool-window-manager.js"></script>
+  <script src="app/panels/tunnel-manager.js"></script>
+  <script src="app/layout/split-tree.js"></script>
+  <script src="app/layout/split-pane.js"></script>
+  <script src="app/layout/pane-dnd.js"></script>
+  <script src="app/state.js"></script>
+  <script src="app/bootstrap.js"></script>
+  <script src="app/split-runtime.js"></script>
+  <script src="app/layout-runtime.js"></script>
+  <script src="app/manager-delegates-runtime.js"></script>
+  <script src="app/compose-runtime.js"></script>
+  <script src="app/bridge-runtime.js"></script>
+  <script src="app/manager-compose-runtime.js"></script>
+  <script src="app/orchestration-runtime.js"></script>
+  <script src="app/event-wiring-runtime.js"></script>
+  <script src="app/pane-manager.js"></script>
+  <script src="app/tab-manager.js"></script>
+  <script src="app/tool-window-runtime.js"></script>
+  <script src="app/context-menu-runtime.js"></script>
+  <script src="app/menu-actions.js"></script>
+  <script src="app/window-events-runtime.js"></script>
+  <script src="app/shortcut-runtime.js"></script>
+  <script src="app/dragdrop-runtime.js"></script>
+  <script src="app/input-runtime.js"></script>
+  <script src="app/clipboard-runtime.js"></script>
+  <script src="app/config-runtime.js"></script>
+  <script src="app/dialog-runtime.js"></script>
+  <script src="app/command-palette-runtime.js"></script>
+  <script src="app/terminal-runtime.js"></script>
+  <script src="app/startup-runtime.js"></script>
+  <script src="app/main-runtime.js"></script>
+  <div id="terminal-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--tab-border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+    <button class="context-item" data-action="split-vertical" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Vertically</button>
+    <button class="context-item" data-action="split-horizontal" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Split Horizontally</button>
+  </div>
+  <div id="tab-context-menu" style="display:none; position:fixed; z-index:9999; min-width:160px; background:var(--bg); border:1px solid var(--tab-border); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px 0; font-size:13px;">
+    <button class="context-item" data-action="rename-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Rename Tab</button>
+    <button class="context-item" data-action="close-tab" style="display:block; width:100%; text-align:left; padding:6px 12px; border:none; background:none; color:var(--fg); cursor:pointer; font-size:inherit;">Close Tab</button>
+  </div>
+</body>
+</html>

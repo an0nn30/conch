@@ -1,0 +1,26 @@
+[package]
+name = "termlab_vault"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+zeroize = { version = "1", features = ["derive"] }
+log = { workspace = true }
+thiserror = "2"
+bincode = "1"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+parking_lot = { workspace = true }
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "p384", "encryption", "getrandom"] }
+base64 = { workspace = true }
+
+[features]
+vault_eager_import = []
+
+[dev-dependencies]
+tempfile = "3"

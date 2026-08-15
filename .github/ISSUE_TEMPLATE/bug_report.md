@@ -25,7 +25,7 @@ labels: bug
 ## Environment
 
 - **OS:** (e.g. macOS 14.4, Ubuntu 22.04, Windows 11)
-- **Conch version:** (e.g. v0.1.0 — check the title bar or release page)
+- **TermLab version:** (e.g. v0.1.0 — check the title bar or release page)
 - **Install method:** (DMG / MSI / .deb / built from source)
 - **Session type:** (local / SSH)
 

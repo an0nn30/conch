@@ -1,6 +1,6 @@
-# Conch Plugin SDK
+# TermLab Plugin SDK
 
-Conch supports two plugin tiers:
+TermLab supports two plugin tiers:
 
 | Tier | Language | Use Case | Build Step |
 |------|----------|----------|------------|
@@ -15,7 +15,7 @@ Plugins are managed via **Settings > Plugins** -- scan, enable, disable, and per
 - [Java Plugins](#java-plugins)
   - [Quick Start](#java-quick-start)
   - [Project Setup (Gradle)](#project-setup-gradle)
-  - [ConchPlugin Interface](#conchplugin-interface)
+  - [TermLabPlugin Interface](#termlabplugin-interface)
   - [HostApi Reference](#java-hostapi)
   - [Plugin Settings Sections (Java + Lua)](#plugin-settings-sections-java--lua)
   - [Widget Builder](#widget-builder)
@@ -97,7 +97,7 @@ If you want a docs-only acceptance test for the plugin system, these are strong 
 
 ## Java Plugins
 
-Java plugins are JAR files loaded by an embedded JVM. Any JVM language works (Java, Kotlin, Scala, Groovy). The SDK JAR is embedded in the Conch binary -- no external files needed.
+Java plugins are JAR files loaded by an embedded JVM. Any JVM language works (Java, Kotlin, Scala, Groovy). The SDK JAR is embedded in the TermLab binary -- no external files needed.
 
 This is the recommended tier for community plugins. If you've written Bukkit/Paper plugins for Minecraft, this will feel familiar.
 
@@ -112,7 +112,7 @@ plugins {
 }
 
 dependencies {
-    compileOnly files('path/to/conch-plugin-sdk.jar')
+    compileOnly files('path/to/termlab-plugin-sdk.jar')
 }
 
 jar {
@@ -126,18 +126,18 @@ jar {
 }
 ```
 
-> Download `conch-plugin-sdk.jar` from the [Releases](https://github.com/an0nn30/rusty_conch/releases) page, or build it locally with `make java-sdk`.
+> Download `termlab-plugin-sdk.jar` from the [Releases](https://github.com/an0nn30/conch/releases) page, or build it locally with `make java-sdk`.
 
-**2. Implement `ConchPlugin`:**
+**2. Implement `TermLabPlugin`:**
 
 ```java
 package com.example;
 
-import conch.plugin.ConchPlugin;
-import conch.plugin.HostApi;
-import conch.plugin.PluginInfo;
+import termlab.plugin.TermLabPlugin;
+import termlab.plugin.HostApi;
+import termlab.plugin.PluginInfo;
 
-public class MyPlugin implements ConchPlugin {
+public class MyPlugin implements TermLabPlugin {
 
     @Override
     public PluginInfo getInfo() {
@@ -178,10 +178,10 @@ public class MyPlugin implements ConchPlugin {
 
 ```bash
 gradle build
-cp build/libs/my-plugin.jar ~/.config/conch/plugins/
+cp build/libs/my-plugin.jar ~/.config/termlab/plugins/
 ```
 
-Open Conch, go to **Settings > Plugins**, and enable your plugin.
+Open TermLab, go to **Settings > Plugins**, and enable your plugin.
 
 ### Project Setup (Gradle)
 
@@ -199,13 +199,13 @@ java {
 }
 
 dependencies {
-    // The SDK is provided by Conch at runtime — don't bundle it.
-    compileOnly files('path/to/conch-plugin-sdk.jar')
+    // The SDK is provided by TermLab at runtime — don't bundle it.
+    compileOnly files('path/to/termlab-plugin-sdk.jar')
 }
 
 jar {
     manifest {
-        // REQUIRED: tells Conch which class to load.
+        // REQUIRED: tells TermLab which class to load.
         // REQUIRED: explicit API + permission contract.
         attributes(
             'Plugin-Class': 'com.example.MyPlugin',
@@ -216,7 +216,7 @@ jar {
 }
 ```
 
-> **Tip: Bundling dependencies into a fat JAR.** Conch loads your plugin as a
+> **Tip: Bundling dependencies into a fat JAR.** TermLab loads your plugin as a
 > single JAR -- external dependencies (like Gson) must be bundled inside it.
 > Use the Shadow plugin:
 >
@@ -227,7 +227,7 @@ jar {
 > }
 >
 > dependencies {
->     compileOnly files('libs/conch-plugin-sdk.jar')  // provided by Conch
+>     compileOnly files('libs/termlab-plugin-sdk.jar')  // provided by TermLab
 >     implementation 'com.google.code.gson:gson:2.11.0'  // bundled into JAR
 > }
 >
@@ -250,11 +250,11 @@ jar {
 ```xml
 <dependencies>
     <dependency>
-        <groupId>conch.plugin</groupId>
-        <artifactId>conch-plugin-sdk</artifactId>
+        <groupId>termlab.plugin</groupId>
+        <artifactId>termlab-plugin-sdk</artifactId>
         <version>1.0.0</version>
         <scope>system</scope>
-        <systemPath>${project.basedir}/libs/conch-plugin-sdk.jar</systemPath>
+        <systemPath>${project.basedir}/libs/termlab-plugin-sdk.jar</systemPath>
     </dependency>
 </dependencies>
 
@@ -277,9 +277,9 @@ jar {
 </build>
 ```
 
-### ConchPlugin Interface
+### TermLabPlugin Interface
 
-Every Java plugin must implement `conch.plugin.ConchPlugin`:
+Every Java plugin must implement `termlab.plugin.TermLabPlugin`:
 
 | Method | Description |
 |--------|-------------|
@@ -293,7 +293,7 @@ Every Java plugin must implement `conch.plugin.ConchPlugin`:
 
 #### Plugin Types
 
-Conch has two plugin types:
+TermLab has two plugin types:
 
 - **`action`** — Background plugin with no persistent UI. Interacts via menu items, keyboard shortcuts, and events.
 - **`tool_window`** — Renders a dockable tool window using widgets or raw HTML. The user can move it between zones (left-top, left-bottom, right-top, right-bottom) at runtime.
@@ -315,7 +315,7 @@ Default zones: `"left"`, `"right"`, `"bottom"`. The user can reposition tool win
 
 ### Java HostApi
 
-Static methods on `conch.plugin.HostApi`.
+Static methods on `termlab.plugin.HostApi`.
 
 **Logging:**
 
@@ -344,7 +344,7 @@ Static methods on `conch.plugin.HostApi`.
 > - Lua: use 4-arg `app.register_command(menu, label, action, keybind?)`
 
 Users can override plugin keybinds in **Settings > Keyboard Shortcuts > Plugin Shortcuts**.
-Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<plugin>:<action>"`.
+Overrides are stored in `termlab.keyboard.plugin_shortcuts` using key format `"<plugin>:<action>"`.
 
 **Notifications:**
 
@@ -398,7 +398,7 @@ Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<pl
 | `getSettingValue(String key)` | Read effective value for plugin settings UI (includes unsaved host Settings drafts) |
 | `setSettingDraft(String key, String value)` | Stage a plugin setting draft value (persisted only when host Settings Apply is clicked) |
 
-Config is stored at `~/.config/conch/plugins/<plugin-name>/<key>.json`.
+Config is stored at `~/.config/termlab/plugins/<plugin-name>/<key>.json`.
 
 When using plugin-owned settings sections, prefer `getSettingValue` / `setSettingDraft` instead of immediate `getConfig` / `setConfig` writes. This keeps plugin settings aligned with the host Settings Apply/Cancel workflow.
 
@@ -487,11 +487,11 @@ app.register_settings_section({
 | `resolve(String host)` | DNS resolve helper (returns IP string array) |
 | `scan(String host, int[] ports, Integer timeoutMs)` | TCP scan helper (returns `ScanResult[]` for open ports) |
 
-> **Note:** Java and Lua now both support pub/sub and RPC query APIs. Query responses in Java are handled via `ConchPlugin.onQuery(...)`.
+> **Note:** Java and Lua now both support pub/sub and RPC query APIs. Query responses in Java are handled via `TermLabPlugin.onQuery(...)`.
 
 ### Widget Builder
 
-The `conch.plugin.Widgets` class provides a fluent builder for constructing widget trees without writing raw JSON:
+The `termlab.plugin.Widgets` class provides a fluent builder for constructing widget trees without writing raw JSON:
 
 ```java
 @Override
@@ -589,7 +589,7 @@ Lua plugins are single `.lua` files -- no compilation, no project setup. Drop a 
 
 ### Lua Quick Start
 
-Create a file (e.g., `~/.config/conch/plugins/my-script.lua`):
+Create a file (e.g., `~/.config/termlab/plugins/my-script.lua`):
 
 ```lua
 -- plugin-name: My Script
@@ -883,7 +883,7 @@ This section is a reference index of currently available API signatures from the
 
 ### Java Signatures
 
-#### `conch.plugin.ConchPlugin`
+#### `termlab.plugin.TermLabPlugin`
 
 ```java
 PluginInfo getInfo();
@@ -895,7 +895,7 @@ default String renderView(String viewId); // defaults to render()
 void teardown();
 ```
 
-#### `conch.plugin.PluginInfo`
+#### `termlab.plugin.PluginInfo`
 
 ```java
 // Fields
@@ -915,7 +915,7 @@ public static PluginInfo toolWindow(String name, String description,
                                     String version, String defaultZone);
 ```
 
-#### `conch.plugin.HostApi`
+#### `termlab.plugin.HostApi`
 
 ```java
 // Permission
@@ -991,7 +991,7 @@ public static final class ScanResult {
 }
 ```
 
-#### `conch.plugin.Widgets`
+#### `termlab.plugin.Widgets`
 
 ```java
 // Layout
@@ -1462,13 +1462,13 @@ In both cases, plugins **do not need to call `ui.request_render()`** after handl
 
 | File | Role |
 |------|------|
-| `crates/conch_plugin/src/lua/runner.rs` | Lua plugin thread, mailbox loop, `handle_render()` |
-| `crates/conch_plugin/src/lua/api/ui.rs` | `ui.panel_*` Lua bindings, `ui.request_render()` |
-| `crates/conch_plugin/src/lua/api/mod.rs` | Widget accumulator, HostApi bridge, PanelHandleStore |
-| `crates/conch_plugin/src/host_api.rs` | `HostApi` trait definition (`set_widgets`, `register_panel`) |
-| `crates/conch_tauri/src/plugins/tauri_host_api.rs` | `TauriHostApi` — emits Tauri events for widget updates |
-| `crates/conch_tauri/src/plugins/mod.rs` | `request_plugin_render` command |
-| `crates/conch_tauri/frontend/plugin-widgets.js` | Frontend renderer, `sendEvent()`, `refreshPanelPlugin()` |
+| `crates/termlab_plugin/src/lua/runner.rs` | Lua plugin thread, mailbox loop, `handle_render()` |
+| `crates/termlab_plugin/src/lua/api/ui.rs` | `ui.panel_*` Lua bindings, `ui.request_render()` |
+| `crates/termlab_plugin/src/lua/api/mod.rs` | Widget accumulator, HostApi bridge, PanelHandleStore |
+| `crates/termlab_plugin/src/host_api.rs` | `HostApi` trait definition (`set_widgets`, `register_panel`) |
+| `crates/termlab_tauri/src/plugins/tauri_host_api.rs` | `TauriHostApi` — emits Tauri events for widget updates |
+| `crates/termlab_tauri/src/plugins/mod.rs` | `request_plugin_render` command |
+| `crates/termlab_tauri/frontend/plugin-widgets.js` | Frontend renderer, `sendEvent()`, `refreshPanelPlugin()` |
 
 ---
 
@@ -1530,7 +1530,7 @@ end
 
 ## Inter-Plugin Communication
 
-Conch provides two mechanisms for plugins to communicate: pub/sub events for broadcasting, and RPC queries for direct request/response.
+TermLab provides two mechanisms for plugins to communicate: pub/sub events for broadcasting, and RPC queries for direct request/response.
 
 ### Pub/Sub Events
 
@@ -1658,12 +1658,12 @@ Plugins can reference built-in icons by name in widget fields like `icon`, `Tree
 
 ## Plugin Search Paths
 
-Conch scans these directories for plugins:
+TermLab scans these directories for plugins:
 
 1. `target/debug/` and `target/release/` (development)
 2. Executable directory and `plugins/` subdirectory
-3. `~/.config/conch/plugins/` (user plugins)
-4. Custom paths from `[conch.plugins] search_paths` in `config.toml`
+3. `~/.config/termlab/plugins/` (user plugins)
+4. Custom paths from `[termlab.plugins] search_paths` in `config.toml`
 
 **File extensions:**
 - Java: `.jar` (must have `Plugin-Class` in `META-INF/MANIFEST.MF`)

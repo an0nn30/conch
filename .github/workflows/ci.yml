@@ -88,8 +88,8 @@ jobs:
       - name: Build Java SDK JAR (embedded in binary)
         run: |
           mkdir -p java-sdk/build/classes
-          javac -d java-sdk/build/classes java-sdk/src/conch/plugin/*.java
-          jar cf java-sdk/build/conch-plugin-sdk.jar -C java-sdk/build/classes .
+          javac -d java-sdk/build/classes java-sdk/src/termlab/plugin/*.java
+          jar cf java-sdk/build/termlab-plugin-sdk.jar -C java-sdk/build/classes .
 
       - name: Test
         run: cargo test --workspace

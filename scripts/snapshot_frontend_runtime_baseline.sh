@@ -14,7 +14,7 @@ const { performance } = require('perf_hooks');
 
 const root = path.resolve(process.argv[2]);
 const out = path.resolve(process.argv[3]);
-const frontend = path.join(root, 'crates', 'conch_tauri', 'frontend');
+const frontend = path.join(root, 'crates', 'termlab_tauri', 'frontend');
 
 function makeClassList() {
   const set = new Set();
@@ -73,8 +73,8 @@ async function measureStartupRuntime() {
   sandbox.window.console = console;
   sandbox.window.addEventListener = () => {};
   sandbox.window.notificationPanel = { init: () => {} };
-  sandbox.window.conchKeyboardRouter = { register: () => () => {} };
-  sandbox.window.conchConfigService = {
+  sandbox.window.termlabKeyboardRouter = { register: () => () => {} };
+  sandbox.window.termlabConfigService = {
     toTerminalTheme: (_tc, fallbackTheme) => fallbackTheme,
     applyThemeCss: () => {},
     applyUiConfig: () => ({ borderlessMode: false }),
@@ -84,7 +84,7 @@ async function measureStartupRuntime() {
   const startupRuntimePath = path.join(frontend, 'app', 'startup-runtime.js');
   loadScriptInContext(startupRuntimePath, sandbox);
 
-  const runtimeFactory = sandbox.window.conchStartupRuntime && sandbox.window.conchStartupRuntime.create;
+  const runtimeFactory = sandbox.window.termlabStartupRuntime && sandbox.window.termlabStartupRuntime.create;
   if (typeof runtimeFactory !== 'function') {
     throw new Error('startup-runtime create() unavailable');
   }
@@ -206,8 +206,8 @@ async function measureCommandPaletteBuild() {
     palettePath,
     sandbox,
     (src) => src.replace(
-      'global.__conchInvalidateCommandPaletteCache = invalidateCommandCache;',
-      'global.__conchInvalidateCommandPaletteCache = invalidateCommandCache; global.__conchDebugBuildPaletteCommands = buildPaletteCommands;'
+      'global.__termlabInvalidateCommandPaletteCache = invalidateCommandCache;',
+      'global.__termlabInvalidateCommandPaletteCache = invalidateCommandCache; global.__termlabDebugBuildPaletteCommands = buildPaletteCommands;'
     )
   );
 
@@ -221,7 +221,7 @@ async function measureCommandPaletteBuild() {
     return [];
   };
 
-  const runtimeFactory = sandbox.window.conchCommandPaletteRuntime && sandbox.window.conchCommandPaletteRuntime.create;
+  const runtimeFactory = sandbox.window.termlabCommandPaletteRuntime && sandbox.window.termlabCommandPaletteRuntime.create;
   if (typeof runtimeFactory !== 'function') {
     throw new Error('command-palette create() unavailable');
   }
@@ -237,7 +237,7 @@ async function measureCommandPaletteBuild() {
     refreshSshPanel: () => {},
   });
 
-  const buildFn = sandbox.window.__conchDebugBuildPaletteCommands;
+  const buildFn = sandbox.window.__termlabDebugBuildPaletteCommands;
   if (typeof buildFn !== 'function') {
     throw new Error('debug palette build function unavailable');
   }
@@ -300,7 +300,7 @@ function summarize(name, samples) {
   lines.push('# Frontend Runtime Baseline Snapshot');
   lines.push('');
   lines.push(`- Date: ${new Date().toISOString()}`);
-  lines.push(`- Scope: \`crates/conch_tauri/frontend/app\``);
+  lines.push(`- Scope: \`crates/termlab_tauri/frontend/app\``);
   lines.push('- Method: simulated runtime microbench with mocked Tauri/document dependencies (agent-run reproducible script)');
   lines.push('');
   lines.push('## Startup Metrics (ms)');

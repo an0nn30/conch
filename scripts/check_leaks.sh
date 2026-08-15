@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 #
-# Automated memory leak checker for Conch.
+# Automated memory leak checker for TermLab.
 #
 # Usage:
 #   ./scripts/check_leaks.sh [--build]
 #
 # What it does:
 #   1. Optionally builds the release binary (--build flag)
-#   2. Launches Conch
+#   2. Launches TermLab
 #   3. Waits for you to exercise the app (open/close tabs & windows)
 #   4. Press Enter when ready to scan
 #   5. Runs `leaks` against the process
-#   6. Sends Ctrl-C to quit Conch and shows the summary
+#   6. Sends Ctrl-C to quit TermLab and shows the summary
 #
 # Requires macOS developer tools (for the `leaks` command).
 
 set -euo pipefail
 
-BINARY="./target/release/conch"
-LEAKS_LOG="/tmp/conch-leaks-$(date +%Y%m%d-%H%M%S).txt"
+BINARY="./target/release/termlab"
+LEAKS_LOG="/tmp/termlab-leaks-$(date +%Y%m%d-%H%M%S).txt"
 
 if [[ "${1:-}" == "--build" ]]; then
     echo "Building release binary..."
@@ -31,20 +31,20 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-echo "=== Conch Memory Leak Checker ==="
+echo "=== TermLab Memory Leak Checker ==="
 echo ""
-echo "Launching Conch..."
+echo "Launching TermLab..."
 "$BINARY" &
-CONCH_PID=$!
+TERMLAB_PID=$!
 sleep 2
 
 # Verify it started
-if ! kill -0 "$CONCH_PID" 2>/dev/null; then
-    echo "Error: Conch failed to start."
+if ! kill -0 "$TERMLAB_PID" 2>/dev/null; then
+    echo "Error: TermLab failed to start."
     exit 1
 fi
 
-echo "Conch running (PID: $CONCH_PID)"
+echo "TermLab running (PID: $TERMLAB_PID)"
 echo ""
 echo "--- Exercise the app now ---"
 echo "  - Open and close several tabs (Cmd+T, Cmd+W)"
@@ -55,7 +55,7 @@ read -rp "Press Enter when ready to scan for leaks..."
 
 echo ""
 echo "Running leaks scan (this may take a moment)..."
-if leaks "$CONCH_PID" > "$LEAKS_LOG" 2>&1; then
+if leaks "$TERMLAB_PID" > "$LEAKS_LOG" 2>&1; then
     LEAK_STATUS="PASS"
 else
     LEAK_STATUS="LEAKS FOUND"
@@ -87,7 +87,7 @@ if [[ "$LEAK_STATUS" == "LEAKS FOUND" ]]; then
     echo ""
 fi
 
-read -rp "Press Enter to quit Conch..."
-kill "$CONCH_PID" 2>/dev/null || true
-wait "$CONCH_PID" 2>/dev/null || true
+read -rp "Press Enter to quit TermLab..."
+kill "$TERMLAB_PID" 2>/dev/null || true
+wait "$TERMLAB_PID" 2>/dev/null || true
 echo "Done."

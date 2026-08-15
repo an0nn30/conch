@@ -1,18 +1,18 @@
-# Conch Lua Plugin SDK — Neovim / LazyVim Support
+# TermLab Lua Plugin SDK — Neovim / LazyVim Support
 
-Type definitions for [LuaLS (lua-language-server)](https://github.com/LuaLS/lua-language-server) that provide autocompletion, hover documentation, and type checking when writing Conch Lua plugins in Neovim.
+Type definitions for [LuaLS (lua-language-server)](https://github.com/LuaLS/lua-language-server) that provide autocompletion, hover documentation, and type checking when writing TermLab Lua plugins in Neovim.
 
 ## Setup
 
 ### Option 1: Copy `.luarc.json` into your plugin directory
 
-Copy the `.luarc.json` from this directory into the directory where you write your Conch plugins, and update the library path to point to the stubs:
+Copy the `.luarc.json` from this directory into the directory where you write your TermLab plugins, and update the library path to point to the stubs:
 
 ```json
 {
   "runtime": { "version": "Lua 5.4" },
   "workspace": {
-    "library": ["/path/to/rusty_conch/editors/neovim/lua/conch"],
+    "library": ["/path/to/termlab/editors/neovim/lua/termlab"],
     "checkThirdParty": false
   },
   "diagnostics": {
@@ -31,8 +31,8 @@ require("lspconfig").lua_ls.setup({
     Lua = {
       workspace = {
         library = {
-          -- Add Conch stubs to every Lua workspace
-          "/path/to/rusty_conch/editors/neovim/lua/conch",
+          -- Add TermLab stubs to every Lua workspace
+          "/path/to/termlab/editors/neovim/lua/termlab",
         },
       },
       diagnostics = {
@@ -51,7 +51,7 @@ If you use LazyVim with `neoconf.nvim`, create a `.neoconf.json` in your plugin 
 {
   "lspconfig": {
     "lua_ls": {
-      "Lua.workspace.library": ["/path/to/rusty_conch/editors/neovim/lua/conch"],
+      "Lua.workspace.library": ["/path/to/termlab/editors/neovim/lua/termlab"],
       "Lua.diagnostics.globals": ["ui", "app", "session", "net", "setup", "render", "on_event", "on_query"]
     }
   }

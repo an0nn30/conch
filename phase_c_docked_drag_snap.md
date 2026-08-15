@@ -13,7 +13,7 @@ This branch has partial completion for split-tree pane drag, and no tab-drag sup
 ## Branch Reality (as of 2026-04-01)
 
 ### Implemented now: split-tree pane drag (partial)
-- `crates/conch_tauri/frontend/pane-dnd.js` exists and is wired in `index.html`.
+- `crates/termlab_tauri/frontend/pane-dnd.js` exists and is wired in `index.html`.
 - Drag handle registration is active for plugin-view pane headers (`registerDraggablePaneHeader` is called from `openPluginDockedViewFromRequest`).
 - Pointer drag session exists with:
   - movement threshold,

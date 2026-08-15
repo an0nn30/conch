@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=TermLab
+Comment=Terminal Emulator with SSH session management
+Exec=/opt/termlab/bin/termlab
+Icon=termlab
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;
+Keywords=terminal;ssh;shell;

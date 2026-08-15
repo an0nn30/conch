@@ -1,0 +1,9 @@
+[package]
+name = "termlab_plugin_sdk"
+version.workspace = true
+edition.workspace = true
+description = "Widget and event types shared between TermLab and its Lua/Java plugins"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"

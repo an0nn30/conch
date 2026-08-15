@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="crates/conch_tauri/icons/icon.png" alt="Conch" width="128" />
+  <img src="crates/termlab_tauri/icons/icon.png" alt="TermLab" width="128" />
 </p>
 
-<h1 align="center">Conch</h1>
+<h1 align="center">TermLab</h1>
 
 <p align="center">
   A terminal-native workstation that unifies terminal, SSH, files, tunnels, credentials, and plugins in one app.<br/>
@@ -10,11 +10,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/an0nn30/rusty_conch/actions/workflows/ci.yml">
-    <img src="https://github.com/an0nn30/rusty_conch/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  <a href="https://github.com/an0nn30/conch/actions/workflows/ci.yml">
+    <img src="https://github.com/an0nn30/conch/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
-  <a href="https://github.com/an0nn30/rusty_conch/releases">
-    <img src="https://img.shields.io/github/v/release/an0nn30/rusty_conch?label=Download" alt="Latest Release" />
+  <a href="https://github.com/an0nn30/conch/releases">
+    <img src="https://img.shields.io/github/v/release/an0nn30/conch?label=Download" alt="Latest Release" />
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License" />
@@ -23,11 +23,11 @@
 
 ---
 
-## Why Conch?
+## Why TermLab?
 
-Most terminal emulators do one thing well. SSH clients do another. File transfer tools are often separate. Conch combines these into a single workstation for terminal-oriented workflows: terminal, SSH sessions, file movement, tunnels, credentials, and extensible tooling.
+Most terminal emulators do one thing well. SSH clients do another. File transfer tools are often separate. TermLab combines these into a single workstation for terminal-oriented workflows: terminal, SSH sessions, file movement, tunnels, credentials, and extensible tooling.
 
-Positioning: Conch sits between terminal emulators (iTerm2, WezTerm, Warp) and remote-ops clients (MobaXterm, Termius) as an open-source, cross-platform control plane for terminal-first engineering work.
+Positioning: TermLab sits between terminal emulators (iTerm2, WezTerm, Warp) and remote-ops clients (MobaXterm, Termius) as an open-source, cross-platform control plane for terminal-first engineering work.
 
 ## Features
 
@@ -45,7 +45,7 @@ Positioning: Conch sits between terminal emulators (iTerm2, WezTerm, Warp) and r
 
 **Auto-Updates** (macOS/Windows) — Checks for new versions on startup and notifies when an update is available. Download and install updates in-place from the app. Configurable via Settings > Advanced or check manually from the menu.
 
-**Theming** — Full [Alacritty-compatible](https://github.com/alacritty/alacritty-theme) `.toml` theme support. Drop a theme file in `~/.config/conch/themes/` and set `[colors] theme = "name"`. Hot-reload on file change. Live preview in the Settings dialog shows theme colors before applying.
+**Theming** — Full [Alacritty-compatible](https://github.com/alacritty/alacritty-theme) `.toml` theme support. Drop a theme file in `~/.config/termlab/themes/` and set `[colors] theme = "name"`. Hot-reload on file change. Live preview in the Settings dialog shows theme colors before applying.
 
 **Zen Mode** — `Cmd+Shift+Z` hides all panels for a distraction-free terminal.
 
@@ -53,7 +53,7 @@ Positioning: Conch sits between terminal emulators (iTerm2, WezTerm, Warp) and r
 
 ## Plugin System
 
-Conch supports **Lua** and **Java** plugins for extending functionality with custom panels, menu items, notifications, dialogs, and inter-plugin communication.
+TermLab supports **Lua** and **Java** plugins for extending functionality with custom panels, menu items, notifications, dialogs, and inter-plugin communication.
 
 ### What can plugins do?
 
@@ -66,7 +66,7 @@ Conch supports **Lua** and **Java** plugins for extending functionality with cus
 
 ### Java plugins
 
-Conch supports **Java plugins** via an embedded JVM. Any JVM language works (Java, Kotlin, Scala, Groovy). The SDK JAR is embedded in the binary — no external files needed. Java plugins have full access to logging, menu items, notifications, clipboard, dialogs (prompt, confirm, alert, forms), config persistence, inter-plugin communication, and terminal/tab control.
+TermLab supports **Java plugins** via an embedded JVM. Any JVM language works (Java, Kotlin, Scala, Groovy). The SDK JAR is embedded in the binary — no external files needed. Java plugins have full access to logging, menu items, notifications, clipboard, dialogs (prompt, confirm, alert, forms), config persistence, inter-plugin communication, and terminal/tab control.
 
 See the [Java Plugin SDK](java-sdk/) for the API reference.
 
@@ -108,7 +108,7 @@ See the **[VS Code extension](editors/vscode/)** or **[Neovim definitions](edito
 
 ### Pre-built binaries
 
-Download the latest release for your platform from the [Releases page](https://github.com/an0nn30/rusty_conch/releases).
+Download the latest release for your platform from the [Releases page](https://github.com/an0nn30/conch/releases).
 
 ### Build from source
 
@@ -162,16 +162,16 @@ sudo pacman -S --needed \
 
 ```bash
 git clone https://github.com/an0nn30/conch.git
-cd conch
+cd termlab
 
 # Debug build / run
-cargo run -p conch_tauri
+cargo run -p termlab_tauri
 
 # Release build
-cargo build --release -p conch_tauri
+cargo build --release -p termlab_tauri
 ```
 
-The binary is at `target/release/conch`.
+The binary is at `target/release/termlab`.
 
 ## Keyboard Shortcuts
 
@@ -192,22 +192,22 @@ The binary is at `target/release/conch`.
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Zoom in / out / reset |
 | `Cmd+Shift+T` | Manage SSH tunnels |
 
-All shortcuts are configurable in `[conch.keyboard]`. Plugins can also register their own keybindings.
+All shortcuts are configurable in `[termlab.keyboard]`. Plugins can also register their own keybindings.
 
 ## Configuration
 
-Most settings can be configured through the Settings dialog (File > Settings or `Cmd+,`). For manual editing, Conch uses a TOML config at `~/.config/conch/config.toml` (Linux/macOS) or `%APPDATA%\conch\config.toml` (Windows).
+Most settings can be configured through the Settings dialog (File > Settings or `Cmd+,`). For manual editing, TermLab uses a TOML config at `~/.config/termlab/config.toml` (Linux/macOS) or `%APPDATA%\termlab\config.toml` (Windows).
 
-Alacritty-compatible sections (`[window]`, `[font]`, `[colors]`, `[terminal]`) work as-is. Conch adds its own sections:
+Alacritty-compatible sections (`[window]`, `[font]`, `[colors]`, `[terminal]`) work as-is. TermLab adds its own sections:
 
 ```toml
 [colors]
 theme = "dracula"           # Any Alacritty .toml theme file name
 
-[conch]
+[termlab]
 check_for_updates = true    # Check for new versions on startup (macOS/Windows)
 
-[conch.keyboard]
+[termlab.keyboard]
 new_tab = "cmd+t"
 close_tab = "cmd+w"
 new_window = "cmd+shift+n"
@@ -225,10 +225,10 @@ navigate_pane_down = "cmd+alt+down"
 navigate_pane_left = "cmd+alt+left"
 navigate_pane_right = "cmd+alt+right"
 
-[conch.keyboard.plugin_shortcuts]
+[termlab.keyboard.plugin_shortcuts]
 "My Plugin:do_thing" = "ctrl+alt+4"  # Per-plugin override key: "<plugin>:<action>"
 
-[conch.plugins]
+[termlab.plugins]
 enabled = true              # Master switch
 lua = true                  # Lua plugins
 java = true                 # Java plugins (disabling skips JVM startup)
@@ -241,12 +241,12 @@ See [`config.example.toml`](config.example.toml) for the full reference.
 
 ```
 crates/
-  conch_core/         Config loading, color schemes, persistent state
-  conch_plugin_sdk/   Widget/event types shared with Lua and Java plugins
-  conch_plugin/       Plugin host — message bus, Lua runner, Java runtime
-  conch_remote/       Platform-agnostic SSH, SFTP, tunnels (russh)
-  conch_tauri/        The app — Tauri/xterm.js UI, built-in SSH/SFTP/tunnels
-  conch_vault/        Credential vault — encrypted storage, key generation
+  termlab_core/         Config loading, color schemes, persistent state
+  termlab_plugin_sdk/   Widget/event types shared with Lua and Java plugins
+  termlab_plugin/       Plugin host — message bus, Lua runner, Java runtime
+  termlab_remote/       Platform-agnostic SSH, SFTP, tunnels (russh)
+  termlab_tauri/        The app — Tauri/xterm.js UI, built-in SSH/SFTP/tunnels
+  termlab_vault/        Credential vault — encrypted storage, key generation
 java-sdk/             Java Plugin SDK (JAR + sources)
 editors/
   vscode/             VS Code extension for Lua plugin development
@@ -255,7 +255,7 @@ editors/
 
 ## Contributing
 
-Conch is actively developed. Bug reports, feature requests, and pull requests are welcome — please [open an issue](https://github.com/an0nn30/rusty_conch/issues) to start a discussion. When submitting PRs, use branch prefixes: `feat/`, `fix/`, `chore/`, or `perf/`.
+TermLab is actively developed. Bug reports, feature requests, and pull requests are welcome — please [open an issue](https://github.com/an0nn30/conch/issues) to start a discussion. When submitting PRs, use branch prefixes: `feat/`, `fix/`, `chore/`, or `perf/`.
 
 For plugin development, see the [Java Plugin SDK](java-sdk/) and the editor extensions in [editors/](editors/).
 

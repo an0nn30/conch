@@ -1,4 +1,4 @@
-# Conch — Claude Instructions
+# TermLab — Claude Instructions
 
 This file is the published working agreement for AI coding agents operating in this repository, including Codex and Claude-style agents.
 
@@ -55,23 +55,23 @@ Code MUST be broken into small, focused modules. When adding new functionality:
 ### Workspace (4 crates, no egui, no native plugins)
 ```
 crates/
-  conch_core/         — Config loading, color schemes, persistent state
-  conch_plugin_sdk/   — Widget/event types shared with Lua and Java plugins
-  conch_plugin/       — Plugin host: message bus, Lua runner, Java runtime, HostApi trait
-  conch_tauri/        — The app: Tauri v2 / xterm.js UI, built-in SSH/SFTP/tunnels
-java-sdk/             — Java Plugin SDK: HostApi, ConchPlugin, Widgets, PluginInfo
+  termlab_core/         — Config loading, color schemes, persistent state
+  termlab_plugin_sdk/   — Widget/event types shared with Lua and Java plugins
+  termlab_plugin/       — Plugin host: message bus, Lua runner, Java runtime, HostApi trait
+  termlab_tauri/        — The app: Tauri v2 / xterm.js UI, built-in SSH/SFTP/tunnels
+java-sdk/             — Java Plugin SDK: HostApi, TermLabPlugin, Widgets, PluginInfo
 editors/
   vscode/             — VS Code extension for Lua plugin development
 ```
 
-### conch_tauri — The App
+### termlab_tauri — The App
 ```
 src/
   main.rs             — Entry point, config loading, launches Tauri app
   lib.rs              — Tauri setup, commands, menu building, window management
   theme.rs            — Color theme loading (Alacritty .toml → CSS variables)
   pty_backend.rs      — Local PTY via portable-pty (raw byte I/O for xterm.js)
-  ipc.rs              — Unix socket IPC listener (conch msg new-tab/new-window)
+  ipc.rs              — Unix socket IPC listener (termlab msg new-tab/new-window)
   watcher.rs          — File watcher for config/theme hot-reload
   remote/             — Built-in SSH + SFTP + file operations (not a plugin)
     mod.rs            — Session registry, Tauri commands, auth prompt bridge
@@ -104,14 +104,14 @@ frontend/
 - Declarative widget system: plugins return JSON widget trees → rendered as HTML
 - Pub/sub event bus + RPC queries for inter-plugin communication
 - Blocking dialog APIs (form, prompt, confirm) via oneshot channels
-- Plugin config persistence: `~/.config/conch/plugins/{name}/{key}.json`
+- Plugin config persistence: `~/.config/termlab/plugins/{name}/{key}.json`
 - Plugins are NOT auto-loaded — managed via Tools > Plugin Manager
 - Enabled plugins persisted in `state.toml` and restored on restart
 
 ### Built-in Features (not plugins)
 SSH sessions, SFTP file browsing, file transfers, SSH tunnels, server
 management, `~/.ssh/config` import, and host key verification are all
-built directly into `conch_tauri/src/remote/`. They were previously
+built directly into `termlab_tauri/src/remote/`. They were previously
 separate native plugins but were consolidated for reliability.
 
 ### Key Patterns
@@ -156,11 +156,11 @@ separate native plugins but were consolidated for reliability.
 - Preserve focus behavior and keyboard navigation when changing interactive UI
 
 ### Config
-- User config: `~/.config/conch/config.toml` (loaded by conch_core)
-- Persistent state: `~/.config/conch/state.toml` (window size, plugins, layout)
-- SSH server config: `~/.config/conch/remote/servers.json`
-- Plugin config: `~/.config/conch/plugins/{plugin_name}/{key}.json`
-- Keyboard shortcuts: configurable in `[conch.keyboard]` section
+- User config: `~/.config/termlab/config.toml` (loaded by termlab_core)
+- Persistent state: `~/.config/termlab/state.toml` (window size, plugins, layout)
+- SSH server config: `~/.config/termlab/remote/servers.json`
+- Plugin config: `~/.config/termlab/plugins/{plugin_name}/{key}.json`
+- Keyboard shortcuts: configurable in `[termlab.keyboard]` section
 - Default shortcuts use `cmd+` prefix (maps to Cmd on macOS, Ctrl on Linux/Windows)
 
 ### Testing Standards

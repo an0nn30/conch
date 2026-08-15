@@ -4,7 +4,7 @@
     "version": "Lua 5.4"
   },
   "workspace": {
-    "library": ["../../editors/neovim/lua/conch"],
+    "library": ["../../editors/neovim/lua/termlab"],
     "checkThirdParty": false
   },
   "diagnostics": {

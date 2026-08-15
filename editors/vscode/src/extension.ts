@@ -1,22 +1,22 @@
 import * as vscode from "vscode";
 import * as path from "path";
-import { ConchDiagnostics } from "./diagnostics";
+import { TermLabDiagnostics } from "./diagnostics";
 
-let diagnostics: ConchDiagnostics | undefined;
+let diagnostics: TermLabDiagnostics | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
-  // Configure LuaLS to include our Conch API type definitions.
+  // Configure LuaLS to include our TermLab API type definitions.
   configureLuaLS(context);
 
-  // Set up diagnostics via `conch check`.
-  diagnostics = new ConchDiagnostics();
+  // Set up diagnostics via `termlab check`.
+  diagnostics = new TermLabDiagnostics();
   context.subscriptions.push(diagnostics);
 
   // Run diagnostics on save (if enabled).
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument((doc) => {
-      if (doc.languageId === "lua" && isConchPlugin(doc)) {
-        const config = vscode.workspace.getConfiguration("conch");
+      if (doc.languageId === "lua" && isTermLabPlugin(doc)) {
+        const config = vscode.workspace.getConfiguration("termlab");
         if (config.get<boolean>("checkOnSave", true)) {
           diagnostics?.check(doc);
         }
@@ -27,7 +27,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Run diagnostics when opening a Lua file.
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((doc) => {
-      if (doc.languageId === "lua" && isConchPlugin(doc)) {
+      if (doc.languageId === "lua" && isTermLabPlugin(doc)) {
         diagnostics?.check(doc);
       }
     })
@@ -42,7 +42,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register a manual check command.
   context.subscriptions.push(
-    vscode.commands.registerCommand("conch.checkPlugin", () => {
+    vscode.commands.registerCommand("termlab.checkPlugin", () => {
       const editor = vscode.window.activeTextEditor;
       if (editor && editor.document.languageId === "lua") {
         diagnostics?.check(editor.document);
@@ -52,7 +52,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Check all open Lua files on activation.
   for (const doc of vscode.workspace.textDocuments) {
-    if (doc.languageId === "lua" && isConchPlugin(doc)) {
+    if (doc.languageId === "lua" && isTermLabPlugin(doc)) {
       diagnostics.check(doc);
     }
   }
@@ -63,10 +63,10 @@ export function deactivate() {
 }
 
 /**
- * Configure LuaLS (sumneko.lua) to include Conch API type definitions.
+ * Configure LuaLS (sumneko.lua) to include TermLab API type definitions.
  *
  * Adds our `lua/` directory to the workspace library so LuaLS picks up
- * the EmmyLua annotations in `conch.lua`.
+ * the EmmyLua annotations in `termlab.lua`.
  */
 function configureLuaLS(context: vscode.ExtensionContext) {
   const libraryPath = path.join(context.extensionPath, "lua");
@@ -90,7 +90,7 @@ function configureLuaLS(context: vscode.ExtensionContext) {
   // Suppress the "undefined global" warning for our API globals.
   const globals: string[] =
     luaConfig.get<string[]>("diagnostics.globals") || [];
-  const conchGlobals = [
+  const termlabGlobals = [
     "session",
     "app",
     "ui",
@@ -103,7 +103,7 @@ function configureLuaLS(context: vscode.ExtensionContext) {
   ];
 
   let changed = false;
-  for (const g of conchGlobals) {
+  for (const g of termlabGlobals) {
     if (!globals.includes(g)) {
       globals.push(g);
       changed = true;
@@ -119,11 +119,11 @@ function configureLuaLS(context: vscode.ExtensionContext) {
 }
 
 /**
- * Heuristic to detect whether a Lua file is a Conch plugin.
+ * Heuristic to detect whether a Lua file is a TermLab plugin.
  *
- * Checks for plugin header comments or usage of Conch API globals.
+ * Checks for plugin header comments or usage of TermLab API globals.
  */
-function isConchPlugin(doc: vscode.TextDocument): boolean {
+function isTermLabPlugin(doc: vscode.TextDocument): boolean {
   const text = doc.getText(new vscode.Range(0, 0, 20, 0));
   return (
     text.includes("-- plugin-name:") ||

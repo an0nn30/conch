@@ -1,0 +1,68 @@
+[package]
+name = "termlab_tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TermLab terminal emulator — Tauri/xterm.js UI"
+
+[[bin]]
+name = "termlab"
+path = "src/main.rs"
+
+[lib]
+name = "termlab_tauri"
+path = "src/lib.rs"
+
+[dependencies]
+termlab_core = { workspace = true }
+termlab_plugin = { workspace = true }
+termlab_plugin_sdk = { workspace = true }
+termlab_remote = { workspace = true }
+termlab_vault = { path = "../termlab_vault" }
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
+portable-pty = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+env_logger = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+arboard = "3"
+font-kit = "0.14"
+ts-rs = { workspace = true }
+
+# SSH (via termlab_remote, only async-trait needed locally for TauriRemoteCallbacks)
+async-trait = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSLocale"] }
+core-text = "20"
+core-foundation = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["vault_eager_import"]
+vault_eager_import = ["termlab_vault/vault_eager_import"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+vergen-git2 = "1"
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "../../target/release/termlab", dest = "/usr/bin/termlab", mode = "0755" },
+]

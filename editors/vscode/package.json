@@ -1,13 +1,13 @@
 {
-  "name": "conch-lua",
-  "displayName": "Conch Plugin Support",
-  "description": "Lua language support for Conch terminal emulator plugins — completions, hover docs, and diagnostics.",
+  "name": "termlab-lua",
+  "displayName": "TermLab Plugin Support",
+  "description": "Lua language support for TermLab terminal emulator plugins — completions, hover docs, and diagnostics.",
   "version": "0.1.0",
   "publisher": "an0nn30",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/an0nn30/rusty_conch"
+    "url": "https://github.com/an0nn30/conch"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -25,17 +25,17 @@
   ],
   "contributes": {
     "configuration": {
-      "title": "Conch Plugin Support",
+      "title": "TermLab Plugin Support",
       "properties": {
-        "conch.checkOnSave": {
+        "termlab.checkOnSave": {
           "type": "boolean",
           "default": true,
-          "description": "Run `conch check` on save to validate plugin files."
+          "description": "Run `termlab check` on save to validate plugin files."
         },
-        "conch.executablePath": {
+        "termlab.executablePath": {
           "type": "string",
-          "default": "conch",
-          "description": "Path to the `conch` executable (for `conch check` diagnostics)."
+          "default": "termlab",
+          "description": "Path to the `termlab` executable (for `termlab check` diagnostics)."
         }
       }
     }

@@ -91,7 +91,7 @@ jobs:
           ./.github/workflows/upload_asset.sh \
             ./target/universal-apple-darwin/release/bundle/dmg/*.dmg $GITHUB_TOKEN
 
-      # NOTE: Exact artifact filenames (e.g., Conch.app.tar.gz) should be
+      # NOTE: Exact artifact filenames (e.g., TermLab.app.tar.gz) should be
       # verified after the first Tauri build — glob patterns used here as a
       # best-effort match.
       - name: Upload update artifact
@@ -126,8 +126,8 @@ jobs:
       - name: Build Java SDK JAR (embedded in binary)
         run: |
           mkdir -p java-sdk/build/classes
-          javac -d java-sdk/build/classes java-sdk/src/conch/plugin/*.java
-          jar cf java-sdk/build/conch-plugin-sdk.jar -C java-sdk/build/classes .
+          javac -d java-sdk/build/classes java-sdk/src/termlab/plugin/*.java
+          jar cf java-sdk/build/termlab-plugin-sdk.jar -C java-sdk/build/classes .
 
       - name: Test
         run: cargo test --release
@@ -147,16 +147,16 @@ jobs:
       - name: Upload NSIS installer and signature
         run: |
           ./.github/workflows/upload_asset.sh \
-            "./target/release/bundle/nsis/Conch_${{ steps.version.outputs.version }}_x64-setup.exe" $GITHUB_TOKEN
+            "./target/release/bundle/nsis/TermLab_${{ steps.version.outputs.version }}_x64-setup.exe" $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
-            "./target/release/bundle/nsis/Conch_${{ steps.version.outputs.version }}_x64-setup.exe.sig" $GITHUB_TOKEN
+            "./target/release/bundle/nsis/TermLab_${{ steps.version.outputs.version }}_x64-setup.exe.sig" $GITHUB_TOKEN
 
       - name: Upload MSI installer and signature
         run: |
           ./.github/workflows/upload_asset.sh \
-            "./target/release/bundle/msi/Conch_${{ steps.version.outputs.version }}_x64_en-US.msi" $GITHUB_TOKEN
+            "./target/release/bundle/msi/TermLab_${{ steps.version.outputs.version }}_x64_en-US.msi" $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
-            "./target/release/bundle/msi/Conch_${{ steps.version.outputs.version }}_x64_en-US.msi.sig" $GITHUB_TOKEN
+            "./target/release/bundle/msi/TermLab_${{ steps.version.outputs.version }}_x64_en-US.msi.sig" $GITHUB_TOKEN
 
   # ---------------------------------------------------------------------------
   # Generate latest.json — Tauri updater endpoint artifact
@@ -202,8 +202,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${{ steps.version.outputs.version }}"
-          MAC_SIG=$(cat sigs/Conch.app.tar.gz.sig 2>/dev/null || echo "")
-          WIN_SIG=$(cat "sigs/Conch_${VERSION}_x64-setup.exe.sig" 2>/dev/null || echo "")
+          MAC_SIG=$(cat sigs/TermLab.app.tar.gz.sig 2>/dev/null || echo "")
+          WIN_SIG=$(cat "sigs/TermLab_${VERSION}_x64-setup.exe.sig" 2>/dev/null || echo "")
 
           cat > latest.json << ENDJSON
           {
@@ -213,15 +213,15 @@ jobs:
             "platforms": {
               "darwin-aarch64": {
                 "signature": "$MAC_SIG",
-                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/Conch.app.tar.gz"
+                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/TermLab.app.tar.gz"
               },
               "darwin-x86_64": {
                 "signature": "$MAC_SIG",
-                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/Conch.app.tar.gz"
+                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/TermLab.app.tar.gz"
               },
               "windows-x86_64": {
                 "signature": "$WIN_SIG",
-                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/Conch_${VERSION}_x64-setup.exe"
+                "url": "https://github.com/an0nn30/conch/releases/download/$TAG/TermLab_${VERSION}_x64-setup.exe"
               }
             }
           }
@@ -263,7 +263,7 @@ jobs:
         run: cargo test --release
 
       - name: Build
-        run: cargo build --release -p conch_tauri
+        run: cargo build --release -p termlab_tauri
 
       - name: Extract version
         id: version
@@ -278,20 +278,20 @@ jobs:
 
       - name: Build AMD64 .deb
         run: |
-          cargo deb -p conch_tauri --no-build
-          cp target/debian/*.deb ./conch-v${{ steps.version.outputs.version }}-amd64.deb
+          cargo deb -p termlab_tauri --no-build
+          cp target/debian/*.deb ./termlab-v${{ steps.version.outputs.version }}-amd64.deb
 
       - name: Build AMD64 .rpm
         run: |
-          cargo generate-rpm -p crates/conch_tauri
-          cp target/generate-rpm/*.rpm ./conch-v${{ steps.version.outputs.version }}-1.x86_64.rpm
+          cargo generate-rpm -p crates/termlab_tauri
+          cp target/generate-rpm/*.rpm ./termlab-v${{ steps.version.outputs.version }}-1.x86_64.rpm
 
       - name: Upload AMD64 packages
         run: |
           ./.github/workflows/upload_asset.sh \
-            ./conch-v${{ steps.version.outputs.version }}-amd64.deb $GITHUB_TOKEN
+            ./termlab-v${{ steps.version.outputs.version }}-amd64.deb $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
-            ./conch-v${{ steps.version.outputs.version }}-1.x86_64.rpm $GITHUB_TOKEN
+            ./termlab-v${{ steps.version.outputs.version }}-1.x86_64.rpm $GITHUB_TOKEN
 
   # ---------------------------------------------------------------------------
   # Linux ARM64 — deb + rpm (native build on ARM64 runner)
@@ -323,7 +323,7 @@ jobs:
         run: cargo test --release
 
       - name: Build
-        run: cargo build --release -p conch_tauri
+        run: cargo build --release -p termlab_tauri
 
       - name: Extract version
         id: version
@@ -338,20 +338,20 @@ jobs:
 
       - name: Build ARM64 .deb
         run: |
-          cargo deb -p conch_tauri --no-build
-          cp target/debian/*.deb ./conch-v${{ steps.version.outputs.version }}-arm64.deb
+          cargo deb -p termlab_tauri --no-build
+          cp target/debian/*.deb ./termlab-v${{ steps.version.outputs.version }}-arm64.deb
 
       - name: Build ARM64 .rpm
         run: |
-          cargo generate-rpm -p crates/conch_tauri
-          cp target/generate-rpm/*.rpm ./conch-v${{ steps.version.outputs.version }}-1.aarch64.rpm
+          cargo generate-rpm -p crates/termlab_tauri
+          cp target/generate-rpm/*.rpm ./termlab-v${{ steps.version.outputs.version }}-1.aarch64.rpm
 
       - name: Upload ARM64 packages
         run: |
           ./.github/workflows/upload_asset.sh \
-            ./conch-v${{ steps.version.outputs.version }}-arm64.deb $GITHUB_TOKEN
+            ./termlab-v${{ steps.version.outputs.version }}-arm64.deb $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
-            ./conch-v${{ steps.version.outputs.version }}-1.aarch64.rpm $GITHUB_TOKEN
+            ./termlab-v${{ steps.version.outputs.version }}-1.aarch64.rpm $GITHUB_TOKEN
 
   # ---------------------------------------------------------------------------
   # Extras — VS Code extension, Java SDK
@@ -386,18 +386,18 @@ jobs:
 
       - name: Upload Java Plugin SDK
         run: |
-          cp java-sdk/build/conch-plugin-sdk.jar \
-            ./conch-plugin-sdk-v${{ steps.version.outputs.version }}.jar
-          cp java-sdk/build/conch-plugin-sdk-sources.jar \
-            ./conch-plugin-sdk-v${{ steps.version.outputs.version }}-sources.jar
-          cp java-sdk/build/conch-plugin-sdk-javadoc.jar \
-            ./conch-plugin-sdk-v${{ steps.version.outputs.version }}-javadoc.jar
+          cp java-sdk/build/termlab-plugin-sdk.jar \
+            ./termlab-plugin-sdk-v${{ steps.version.outputs.version }}.jar
+          cp java-sdk/build/termlab-plugin-sdk-sources.jar \
+            ./termlab-plugin-sdk-v${{ steps.version.outputs.version }}-sources.jar
+          cp java-sdk/build/termlab-plugin-sdk-javadoc.jar \
+            ./termlab-plugin-sdk-v${{ steps.version.outputs.version }}-javadoc.jar
           ./.github/workflows/upload_asset.sh \
-            ./conch-plugin-sdk-v${{ steps.version.outputs.version }}.jar $GITHUB_TOKEN
+            ./termlab-plugin-sdk-v${{ steps.version.outputs.version }}.jar $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
-            ./conch-plugin-sdk-v${{ steps.version.outputs.version }}-sources.jar $GITHUB_TOKEN
+            ./termlab-plugin-sdk-v${{ steps.version.outputs.version }}-sources.jar $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
-            ./conch-plugin-sdk-v${{ steps.version.outputs.version }}-javadoc.jar $GITHUB_TOKEN
+            ./termlab-plugin-sdk-v${{ steps.version.outputs.version }}-javadoc.jar $GITHUB_TOKEN
 
       - name: Build VS Code extension
         working-directory: editors/vscode
@@ -409,10 +409,10 @@ jobs:
       - name: Upload VS Code extension
         run: |
           ./.github/workflows/upload_asset.sh \
-            ./editors/vscode/conch-lua-*.vsix $GITHUB_TOKEN
+            ./editors/vscode/termlab-lua-*.vsix $GITHUB_TOKEN
 
       - name: Upload example config
         run: |
-          cp config.example.toml conch-config-example-v${{ steps.version.outputs.version }}.toml
+          cp config.example.toml termlab-config-example-v${{ steps.version.outputs.version }}.toml
           ./.github/workflows/upload_asset.sh \
-            ./conch-config-example-v${{ steps.version.outputs.version }}.toml $GITHUB_TOKEN
+            ./termlab-config-example-v${{ steps.version.outputs.version }}.toml $GITHUB_TOKEN

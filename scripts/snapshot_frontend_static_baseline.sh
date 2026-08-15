@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="${1:-.}"
 OUT="${2:-$ROOT/docs/superpowers/plans/2026-04-06-frontend-static-baseline.md}"
-FRONTEND="$ROOT/crates/conch_tauri/frontend"
+FRONTEND="$ROOT/crates/termlab_tauri/frontend"
 APP_DIR="$FRONTEND/app"
 
 if [[ ! -d "$APP_DIR" ]]; then
@@ -33,7 +33,7 @@ raw_layout_count="$(rg -n "invoke\\('save_window_layout'|invoke\\('get_saved_lay
   echo "# Frontend Static Baseline Snapshot"
   echo
   echo "- Date: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-  echo "- Scope: \`crates/conch_tauri/frontend/app\`"
+  echo "- Scope: \`crates/termlab_tauri/frontend/app\`"
   echo "- Method: static source scan (no runtime timing instrumentation)"
   echo
   echo "## Summary"

@@ -1,4 +1,4 @@
 #!/bin/sh
 set -e
-ln -sf /opt/conch/bin/conch /usr/bin/conch
-update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /opt/conch/bin/conch 50
+ln -sf /opt/termlab/bin/termlab /usr/bin/termlab
+update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /opt/termlab/bin/termlab 50

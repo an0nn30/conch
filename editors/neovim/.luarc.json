@@ -4,7 +4,7 @@
     "version": "Lua 5.4"
   },
   "workspace": {
-    "library": ["lua/conch"],
+    "library": ["lua/termlab"],
     "checkThirdParty": false
   },
   "diagnostics": {

@@ -1,6 +1,6 @@
 # Plugin Security Model
 
-This document defines the plugin API compatibility and permission model for Conch plugins.
+This document defines the plugin API compatibility and permission model for TermLab plugins.
 
 ## Objectives
 
@@ -11,14 +11,14 @@ This document defines the plugin API compatibility and permission model for Conc
 
 ## Versioning Model
 
-Conch tracks plugin API compatibility separately from plugin release versions.
+TermLab tracks plugin API compatibility separately from plugin release versions.
 
 - `plugin-version`: plugin's own release version (already supported)
 - `plugin-api`: host API requirement (new)
 
 ### Host API version
 
-Defined in `conch_plugin_sdk`:
+Defined in `termlab_plugin_sdk`:
 
 - `HOST_PLUGIN_API_MAJOR`
 - `HOST_PLUGIN_API_MINOR`
@@ -138,7 +138,7 @@ When plugin upgrades and requests additional capabilities:
 
 Persist grants in a dedicated file, e.g.:
 
-- `~/.config/conch/plugin_permissions.toml`
+- `~/.config/termlab/plugin_permissions.toml`
 
 Suggested schema:
 

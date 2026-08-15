@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-    update-alternatives --remove x-terminal-emulator /opt/conch/bin/conch
-    rm -f /usr/bin/conch
+    update-alternatives --remove x-terminal-emulator /opt/termlab/bin/termlab
+    rm -f /usr/bin/termlab
 fi

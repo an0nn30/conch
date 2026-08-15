@@ -1,5 +1,5 @@
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-APP      = Conch.app
+APP      = TermLab.app
 DIST     = dist
 
 # ---------------------------------------------------------------------------
@@ -46,8 +46,8 @@ java-sdk:
 
 .PHONY: build
 build:
-	cargo build --release -p conch_tauri
-	@echo "Binary at target/release/conch"
+	cargo build --release -p termlab_tauri
+	@echo "Binary at target/release/termlab"
 
 .PHONY: build-all
 build-all: java-sdk build
@@ -60,27 +60,27 @@ dmg-native: build
 	@mkdir -p "$(DIST)"
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
-	cp target/release/conch "$(APP)/Contents/MacOS/"
+	cp target/release/termlab "$(APP)/Contents/MacOS/"
 	cp packaging/macos/Info.plist "$(APP)/Contents/"
-	@if [ -f crates/conch_tauri/icons/icon.icns ]; then \
-		cp crates/conch_tauri/icons/icon.icns "$(APP)/Contents/Resources/conch.icns"; \
+	@if [ -f crates/termlab_tauri/icons/icon.icns ]; then \
+		cp crates/termlab_tauri/icons/icon.icns "$(APP)/Contents/Resources/termlab.icns"; \
 	fi
 	codesign --remove-signature "$(APP)" 2>/dev/null || true
 	codesign --force --deep --sign - "$(APP)"
 	mkdir -p dmg-staging && mv "$(APP)" dmg-staging/
 	create-dmg \
-		--volname "Conch" \
+		--volname "TermLab" \
 		--window-pos 200 120 \
 		--window-size 600 400 \
 		--icon-size 80 \
-		--icon "Conch.app" 150 200 \
-		--hide-extension "Conch.app" \
+		--icon "TermLab.app" 150 200 \
+		--hide-extension "TermLab.app" \
 		--app-drop-link 450 200 \
 		--no-internet-enable \
-		"$(DIST)/Conch-v$(VERSION)-$(shell uname -m).dmg" \
+		"$(DIST)/TermLab-v$(VERSION)-$(shell uname -m).dmg" \
 		"dmg-staging/" || true
 	rm -rf dmg-staging
-	@echo "Built $(DIST)/Conch-v$(VERSION)-$(shell uname -m).dmg"
+	@echo "Built $(DIST)/TermLab-v$(VERSION)-$(shell uname -m).dmg"
 
 # ---------------------------------------------------------------------------
 # macOS — Universal DMG (ARM64 + x86_64)
@@ -88,35 +88,35 @@ dmg-native: build
 .PHONY: dmg-universal
 dmg-universal: java-sdk
 	rustup target add aarch64-apple-darwin x86_64-apple-darwin 2>/dev/null || true
-	cargo build --release -p conch_tauri --target=aarch64-apple-darwin
-	cargo build --release -p conch_tauri --target=x86_64-apple-darwin
+	cargo build --release -p termlab_tauri --target=aarch64-apple-darwin
+	cargo build --release -p termlab_tauri --target=x86_64-apple-darwin
 	@mkdir -p "$(DIST)"
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	lipo -create \
-		target/aarch64-apple-darwin/release/conch \
-		target/x86_64-apple-darwin/release/conch \
-		-output "$(APP)/Contents/MacOS/conch"
+		target/aarch64-apple-darwin/release/termlab \
+		target/x86_64-apple-darwin/release/termlab \
+		-output "$(APP)/Contents/MacOS/termlab"
 	cp packaging/macos/Info.plist "$(APP)/Contents/"
-	@if [ -f crates/conch_tauri/icons/icon.icns ]; then \
-		cp crates/conch_tauri/icons/icon.icns "$(APP)/Contents/Resources/conch.icns"; \
+	@if [ -f crates/termlab_tauri/icons/icon.icns ]; then \
+		cp crates/termlab_tauri/icons/icon.icns "$(APP)/Contents/Resources/termlab.icns"; \
 	fi
 	codesign --remove-signature "$(APP)" 2>/dev/null || true
 	codesign --force --deep --sign - "$(APP)"
 	mkdir -p dmg-staging && mv "$(APP)" dmg-staging/
 	create-dmg \
-		--volname "Conch" \
+		--volname "TermLab" \
 		--window-pos 200 120 \
 		--window-size 600 400 \
 		--icon-size 80 \
-		--icon "Conch.app" 150 200 \
-		--hide-extension "Conch.app" \
+		--icon "TermLab.app" 150 200 \
+		--hide-extension "TermLab.app" \
 		--app-drop-link 450 200 \
 		--no-internet-enable \
-		"$(DIST)/Conch-v$(VERSION).dmg" \
+		"$(DIST)/TermLab-v$(VERSION).dmg" \
 		"dmg-staging/" || true
 	rm -rf dmg-staging
-	@echo "Built $(DIST)/Conch-v$(VERSION).dmg"
+	@echo "Built $(DIST)/TermLab-v$(VERSION).dmg"
 
 # ---------------------------------------------------------------------------
 # Linux — .deb (run on Linux, builds natively)
@@ -124,9 +124,9 @@ dmg-universal: java-sdk
 .PHONY: deb
 deb: build
 	@mkdir -p "$(DIST)"
-	cargo deb -p conch_tauri --no-build
-	cp target/debian/*.deb "$(DIST)/conch-v$(VERSION)-$$(dpkg --print-architecture).deb"
-	@echo "Built $(DIST)/conch-v$(VERSION)-$$(dpkg --print-architecture).deb"
+	cargo deb -p termlab_tauri --no-build
+	cp target/debian/*.deb "$(DIST)/termlab-v$(VERSION)-$$(dpkg --print-architecture).deb"
+	@echo "Built $(DIST)/termlab-v$(VERSION)-$$(dpkg --print-architecture).deb"
 
 # ---------------------------------------------------------------------------
 # Linux — .rpm (run on Linux, builds natively)
@@ -134,7 +134,7 @@ deb: build
 .PHONY: rpm
 rpm: build
 	@mkdir -p "$(DIST)"
-	cargo generate-rpm -p crates/conch_tauri
+	cargo generate-rpm -p crates/termlab_tauri
 	cp target/generate-rpm/*.rpm "$(DIST)/"
 	@echo "Built RPM in $(DIST)/"
 
@@ -146,9 +146,9 @@ msi: build
 	@mkdir -p "$(DIST)"
 	wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5 2>/dev/null || true
 	wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
-		-out "$(DIST)/Conch-v$(VERSION)-installer.msi" \
-		"packaging/windows/conch.wxs"
-	@echo "Built $(DIST)/Conch-v$(VERSION)-installer.msi"
+		-out "$(DIST)/TermLab-v$(VERSION)-installer.msi" \
+		"packaging/windows/termlab.wxs"
+	@echo "Built $(DIST)/TermLab-v$(VERSION)-installer.msi"
 
 # ---------------------------------------------------------------------------
 # Windows — portable .exe (run on Windows)
@@ -156,8 +156,8 @@ msi: build
 .PHONY: exe
 exe: build
 	@mkdir -p "$(DIST)"
-	cp target/release/conch.exe "$(DIST)/Conch-v$(VERSION)-portable.exe"
-	@echo "Built $(DIST)/Conch-v$(VERSION)-portable.exe"
+	cp target/release/termlab.exe "$(DIST)/TermLab-v$(VERSION)-portable.exe"
+	@echo "Built $(DIST)/TermLab-v$(VERSION)-portable.exe"
 
 # ===========================================================================
 # RELEASE & UTILITIES
@@ -171,7 +171,7 @@ endif
 	@echo "Bumping version to $(V)..."
 	sed -i '' 's/^version = ".*"/version = "$(V)"/' Cargo.toml
 	sed -i '' 's|<string>[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*</string>|<string>$(V)</string>|g' packaging/macos/Info.plist
-	sed -i '' 's|Version="[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"|Version="$(V)"|g' packaging/windows/conch.wxs
+	sed -i '' 's|Version="[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"|Version="$(V)"|g' packaging/windows/termlab.wxs
 	cargo check --workspace
 	@echo "Version bumped to $(V). Review with 'git diff', then commit."
 
@@ -182,7 +182,7 @@ ifndef V
 endif
 	@echo "Releasing v$(V)..."
 	$(MAKE) bump V=$(V)
-	git add Cargo.toml packaging/macos/Info.plist packaging/windows/conch.wxs Cargo.lock
+	git add Cargo.toml packaging/macos/Info.plist packaging/windows/termlab.wxs Cargo.lock
 	git diff --cached --quiet || git commit -m "release: v$(V)"
 	git tag -a "v$(V)" -m "v$(V)" -f
 	git push origin main
