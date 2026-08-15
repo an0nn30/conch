@@ -22,7 +22,9 @@
   let serverListEl = null;
   let quickConnectEl = null;
   let sessionListEl = null;
-  let tunnelsSectionEl = null;
+  let editHostBtn = null;
+  let removeHostBtn = null;
+  let configToggleBtn = null;
   let fitActiveTabFn = null;
   let refocusTerminalFn = null;
 
@@ -31,6 +33,8 @@
   let panelWasHiddenBeforeQuickConnect = false;
   let searchQuery = '';
   let searchSelectedIndex = 0;
+  let selectedServer = null;
+  let showSshConfigHosts = false;
 
   function setOverlayDialogAttributes(overlay, label) {
     if (!overlay) return;
@@ -82,23 +86,18 @@
     }
 
     panelEl.innerHTML = `
-      <div class="ssh-panel-header">
-        <span class="ssh-panel-title">Sessions</span>
-        <div class="ssh-panel-actions">
-          <div style="position:relative">
-            <button class="ssh-icon-btn" id="ssh-add-new" title="New..."><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="M 4 7 h 8 v 2 H 4 Z M 7 4 h 2 v 8 H 7 Z"/></svg></button>
-          </div>
-          <button class="ssh-icon-btn" id="ssh-refresh" title="Refresh"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="m 7.972 0 v 2 c -3.314 0 -6 2.686 -6 6 0 3.314 2.686 6 6 6 3.28 0 5.94 -2.633 5.994 -5.9 0.004 -0.033 0.006 -0.066 0.006 -0.1 0 -0.006 -0.004 -0.011 -0.004 -0.018 h -1.992 c 0 0.006 -0.004 0.011 -0.004 0.018 0 2.209 -1.791 4 -4 4 -2.209 0 -4 -1.791 -4 -4 0 -2.209 1.791 -4 4 -4 v 2 l 3.494 -3.018 z"/></svg></button>
-        </div>
-      </div>
-      <div class="ssh-quick-connect">
-        <input type="text" id="ssh-quick-connect-input"
+      <div class="tl-toolwindow__toolbar" id="hosts-toolbar">
+        <button class="tl-icon-btn" id="ssh-add-new" title="New Host"></button>
+        <button class="tl-icon-btn" id="ssh-edit-host" title="Edit Host"></button>
+        <button class="tl-icon-btn" id="ssh-remove-host" title="Delete Host"></button>
+        <button class="tl-icon-btn" id="ssh-refresh" title="Refresh"></button>
+        <button class="tl-icon-btn" id="ssh-config-toggle" title="Show ~/.ssh/config hosts"></button>
+        <input id="ssh-quick-connect-input" class="tl-input ssh-quick-connect-input"
                placeholder="Quick connect (user@host:port)"
                spellcheck="false" autocomplete="off" />
       </div>
-      <div class="ssh-panel-body" id="ssh-panel-body">
+      <div class="ssh-panel-body tl-scroll" id="ssh-panel-body">
         <div class="ssh-active-sessions" id="ssh-active-sessions"></div>
-        <div class="ssh-tunnels-section" id="ssh-tunnels-section"></div>
         <div class="ssh-server-list" id="ssh-server-list"></div>
       </div>
     `;
@@ -106,7 +105,23 @@
     serverListEl = panelEl.querySelector('#ssh-server-list');
     quickConnectEl = panelEl.querySelector('#ssh-quick-connect-input');
     sessionListEl = panelEl.querySelector('#ssh-active-sessions');
-    tunnelsSectionEl = panelEl.querySelector('#ssh-tunnels-section');
+    editHostBtn = panelEl.querySelector('#ssh-edit-host');
+    removeHostBtn = panelEl.querySelector('#ssh-remove-host');
+    configToggleBtn = panelEl.querySelector('#ssh-config-toggle');
+
+    if (window.tlIcon) {
+      panelEl.querySelector('#ssh-add-new').appendChild(window.tlIcon.create('add', { size: 16 }));
+      editHostBtn.appendChild(window.tlIcon.create('edit', { size: 16 }));
+      removeHostBtn.appendChild(window.tlIcon.create('remove', { size: 16 }));
+      panelEl.querySelector('#ssh-refresh').appendChild(window.tlIcon.create('refresh', { size: 16 }));
+      configToggleBtn.appendChild(window.tlIcon.create('web', { size: 16 }));
+    }
+
+    editHostBtn.disabled = true;
+    removeHostBtn.disabled = true;
+
+    // Selection — event delegation so it survives server-list re-renders.
+    serverListEl.addEventListener('click', handleServerListClick);
 
     // Quick connect input — filters server list + arrow key navigation
     quickConnectEl.addEventListener('input', () => {
@@ -177,6 +192,26 @@
       showNewMenu(panelEl.querySelector('#ssh-add-new'));
     });
     panelEl.querySelector('#ssh-refresh').addEventListener('click', refreshAll);
+    editHostBtn.addEventListener('click', () => {
+      if (!selectedServer) return;
+      showConnectionForm(selectedServer);
+    });
+    removeHostBtn.addEventListener('click', () => {
+      if (!selectedServer) return;
+      const server = selectedServer;
+      showDeleteConfirmDialog(`Delete "${server.label}"?`, () => {
+        if (!sshActions || typeof sshActions.deleteServer !== 'function') return;
+        sshActions.deleteServer(invoke, server.id).then(() => {
+          selectServer(null);
+          refreshAll();
+        }).catch(() => {});
+      });
+    });
+    configToggleBtn.addEventListener('click', () => {
+      showSshConfigHosts = !showSshConfigHosts;
+      configToggleBtn.classList.toggle('active', showSshConfigHosts);
+      renderServerList();
+    });
 
     // Auth prompts
     listen('ssh-host-key-prompt', handleHostKeyPrompt);
@@ -193,7 +228,7 @@
   }
 
   function hasPanelDom() {
-    return !!(panelEl && serverListEl && sessionListEl && tunnelsSectionEl);
+    return !!(panelEl && serverListEl && sessionListEl);
   }
 
   // ---------------------------------------------------------------------------
@@ -351,7 +386,6 @@
     if (!hasPanelDom()) return;
     renderServerList();
     await refreshSessions();
-    await refreshTunnels();
   }
 
   async function exportConfig() {
@@ -660,9 +694,10 @@
       console.error('ssh-view missing renderServerList');
       return;
     }
+    const dataForView = showSshConfigHosts ? serverData : { ...serverData, ssh_config: [] };
     sshView.renderServerList({
       serverListEl,
-      serverData,
+      serverData: dataForView,
       searchQuery,
       searchSelectedIndex,
       getFilteredServers,
@@ -680,83 +715,48 @@
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Selection state
+  // ---------------------------------------------------------------------------
+
+  // Server tree nodes (see features/ssh/view.js#createServerNode) don't carry a
+  // data-id attribute, but each node's title is the unique "user@host:port"
+  // session key (same key format used by exportConfig's serverSessionKey /
+  // findServerForTunnel above) — used here to resolve a clicked DOM node back
+  // to its server record without modifying the view module.
+  function findServerByNodeTitle(title) {
+    const servers = getAllServers();
+    return servers.find((s) => `${s.user}@${s.host}:${s.port}` === title) || null;
+  }
+
+  function handleServerListClick(event) {
+    const node = event.target.closest('.ssh-server-node');
+    serverListEl.querySelectorAll('.ssh-server-node.selected').forEach((el) => el.classList.remove('selected'));
+    if (!node) {
+      selectServer(null);
+      return;
+    }
+    node.classList.add('selected');
+    selectServer(findServerByNodeTitle(node.title));
+  }
+
+  function selectServer(server) {
+    selectedServer = server || null;
+    updateSelectionButtons();
+  }
+
+  function updateSelectionButtons() {
+    const disabled = !selectedServer;
+    if (editHostBtn) editHostBtn.disabled = disabled;
+    if (removeHostBtn) removeHostBtn.disabled = disabled;
+  }
+
   function renderSessions(sessions) {
     if (!sshView || typeof sshView.renderSessions !== 'function') {
       console.error('ssh-view missing renderSessions');
       return;
     }
     sshView.renderSessions(sessionListEl, sessions, { esc });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Tunnels section in sidebar
-  // ---------------------------------------------------------------------------
-
-  async function refreshTunnels() {
-    let tunnels = [];
-    try {
-      if (!sshDataService || typeof sshDataService.getTunnels !== 'function') {
-        throw new Error('SSH data service unavailable: getTunnels');
-      }
-      tunnels = await sshDataService.getTunnels(invoke);
-    } catch (e) {
-      console.error('Failed to load tunnels:', e);
-    }
-    invalidateCommandPaletteCache('ssh-refresh-tunnels');
-    renderTunnels(tunnels);
-  }
-
-  function renderTunnels(tunnels) {
-    if (!sshView || typeof sshView.renderTunnels !== 'function') {
-      console.error('ssh-view missing renderTunnels');
-      return;
-    }
-    sshView.renderTunnels(tunnelsSectionEl, tunnels, {
-      esc,
-      toast: window.toast,
-      onStartTunnel: async (tunnel) => {
-        if (!sshActions || typeof sshActions.startTunnel !== 'function') {
-          throw new Error('SSH actions unavailable: startTunnel');
-        }
-        await sshActions.startTunnel(invoke, tunnel.id);
-      },
-      onStopTunnel: async (tunnel) => {
-        if (!sshActions || typeof sshActions.stopTunnel !== 'function') {
-          throw new Error('SSH actions unavailable: stopTunnel');
-        }
-        await sshActions.stopTunnel(invoke, tunnel.id);
-      },
-      onRefreshTunnels: refreshTunnels,
-      onTunnelContextMenu: (event, tunnel, status) => showTunnelContextMenu(event, tunnel, status),
-    });
-  }
-
-  function showTunnelContextMenu(e, tunnel, status) {
-    const items = [];
-    if (status === 'active' || status === 'connecting') {
-      items.push({ label: 'Stop', action: async () => {
-        if (!sshActions || typeof sshActions.stopTunnel !== 'function') return;
-        try { await sshActions.stopTunnel(invoke, tunnel.id); } catch (err) { console.error(err); }
-        setTimeout(refreshTunnels, 300);
-      }});
-    } else {
-      items.push({ label: 'Start', action: async () => {
-        if (!sshActions || typeof sshActions.startTunnel !== 'function') return;
-        try { await sshActions.startTunnel(invoke, tunnel.id); } catch (err) { window.toast.error('Tunnel Error', String(err)); }
-        setTimeout(refreshTunnels, 500);
-      }});
-    }
-    items.push({ label: 'Edit', action: () => {
-      if (window.tunnelManager) window.tunnelManager.showEdit(tunnel);
-    }});
-    items.push({ type: 'separator' });
-    items.push({ label: 'Delete', danger: true, action: async () => {
-      if (!sshActions || typeof sshActions.deleteTunnel !== 'function') return;
-      try { await sshActions.deleteTunnel(invoke, tunnel.id); } catch (err) { console.error(err); }
-      refreshTunnels();
-    }});
-
-    showContextMenu(e, items);
   }
 
   // ---------------------------------------------------------------------------
@@ -977,5 +977,5 @@
 
   function getServerData() { return serverData; }
 
-  exports.sshPanel = { init, refreshAll, refreshSessions, togglePanel, focusQuickConnect, isHidden, getServerData, exportConfig, importConfig };
+  exports.sshPanel = { init, refreshAll, refreshSessions, togglePanel, focusQuickConnect, isHidden, getServerData, exportConfig, importConfig, getSelectedServer: () => selectedServer };
 })(window);

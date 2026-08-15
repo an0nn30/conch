@@ -244,29 +244,13 @@
       min-height: 0;
       overflow: hidden;
     }
-    .ssh-panel-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 10px 6px;
-      border-bottom: 1px solid var(--tab-border);
+    .ssh-quick-connect-input {
+      flex: 1;
+      min-width: 0;
+      font: 12px "JetBrains Mono", monospace;
     }
-    .ssh-panel-title { font-weight: 600; font-size: 13px; color: var(--fg); }
-    .ssh-panel-actions { display: flex; gap: 4px; }
-    .ssh-icon-btn {
-      background: none; border: 1px solid transparent; border-radius: 4px;
-      color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: 13px;
-      line-height: 1;
-    }
-    .ssh-icon-btn:hover { background: var(--tab-border); color: var(--fg); }
-    .ssh-quick-connect { padding: 6px 10px; }
-    .ssh-quick-connect input {
-      width: 100%; padding: 5px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
-      border-radius: 4px; color: var(--fg); font: 12px "JetBrains Mono", monospace;
-      outline: none;
-    }
-    .ssh-quick-connect input:focus { border-color: var(--dim-fg); }
-    .ssh-quick-connect input::placeholder { color: var(--dim-fg); }
+    #ssh-config-toggle.active { background: var(--tl-row-hover, var(--active-highlight)); }
+    #hosts-toolbar .tl-icon-btn:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
     .ssh-panel-body {
       flex: 1;
       min-height: 0;
@@ -339,7 +323,6 @@
       letter-spacing: 1px;
     }
     .ssh-tunnel-empty { padding: 4px 14px; font-size: var(--ui-font-small); color: var(--dim-fg); }
-    .ssh-tunnels-section { }
     .ssh-server-list { overflow: visible; }
     .ssh-folder { }
     .ssh-folder-header {
@@ -359,6 +342,7 @@
     }
     .ssh-server-node:hover { background: var(--input-bg); }
     .ssh-server-node.highlighted { background: var(--active-highlight); color: var(--fg); }
+    .ssh-server-node.selected { background: var(--active-highlight); color: var(--fg); }
     .ssh-server-node.dimmed { opacity: 0.6; }
     .ssh-search-hint { padding: 8px 14px; font-size: var(--ui-font-small); color: var(--dim-fg); font-style: italic; }
     .ssh-server-label {
