@@ -105,16 +105,9 @@
     panelEl.innerHTML = `
       <div class="fp-pane-container">
         <div class="fp-pane" id="fp-local"></div>
-        <div class="fp-transfer-bar">
-          <button class="fp-transfer-btn" id="fp-upload" title="Upload selected file from local to remote"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="m 2.001 7.789 1.386 1.385 3.635 -3.635 -0.021 8.461 h 2 l 0.021 -8.461 3.634 3.635 1.385 -1.385 -6.041 -6.001 z"/></svg></button>
-          <button class="fp-transfer-btn" id="fp-download" title="Download selected file from remote to local"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px"><path d="m 2.001 8.211 1.386 -1.385 3.635 3.635 -0.021 -8.461 h 2 l 0.021 8.461 3.634 -3.635 1.385 1.385 -6.041 6.001 z"/></svg></button>
-        </div>
         <div class="fp-pane" id="fp-remote"></div>
       </div>
     `;
-
-    panelEl.querySelector('#fp-download').addEventListener('click', doDownload);
-    panelEl.querySelector('#fp-upload').addEventListener('click', doUpload);
 
     // Start local pane at home
     const homePromise = filesDataService && typeof filesDataService.getHomeDir === 'function'
@@ -432,6 +425,7 @@
         renderPane(pane, el);
       },
       onOpenColumnMenu: (event) => showColumnMenu(event, pane, el),
+      onOpenRowMenu: (event, entry) => showRowContextMenu(event, pane, entry),
     });
   }
 
@@ -454,21 +448,22 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Transfers
+  // Transfers — reached from the row context menu (see buildRowContextMenuItems).
+  // Local pane rows offer upload actions; remote pane rows offer download
+  // actions, mirroring the reference app's per-pane transfer direction.
   // ---------------------------------------------------------------------------
 
-  function getSelectedEntry(pane) {
-    if (!pane._selectedName) return null;
-    return pane.entries.find((e) => e.name === pane._selectedName) || null;
+  function joinPath(base, name) {
+    const trimmed = String(base || '').replace(/\/+$/, '');
+    return (trimmed || '') + '/' + name;
   }
 
-  async function doDownload() {
-    const entry = getSelectedEntry(remotePane);
+  async function doDownload(entry) {
     if (!entry || !activeRemotePaneId) return;
     if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
 
-    const remotePath = remotePane.currentPath + '/' + entry.name;
-    const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
+    const remotePath = joinPath(remotePane.currentPath, entry.name);
+    const localPath = joinPath(localPane.currentPath, entry.name);
 
     try {
       if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
@@ -482,13 +477,12 @@
     }
   }
 
-  async function doUpload() {
-    const entry = getSelectedEntry(localPane);
+  async function doUpload(entry) {
     if (!entry || !activeRemotePaneId) return;
     if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory upload not yet supported.'); return; }
 
-    const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
-    const remotePath = remotePane.currentPath + '/' + entry.name;
+    const localPath = joinPath(localPane.currentPath, entry.name);
+    const remotePath = joinPath(remotePane.currentPath, entry.name);
 
     try {
       if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
@@ -500,6 +494,325 @@
     } catch (e) {
       window.toast.error('Upload Failed', String(e));
     }
+  }
+
+  async function doUploadToPath(entry) {
+    if (!entry || !activeRemotePaneId) return;
+    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory upload not yet supported.'); return; }
+
+    const localPath = joinPath(localPane.currentPath, entry.name);
+    showTextPromptDialog({
+      title: 'Upload to Path',
+      label: 'Remote destination path',
+      initialValue: joinPath(remotePane.currentPath, entry.name),
+      confirmLabel: 'Upload',
+      onConfirm: async (remotePath) => {
+        try {
+          if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
+            throw new Error('Files data service unavailable: transferUpload');
+          }
+          const transferId = await filesDataService.transferUpload(invoke, activeRemotePaneId, localPath, remotePath);
+          remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+        } catch (e) {
+          window.toast.error('Upload Failed', String(e));
+        }
+      },
+    });
+  }
+
+  async function doDownloadToPath(entry) {
+    if (!entry || !activeRemotePaneId) return;
+    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
+
+    const remotePath = joinPath(remotePane.currentPath, entry.name);
+    showTextPromptDialog({
+      title: 'Download to Path',
+      label: 'Local destination path',
+      initialValue: joinPath(localPane.currentPath, entry.name),
+      confirmLabel: 'Download',
+      onConfirm: async (localPath) => {
+        try {
+          if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
+            throw new Error('Files data service unavailable: transferDownload');
+          }
+          const transferId = await filesDataService.transferDownload(invoke, activeRemotePaneId, remotePath, localPath);
+          localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+        } catch (e) {
+          window.toast.error('Download Failed', String(e));
+        }
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Row actions — New Folder / Rename / Delete / Copy Path (row context menu)
+  // ---------------------------------------------------------------------------
+
+  function doNewFolder(pane) {
+    showTextPromptDialog({
+      title: 'New Folder',
+      label: 'Name',
+      initialValue: '',
+      confirmLabel: 'Create',
+      onConfirm: (name) => {
+        const path = joinPath(pane.currentPath, name);
+        const mkdirPromise = pane.isLocal
+          ? (filesDataService && typeof filesDataService.localMkdir === 'function'
+            ? filesDataService.localMkdir(invoke, path)
+            : Promise.reject(new Error('Files data service unavailable: localMkdir')))
+          : (filesDataService && typeof filesDataService.remoteMkdir === 'function'
+            ? filesDataService.remoteMkdir(invoke, activeRemotePaneId, path)
+            : Promise.reject(new Error('Files data service unavailable: remoteMkdir')));
+        mkdirPromise
+          .then(() => loadEntries(pane))
+          .catch((e) => window.toast.error('New Folder Failed', String(e)));
+      },
+    });
+  }
+
+  function doRename(pane, entry) {
+    showTextPromptDialog({
+      title: 'Rename',
+      label: 'Name',
+      initialValue: entry.name,
+      confirmLabel: 'Rename',
+      onConfirm: (newName) => {
+        if (newName === entry.name) return;
+        const from = joinPath(pane.currentPath, entry.name);
+        const to = joinPath(pane.currentPath, newName);
+        const renamePromise = pane.isLocal
+          ? (filesDataService && typeof filesDataService.localRename === 'function'
+            ? filesDataService.localRename(invoke, from, to)
+            : Promise.reject(new Error('Files data service unavailable: localRename')))
+          : (filesDataService && typeof filesDataService.remoteRename === 'function'
+            ? filesDataService.remoteRename(invoke, activeRemotePaneId, from, to)
+            : Promise.reject(new Error('Files data service unavailable: remoteRename')));
+        renamePromise
+          .then(() => loadEntries(pane))
+          .catch((e) => window.toast.error('Rename Failed', String(e)));
+      },
+    });
+  }
+
+  function doDelete(pane, entry) {
+    showConfirmDialog({
+      title: 'Delete',
+      message: `Delete "${entry.name}"? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      danger: true,
+      onConfirm: () => {
+        const path = joinPath(pane.currentPath, entry.name);
+        const removePromise = pane.isLocal
+          ? (filesDataService && typeof filesDataService.localRemove === 'function'
+            ? filesDataService.localRemove(invoke, path, !!entry.is_dir)
+            : Promise.reject(new Error('Files data service unavailable: localRemove')))
+          : (filesDataService && typeof filesDataService.remoteRemove === 'function'
+            ? filesDataService.remoteRemove(invoke, activeRemotePaneId, path, !!entry.is_dir)
+            : Promise.reject(new Error('Files data service unavailable: remoteRemove')));
+        removePromise
+          .then(() => loadEntries(pane))
+          .catch((e) => window.toast.error('Delete Failed', String(e)));
+      },
+    });
+  }
+
+  function doCopyPath(pane, entry) {
+    const path = joinPath(pane.currentPath, entry.name);
+    const copyPromise = filesDataService && typeof filesDataService.clipboardWriteText === 'function'
+      ? filesDataService.clipboardWriteText(invoke, path)
+      : Promise.reject(new Error('Files data service unavailable: clipboardWriteText'));
+    Promise.resolve(copyPromise)
+      .then(() => window.toast.success('Copied', 'Path copied to clipboard.'))
+      .catch((e) => window.toast.error('Copy Failed', String(e)));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Row context menu
+  // ---------------------------------------------------------------------------
+
+  function buildRowContextMenuItems(pane, entry) {
+    const noSession = !activeRemotePaneId;
+    const sessionTitle = pane.isLocal
+      ? 'Connect to an SSH session to upload files.'
+      : 'Connect to an SSH session to download files.';
+
+    const items = [
+      { icon: 'newFolder', label: 'New Folder…', action: () => doNewFolder(pane) },
+      { type: 'separator' },
+      { icon: 'edit', label: 'Rename…', action: () => doRename(pane, entry) },
+      { icon: 'remove', label: 'Delete', action: () => doDelete(pane, entry) },
+      { type: 'separator' },
+      { icon: 'copy', label: 'Copy Path', action: () => doCopyPath(pane, entry) },
+      { type: 'separator' },
+    ];
+
+    if (pane.isLocal) {
+      items.push({
+        label: 'Upload to remote host',
+        disabled: noSession,
+        title: noSession ? sessionTitle : undefined,
+        action: () => doUpload(entry),
+      });
+      items.push({
+        label: 'Upload to path…',
+        disabled: noSession,
+        title: noSession ? sessionTitle : undefined,
+        action: () => doUploadToPath(entry),
+      });
+    } else {
+      items.push({
+        label: 'Download to local host',
+        disabled: noSession,
+        title: noSession ? sessionTitle : undefined,
+        action: () => doDownload(entry),
+      });
+      items.push({
+        label: 'Download to path…',
+        disabled: noSession,
+        title: noSession ? sessionTitle : undefined,
+        action: () => doDownloadToPath(entry),
+      });
+    }
+
+    items.push({ type: 'separator' });
+    items.push({ icon: 'refresh', label: 'Refresh', action: () => loadEntries(pane) });
+
+    return items;
+  }
+
+  function showRowContextMenu(event, pane, entry) {
+    if (!filesPaneView || typeof filesPaneView.showRowContextMenu !== 'function') {
+      console.error('files-pane-view missing showRowContextMenu');
+      return;
+    }
+    filesPaneView.showRowContextMenu(event, buildRowContextMenuItems(pane, entry));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Small single-field / confirm dialogs — reuse the app-wide .ssh-overlay /
+  // .ssh-form popup styling (see styles/dialogs.css) already used by the SSH,
+  // tunnel, vault, and settings dialogs; no files-panel-specific CSS needed.
+  // ---------------------------------------------------------------------------
+
+  function removeFilesOverlay() {
+    document.querySelectorAll('.fp-dialog-overlay').forEach((el) => el.remove());
+  }
+
+  function setFilesOverlayAttributes(overlay, label) {
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', String(label || 'Dialog'));
+  }
+
+  function registerFilesOverlayKeys(overlay, name, onKeyDown) {
+    const keyboardRouter = window.termlabKeyboardRouter;
+    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+      return keyboardRouter.register({
+        name: name || 'fp-overlay',
+        priority: 220,
+        isActive: () => !!(overlay && overlay.isConnected),
+        onKeyDown: (event) => {
+          if (!overlay || !overlay.isConnected) return false;
+          return onKeyDown(event) === true;
+        },
+      });
+    }
+    console.warn('files-panel: keyboard router unavailable, skipping overlay handler registration:', name || 'fp-overlay');
+    return () => {};
+  }
+
+  function showTextPromptDialog(opts) {
+    const o = opts || {};
+    removeFilesOverlay();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay fp-dialog-overlay';
+    overlay.style.zIndex = '4500';
+    setFilesOverlayAttributes(overlay, o.title);
+    overlay.innerHTML = `
+      <div class="ssh-form ssh-form-small">
+        <div class="ssh-form-title">${esc(o.title)}</div>
+        <div class="ssh-form-body">
+          <label class="ssh-form-label">${esc(o.label)}
+            <input type="text" id="fp-dlg-input" value="${attr(o.initialValue || '')}" spellcheck="false" />
+          </label>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="fp-dlg-cancel">Cancel</button>
+          <button class="ssh-form-btn primary" id="fp-dlg-confirm">${esc(o.confirmLabel || 'OK')}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const input = overlay.querySelector('#fp-dlg-input');
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+
+    let closed = false;
+    const dismiss = () => {
+      if (closed) return;
+      closed = true;
+      if (typeof unregisterKeys === 'function') unregisterKeys();
+      overlay.remove();
+    };
+    const confirm = () => {
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      dismiss();
+      if (typeof o.onConfirm === 'function') o.onConfirm(value);
+    };
+    const unregisterKeys = registerFilesOverlayKeys(overlay, 'fp-text-prompt-dialog', (event) => {
+      if (event.key === 'Escape') { dismiss(); return true; }
+      if (event.key === 'Enter') { confirm(); return true; }
+      return false;
+    });
+    overlay.addEventListener('mousedown', (event) => { if (event.target === overlay) dismiss(); });
+    overlay.querySelector('#fp-dlg-cancel').addEventListener('click', dismiss);
+    overlay.querySelector('#fp-dlg-confirm').addEventListener('click', confirm);
+  }
+
+  function showConfirmDialog(opts) {
+    const o = opts || {};
+    removeFilesOverlay();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay fp-dialog-overlay';
+    overlay.style.zIndex = '4500';
+    setFilesOverlayAttributes(overlay, o.title);
+    const dangerStyle = o.danger ? ' style="background:var(--red);border-color:var(--red)"' : '';
+    overlay.innerHTML = `
+      <div class="ssh-form ssh-form-small">
+        <div class="ssh-form-title">${esc(o.title)}</div>
+        <div class="ssh-form-body">
+          <div class="ssh-auth-message">${esc(o.message)}</div>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="fp-dlg-cancel">Cancel</button>
+          <button class="ssh-form-btn primary" id="fp-dlg-confirm"${dangerStyle}>${esc(o.confirmLabel || 'OK')}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    let closed = false;
+    const dismiss = () => {
+      if (closed) return;
+      closed = true;
+      if (typeof unregisterKeys === 'function') unregisterKeys();
+      overlay.remove();
+    };
+    const confirm = () => {
+      dismiss();
+      if (typeof o.onConfirm === 'function') o.onConfirm();
+    };
+    const unregisterKeys = registerFilesOverlayKeys(overlay, 'fp-confirm-dialog', (event) => {
+      if (event.key !== 'Escape') return false;
+      dismiss();
+      return true;
+    });
+    overlay.addEventListener('mousedown', (event) => { if (event.target === overlay) dismiss(); });
+    overlay.querySelector('#fp-dlg-cancel').addEventListener('click', dismiss);
+    overlay.querySelector('#fp-dlg-confirm').addEventListener('click', confirm);
   }
 
   // ---------------------------------------------------------------------------

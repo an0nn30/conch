@@ -6,6 +6,7 @@
   let darkVariants = new Set([
     'add', 'edit', 'remove', 'refresh', 'web', 'settings', 'gear',
     'hideToolWindow', 'notifications', 'moreVertical', 'sftp',
+    'newFolder', 'copy',
   ]);
 
   function resolve(name, isDark) {

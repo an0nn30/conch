@@ -41,6 +41,34 @@
     return invoke('transfer_cancel', { transferId });
   }
 
+  async function localMkdir(invoke, path) {
+    return invoke('local_mkdir', { path });
+  }
+
+  async function localRename(invoke, from, to) {
+    return invoke('local_rename', { from, to });
+  }
+
+  async function localRemove(invoke, path, isDir) {
+    return invoke('local_remove', { path, isDir });
+  }
+
+  async function remoteMkdir(invoke, paneId, path) {
+    return invoke('sftp_mkdir', { paneId, path });
+  }
+
+  async function remoteRename(invoke, paneId, from, to) {
+    return invoke('sftp_rename', { paneId, from, to });
+  }
+
+  async function remoteRemove(invoke, paneId, path, isDir) {
+    return invoke('sftp_remove', { paneId, path, isDir });
+  }
+
+  async function clipboardWriteText(invoke, text) {
+    return invoke('clipboard_write_text', { text });
+  }
+
   global.termlabFilesFeatureDataService = {
     getAllSettings,
     getHomeDir,
@@ -52,5 +80,12 @@
     transferDownload,
     transferUpload,
     transferCancel,
+    localMkdir,
+    localRename,
+    localRemove,
+    remoteMkdir,
+    remoteRename,
+    remoteRemove,
+    clipboardWriteText,
   };
 })(window);

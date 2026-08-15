@@ -29,6 +29,8 @@ classic set has no dark counterpart (verified by search — Task 5's icon helper
 - `moreVertical` ← `actions/more.svg` (Apache-2.0) `[+ _dark]`
 - `sftp` ← `runConfigurations/remote.svg` (Apache-2.0) `[+ _dark]`
 - `terminal` ← `nodes/console.svg` (Apache-2.0) `[no dark variant]`
+- `newFolder` ← `actions/newFolder.svg` (Apache-2.0) `[+ _dark]`
+- `copy` ← `actions/copy.svg` (Apache-2.0) `[+ _dark]`
 
 ## Notes on non-exact-name choices
 
@@ -83,3 +85,7 @@ The other 9 (`add`, `edit`, `remove`, `refresh`, `web`, `settings`, `hideToolWin
 `moreVertical`) each have both `<name>.svg` and `<name>_dark.svg`. `terminal` (added in Task 1,
 `design-system-phase-4`) also has no dark variant — see its entry above.
 gear ← platform/icons/src/general/gearPlain.svg (Apache-2.0)
+
+- **newFolder** / **copy** (design-system-phase-4, SFTP context menu): vendored for the file-panel
+  row context menu's "New Folder…" and "Copy Path" items. Both exact-name matches in the classic set
+  (`actions/newFolder.svg`, `actions/copy.svg`), both with classic dark variants.
