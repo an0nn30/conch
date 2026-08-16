@@ -6,11 +6,15 @@
   'use strict';
 
   let invoke = null;
-  let escapeHandler = null;
   let standaloneEscapeHandler = null;
   let standaloneMode = false;   // true when running in its own window
   let standaloneRoot = null;    // root element in standalone mode
   let settingsSearchAutofocusTimer = null;
+  // The tl-dialog handle for the modal shell (open()'s path only —
+  // standalone mode never sets this). Same pattern as tunnel-manager.js's
+  // activeDialogHandle: null while no modal is open, doubles as the
+  // "is a settings dialog currently open" check.
+  let dialogHandle = null;
 
   const settingsDataService = exports.termlabSettingsFeatureDataService || {};
   const settingsSearchFeature = exports.termlabSettingsFeatureSearch || {};
@@ -85,7 +89,7 @@
   function focusSettingsSearchInput(selectAll) {
     clearSettingsAutofocusTimer();
     settingsSearchAutofocusTimer = setTimeout(() => {
-      const input = document.querySelector('#settings-sidebar .settings-sidebar-search');
+      const input = document.querySelector('#settings-sidebar .tl-settings__search');
       if (!input) return;
       input.focus();
       if (selectAll) input.select();
@@ -104,9 +108,9 @@
     const sidebar = document.getElementById('settings-sidebar');
     if (!sidebar) return;
     renderSidebarInto(sidebar);
-    const selectedEl = sidebar.querySelector('.settings-sidebar-item.selected');
+    const selectedEl = sidebar.querySelector('.tl-settings__item.is-selected');
     if (selectedEl) selectedEl.scrollIntoView({ block: 'nearest' });
-    const input = sidebar.querySelector('.settings-sidebar-search');
+    const input = sidebar.querySelector('.tl-settings__search');
     if (input) {
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
@@ -143,6 +147,8 @@
       getSidebarResults: () => store.getSidebarResults(),
       setSidebarResults: (results) => store.setSidebarResults(results),
       getCurrentSection: () => store.getCurrentSection(),
+      isGroupCollapsed: (groupLabel) => store.isSidebarGroupCollapsed(groupLabel),
+      toggleGroupCollapsed: (groupLabel) => store.toggleSidebarGroupCollapsed(groupLabel),
       moveSidebarSearchSelection,
       onSidebarSearchResultSelected,
       selectSection,
@@ -150,7 +156,7 @@
   }
 
   async function open() {
-    if (document.getElementById('settings-overlay')) { close(); return; }
+    if (dialogHandle) { close(); return; }
     if (!settingsModulesReady()) return;
 
     try {
@@ -179,15 +185,49 @@
     }
   }
 
-  /** Render settings as a full-window layout (no overlay, no modal). */
-  function renderStandalone() {
-    settingsRenderers.renderStandaloneShell(standaloneRoot, {
+  // Shared by both shells: Cancel discards (just close()); Apply saves
+  // without closing (footer stays open, its own disabled state resets once
+  // store.isDirty() goes false again — see renderers.js's
+  // wireApplyDirtyTracking); OK saves and closes. See actions.js's
+  // applySettings for the keepOpen/onApplied contract.
+  function applySettingsKeepOpen() {
+    return settingsActions.applySettings({
+      invoke,
+      getPendingSettings: () => store.getPendingSettings(),
+      isStandaloneMode: () => standaloneMode,
+      markSkipPluginDraftDiscard: () => store.setSkipPluginDraftDiscardOnClose(true),
       close,
-      applySettings,
+      keepOpen: true,
+      onApplied: () => store.commitPendingAsOriginal(),
+    });
+  }
+
+  function applySettingsAndClose() {
+    return settingsActions.applySettings({
+      invoke,
+      getPendingSettings: () => store.getPendingSettings(),
+      isStandaloneMode: () => standaloneMode,
+      markSkipPluginDraftDiscard: () => store.setSkipPluginDraftDiscardOnClose(true),
+      close,
+      keepOpen: false,
+    });
+  }
+
+  function shellDeps() {
+    return {
+      close,
+      applyKeepOpen: applySettingsKeepOpen,
+      applyAndClose: applySettingsAndClose,
+      isDirty: () => store.isDirty(),
       renderSidebarInto,
       isRecording,
       setSidebarQuery: (value) => store.setSidebarQuery(value),
-    });
+    };
+  }
+
+  /** Render settings as a full-window layout (no overlay, no modal). */
+  function renderStandalone() {
+    settingsRenderers.renderStandaloneShell(standaloneRoot, shellDeps());
 
     if (standaloneEscapeHandler) {
       standaloneEscapeHandler();
@@ -208,41 +248,40 @@
     focusSettingsSearchInput(true);
   }
 
+  // Modal path: tl-dialog (app/ui/tl-dialog.js) owns Escape, the focus trap,
+  // focus restore, depth stacking, and backdrop dismissal for this dialog —
+  // there is no priority-210 Escape registration here anymore (that
+  // responsibility moved to tl-dialog's own priority-225 registration when
+  // this shell was ported onto tlDialog.open()). handleDialogClosed below is
+  // wired through renderDialogShell's deps.onClose so store/plugin-draft
+  // cleanup still runs on every close path (Escape, backdrop click, Cancel,
+  // OK) — not just the ones that happen to call close() directly.
   function renderDialog() {
-    settingsRenderers.renderDialogShell({
-      close,
-      applySettings,
-      renderSidebarInto,
-      isRecording,
-      setSidebarQuery: (value) => store.setSidebarQuery(value),
+    dialogHandle = settingsRenderers.renderDialogShell({
+      ...shellDeps(),
+      onClose: handleDialogClosed,
     });
-
-    // Escape handler (capture phase, before xterm.js)
-    if (escapeHandler) {
-      escapeHandler();
-      escapeHandler = null;
-    }
-    escapeHandler = registerGlobalKeyHandler(
-      'settings-dialog-escape',
-      (event) => {
-        if (event.key !== 'Escape') return false;
-        // If a shortcut is being recorded, let the recording handler handle Escape.
-        if (isRecording()) return false;
-        close();
-        return true;
-      },
-      () => !!document.getElementById('settings-overlay')
-    );
 
     // Render initial section
     renderCurrentSection();
     focusSettingsSearchInput(true);
   }
 
-  function close() {
+  function handleDialogClosed() {
+    dialogHandle = null;
     if (recorder) recorder.stopRecording();
     clearSettingsAutofocusTimer();
+    store.clearLoadedSettings();
+    if (!store.getSkipPluginDraftDiscardOnClose()) {
+      settingsActions.discardPluginSettingsDrafts(invoke);
+    }
+    store.setSkipPluginDraftDiscardOnClose(false);
+  }
+
+  function close() {
     if (standaloneMode) {
+      if (recorder) recorder.stopRecording();
+      clearSettingsAutofocusTimer();
       if (!store.getSkipPluginDraftDiscardOnClose()) {
         settingsActions.discardPluginSettingsDrafts(invoke);
       }
@@ -258,17 +297,12 @@
       }
       return;
     }
-    const el = document.getElementById('settings-overlay');
-    if (el) el.remove();
-    if (escapeHandler) {
-      escapeHandler();
-      escapeHandler = null;
-    }
-    store.clearLoadedSettings();
-    if (!store.getSkipPluginDraftDiscardOnClose()) {
-      settingsActions.discardPluginSettingsDrafts(invoke);
-    }
-    store.setSkipPluginDraftDiscardOnClose(false);
+    // Route through the tl-dialog handle rather than duplicating teardown
+    // here — its own close() triggers handleDialogClosed via the onClose
+    // callback passed to renderDialogShell, which is the single place that
+    // cleanup runs regardless of whether Cancel/OK, Escape, or a backdrop
+    // click triggered it.
+    if (dialogHandle) dialogHandle.close();
   }
 
   function selectSection(id) {
@@ -278,10 +312,29 @@
     renderCurrentSection();
   }
 
+  // "<group> › <section>" per the reference's content header (METRICS.md:
+  // "breadcrumb header (Appearance & Behavior > Appearance)").
+  function getBreadcrumbParts(sectionId) {
+    for (const group of store.getSectionDefs()) {
+      for (const item of group.items) {
+        if (item.id === sectionId) return { group: group.group, label: item.label };
+      }
+    }
+    return null;
+  }
+
   function renderCurrentSection() {
     const content = document.getElementById('settings-content');
     if (!content) return;
     content.innerHTML = '';
+
+    const crumb = getBreadcrumbParts(store.getCurrentSection());
+    if (crumb) {
+      const crumbEl = document.createElement('div');
+      crumbEl.className = 'tl-settings__breadcrumb';
+      crumbEl.textContent = `${crumb.group} › ${crumb.label}`;
+      content.appendChild(crumbEl);
+    }
 
     sectionRenderers.renderSection(content, store.getCurrentSection());
 
@@ -295,16 +348,6 @@
         }
       });
     }
-  }
-
-  function applySettings() {
-    return settingsActions.applySettings({
-      invoke,
-      getPendingSettings: () => store.getPendingSettings(),
-      isStandaloneMode: () => standaloneMode,
-      markSkipPluginDraftDiscard: () => store.setSkipPluginDraftDiscardOnClose(true),
-      close,
-    });
   }
 
   exports.settings = { init, open, openInWindow, close };

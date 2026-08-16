@@ -28,8 +28,15 @@
   }
 
   /**
-   * Save pending settings, commit plugin drafts, then close the dialog/window.
-   * deps: { invoke, getPendingSettings, isStandaloneMode, markSkipPluginDraftDiscard, close }
+   * Save pending settings and commit plugin drafts. By default also closes
+   * the dialog/window (OK's behavior); pass deps.keepOpen: true for Apply's
+   * behavior — save without closing, then call deps.onApplied() (Task 1's
+   * shell wires this to store.commitPendingAsOriginal(), which is what makes
+   * the footer's Apply button go disabled again until the next edit).
+   * deps: {
+   *   invoke, getPendingSettings, isStandaloneMode, markSkipPluginDraftDiscard,
+   *   close, keepOpen, onApplied,
+   * }
    */
   async function applySettings(deps) {
     const d = deps || {};
@@ -37,6 +44,19 @@
       const result = await d.invoke('save_settings', { settings: d.getPendingSettings() });
       await d.invoke('commit_plugin_settings_drafts');
       d.markSkipPluginDraftDiscard();
+
+      if (d.keepOpen) {
+        // The window/dialog stays open, so there's no need to relay the
+        // restart toast to the main window the way the close path below
+        // does — this surface can show it directly (toast.js is loaded in
+        // both index.html and settings.html).
+        if (typeof d.onApplied === 'function') d.onApplied();
+        if (result && result.restart_required && global.toast) {
+          global.toast.warn('Restart Required', 'Some changes require a restart to take effect.');
+        }
+        return;
+      }
+
       if (d.isStandaloneMode() && result && result.restart_required) {
         // Emit to the main window so the toast is visible after this window closes.
         try {

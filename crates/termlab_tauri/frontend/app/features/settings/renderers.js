@@ -8,32 +8,49 @@
 
   // --- Shared layout helpers (reused by all section renderers) ---
 
+  // Section header + rule, merged into one construct per the reference
+  // (jvm-termlab-settings.png / METRICS.md "Settings window"): a plain-case
+  // label followed by a 1px rule running to the right edge — the rule sits
+  // BESIDE the label, not underneath it as a separate spacer line the way
+  // the old two-call addSectionLabel()+addDivider() pair drew it.
+  //
+  // addDivider() is kept as a callable no-op: ~20 call sites across
+  // sections-*.js/plugins-section.js (out of Task 1's scope) still call
+  // addDivider(container) between two addSectionLabel() calls, matching the
+  // old "label, rows, divider, label, rows" convention. Since the rule is
+  // now part of the *next* label's own row, that trailing addDivider() call
+  // has nothing left to do — .tl-settings__section's own top margin (see
+  // components/settings.css) recreates the old spacer's vertical gap.
   function addSectionLabel(container, text) {
-    const label = document.createElement('div');
-    label.className = 'settings-section-label';
+    const row = document.createElement('div');
+    row.className = 'tl-settings__section';
+    const label = document.createElement('span');
+    label.className = 'tl-settings__section-label';
     label.textContent = text;
-    container.appendChild(label);
+    const rule = document.createElement('span');
+    rule.className = 'tl-settings__rule';
+    row.appendChild(label);
+    row.appendChild(rule);
+    container.appendChild(row);
   }
 
-  function addDivider(container) {
-    const hr = document.createElement('hr');
-    hr.className = 'settings-divider';
-    container.appendChild(hr);
+  function addDivider(_container) {
+    // See addSectionLabel's comment above — intentionally inert.
   }
 
   function addRow(container, labelText, descText, controlEl) {
     const row = document.createElement('div');
-    row.className = 'settings-row';
+    row.className = 'tl-settings__row';
     if (labelText) row.dataset.searchLabel = searchFeature.normalizeSearchText(labelText);
     if (descText) row.dataset.searchDesc = searchFeature.normalizeSearchText(descText);
     const left = document.createElement('div');
     const lbl = document.createElement('div');
-    lbl.className = 'settings-row-label';
+    lbl.className = 'tl-settings__row-label';
     lbl.textContent = labelText;
     left.appendChild(lbl);
     if (descText) {
       const desc = document.createElement('div');
-      desc.className = 'settings-row-desc';
+      desc.className = 'tl-settings__row-desc';
       desc.textContent = descText;
       left.appendChild(desc);
     }
@@ -50,12 +67,12 @@
 
   function applyRowSearchHighlight(row, labelText, descText, query) {
     if (!row || !query) return;
-    const labelEl = row.querySelector('.settings-row-label');
+    const labelEl = row.querySelector('.tl-settings__row-label');
     if (labelEl) {
       labelEl.textContent = '';
       searchFeature.appendHighlightedText(labelEl, labelText, query);
     }
-    const descEl = row.querySelector('.settings-row-desc');
+    const descEl = row.querySelector('.tl-settings__row-desc');
     if (descEl && descText) {
       descEl.textContent = '';
       searchFeature.appendHighlightedText(descEl, descText, query);
@@ -424,6 +441,16 @@
         if (!combo) return true; // bare modifier, keep waiting
 
         d.setShortcutValue(settingsRef, combo);
+        // Shortcut edits land in pendingSettings via the keyboard router's
+        // global handler above, not a DOM input/change event on any element
+        // inside the dialog — the footer's Apply-dirty-state listener (see
+        // renderDialogShell/renderStandaloneShell) only hears bubbled
+        // input/change/click, so it would otherwise miss a shortcut-only
+        // edit entirely. Broadcast on `document` so it's heard regardless of
+        // which shell (modal or standalone) is currently open.
+        if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function') {
+          document.dispatchEvent(new CustomEvent('termlab-settings-changed'));
+        }
         stopRecording();
         return true;
       }, () => !!recordingEl && !!recordingRef);
@@ -463,11 +490,11 @@
     }
     if (!row && jump.label) {
       const normalized = searchFeature.normalizeSearchText(jump.label);
-      row = root.querySelector(`.settings-row[data-search-label="${normalized}"]`);
+      row = root.querySelector(`.tl-settings__row[data-search-label="${normalized}"]`);
     }
     if (!row && jump.query) {
       const q = searchFeature.normalizeSearchText(jump.query);
-      row = Array.from(root.querySelectorAll('.settings-row')).find((el) => {
+      row = Array.from(root.querySelectorAll('.tl-settings__row')).find((el) => {
         const label = el.dataset.searchLabel || '';
         const desc = el.dataset.searchDesc || '';
         return label.includes(q) || desc.includes(q);
@@ -506,145 +533,39 @@
 
   // --- Dialog / standalone window shells ---
 
-  /**
-   * Build the in-app modal dialog shell and attach it to document.body.
-   * deps: { close, applySettings, renderSidebarInto, isRecording, setSidebarQuery }
-   */
-  function renderDialogShell(deps) {
-    const d = deps || {};
+  // Shared by both shells: the sidebar+content two-pane body. Appended
+  // directly as the modal's tl-dialog__body content (Step 1: "the standalone
+  // window ... shares every inner class").
+  function buildSettingsBody(d) {
+    const shell = document.createElement('div');
+    shell.className = 'tl-settings';
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.id = 'settings-overlay';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', 'Settings');
-
-    const dialog = document.createElement('div');
-    dialog.className = 'ssh-form settings-dialog';
-
-    // Title
-    const title = document.createElement('div');
-    title.className = 'ssh-form-title';
-    title.textContent = 'Settings';
-    dialog.appendChild(title);
-
-    // Body = sidebar + content
-    const body = document.createElement('div');
-    body.className = 'settings-body';
-
-    // Sidebar
     const sidebar = document.createElement('div');
-    sidebar.className = 'settings-sidebar';
+    sidebar.className = 'tl-settings__sidebar tl-scroll';
     sidebar.id = 'settings-sidebar';
     d.renderSidebarInto(sidebar);
-    body.appendChild(sidebar);
+    shell.appendChild(sidebar);
 
-    // Content area
     const content = document.createElement('div');
-    content.className = 'settings-content';
+    content.className = 'tl-settings__content tl-scroll';
     content.id = 'settings-content';
-    body.appendChild(content);
+    shell.appendChild(content);
 
-    dialog.appendChild(body);
-
-    // Footer
-    const footer = document.createElement('div');
-    footer.className = 'ssh-form-buttons settings-footer';
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'ssh-form-btn';
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.addEventListener('click', d.close);
-    const applyBtn = document.createElement('button');
-    applyBtn.className = 'ssh-form-btn primary';
-    applyBtn.textContent = 'Apply';
-    applyBtn.addEventListener('click', d.applySettings);
-    footer.appendChild(cancelBtn);
-    footer.appendChild(applyBtn);
-    dialog.appendChild(footer);
-
-    overlay.appendChild(dialog);
-
-    // Click outside to close
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) d.close(); });
-
-    dialog.addEventListener('keydown', (e) => {
-      if (d.isRecording()) return;
-      if (!searchFeature.isPrintableKeyEvent(e)) return;
-      const active = document.activeElement;
-      if (active && active.closest && active.closest('#settings-overlay') && searchFeature.isTextLikeElement(active)) return;
-      const input = dialog.querySelector('.settings-sidebar-search');
-      if (!input) return;
-      e.preventDefault();
-      e.stopPropagation();
-      input.focus();
-      input.value = (input.value || '') + e.key;
-      d.setSidebarQuery(input.value);
-      d.renderSidebarInto(document.getElementById('settings-sidebar'));
-      const nextInput = document.querySelector('#settings-sidebar .settings-sidebar-search');
-      if (nextInput) {
-        nextInput.focus();
-        nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
-      }
-    }, true);
-
-    document.body.appendChild(overlay);
-    return overlay;
+    return shell;
   }
 
-  /**
-   * Build the standalone-window shell (no overlay, no modal) into rootEl.
-   * deps: { close, applySettings, renderSidebarInto, isRecording, setSidebarQuery }
-   */
-  function renderStandaloneShell(root, deps) {
-    const d = deps || {};
-    root.innerHTML = '';
-
-    // Title bar (also serves as drag region)
-    const title = document.createElement('div');
-    title.className = 'settings-title';
-    title.textContent = 'Settings';
-    title.setAttribute('data-tauri-drag-region', '');
-    root.appendChild(title);
-
-    // Body = sidebar + content
-    const body = document.createElement('div');
-    body.className = 'settings-body';
-
-    const sidebar = document.createElement('div');
-    sidebar.className = 'settings-sidebar';
-    sidebar.id = 'settings-sidebar';
-    d.renderSidebarInto(sidebar);
-    body.appendChild(sidebar);
-
-    const content = document.createElement('div');
-    content.className = 'settings-content';
-    content.id = 'settings-content';
-    body.appendChild(content);
-
-    root.appendChild(body);
-
-    // Footer
-    const footer = document.createElement('div');
-    footer.className = 'settings-footer';
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'ssh-form-btn';
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.addEventListener('click', d.close);
-    const applyBtn = document.createElement('button');
-    applyBtn.className = 'ssh-form-btn primary';
-    applyBtn.textContent = 'Apply';
-    applyBtn.addEventListener('click', d.applySettings);
-    footer.appendChild(cancelBtn);
-    footer.appendChild(applyBtn);
-    root.appendChild(footer);
-
-    root.addEventListener('keydown', (e) => {
+  // Wires the "press any printable key while nothing text-like is focused ->
+  // jump into and type into the sidebar search box" behavior onto whichever
+  // root element owns the shell's keydown events (the dialog panel for the
+  // modal shell, `root` for standalone). Unchanged from the pre-tl-dialog
+  // version except the id/class lookups now target the renamed elements.
+  function wireTypeToSearch(scopeEl, containsScope, d) {
+    scopeEl.addEventListener('keydown', (e) => {
       if (d.isRecording()) return;
       if (!searchFeature.isPrintableKeyEvent(e)) return;
       const active = document.activeElement;
-      if (searchFeature.isTextLikeElement(active)) return;
-      const input = root.querySelector('.settings-sidebar-search');
+      if (active && searchFeature.isTextLikeElement(active) && containsScope(active)) return;
+      const input = scopeEl.querySelector('.tl-settings__search');
       if (!input) return;
       e.preventDefault();
       e.stopPropagation();
@@ -653,12 +574,160 @@
       d.setSidebarQuery(input.value);
       const sidebarEl = document.getElementById('settings-sidebar');
       if (sidebarEl) d.renderSidebarInto(sidebarEl);
-      const nextInput = root.querySelector('.settings-sidebar-search');
+      const nextInput = scopeEl.querySelector('.tl-settings__search');
       if (nextInput) {
         nextInput.focus();
         nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
       }
     }, true);
+  }
+
+  // Finds the Apply button among a footer's buttons by label (tl-dialog's
+  // buildFooterButton doesn't expose ids/refs, and label text is a stable,
+  // caller-controlled string here) and keeps its disabled state in sync with
+  // d.isDirty() as the user edits: bubbled input/change/click cover ordinary
+  // controls (text fields, switches, toggle groups — all mutate
+  // pendingSettings synchronously in their own click/change handler, which
+  // runs before this bubble-phase listener sees the event), and the
+  // 'termlab-settings-changed' custom event covers the keyboard-shortcut
+  // recorder's out-of-band edits (see createShortcutRecorder above). Does
+  // NOT observe plugin-settings widgets, which mutate server-side drafts
+  // rather than pendingSettings (see store.js's isDirty() comment) — a known
+  // gap, not a regression from the pre-Task-1 shell, which had no
+  // dirty-tracking at all.
+  function wireApplyDirtyTracking(footerEl, scopeEl, d) {
+    const applyBtn = Array.from(footerEl.querySelectorAll('.tl-btn')).find((btn) => btn.textContent === 'Apply') || null;
+    if (!applyBtn) return { refresh: () => {}, dispose: () => {} };
+    const refresh = () => { applyBtn.disabled = !d.isDirty(); };
+    refresh();
+    scopeEl.addEventListener('input', refresh);
+    scopeEl.addEventListener('change', refresh);
+    scopeEl.addEventListener('click', refresh);
+    document.addEventListener('termlab-settings-changed', refresh);
+    const dispose = () => document.removeEventListener('termlab-settings-changed', refresh);
+    return { refresh, dispose };
+  }
+
+  function helpFooterButtonSpec() {
+    return {
+      label: '?',
+      onSelect: () => {
+        if (global.toast && typeof global.toast.info === 'function') {
+          global.toast.info('Settings', 'Help documentation is not available yet.');
+        }
+      },
+    };
+  }
+
+  /**
+   * Build the in-app modal dialog shell via tlDialog.open() and attach it to
+   * document.body.
+   * deps: {
+   *   close, applyKeepOpen, applyAndClose, isDirty, renderSidebarInto,
+   *   isRecording, setSidebarQuery, onClose,
+   * }
+   */
+  function renderDialogShell(deps) {
+    const d = deps || {};
+    const body = buildSettingsBody(d);
+
+    const handle = global.tlDialog.open({
+      title: 'Settings',
+      ariaLabel: 'Settings',
+      size: 'lg',
+      body,
+      footerStart: [helpFooterButtonSpec()],
+      buttons: [
+        { label: 'Cancel', onSelect: () => d.close() },
+        {
+          label: 'Apply',
+          disabled: !d.isDirty(),
+          onSelect: () => { Promise.resolve(d.applyKeepOpen()).then(() => tracking.refresh()); },
+        },
+        { label: 'OK', primary: true, onSelect: () => d.applyAndClose() },
+      ],
+      // Escape and backdrop-dismiss close the dialog through tl-dialog's own
+      // internal close(), never through this module's Cancel/OK onSelect —
+      // so both this module's tracking cleanup AND the caller's store/plugin
+      // -draft cleanup (deps.onClose, e.g. settings.js's
+      // handleModalDialogClosed) have to run from here to fire on every
+      // close path, not just the button ones.
+      onClose: (result) => {
+        tracking.dispose();
+        if (typeof d.onClose === 'function') d.onClose(result);
+      },
+    });
+
+    const panel = handle.el;
+    const footerEl = panel.querySelector('.tl-dialog__footer-end') || panel;
+    const tracking = wireApplyDirtyTracking(footerEl, panel, d);
+
+    wireTypeToSearch(panel, (el) => panel.contains(el), d);
+
+    return handle;
+  }
+
+  /**
+   * Build the standalone-window shell (no overlay, no modal) into rootEl,
+   * sharing the same .tl-settings inner markup and .tl-dialog__footer*
+   * button classes as the modal shell.
+   * deps: {
+   *   close, applyKeepOpen, applyAndClose, isDirty, renderSidebarInto,
+   *   isRecording, setSidebarQuery,
+   * }
+   */
+  function renderStandaloneShell(root, deps) {
+    const d = deps || {};
+    root.innerHTML = '';
+
+    // Title bar (also serves as drag region) — standalone-only; the modal
+    // shell gets its title from tlDialog.open({ title }) instead.
+    const title = document.createElement('div');
+    title.className = 'tl-settings__title';
+    title.textContent = 'Settings';
+    title.setAttribute('data-tauri-drag-region', '');
+    root.appendChild(title);
+
+    root.appendChild(buildSettingsBody(d));
+
+    const footer = document.createElement('div');
+    footer.className = 'tl-dialog__footer';
+    const startEl = document.createElement('div');
+    startEl.className = 'tl-dialog__footer-start';
+    const helpBtn = document.createElement('button');
+    helpBtn.type = 'button';
+    helpBtn.className = 'tl-btn';
+    helpBtn.textContent = '?';
+    const helpSpec = helpFooterButtonSpec();
+    helpBtn.addEventListener('click', helpSpec.onSelect);
+    startEl.appendChild(helpBtn);
+    footer.appendChild(startEl);
+
+    const endEl = document.createElement('div');
+    endEl.className = 'tl-dialog__footer-end';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'tl-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => d.close());
+    const applyBtn = document.createElement('button');
+    applyBtn.type = 'button';
+    applyBtn.className = 'tl-btn';
+    applyBtn.textContent = 'Apply';
+    applyBtn.addEventListener('click', () => { Promise.resolve(d.applyKeepOpen()).then(() => tracking.refresh()); });
+    const okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = 'tl-btn tl-btn--primary';
+    okBtn.textContent = 'OK';
+    okBtn.addEventListener('click', () => d.applyAndClose());
+    endEl.appendChild(cancelBtn);
+    endEl.appendChild(applyBtn);
+    endEl.appendChild(okBtn);
+    footer.appendChild(endEl);
+    root.appendChild(footer);
+
+    const tracking = wireApplyDirtyTracking(endEl, root, d);
+    wireTypeToSearch(root, () => true, d);
   }
 
   // --- Section render dispatch ---

@@ -35,10 +35,22 @@
   flex: 1; min-height: 0; overflow-y: auto;
   padding: 0 var(--tl-space-4) var(--tl-space-3);
 }
+/* justify-content: space-between splits the footer into a left slot
+   (.tl-dialog__footer-start — e.g. a "?" help button) and the standard
+   right-aligned action group (.tl-dialog__footer-end). When a dialog has no
+   opts.footerStart, app/ui/tl-dialog.js still emits an empty start element,
+   which collapses to zero width and leaves the end group flush right,
+   matching every dialog that predates this addition. General dialog
+   capability (the reference's dialogs use a bottom-left help button too),
+   not a settings-only hack — see components/settings.css for its consumer. */
 .tl-dialog__footer {
   flex-shrink: 0;
-  display: flex; justify-content: flex-end; gap: var(--tl-space-2);
+  display: flex; align-items: center; justify-content: space-between; gap: var(--tl-space-2);
   padding: var(--tl-space-3) var(--tl-space-4);
+}
+.tl-dialog__footer-start,
+.tl-dialog__footer-end {
+  display: flex; align-items: center; gap: var(--tl-space-2);
 }
 /* Footer buttons reuse the shared .tl-btn/.tl-btn--primary component
    (design-system/components/button.css); the danger variant (a destructive

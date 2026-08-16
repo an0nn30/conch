@@ -75,4 +75,16 @@
   --tl-control-bg: var(--tl-TextField-background);
   --tl-control-tick: var(--tl-base-foreground);
   --tl-primary-fg: #ffffff;
+
+  /* Settings sidebar selected-row fill, measured directly off
+     jvm-termlab-settings.png (METRICS.md "Settings window" table): #627190,
+     a muted blue distinct from --tl-accent (#6B80A1). Checked tokens-dark.css
+     for a raw token already carrying this value (grep 627190) — none does.
+     The closest-named candidate, --tl-List-selectionBackground, exists but
+     holds #5E7293 (a different, wrong value), so chaining to it as a
+     var(--tl-List-selectionBackground, #627190) fallback would silently
+     resolve to the wrong color instead of ever using the fallback — the
+     same phantom-correct trap --tl-accent's history above warns about.
+     Literal hex, same footing as --tl-danger's fallback. */
+  --tl-settings-selection: #627190;
 }

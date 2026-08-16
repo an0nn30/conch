@@ -83,6 +83,14 @@
     let settingsSidebarSelectionIndex = -1;
     let pendingSettingsJump = null;
     let skipPluginDraftDiscardOnClose = false;
+    // Sidebar group-header disclosure state (Task 1 "Sidebar per the
+    // measurement" — the reference's tree has collapsible groups). Persists
+    // across renderSidebarInto() re-renders (every keystroke/selection
+    // rebuilds the sidebar's innerHTML from scratch) but not across
+    // open()/openInWindow() — applyLoadedSettingsData() below resets it, same
+    // lifetime as settingsSidebarQuery. Default: expanded (matches the prior
+    // always-expanded behavior).
+    let collapsedSidebarGroups = new Set();
 
     function ensureSettingsShape(settings) {
       if (!settings.termlab) settings.termlab = {};
@@ -117,11 +125,47 @@
       settingsSidebarQuery = '';
       keyboardSearchQuery = '';
       currentSection = 'appearance';
+      collapsedSidebarGroups = new Set();
     }
 
     function clearLoadedSettings() {
       pendingSettings = null;
       originalSettings = null;
+    }
+
+    // Dirty tracking for the footer's Apply button (Task 1 brief: "disabled
+    // until there are pending changes"). pendingSettings/originalSettings are
+    // the store's existing edit-vs-baseline pair (applyLoadedSettingsData
+    // above clones the loaded settings into both; every section renderer
+    // mutates pendingSettings in place) — isDirty() is just a structural
+    // comparison of that existing pair, not a new source of truth. Does NOT
+    // cover plugin-settings drafts, which live server-side behind their own
+    // commit/discard invokes (see actions.js) rather than in pendingSettings.
+    function isDirty() {
+      if (!pendingSettings || !originalSettings) return false;
+      try {
+        return JSON.stringify(pendingSettings) !== JSON.stringify(originalSettings);
+      } catch (_) {
+        return false;
+      }
+    }
+
+    // Called after a successful non-closing Apply so the just-saved state
+    // becomes the new baseline (isDirty() goes false again until the next
+    // edit), mirroring applyLoadedSettingsData's clone-into-both pattern.
+    function commitPendingAsOriginal() {
+      if (!pendingSettings) return;
+      originalSettings = JSON.parse(JSON.stringify(pendingSettings));
+    }
+
+    function isSidebarGroupCollapsed(groupLabel) {
+      return collapsedSidebarGroups.has(groupLabel);
+    }
+
+    function toggleSidebarGroupCollapsed(groupLabel) {
+      if (!groupLabel) return;
+      if (collapsedSidebarGroups.has(groupLabel)) collapsedSidebarGroups.delete(groupLabel);
+      else collapsedSidebarGroups.add(groupLabel);
     }
 
     function getPluginSettingsSections() {
@@ -366,6 +410,11 @@
 
       getSkipPluginDraftDiscardOnClose: () => skipPluginDraftDiscardOnClose,
       setSkipPluginDraftDiscardOnClose: (value) => { skipPluginDraftDiscardOnClose = !!value; },
+
+      isDirty,
+      commitPendingAsOriginal,
+      isSidebarGroupCollapsed,
+      toggleSidebarGroupCollapsed,
 
       applyLoadedSettingsData,
       clearLoadedSettings,

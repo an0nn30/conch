@@ -240,12 +240,35 @@
     }
     entry.close = close;
 
-    if (Array.isArray(opts.buttons) && opts.buttons.length) {
+    // opts.footerStart is a left-aligned button group (e.g. a "?" help
+    // button) rendered before the standard right-aligned opts.buttons group;
+    // see components/dialog.css's .tl-dialog__footer-start/-end. A footer is
+    // built whenever either is present so a footerStart-only dialog still
+    // gets one.
+    const hasButtons = Array.isArray(opts.buttons) && opts.buttons.length;
+    const hasFooterStart = Array.isArray(opts.footerStart) && opts.footerStart.length;
+    if (hasButtons || hasFooterStart) {
       const footer = document.createElement('div');
       footer.className = 'tl-dialog__footer';
-      for (const spec of opts.buttons) {
-        footer.appendChild(buildFooterButton(spec));
+
+      const startEl = document.createElement('div');
+      startEl.className = 'tl-dialog__footer-start';
+      if (hasFooterStart) {
+        for (const spec of opts.footerStart) {
+          startEl.appendChild(buildFooterButton(spec));
+        }
       }
+      footer.appendChild(startEl);
+
+      const endEl = document.createElement('div');
+      endEl.className = 'tl-dialog__footer-end';
+      if (hasButtons) {
+        for (const spec of opts.buttons) {
+          endEl.appendChild(buildFooterButton(spec));
+        }
+      }
+      footer.appendChild(endEl);
+
       panel.appendChild(footer);
     }
 

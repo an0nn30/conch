@@ -1,6 +1,17 @@
 (function initTermLabSettingsSidebar(global) {
   'use strict';
 
+  // Real <button> elements (Task 1 brief: "Rows keep role=button/tabindex=0
+  // but should become real <button> elements unless that breaks the
+  // existing keyboard handling"). It doesn't: attachActivatableItem's
+  // Enter/Space keydown handler calls event.preventDefault() before invoking
+  // onActivate(), which suppresses the button's own native
+  // Enter/Space-triggers-click activation, so onActivate() still runs
+  // exactly once per press — same contract as the old <div role="button">
+  // rows, now with real focus/keyboard semantics (and no need to set
+  // role="button" — <button>'s implicit role already is button — but it's
+  // harmless to set redundantly and keeps this helper correct for any
+  // future non-button caller too).
   function attachActivatableItem(el, onActivate) {
     if (!el || typeof onActivate !== 'function') return;
     el.setAttribute('role', 'button');
@@ -11,6 +22,13 @@
       event.preventDefault();
       onActivate();
     });
+  }
+
+  function makeItemButton(extraClassName) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tl-settings__item' + (extraClassName ? ' ' + extraClassName : '');
+    return btn;
   }
 
   function renderSidebarInto(sidebar, deps) {
@@ -41,15 +59,22 @@
     const moveSidebarSearchSelection = typeof d.moveSidebarSearchSelection === 'function' ? d.moveSidebarSearchSelection : () => {};
     const onSidebarSearchResultSelected = typeof d.onSidebarSearchResultSelected === 'function' ? d.onSidebarSearchResultSelected : () => {};
     const selectSection = typeof d.selectSection === 'function' ? d.selectSection : () => {};
+    // Group-header disclosure state (METRICS.md: "a disclosure tree
+    // (Appearance & Behavior > children)"). Lives in the settings store —
+    // see store.js's isSidebarGroupCollapsed/toggleSidebarGroupCollapsed —
+    // so it survives the re-render this function does on every keystroke and
+    // every section selection.
+    const isGroupCollapsed = typeof d.isGroupCollapsed === 'function' ? d.isGroupCollapsed : () => false;
+    const toggleGroupCollapsed = typeof d.toggleGroupCollapsed === 'function' ? d.toggleGroupCollapsed : () => {};
 
     sidebar.innerHTML = '';
     setSidebarResults([]);
 
     const searchWrap = document.createElement('div');
-    searchWrap.className = 'settings-sidebar-search-wrap';
+    searchWrap.className = 'tl-settings__search-wrap';
     const searchInput = document.createElement('input');
     searchInput.type = 'search';
-    searchInput.className = 'settings-sidebar-search';
+    searchInput.className = 'tl-input tl-settings__search';
     searchInput.placeholder = 'Search settings';
     searchInput.value = getSidebarQuery();
     searchInput.addEventListener('input', () => {
@@ -58,7 +83,7 @@
       const active = document.activeElement === searchInput;
       renderSidebarInto(sidebar, d);
       if (active) {
-        const nextInput = sidebar.querySelector('.settings-sidebar-search');
+        const nextInput = sidebar.querySelector('.tl-settings__search');
         if (nextInput) {
           nextInput.focus();
           nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
@@ -120,28 +145,27 @@
 
       if (sectionMatches.length > 0) {
         const header = document.createElement('div');
-        header.className = 'settings-sidebar-group';
+        header.className = 'tl-settings__group';
         header.textContent = 'Sections';
         sidebar.appendChild(header);
 
         for (let idx = 0; idx < sectionMatches.length; idx++) {
           const item = sectionMatches[idx];
           const resultIndex = settingMatches.length + idx;
-          const row = document.createElement('div');
-          row.className = 'settings-sidebar-item settings-sidebar-item-search'
-            + (item.id === getCurrentSection() ? ' active' : '')
-            + (getSidebarSelectionIndex() === resultIndex ? ' selected' : '');
+          const row = makeItemButton('tl-settings__item--search'
+            + (item.id === getCurrentSection() ? ' is-active' : '')
+            + (getSidebarSelectionIndex() === resultIndex ? ' is-selected' : ''));
           row.dataset.section = item.id;
           row.setAttribute('aria-current', item.id === getCurrentSection() ? 'page' : 'false');
 
           const title = document.createElement('div');
-          title.className = 'settings-sidebar-item-title';
+          title.className = 'tl-settings__item-title';
           appendHighlightedText(title, item.label, q);
           row.appendChild(title);
 
           if (item.description) {
             const desc = document.createElement('div');
-            desc.className = 'settings-sidebar-item-desc';
+            desc.className = 'tl-settings__item-desc';
             appendHighlightedText(desc, item.description, q);
             row.appendChild(desc);
           }
@@ -157,25 +181,24 @@
 
       if (settingMatches.length > 0) {
         const header = document.createElement('div');
-        header.className = 'settings-sidebar-group';
+        header.className = 'tl-settings__group';
         header.textContent = 'Settings';
         sidebar.appendChild(header);
 
         for (let idx = 0; idx < settingMatches.length; idx++) {
           const match = settingMatches[idx];
-          const row = document.createElement('div');
-          row.className = 'settings-sidebar-item settings-sidebar-item-search'
-            + (getSidebarSelectionIndex() === idx ? ' selected' : '');
+          const row = makeItemButton('tl-settings__item--search'
+            + (getSidebarSelectionIndex() === idx ? ' is-selected' : ''));
           row.dataset.section = match.section;
           row.setAttribute('aria-current', match.section === getCurrentSection() ? 'page' : 'false');
 
           const title = document.createElement('div');
-          title.className = 'settings-sidebar-item-title';
+          title.className = 'tl-settings__item-title';
           appendHighlightedText(title, match.label, q);
           row.appendChild(title);
 
           const desc = document.createElement('div');
-          desc.className = 'settings-sidebar-item-desc';
+          desc.className = 'tl-settings__item-desc';
           appendHighlightedText(desc, match.path || match.sectionLabel, q);
           row.appendChild(desc);
 
@@ -186,7 +209,7 @@
 
       if (sectionMatches.length === 0 && settingMatches.length === 0) {
         const empty = document.createElement('div');
-        empty.className = 'settings-sidebar-empty';
+        empty.className = 'tl-settings__empty';
         empty.textContent = 'No settings match your search.';
         sidebar.appendChild(empty);
       }
@@ -197,28 +220,35 @@
     setSidebarSelectionIndex(-1);
 
     for (const group of sectionDefs) {
-      const groupEl = document.createElement('div');
-      groupEl.className = 'settings-sidebar-group';
-      groupEl.textContent = group.group;
+      const collapsed = isGroupCollapsed(group.group);
+
+      const groupEl = document.createElement('button');
+      groupEl.type = 'button';
+      groupEl.className = 'tl-settings__group';
+      groupEl.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      const chevron = global.tlIcon && typeof global.tlIcon.create === 'function'
+        ? global.tlIcon.create(collapsed ? 'chevronRight' : 'chevronDown', { size: 12 })
+        : null;
+      if (chevron) {
+        chevron.className += ' tl-settings__group-chevron';
+        groupEl.appendChild(chevron);
+      }
+      const groupLabel = document.createElement('span');
+      groupLabel.textContent = group.group;
+      groupEl.appendChild(groupLabel);
+      groupEl.addEventListener('click', () => {
+        toggleGroupCollapsed(group.group);
+        renderSidebarInto(sidebar, d);
+      });
       sidebar.appendChild(groupEl);
 
+      if (collapsed) continue;
+
       for (const item of group.items) {
-        const itemEl = document.createElement('div');
-        itemEl.className = 'settings-sidebar-item' + (item.id === getCurrentSection() ? ' active' : '');
+        const itemEl = makeItemButton(item.id === getCurrentSection() ? 'is-active' : '');
         itemEl.dataset.section = item.id;
         itemEl.setAttribute('aria-current', item.id === getCurrentSection() ? 'page' : 'false');
-
-        const title = document.createElement('div');
-        title.className = 'settings-sidebar-item-title';
-        title.textContent = item.label;
-        itemEl.appendChild(title);
-
-        if (item.description) {
-          const desc = document.createElement('div');
-          desc.className = 'settings-sidebar-item-desc';
-          desc.textContent = item.description;
-          itemEl.appendChild(desc);
-        }
+        itemEl.textContent = item.label;
 
         attachActivatableItem(itemEl, () => selectSection(item.id));
         sidebar.appendChild(itemEl);

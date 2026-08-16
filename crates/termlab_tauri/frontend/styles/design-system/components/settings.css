@@ -1,0 +1,189 @@
+/* Settings window shell — sidebar + content two-pane body shared by the
+   modal (rendered inside tl-dialog's .tl-dialog__body via
+   renderDialogShell()) and the standalone window (rendered straight into
+   #settings-root via renderStandaloneShell()) — see
+   app/features/settings/renderers.js. Structural values are measured off
+   jvm-termlab-settings.png; see METRICS.md's "Settings window" table
+   (sidebar ~20% width, 24px selected-row height, the --tl-settings-selection
+   fill defined in base.css) and its "Dialogs and settings" section
+   (breadcrumb header, plain-case
+   section labels followed by a rule, muted helper text, accent links).
+   Control-level classes (.settings-input/.settings-switch/
+   .settings-toggle-group/etc., built by renderers.js's makeInput/
+   makeSwitch/makeToggleGroup) are unchanged by this task and still styled
+   by styles/dialogs.css — only the shell/sidebar/breadcrumb/section/row/
+   footer structure was in scope. */
+
+.tl-settings {
+  display: flex;
+  min-width: 0;
+}
+
+/* Modal shell: fixed, comfortable height inside tl-dialog's 84vh-capped
+   panel (regardless of how short/tall the current section's content is),
+   pulled flush to the dialog's left/right/bottom edges to cancel
+   .tl-dialog__body's own padding (components/dialog.css) — the reference
+   dialog has the sidebar+content running edge to edge under the title. */
+.tl-dialog__body > .tl-settings {
+  height: min(520px, 70vh);
+  margin: 0 calc(var(--tl-space-4) * -1) calc(var(--tl-space-3) * -1);
+}
+
+/* Standalone shell: fills whatever's left of the window's flex column below
+   the title bar (#settings-root is display:flex/flex-direction:column, see
+   styles/settings-window.css) instead of a fixed height. */
+#settings-root > .tl-settings {
+  flex: 1;
+  min-height: 0;
+}
+
+.tl-settings__sidebar {
+  flex: 0 0 20%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--tl-space-2) 0;
+  border-right: 1px solid var(--tl-border);
+}
+
+.tl-settings__content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--tl-space-4);
+}
+
+/* -- Sidebar: search field -- */
+
+.tl-settings__search-wrap { padding: 0 var(--tl-space-2) var(--tl-space-2); }
+.tl-settings__search { width: 100%; }
+
+/* -- Sidebar: disclosure tree (group headers + items) -- */
+
+.tl-settings__group {
+  display: flex; align-items: center; gap: var(--tl-space-1);
+  width: 100%;
+  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  background: transparent;
+  border: none;
+  padding: var(--tl-space-2) var(--tl-space-2);
+  text-align: left;
+  cursor: default;
+}
+.tl-settings__group:hover { background: var(--tl-row-hover); }
+.tl-settings__group:focus-visible {
+  outline: 1px solid var(--tl-accent); outline-offset: -1px;
+}
+.tl-settings__group-chevron { flex-shrink: 0; }
+
+.tl-settings__item {
+  display: block;
+  width: 100%;
+  height: var(--tl-row-h);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  background: transparent;
+  border: none;
+  border-radius: var(--tl-radius);
+  text-align: left;
+  padding: 0 var(--tl-space-2) 0 var(--tl-space-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: default;
+}
+.tl-settings__item:hover { background: var(--tl-row-hover); }
+.tl-settings__item:focus-visible {
+  outline: 1px solid var(--tl-accent); outline-offset: -1px;
+}
+.tl-settings__item.is-active {
+  background: var(--tl-settings-selection);
+}
+
+/* Search-results view: two-line title+description items, not covered by the
+   24px-row measurement above (that's the default, non-search tree). */
+.tl-settings__item--search {
+  height: auto;
+  min-height: var(--tl-row-h);
+  padding: var(--tl-space-1) var(--tl-space-2) var(--tl-space-1) var(--tl-space-4);
+  white-space: normal;
+}
+.tl-settings__item-title { font: 400 var(--tl-font-size-ui) var(--tl-font-ui); color: inherit; }
+.tl-settings__item-desc {
+  margin-top: 2px;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  line-height: 1.35;
+  color: var(--tl-fg-muted);
+}
+.tl-settings__item--search.is-active .tl-settings__item-desc { color: inherit; }
+.tl-settings__item--search.is-selected { background: var(--tl-row-hover); }
+
+.tl-settings__empty {
+  padding: var(--tl-space-2) var(--tl-space-2);
+  color: var(--tl-fg-muted);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  line-height: 1.4;
+}
+
+/* -- Content: breadcrumb + section headers + rows -- */
+
+.tl-settings__breadcrumb {
+  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  margin-bottom: var(--tl-space-3);
+}
+
+/* Section header + rule, merged into one construct (see renderers.js's
+   addSectionLabel): a plain-case label beside a 1px rule running to the
+   right edge, not a separate spacer line underneath. */
+.tl-settings__section {
+  display: flex; align-items: center; gap: var(--tl-space-2);
+  margin: var(--tl-space-4) 0 var(--tl-space-2);
+}
+.tl-settings__section:first-child { margin-top: 0; }
+.tl-settings__section-label {
+  flex-shrink: 0;
+  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+}
+.tl-settings__rule {
+  flex: 1 1 auto;
+  height: 0;
+  border-top: 1px solid var(--tl-border);
+}
+
+.tl-settings__row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--tl-space-3);
+  padding: var(--tl-space-1) 0;
+}
+.tl-settings__row > :first-child { min-width: 0; flex: 1; }
+.tl-settings__row-label { font: 400 var(--tl-font-size-ui) var(--tl-font-ui); color: var(--tl-fg); }
+.tl-settings__row-desc {
+  margin-top: 2px;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg-muted);
+}
+
+/* Inline accent-colored links inside row descriptions (reference: "Reset to
+   default", "How it works") — not yet consumed by any section renderer
+   (Task 1 is the shell, not the section content), defined here so the
+   component exists per this task's class contract. */
+.tl-settings__link {
+  color: var(--tl-accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.tl-settings__link:hover { text-decoration: underline; }
+.tl-settings__link:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+
+/* -- Standalone-only title bar (the modal gets its title from
+   tlDialog.open({ title }) instead) -- */
+.tl-settings__title {
+  padding: var(--tl-space-3) var(--tl-space-4) var(--tl-space-2);
+  font: 600 15px var(--tl-font-ui);
+  color: var(--tl-fg);
+  border-bottom: 1px solid var(--tl-border);
+  flex-shrink: 0;
+}
