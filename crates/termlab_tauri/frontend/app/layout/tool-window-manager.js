@@ -120,18 +120,19 @@
     if (typeof next.bottom === 'boolean') savedPanelVisibility.bottom = next.bottom;
   }
 
+  // "This side has a saved arrangement" — which includes a side the user closed.
+  // Presence of the key is what matters, not whether it names a window: an empty
+  // value means "configured, nothing active", and only a wholly absent key means
+  // "never configured", where auto-activating a default is still right.
+  //
   // The bottom zone is a single zone rather than a top/bottom pair, so it has no
   // '<side>-top'/'<side>-bottom' keys to look up — its own name is the key.
   function hasPersistedActiveForSide(side) {
     const active = savedActiveZoneWindows || {};
-    if (side === 'bottom') {
-      const only = active.bottom;
-      return typeof only === 'string' && only.length > 0;
-    }
+    const has = (key) => Object.prototype.hasOwnProperty.call(active, key);
+    if (side === 'bottom') return has('bottom');
     if (side !== 'left' && side !== 'right') return false;
-    const top = active[side + '-top'];
-    const bottom = active[side + '-bottom'];
-    return (typeof top === 'string' && top.length > 0) || (typeof bottom === 'string' && bottom.length > 0);
+    return has(side + '-top') || has(side + '-bottom');
   }
 
   // ---- Registration ---------------------------------------------------------
@@ -1099,12 +1100,21 @@
     return map;
   }
 
+  // A zone that holds windows but has none active is a zone the user closed, and
+  // that has to survive a restart. Emitting nothing for it made "closed" and
+  // "never configured" the same bytes on disk, so the next boot re-opened it.
+  // An empty value records the closed state; zones with no windows at all stay
+  // absent, since there is nothing there to have an opinion about.
   function getActiveZoneAssignments() {
     const map = {};
     for (const zoneName of ZONE_IDS) {
-      const activeId = zones[zoneName] ? zones[zoneName].activeId : null;
+      const zone = zones[zoneName];
+      if (!zone) continue;
+      const activeId = zone.activeId;
       if (typeof activeId === 'string' && activeId.length > 0) {
         map[zoneName] = activeId;
+      } else if (zone.windows.length > 0) {
+        map[zoneName] = '';
       }
     }
     return map;
