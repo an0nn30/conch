@@ -75,5 +75,4 @@
   --tl-control-bg: var(--tl-TextField-background);
   --tl-control-tick: var(--tl-base-foreground);
   --tl-primary-fg: #ffffff;
-  --tl-z-dialog: 3000;
 }

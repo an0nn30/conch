@@ -50,6 +50,26 @@
     return Math.max(LEGACY_DIALOG_MAX_Z + 10, aboveTlDialogStack);
   }
 
+  // tl-menu's Escape handler must win over window.tlDialog's (fixed priority
+  // 225 — see registerEscape() in app/ui/tl-dialog.js) whenever a tl-dialog
+  // is topmost, so Escape closes just the popup and leaves the dialog
+  // beneath it open with focus back on whatever opened the popup (e.g. a
+  // tl-combo button). Without this, tl-dialog's higher-priority handler ran
+  // first, closed the dialog, and stranded the popup — appended to
+  // document.body as a SIBLING of the dialog overlay (see open() below), it
+  // survives the dialog's removal instead of going with it. Mirrors
+  // menuZIndex()'s dialog-aware computation, and rests on the same
+  // assumption: any menu open while a dialog is topmost was opened from
+  // within that dialog. Computed fresh per open() (not a caller-supplied
+  // constant) so every tlMenu consumer gets this for free, not just
+  // tl-combo. An explicit o.routerPriority always overrides it.
+  function escapePriority() {
+    const dialogCount = (global.tlDialog && typeof global.tlDialog.count === 'function')
+      ? global.tlDialog.count()
+      : 0;
+    return dialogCount > 0 ? 230 : 220;
+  }
+
   function close() {
     if (activeOutsideClickHandler) {
       document.removeEventListener('click', activeOutsideClickHandler);
@@ -197,7 +217,7 @@
     if (keyboardRouter && typeof keyboardRouter.register === 'function') {
       activeUnregisterEscape = keyboardRouter.register({
         name: o.routerName || 'tl-menu',
-        priority: typeof o.routerPriority === 'number' ? o.routerPriority : 220,
+        priority: typeof o.routerPriority === 'number' ? o.routerPriority : escapePriority(),
         isActive: () => menu.isConnected,
         onKeyDown: (keyEvent) => {
           if (!menu.isConnected) return false;
@@ -214,5 +234,15 @@
     return menu;
   }
 
-  global.tlMenu = { open, close };
+  global.tlMenu = {
+    open,
+    close,
+    // Exposed so app/ui/tl-dialog.js's focus trap can fold an open tl-menu
+    // popup into the dialog's focus scope (design-system-phase-5a final
+    // review, task 1): the popup is a document.body child sibling of the
+    // dialog overlay, not a descendant, so the trap can't discover it via
+    // panel.querySelectorAll alone. Returns the live menu element, or null
+    // if nothing is open (or it's already been removed from the DOM).
+    activeElement: () => (activeMenu && activeMenu.isConnected ? activeMenu : null),
+  };
 })(window);

@@ -83,6 +83,12 @@
       }));
 
       button.setAttribute('aria-expanded', 'true');
+      // No routerPriority passed: tl-menu.js's open() already computes an
+      // Escape priority above window.tlDialog's whenever a dialog is open
+      // (see its escapePriority()), which covers every combo opened from
+      // inside a tl-dialog (keygen, tunnel-manager, plugin-widgets,
+      // connection-form, account-form) without this call site needing to
+      // know about tl-dialog at all.
       const menu = global.tlMenu.open({
         x: rect.left,
         y: rect.bottom + 2,

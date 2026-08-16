@@ -8,9 +8,11 @@
 
     function initOverlayFocusHandlers() {
       // True while ANY dialog is open — either a legacy .ssh-overlay (still
-      // used by tunnel-manager.js/vault.js, migrated in design-system-phase-5a
-      // task 4) or a tl-dialog-shell dialog (app/ui/tl-dialog.js; everything
-      // this task migrated: SSH, keygen, files, plugin, About, restart).
+      // used by command-palette-runtime.js, core/dialog-service.js, and
+      // features/settings/renderers.js; migrating those is Phase 5b's job,
+      // not design-system-phase-5a's) or a tl-dialog-shell dialog
+      // (app/ui/tl-dialog.js; everything this phase migrated onto it: SSH,
+      // keygen, files, plugin, About, restart, tunnels, vault).
       const isAnyDialogOpen = () =>
         !!document.querySelector('.ssh-overlay') ||
         !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
@@ -49,8 +51,9 @@
         }, 0);
       }
 
-      // Legacy dialogs (tunnel-manager.js, vault.js — batch B of this
-      // migration) still build a plain .ssh-overlay div and el.remove() it
+      // Legacy dialogs (command-palette-runtime.js, core/dialog-service.js,
+      // features/settings/renderers.js — Phase 5b's job to migrate onto
+      // tl-dialog) still build a plain .ssh-overlay div and el.remove() it
       // with no lifecycle hook, so a MutationObserver is still needed to
       // notice when the last one of those closes.
       let previousOverlayCount = document.querySelectorAll('.ssh-overlay').length;
