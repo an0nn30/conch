@@ -250,6 +250,43 @@
       return scored.slice(0, MAX_RESULTS).map((x) => x.c);
     }
 
+    // Stable-partitions a fuzzy-score-sorted result list into
+    // Search-Everywhere-style named sections, in first-appearance order — so
+    // the group holding the single best match sorts first, and items keep
+    // their relative score order within their own group — and returns the
+    // FLATTENED result: one array, in the exact order rows will render in.
+    //
+    // This must be the ONLY reordering step, applied once, right where
+    // `filtered` is produced (below), not a second time inside
+    // renderPaletteResults(). Review round 1 (phase 5b task 3) found a bug
+    // where renderPaletteResults() grouped `commandPalette.filtered` for
+    // display while every execution path (digit quick-pick, click,
+    // Enter-after-arrow) indexed into the *un*grouped `filtered` array — two
+    // different orderings sharing one index space, so whenever a query's top
+    // matches spanned more than one group, pressing digit N (or clicking, or
+    // arrowing to and pressing Enter on) the row visibly at position N could
+    // run a *different* command than the one displayed there. Folding the
+    // grouping into `filtered` itself — so render and execution share the
+    // same array, not two independently-ordered ones — makes that class of
+    // bug structurally impossible rather than just currently-not-happening.
+    function orderResultsByGroup(results) {
+      const order = [];
+      const buckets = new Map();
+      for (const cmd of results) {
+        const name = cmd.group || 'Actions';
+        if (!buckets.has(name)) {
+          buckets.set(name, []);
+          order.push(name);
+        }
+        buckets.get(name).push(cmd);
+      }
+      const flat = [];
+      for (const name of order) {
+        for (const cmd of buckets.get(name)) flat.push(cmd);
+      }
+      return flat;
+    }
+
     function quickPickIndexFromKey(event) {
       if (!event || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null;
       const key = String(event.key || '');
@@ -278,24 +315,15 @@
       return null;
     }
 
-    // Stable-partitions the already-sorted (by fuzzy score) flat result list
-    // into Search-Everywhere-style named sections, in first-appearance
-    // order — so the group holding the single best match sorts first, and
-    // items keep their relative score order within their own group.
-    function groupPaletteResults(results) {
-      const order = [];
-      const buckets = new Map();
-      for (const cmd of results) {
-        const name = cmd.group || 'Actions';
-        if (!buckets.has(name)) {
-          buckets.set(name, []);
-          order.push(name);
-        }
-        buckets.get(name).push(cmd);
-      }
-      return order.map((name) => ({ name, items: buckets.get(name) }));
-    }
-
+    // Renders `commandPalette.filtered` — and ONLY `commandPalette.filtered`,
+    // already in its final group-then-score render order courtesy of
+    // orderResultsByGroup() above — top to bottom, opening a new
+    // .tl-palette__group section whenever the group name changes. Since
+    // grouping is a stable partition, same-group items in `filtered` are
+    // already contiguous, so a group name change here can only mean "start
+    // of the next section," never "back to an earlier one." Row index `idx`
+    // is this same array's index — the one and only index space shared with
+    // quickPickIndexFromKey()/click/Enter's `filtered[idx]` lookups below.
     function renderPaletteResults() {
       if (!commandPalette) return;
       const listEl = commandPalette.listEl;
@@ -311,63 +339,65 @@
         return;
       }
 
-      let i = 0;
-      for (const group of groupPaletteResults(results)) {
-        const groupEl = document.createElement('div');
-        groupEl.className = 'tl-palette__group';
-        const titleEl = document.createElement('div');
-        titleEl.className = 'tl-palette__group-title';
-        titleEl.textContent = group.name;
-        groupEl.appendChild(titleEl);
-
-        for (const cmd of group.items) {
-          const idx = i++;
-          const row = document.createElement('div');
-          row.className = 'tl-palette__item' + (idx === commandPalette.selectedIndex ? ' is-active' : '');
-
-          const iconEl = document.createElement('div');
-          iconEl.className = 'tl-palette__icon';
-          const iconName = paletteIconFor(cmd);
-          if (iconName && global.tlIcon && typeof global.tlIcon.create === 'function') {
-            iconEl.appendChild(global.tlIcon.create(iconName, { size: 16, alt: '' }));
-          }
-          row.appendChild(iconEl);
-
-          const mainEl = document.createElement('div');
-          mainEl.className = 'tl-palette__main';
-          const titleRowEl = document.createElement('div');
-          titleRowEl.className = 'tl-palette__title';
-          titleRowEl.textContent = cmd.title;
-          mainEl.appendChild(titleRowEl);
-          if (cmd.subtitle) {
-            const subtitleEl = document.createElement('div');
-            subtitleEl.className = 'tl-palette__subtitle';
-            subtitleEl.textContent = cmd.subtitle;
-            mainEl.appendChild(subtitleEl);
-          }
-          row.appendChild(mainEl);
-
-          // Only the first five flat results ever get a digit badge —
-          // quickPickIndexFromKey() only matches keys 1-5, so this stays in
-          // sync with what Escape/1-5 can actually reach even though the
-          // total result cap (MAX_RESULTS) is well above 5.
-          if (idx < MAX_QUICK_RESULTS) {
-            const shortcutEl = document.createElement('div');
-            shortcutEl.className = 'tl-palette__shortcut';
-            shortcutEl.textContent = String(idx + 1);
-            row.appendChild(shortcutEl);
-          }
-
-          row.addEventListener('mouseenter', () => {
-            if (!commandPalette || commandPalette.keyboardMode) return;
-            commandPalette.selectedIndex = idx;
-            renderPaletteResults();
-          });
-          row.addEventListener('click', () => executePaletteCommand(idx));
-          groupEl.appendChild(row);
+      let groupEl = null;
+      let currentGroupName = null;
+      for (let idx = 0; idx < results.length; idx++) {
+        const cmd = results[idx];
+        const groupName = cmd.group || 'Actions';
+        if (groupName !== currentGroupName) {
+          currentGroupName = groupName;
+          groupEl = document.createElement('div');
+          groupEl.className = 'tl-palette__group';
+          const titleEl = document.createElement('div');
+          titleEl.className = 'tl-palette__group-title';
+          titleEl.textContent = groupName;
+          groupEl.appendChild(titleEl);
+          listEl.appendChild(groupEl);
         }
 
-        listEl.appendChild(groupEl);
+        const row = document.createElement('div');
+        row.className = 'tl-palette__item' + (idx === commandPalette.selectedIndex ? ' is-active' : '');
+
+        const iconEl = document.createElement('div');
+        iconEl.className = 'tl-palette__icon';
+        const iconName = paletteIconFor(cmd);
+        if (iconName && global.tlIcon && typeof global.tlIcon.create === 'function') {
+          iconEl.appendChild(global.tlIcon.create(iconName, { size: 16, alt: '' }));
+        }
+        row.appendChild(iconEl);
+
+        const mainEl = document.createElement('div');
+        mainEl.className = 'tl-palette__main';
+        const titleRowEl = document.createElement('div');
+        titleRowEl.className = 'tl-palette__title';
+        titleRowEl.textContent = cmd.title;
+        mainEl.appendChild(titleRowEl);
+        if (cmd.subtitle) {
+          const subtitleEl = document.createElement('div');
+          subtitleEl.className = 'tl-palette__subtitle';
+          subtitleEl.textContent = cmd.subtitle;
+          mainEl.appendChild(subtitleEl);
+        }
+        row.appendChild(mainEl);
+
+        // Only the first five rendered rows ever get a digit badge —
+        // quickPickIndexFromKey() only matches keys 1-5, so this stays in
+        // sync with what digit-1-5 can actually reach even though the total
+        // result cap (MAX_RESULTS) is well above 5.
+        if (idx < MAX_QUICK_RESULTS) {
+          const shortcutEl = document.createElement('div');
+          shortcutEl.className = 'tl-palette__shortcut';
+          shortcutEl.textContent = String(idx + 1);
+          row.appendChild(shortcutEl);
+        }
+
+        row.addEventListener('mouseenter', () => {
+          if (!commandPalette || commandPalette.keyboardMode) return;
+          commandPalette.selectedIndex = idx;
+          renderPaletteResults();
+        });
+        row.addEventListener('click', () => executePaletteCommand(idx));
+        groupEl.appendChild(row);
       }
     }
 
@@ -416,7 +446,21 @@
         showStatus('Command failed: ' + String(event));
       }
       setTimeout(() => {
-        if (document.querySelector('.ssh-overlay')) return;
+        // Don't steal focus back into the terminal if cmd.run() opened some
+        // other dialog that should keep it instead (e.g. "Open Settings",
+        // or a plugin-permission/ssh-dependency confirm triggered as a
+        // side effect of enabling a plugin or connecting to a host). Two
+        // mechanisms currently coexist: dialogs not yet migrated onto
+        // tl-dialog still render a `.ssh-overlay` (dialog-service.js,
+        // features/ssh/dependency-prompt.js, panels/plugin-widgets.js);
+        // dialogs that HAVE migrated (e.g. Settings — see
+        // features/settings/renderers.js's renderDialogShell()) show up in
+        // tlDialog.count() instead. Checking `.ssh-overlay` alone (as this
+        // used to, back when the palette's own now-removed overlay carried
+        // that class) misses the tl-dialog case entirely.
+        const legacyOverlayOpen = !!document.querySelector('.ssh-overlay');
+        const tlDialogOpen = !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
+        if (legacyOverlayOpen || tlDialogOpen) return;
         const pane = getCurrentPane();
         if (pane && pane.term) pane.term.focus();
       }, 80);
@@ -527,7 +571,11 @@
       input.addEventListener('input', () => {
         if (commandPalette !== state) return;
         state.keyboardMode = false;
-        state.filtered = filterPaletteCommands(state.allCommands, input.value);
+        // orderResultsByGroup() applied here, once — `state.filtered` is
+        // the single ordering both renderPaletteResults() and every
+        // execution path (digit/click/Enter below) share; see that
+        // function's comment for why there must not be a second one.
+        state.filtered = orderResultsByGroup(filterPaletteCommands(state.allCommands, input.value));
         state.selectedIndex = 0;
         renderPaletteResults();
       });
