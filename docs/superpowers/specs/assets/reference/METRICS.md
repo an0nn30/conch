@@ -119,3 +119,23 @@ Sidebar/content divider at x=386 device = **193 logical (~20% of width)**.
 | Panel background | `#22252A` | same as everywhere else |
 
 Design notes not visible in tokens: checkboxes are **outline + foreground tick**, not accent-filled (my earlier read of the screenshot was wrong); section headers (`Accessibility`, `UI Options`, `Tree Views`) are plain-case labels followed by a 1px rule running to the right edge; helper text sits under its row in muted grey; inline links (`Reset to default`, `How it works`) render in the accent blue; the footer holds `?` bottom-left and `Cancel` / `Apply` (disabled until dirty) / `OK` bottom-right.
+
+## Measurement caveat: both windows must be on the same display
+
+Captured colors are display-profile dependent. On 2026-08-15 the same surface
+read `#22252A` in the reference app (external display, 1x capture) and
+`#1F2126` in ours (built-in Retina, 2x capture) **at the same moment** — a
+~10% apparent difference that was entirely the profile, not the pixels.
+
+Before comparing colors across the two apps:
+
+1. Move both windows to the **same** display.
+2. Sanity-check the capture scale: `sips -g pixelWidth` divided by the logical
+   width from `scripts/ui-probe`'s `winlist` should be the same factor (1x or
+   2x) for both captures.
+3. If a comparison looks uniformly off by a few levels across *every* element,
+   suspect the profile before suspecting the CSS — and confirm by sampling a
+   surface both apps share (a tool-window panel) in the same session.
+
+Within a single capture, comparisons are always valid: our dialog panel
+matching our own tool-window panel proved the dialog was not being dimmed.
