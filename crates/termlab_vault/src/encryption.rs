@@ -34,7 +34,14 @@ pub fn derive_key(password: &[u8], salt: &[u8]) -> Result<[u8; KEY_LEN], VaultEr
     Ok(key)
 }
 
-pub fn encrypt_vault(vault: &Vault, password: &[u8]) -> Result<Vec<u8>, VaultError> {
+/// Encrypt arbitrary bytes into the standard TermLab envelope:
+/// magic(8) | version(u32 LE) | salt(16) | nonce(12) | AES-256-GCM ciphertext.
+pub fn encrypt_blob(
+    magic: &[u8; 8],
+    version: u32,
+    plaintext: &[u8],
+    password: &[u8],
+) -> Result<Vec<u8>, VaultError> {
     let mut salt = [0u8; SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
     let key = derive_key(password, &salt)?;
@@ -43,26 +50,35 @@ pub fn encrypt_vault(vault: &Vault, password: &[u8]) -> Result<Vec<u8>, VaultErr
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let payload =
-        bincode::serialize(vault).map_err(|e| VaultError::Serialization(e.to_string()))?;
     let ciphertext = cipher
-        .encrypt(nonce, payload.as_ref())
+        .encrypt(nonce, plaintext)
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
-    let mut output = Vec::new();
-    output.extend_from_slice(MAGIC);
-    output.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    let mut output = Vec::with_capacity(8 + 4 + SALT_LEN + NONCE_LEN + ciphertext.len());
+    output.extend_from_slice(magic);
+    output.extend_from_slice(&version.to_le_bytes());
     output.extend_from_slice(&salt);
     output.extend_from_slice(&nonce_bytes);
     output.extend_from_slice(&ciphertext);
     Ok(output)
 }
 
-pub fn decrypt_vault(data: &[u8], password: &[u8]) -> Result<Vault, VaultError> {
-    let header_len = MAGIC.len() + 4 + SALT_LEN + NONCE_LEN;
+/// Inverse of `encrypt_blob`. Returns the envelope's version alongside the
+/// plaintext so callers can reject versions they do not understand; the version
+/// is read from the header, so a caller can also inspect it before trusting the
+/// payload. `legacy_magic` accepts a second, historical magic value.
+pub fn decrypt_blob(
+    expected_magic: &[u8; 8],
+    legacy_magic: Option<&[u8; 8]>,
+    data: &[u8],
+    password: &[u8],
+) -> Result<(u32, Vec<u8>), VaultError> {
+    let header_len = 8 + 4 + SALT_LEN + NONCE_LEN;
     if data.len() < header_len {
         return Err(VaultError::Corrupted("file too short".into()));
     }
-    if &data[..8] != MAGIC && &data[..8] != LEGACY_MAGIC {
+    let magic_ok =
+        &data[..8] == expected_magic || legacy_magic.is_some_and(|legacy| &data[..8] == legacy);
+    if !magic_ok {
         return Err(VaultError::Corrupted("invalid magic bytes".into()));
     }
     let version = u32::from_le_bytes(
@@ -70,13 +86,8 @@ pub fn decrypt_vault(data: &[u8], password: &[u8]) -> Result<Vault, VaultError> 
             .try_into()
             .map_err(|_| VaultError::Corrupted("invalid version header".into()))?,
     );
-    if version != FORMAT_VERSION {
-        return Err(VaultError::Corrupted(format!(
-            "unsupported version: {version}"
-        )));
-    }
     let salt = &data[12..12 + SALT_LEN];
-    let nonce_bytes = &data[12 + SALT_LEN..12 + SALT_LEN + NONCE_LEN];
+    let nonce_bytes = &data[12 + SALT_LEN..header_len];
     let ciphertext = &data[header_len..];
     let key = derive_key(password, salt)?;
     let cipher =
@@ -85,6 +96,22 @@ pub fn decrypt_vault(data: &[u8], password: &[u8]) -> Result<Vault, VaultError> 
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| VaultError::WrongPassword)?;
+    Ok((version, plaintext))
+}
+
+pub fn encrypt_vault(vault: &Vault, password: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let payload =
+        bincode::serialize(vault).map_err(|e| VaultError::Serialization(e.to_string()))?;
+    encrypt_blob(MAGIC, FORMAT_VERSION, &payload, password)
+}
+
+pub fn decrypt_vault(data: &[u8], password: &[u8]) -> Result<Vault, VaultError> {
+    let (version, plaintext) = decrypt_blob(MAGIC, Some(LEGACY_MAGIC), data, password)?;
+    if version != FORMAT_VERSION {
+        return Err(VaultError::Corrupted(format!(
+            "unsupported version: {version}"
+        )));
+    }
     deserialize_vault(&plaintext)
 }
 
@@ -509,5 +536,60 @@ mod tests {
         // Verify the saved file is loadable
         let (reloaded, _) = load_vault_file(&path2, password).unwrap();
         assert_eq!(reloaded.accounts[0].username, "testuser");
+    }
+
+    const TEST_MAGIC: &[u8; 8] = b"TESTMGC1";
+
+    #[test]
+    fn blob_round_trips() {
+        let out = encrypt_blob(TEST_MAGIC, 7, b"hello world", b"pw").unwrap();
+        assert_eq!(&out[..8], TEST_MAGIC);
+        let (version, plaintext) = decrypt_blob(TEST_MAGIC, None, &out, b"pw").unwrap();
+        assert_eq!(version, 7);
+        assert_eq!(plaintext, b"hello world");
+    }
+
+    #[test]
+    fn blob_rejects_wrong_password() {
+        let out = encrypt_blob(TEST_MAGIC, 1, b"secret", b"right").unwrap();
+        assert!(matches!(
+            decrypt_blob(TEST_MAGIC, None, &out, b"wrong"),
+            Err(VaultError::WrongPassword)
+        ));
+    }
+
+    #[test]
+    fn blob_rejects_foreign_magic() {
+        let out = encrypt_blob(b"OTHERMGC", 1, b"x", b"pw").unwrap();
+        assert!(matches!(
+            decrypt_blob(TEST_MAGIC, None, &out, b"pw"),
+            Err(VaultError::Corrupted(_))
+        ));
+    }
+
+    #[test]
+    fn blob_rejects_truncated_input() {
+        let out = encrypt_blob(TEST_MAGIC, 1, b"x", b"pw").unwrap();
+        assert!(matches!(
+            decrypt_blob(TEST_MAGIC, None, &out[..20], b"pw"),
+            Err(VaultError::Corrupted(_))
+        ));
+    }
+
+    #[test]
+    fn blob_reports_version_without_decrypting() {
+        // A caller must be able to reject a future version by header alone, so
+        // the version is returned even when it is not the one expected.
+        let out = encrypt_blob(TEST_MAGIC, 999, b"x", b"pw").unwrap();
+        let (version, _) = decrypt_blob(TEST_MAGIC, None, &out, b"pw").unwrap();
+        assert_eq!(version, 999);
+    }
+
+    #[test]
+    fn vault_round_trip_still_works() {
+        let vault = Vault::default();
+        let bytes = encrypt_vault(&vault, b"master").unwrap();
+        let back = decrypt_vault(&bytes, b"master").unwrap();
+        assert_eq!(back.version, vault.version);
     }
 }
