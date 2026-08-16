@@ -56,9 +56,15 @@ The Tauri layer holds commands only — no logic. Everything but the executor is
 ```rust
 pub fn encrypt_blob(magic: &[u8; 8], version: u32, plaintext: &[u8], password: &[u8])
     -> Result<Vec<u8>, VaultError>;
-pub fn decrypt_blob(expected_magic: &[u8; 8], data: &[u8], password: &[u8])
-    -> Result<(u32, Vec<u8>), VaultError>;
+pub fn decrypt_blob(
+    expected_magic: &[u8; 8],
+    legacy_magic: Option<&[u8; 8]>,
+    data: &[u8],
+    password: &[u8],
+) -> Result<(u32, Vec<u8>), VaultError>;
 ```
+
+The `legacy_magic` parameter exists because the vault must keep accepting its historical `CONCHVLT` magic; bundles pass `None`.
 
 `encrypt_vault`/`decrypt_vault` become thin wrappers over these, keeping their existing behaviour and their legacy-magic (`CONCHVLT`) fallback. This is a refactor of working code in service of the current goal, not opportunistic cleanup: it is what keeps the crypto single-sourced.
 
