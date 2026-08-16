@@ -164,3 +164,35 @@
 .tl-spinner__step:disabled { opacity: 0.4; cursor: default; }
 .tl-spinner__step .tl-icon { width: 10px; height: 10px; }
 .tl-spinner__step--up .tl-icon { transform: rotate(180deg); }
+
+/* Segmented 3-way toggle group (renderers.js's makeToggleGroup) — a row of
+   mutually-exclusive buttons sharing one border, the active one filled.
+   Used for choices that aren't a plain boolean (cursor shape, appearance
+   mode, notification position) — booleans use .tl-check instead, per the
+   settled switches-to-checkboxes decision. No JVM reference measurement
+   exists for this control (it isn't in METRICS.md's Settings window table),
+   so sizing matches .tl-input/.tl-combo's 26px row height for visual
+   consistency with its neighbors; the active-segment fill reuses
+   --tl-ToolWindow-Button-selectedBackground, the token the reference already
+   uses for its own "selected chrome segment" look (bottom-strip active tab)
+   rather than the accent color, which is reserved for primary actions/focus. */
+.tl-toggle-group { display: inline-flex; }
+.tl-toggle-group__btn {
+  display: flex; align-items: center;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg-muted);
+  background: var(--tl-panel-bg);
+  border: 1px solid var(--tl-border);
+  height: 26px;
+  padding: 0 var(--tl-space-3);
+  cursor: default;
+}
+.tl-toggle-group__btn:first-child { border-radius: var(--tl-radius) 0 0 var(--tl-radius); }
+.tl-toggle-group__btn:last-child { border-radius: 0 var(--tl-radius) var(--tl-radius) 0; }
+.tl-toggle-group__btn + .tl-toggle-group__btn { border-left: none; }
+.tl-toggle-group__btn.is-active {
+  background: var(--tl-ToolWindow-Button-selectedBackground);
+  color: var(--tl-fg);
+  font-weight: 600;
+}
+.tl-toggle-group__btn:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: -1px; }

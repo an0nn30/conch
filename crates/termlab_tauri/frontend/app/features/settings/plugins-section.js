@@ -17,7 +17,7 @@
     const addRow = deps.addRow;
     const setRowTarget = deps.setRowTarget;
     const makeInput = deps.makeInput;
-    const makeSwitch = deps.makeSwitch;
+    const makeCheckbox = deps.makeCheckbox;
 
     function refreshTitlebar() {
       if (global.titlebar && typeof global.titlebar.refresh === 'function') {
@@ -52,12 +52,12 @@
       container.appendChild(heading);
 
       addSectionLabel(container, 'System');
-      const pluginsSwitch = makeSwitch(
+      const pluginsCheckbox = makeCheckbox(
         pendingSettings.termlab.plugins.enabled,
         (value) => { pendingSettings.termlab.plugins.enabled = value; }
       );
       setRowTarget(
-        addRow(container, 'Enable Plugins', 'Master toggle for plugin system', pluginsSwitch),
+        addRow(container, 'Enable Plugins', 'Master toggle for plugin system', pluginsCheckbox),
         'plugins:enabled'
       );
 
@@ -68,24 +68,24 @@
       pluginTypesAnchor.dataset.settingId = 'plugins:types';
       container.appendChild(pluginTypesAnchor);
 
-      const luaSwitch = makeSwitch(
+      const luaCheckbox = makeCheckbox(
         pendingSettings.termlab.plugins.lua,
         (value) => { pendingSettings.termlab.plugins.lua = value; }
       );
-      addRow(container, 'Lua Plugins', null, luaSwitch);
+      addRow(container, 'Lua Plugins', null, luaCheckbox);
 
-      const javaSwitch = makeSwitch(
+      const javaCheckbox = makeCheckbox(
         pendingSettings.termlab.plugins.java,
         (value) => { pendingSettings.termlab.plugins.java = value; }
       );
-      addRow(container, 'Java Plugins', 'Disabling avoids JVM startup overhead', javaSwitch);
+      addRow(container, 'Java Plugins', 'Disabling avoids JVM startup overhead', javaCheckbox);
 
       addDivider(container);
 
       addSectionLabel(container, 'Extra Search Paths');
       const searchPathsHint = document.createElement('div');
       searchPathsHint.dataset.settingId = 'plugins:search-paths';
-      searchPathsHint.className = 'settings-row-desc';
+      searchPathsHint.className = 'tl-settings__row-desc';
       searchPathsHint.style.marginBottom = '8px';
       searchPathsHint.textContent = 'Built-in defaults always include ~/.config/termlab/plugins. Add extra directories here.';
       container.appendChild(searchPathsHint);
@@ -201,7 +201,7 @@
 
           const badge = document.createElement('span');
           const pluginType = (plugin.plugin_type || '').toLowerCase();
-          badge.className = 'settings-plugin-badge' + (pluginType === 'lua' ? ' lua' : ' java');
+          badge.className = 'tl-settings__plugin-badge' + (pluginType === 'lua' ? ' tl-settings__plugin-badge--lua' : ' tl-settings__plugin-badge--java');
           badge.textContent = pluginType;
           left.appendChild(badge);
 
@@ -218,10 +218,16 @@
           left.appendChild(info);
           row.appendChild(left);
 
+          // Wrapped in the shared .tl-check component (rather than left as a
+          // bare, browser-unstyled checkbox) so it matches the styled
+          // checkboxes immediately above it on this same page (Enable
+          // Plugins / Lua / Java) instead of standing out as the one
+          // native-looking control on the Plugins section.
+          const toggleLabel = document.createElement('label');
+          toggleLabel.className = 'tl-check settings-plugin-toggle';
           const toggle = document.createElement('input');
           toggle.type = 'checkbox';
           toggle.checked = !!plugin.loaded;
-          toggle.className = 'settings-plugin-toggle';
           toggle.setAttribute('aria-label', (plugin.loaded ? 'Disable ' : 'Enable ') + plugin.name);
           toggle.addEventListener('change', async () => {
             const nextLoaded = toggle.checked;
@@ -255,7 +261,8 @@
             toggle.disabled = false;
             renderPluginList();
           });
-          row.appendChild(toggle);
+          toggleLabel.appendChild(toggle);
+          row.appendChild(toggleLabel);
           pluginListContainer.appendChild(row);
         }
       }

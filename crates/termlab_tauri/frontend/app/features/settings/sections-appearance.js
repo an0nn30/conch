@@ -22,10 +22,12 @@
     const buildThemePreview = typeof d.buildThemePreview === 'function' ? d.buildThemePreview : null;
     const updateThemePreview = typeof d.updateThemePreview === 'function' ? d.updateThemePreview : null;
     const invoke = typeof d.invoke === 'function' ? d.invoke : null;
-    const makeSwitch = typeof d.makeSwitch === 'function' ? d.makeSwitch : null;
+    const makeCheckbox = typeof d.makeCheckbox === 'function' ? d.makeCheckbox : null;
+    const makeInput = typeof d.makeInput === 'function' ? d.makeInput : null;
+    const makeToggleGroup = typeof d.makeToggleGroup === 'function' ? d.makeToggleGroup : null;
     const configService = global.termlabConfigService || {};
 
-    if (!addSectionLabel || !addRow || !setRowTarget || !addDivider || !buildThemePreview || !updateThemePreview || !invoke || !makeSwitch) {
+    if (!addSectionLabel || !addRow || !setRowTarget || !addDivider || !buildThemePreview || !updateThemePreview || !invoke || !makeCheckbox || !makeInput || !makeToggleGroup) {
       return false;
     }
 
@@ -36,7 +38,6 @@
     addSectionLabel(container, 'Theme & Color');
 
     const themeSelect = document.createElement('select');
-    themeSelect.className = 'settings-select';
     for (const theme of cachedThemes) {
       const opt = document.createElement('option');
       opt.value = theme;
@@ -44,7 +45,9 @@
       if (theme === pendingSettings.colors.theme) opt.selected = true;
       themeSelect.appendChild(opt);
     }
-    setRowTarget(addRow(container, 'Theme', 'Color theme for the terminal and UI', themeSelect), 'appearance:theme');
+    const themeRow = addRow(container, 'Theme', 'Color theme for the terminal and UI', themeSelect);
+    global.tlCombo.attach(themeSelect);
+    setRowTarget(themeRow, 'appearance:theme');
 
     const availableSkins = typeof configService.getAvailableSkins === 'function'
       ? configService.getAvailableSkins()
@@ -53,7 +56,6 @@
         { id: 'metal', label: 'Metal (Swing)' },
       ];
     const skinSelect = document.createElement('select');
-    skinSelect.className = 'settings-select';
     const selectedSkin = String(pendingSettings.termlab.ui.skin || 'default').toLowerCase();
     let skinMatched = false;
     for (const skin of availableSkins) {
@@ -77,15 +79,14 @@
     skinSelect.addEventListener('change', () => {
       pendingSettings.termlab.ui.skin = skinSelect.value;
     });
-    setRowTarget(
-      addRow(
-        container,
-        'UI Skin',
-        'Controls chrome styling for panes, tabs, dialogs, and controls.',
-        skinSelect
-      ),
-      'appearance:ui-skin'
+    const skinRow = addRow(
+      container,
+      'UI Skin',
+      'Controls chrome styling for panes, tabs, dialogs, and controls.',
+      skinSelect
     );
+    global.tlCombo.attach(skinSelect);
+    setRowTarget(skinRow, 'appearance:ui-skin');
 
     const previewBox = buildThemePreview();
     container.appendChild(previewBox);
@@ -105,58 +106,42 @@
         .catch(() => {});
     });
 
-    const modes = ['Dark', 'Light', 'System'];
-    const toggleGroup = document.createElement('div');
-    toggleGroup.className = 'settings-toggle-group';
-    for (const mode of modes) {
-      const btn = document.createElement('button');
-      btn.className = 'settings-toggle';
-      if (pendingSettings.colors.appearance_mode === mode) btn.classList.add('active');
-      btn.textContent = mode;
-      btn.addEventListener('click', () => {
-        pendingSettings.colors.appearance_mode = mode;
-        for (const node of toggleGroup.querySelectorAll('.settings-toggle')) {
-          node.classList.toggle('active', node.textContent === mode);
-        }
-      });
-      toggleGroup.appendChild(btn);
-    }
-    setRowTarget(addRow(container, 'Appearance Mode', null, toggleGroup), 'appearance:mode');
+    const modeToggle = makeToggleGroup(
+      [
+        { label: 'Dark', value: 'Dark' },
+        { label: 'Light', value: 'Light' },
+        { label: 'System', value: 'System' },
+      ],
+      pendingSettings.colors.appearance_mode,
+      (val) => { pendingSettings.colors.appearance_mode = val; }
+    );
+    setRowTarget(addRow(container, 'Appearance Mode', null, modeToggle), 'appearance:mode');
 
     addDivider(container);
 
     addSectionLabel(container, 'Notifications');
 
-    const posOptions = ['Bottom', 'Top'];
-    const posGroup = document.createElement('div');
-    posGroup.className = 'settings-toggle-group';
-    for (const pos of posOptions) {
-      const btn = document.createElement('button');
-      btn.className = 'settings-toggle';
-      if ((pendingSettings.termlab.ui.notification_position || 'bottom').toLowerCase() === pos.toLowerCase()) {
-        btn.classList.add('active');
-      }
-      btn.textContent = pos;
-      btn.addEventListener('click', () => {
-        pendingSettings.termlab.ui.notification_position = pos.toLowerCase();
-        for (const node of posGroup.querySelectorAll('.settings-toggle')) {
-          node.classList.toggle('active', node.textContent === pos);
-        }
-      });
-      posGroup.appendChild(btn);
-    }
-    setRowTarget(addRow(container, 'Notification Position', 'Where toast notifications appear on screen', posGroup), 'appearance:notification-position');
+    const normalizedPosition = (pendingSettings.termlab.ui.notification_position || 'bottom').toLowerCase();
+    const posToggle = makeToggleGroup(
+      [
+        { label: 'Bottom', value: 'bottom' },
+        { label: 'Top', value: 'top' },
+      ],
+      normalizedPosition,
+      (val) => { pendingSettings.termlab.ui.notification_position = val; }
+    );
+    setRowTarget(addRow(container, 'Notification Position', 'Where toast notifications appear on screen', posToggle), 'appearance:notification-position');
 
-    const nativeSwitch = makeSwitch(
+    const nativeCheckbox = makeCheckbox(
       pendingSettings.termlab.ui.native_notifications !== false,
       (val) => { pendingSettings.termlab.ui.native_notifications = val; }
     );
     setRowTarget(
-      addRow(container, 'Native Notifications', 'Use system notifications when the app is not focused', nativeSwitch),
+      addRow(container, 'Native Notifications', 'Use system notifications when the app is not focused', nativeCheckbox),
       'appearance:native-notifications'
     );
 
-    const animationsSwitch = makeSwitch(
+    const animationsCheckbox = makeCheckbox(
       pendingSettings.termlab.ui.disable_animations !== true,
       (val) => { pendingSettings.termlab.ui.disable_animations = !val; }
     );
@@ -165,7 +150,7 @@
         container,
         'Animations',
         'Enable UI motion and toast animations.',
-        animationsSwitch
+        animationsCheckbox
       ),
       'appearance:animations'
     );
@@ -176,7 +161,6 @@
 
     const decoOptions = ['Full', 'Transparent', 'Buttonless', 'None'];
     const decoSelect = document.createElement('select');
-    decoSelect.className = 'settings-select';
     for (const deco of decoOptions) {
       const opt = document.createElement('option');
       opt.value = deco;
@@ -187,22 +171,16 @@
     decoSelect.addEventListener('change', () => {
       pendingSettings.window.decorations = decoSelect.value;
     });
-    setRowTarget(addRow(container, 'Window Decorations', 'Window title bar style', decoSelect), 'appearance:window-decorations');
+    const decoRow = addRow(container, 'Window Decorations', 'Window title bar style', decoSelect);
+    global.tlCombo.attach(decoSelect);
+    setRowTarget(decoRow, 'appearance:window-decorations');
 
     if (typeof navigator !== 'undefined' && navigator.platform.includes('Mac')) {
-      const sw = document.createElement('label');
-      sw.className = 'settings-switch';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!pendingSettings.termlab.ui.native_menu_bar;
-      cb.addEventListener('change', () => {
-        pendingSettings.termlab.ui.native_menu_bar = cb.checked;
-      });
-      const slider = document.createElement('span');
-      slider.className = 'slider';
-      sw.appendChild(cb);
-      sw.appendChild(slider);
-      setRowTarget(addRow(container, 'Native Menu Bar', 'Use the system menu bar instead of in-app menu', sw), 'appearance:native-menu-bar');
+      const menuBarCheckbox = makeCheckbox(
+        !!pendingSettings.termlab.ui.native_menu_bar,
+        (val) => { pendingSettings.termlab.ui.native_menu_bar = val; }
+      );
+      setRowTarget(addRow(container, 'Native Menu Bar', 'Use the system menu bar instead of in-app menu', menuBarCheckbox), 'appearance:native-menu-bar');
     }
 
     addDivider(container);
@@ -210,7 +188,6 @@
     addSectionLabel(container, 'Interface Typography');
 
     const fontSelect = document.createElement('select');
-    fontSelect.className = 'settings-select';
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
     defaultOpt.textContent = 'System Default';
@@ -227,21 +204,22 @@
     fontSelect.addEventListener('change', () => {
       pendingSettings.termlab.ui.font_family = fontSelect.value;
     });
-    setRowTarget(addRow(container, 'UI Font Family', null, fontSelect), 'appearance:ui-font-family');
+    const fontRow = addRow(container, 'UI Font Family', null, fontSelect);
+    global.tlCombo.attach(fontSelect);
+    setRowTarget(fontRow, 'appearance:ui-font-family');
 
-    const sizeInput = document.createElement('input');
-    sizeInput.type = 'number';
-    sizeInput.className = 'settings-input';
-    sizeInput.style.width = '70px';
-    sizeInput.value = pendingSettings.termlab.ui.font_size;
-    sizeInput.min = '6';
-    sizeInput.max = '72';
-    sizeInput.step = '0.5';
+    const sizeInput = makeInput('number', pendingSettings.termlab.ui.font_size, {
+      min: '6',
+      max: '72',
+      step: '0.5',
+    });
     sizeInput.addEventListener('change', () => {
       const value = parseFloat(sizeInput.value);
       if (!isNaN(value) && value > 0) pendingSettings.termlab.ui.font_size = value;
     });
-    setRowTarget(addRow(container, 'UI Font Size', null, sizeInput), 'appearance:ui-font-size');
+    const sizeRow = addRow(container, 'UI Font Size', null, sizeInput);
+    global.tlSpinner.attach(sizeInput);
+    setRowTarget(sizeRow, 'appearance:ui-font-size');
 
     return true;
   }

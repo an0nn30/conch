@@ -107,7 +107,7 @@
   function makeInput(type, value, opts = {}) {
     const input = document.createElement('input');
     input.type = type;
-    input.className = 'settings-input';
+    input.className = 'tl-input';
     input.value = value ?? '';
     if (opts.placeholder) input.placeholder = opts.placeholder;
     if (opts.step) input.step = opts.step;
@@ -119,19 +119,19 @@
 
   function makeToggleGroup(options, activeValue, onChange) {
     const group = document.createElement('div');
-    group.className = 'settings-toggle-group';
+    group.className = 'tl-toggle-group';
     group.setAttribute('role', 'radiogroup');
     const setActive = (activeBtn) => {
       for (const child of group.children) {
-        child.classList.remove('active');
+        child.classList.remove('is-active');
         child.setAttribute('aria-checked', child === activeBtn ? 'true' : 'false');
       }
-      activeBtn.classList.add('active');
+      activeBtn.classList.add('is-active');
       activeBtn.setAttribute('aria-checked', 'true');
     };
     for (const opt of options) {
       const btn = document.createElement('div');
-      btn.className = 'settings-toggle' + (opt.value === activeValue ? ' active' : '');
+      btn.className = 'tl-toggle-group__btn' + (opt.value === activeValue ? ' is-active' : '');
       btn.textContent = opt.label;
       btn.setAttribute('role', 'radio');
       btn.setAttribute('aria-checked', opt.value === activeValue ? 'true' : 'false');
@@ -151,17 +151,22 @@
     return group;
   }
 
-  function makeSwitch(checked, onChange) {
+  // Replaces the deleted makeSwitch() per the settled product decision
+  // (2026-08-15): every boolean setting in Settings renders as a checkbox
+  // now, not an iOS-style switch — the IntelliJ reference has no switch
+  // control at all. Reuses the existing .tl-check component unstyled (no
+  // visible label text: the row's own .tl-settings__row-label already
+  // carries the setting's name in the row's left column) rather than
+  // inventing new CSS, per this task's "never write bespoke CSS for
+  // something a component already does" constraint.
+  function makeCheckbox(checked, onChange) {
     const label = document.createElement('label');
-    label.className = 'settings-switch';
+    label.className = 'tl-check';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = checked;
     cb.addEventListener('change', () => onChange(cb.checked));
-    const slider = document.createElement('span');
-    slider.className = 'slider';
     label.appendChild(cb);
-    label.appendChild(slider);
     return label;
   }
 
@@ -185,12 +190,12 @@
 
   function buildThemePreview() {
     const box = document.createElement('div');
-    box.className = 'tp-container';
+    box.className = 'tl-settings__theme-preview';
 
     // "PREVIEW" label
     const label = document.createElement('div');
     label.textContent = 'PREVIEW';
-    label.className = 'tp-label tp-dim';
+    label.className = 'tl-settings__theme-preview-label tp-dim';
     box.appendChild(label);
 
     // Prompt line
@@ -251,34 +256,34 @@
       span('tp-fg', ' $ '),
     );
     const cursor = document.createElement('span');
-    cursor.className = 'tp-cursor';
+    cursor.className = 'tl-settings__theme-preview-cursor';
     cursor.textContent = ' ';
     cursorLine.appendChild(cursor);
     box.appendChild(cursorLine);
 
     // Swatch divider
     const dividerEl = document.createElement('div');
-    dividerEl.className = 'tp-swatch-divider';
+    dividerEl.className = 'tl-settings__theme-preview-divider';
     box.appendChild(dividerEl);
 
     // Normal swatches row
     const normalRow = document.createElement('div');
-    normalRow.className = 'tp-swatch-row tp-swatch-row--normal';
+    normalRow.className = 'tl-settings__theme-preview-swatches tl-settings__theme-preview-swatches--normal';
     const normalClasses = ['tp-sw-black','tp-sw-red','tp-sw-green','tp-sw-yellow','tp-sw-blue','tp-sw-magenta','tp-sw-cyan','tp-sw-white'];
     for (const cls of normalClasses) {
       const sw = document.createElement('div');
-      sw.className = cls + ' tp-swatch';
+      sw.className = cls + ' tl-settings__theme-preview-swatch';
       normalRow.appendChild(sw);
     }
     box.appendChild(normalRow);
 
     // Bright swatches row
     const brightRow = document.createElement('div');
-    brightRow.className = 'tp-swatch-row';
+    brightRow.className = 'tl-settings__theme-preview-swatches';
     const brightClasses = ['tp-sw-bright-black','tp-sw-bright-red','tp-sw-bright-green','tp-sw-bright-yellow','tp-sw-bright-blue','tp-sw-bright-magenta','tp-sw-bright-cyan','tp-sw-bright-white'];
     for (const cls of brightClasses) {
       const sw = document.createElement('div');
-      sw.className = cls + ' tp-swatch';
+      sw.className = cls + ' tl-settings__theme-preview-swatch';
       brightRow.appendChild(sw);
     }
     box.appendChild(brightRow);
@@ -317,7 +322,7 @@
     }
 
     // Cursor block
-    const cursorEl = container.querySelector('.tp-cursor');
+    const cursorEl = container.querySelector('.tl-settings__theme-preview-cursor');
     if (cursorEl) {
       cursorEl.style.background = tc.cursor_color || tc.foreground || '';
       cursorEl.style.color = tc.cursor_text || tc.background || '';
@@ -358,7 +363,7 @@
     }
 
     // Swatch divider border
-    const divider = container.querySelector('.tp-swatch-divider');
+    const divider = container.querySelector('.tl-settings__theme-preview-divider');
     if (divider) divider.style.borderTopColor = tc.active_highlight || '';
   }
 
@@ -416,7 +421,7 @@
 
     function stopRecording() {
       if (recordingEl) {
-        recordingEl.classList.remove('recording');
+        recordingEl.classList.remove('is-recording');
         recordingEl.textContent = shortcutText(d.getShortcutValue(recordingRef));
       }
       if (typeof recordingUnregister === 'function') {
@@ -433,7 +438,7 @@
 
       recordingEl = el;
       recordingRef = settingsRef;
-      el.classList.add('recording');
+      el.classList.add('is-recording');
       el.textContent = 'Press keys...';
 
       recordingUnregister = d.registerGlobalKeyHandler('settings-shortcut-recorder', (e) => {
@@ -467,7 +472,7 @@
 
     function makeShortcutKeyBox(ref) {
       const keyBox = document.createElement('span');
-      keyBox.className = 'settings-shortcut-key';
+      keyBox.className = 'tl-settings__shortcut-key';
       keyBox.setAttribute('role', 'button');
       keyBox.tabIndex = 0;
       keyBox.setAttribute('aria-label', 'Record shortcut');
@@ -773,7 +778,9 @@
           buildThemePreview,
           updateThemePreview,
           invoke: d.getInvoke(),
-          makeSwitch,
+          makeCheckbox,
+          makeInput,
+          makeToggleGroup,
         });
         if (handled) return;
       }
@@ -863,7 +870,7 @@
         addDivider,
         addRow,
         setRowTarget,
-        makeSwitch,
+        makeCheckbox,
         makeToggleGroup,
       });
     }
@@ -880,7 +887,7 @@
         addDivider,
         addRow,
         setRowTarget,
-        makeSwitch,
+        makeCheckbox,
         makeInput,
       });
     }
@@ -896,7 +903,7 @@
         addSectionLabel,
         addRow,
         setRowTarget,
-        makeSwitch,
+        makeCheckbox,
       });
     }
 
@@ -926,7 +933,7 @@
           addRow,
           setRowTarget,
           makeInput,
-          makeSwitch,
+          makeCheckbox,
         });
         renderer.renderPlugins(c);
         return;
@@ -1031,7 +1038,7 @@
     addSearchInput,
     makeInput,
     makeToggleGroup,
-    makeSwitch,
+    makeCheckbox,
     buildThemePreview,
     updateThemePreview,
     formatShortcut,

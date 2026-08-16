@@ -10,7 +10,7 @@
     const addDivider = d.addDivider || function () {};
     const addRow = d.addRow || function () {};
     const setRowTarget = d.setRowTarget || function (row) { return row; };
-    const makeSwitch = d.makeSwitch || function () { return document.createElement('span'); };
+    const makeCheckbox = d.makeCheckbox || function () { return document.createElement('span'); };
     const makeInput = d.makeInput || function () { return document.createElement('input'); };
 
     const h = document.createElement('h3');
@@ -19,7 +19,7 @@
 
     addSectionLabel(container, 'Startup & Updates');
 
-    const updateSwitch = makeSwitch(
+    const updateCheckbox = makeCheckbox(
       pendingSettings.termlab.check_for_updates !== false,
       (val) => { pendingSettings.termlab.check_for_updates = val; }
     );
@@ -28,7 +28,7 @@
         container,
         'Check for Updates',
         'Automatically check for new versions when the app starts (macOS and Windows)',
-        updateSwitch
+        updateCheckbox
       ),
       'advanced:check-for-updates'
     );
@@ -46,6 +46,7 @@
       if (!isNaN(value)) pendingSettings.window.dimensions.columns = value;
     });
     addRow(container, 'Columns', 'Width in character cells (0 = system default)', colsInput);
+    global.tlSpinner.attach(colsInput);
 
     const linesInput = makeInput('number', pendingSettings.window.dimensions.lines);
     linesInput.addEventListener('input', () => {
@@ -53,6 +54,7 @@
       if (!isNaN(value)) pendingSettings.window.dimensions.lines = value;
     });
     addRow(container, 'Lines', 'Height in character cells (0 = system default)', linesInput);
+    global.tlSpinner.attach(linesInput);
 
     addDivider(container);
 
@@ -62,7 +64,7 @@
     container.appendChild(densityAnchor);
 
     const fontNote = document.createElement('div');
-    fontNote.className = 'settings-row-desc';
+    fontNote.className = 'tl-settings__row-desc';
     fontNote.style.marginBottom = '8px';
     fontNote.textContent = 'Fine-tune text sizes for different UI elements (in points)';
     container.appendChild(fontNote);
@@ -73,6 +75,7 @@
       if (!isNaN(value)) pendingSettings.termlab.ui.font.small = value;
     });
     addRow(container, 'Small', 'Tab titles, badges, compact labels', smallInput);
+    global.tlSpinner.attach(smallInput);
 
     const listInput = makeInput('number', pendingSettings.termlab.ui.font.list, { step: '0.5' });
     listInput.addEventListener('input', () => {
@@ -80,6 +83,7 @@
       if (!isNaN(value)) pendingSettings.termlab.ui.font.list = value;
     });
     addRow(container, 'List', 'Tree nodes, table rows, file explorer', listInput);
+    global.tlSpinner.attach(listInput);
 
     const normalInput = makeInput('number', pendingSettings.termlab.ui.font.normal, { step: '0.5' });
     normalInput.addEventListener('input', () => {
@@ -87,10 +91,12 @@
       if (!isNaN(value)) pendingSettings.termlab.ui.font.normal = value;
     });
     addRow(container, 'Normal', 'Body text, buttons, inputs, dialogs', normalInput);
+    global.tlSpinner.attach(normalInput);
 
     const resetLink = document.createElement('div');
     resetLink.textContent = 'Reset to Default';
-    resetLink.style.cssText = 'font-size:var(--ui-font-small);color:var(--blue);cursor:pointer;margin-top:4px;text-align:right';
+    resetLink.className = 'tl-settings__link';
+    resetLink.style.cssText = 'display:block;margin-top:4px;text-align:right';
     resetLink.addEventListener('click', () => {
       pendingSettings.termlab.ui.font.small = 12.0;
       pendingSettings.termlab.ui.font.list = 14.0;
@@ -110,14 +116,14 @@
     const addSectionLabel = d.addSectionLabel || function () {};
     const addRow = d.addRow || function () {};
     const setRowTarget = d.setRowTarget || function (row) { return row; };
-    const makeSwitch = d.makeSwitch || function () { return document.createElement('span'); };
+    const makeCheckbox = d.makeCheckbox || function () { return document.createElement('span'); };
 
     const h = document.createElement('h3');
     h.textContent = 'Files';
     container.appendChild(h);
 
     addSectionLabel(container, 'Explorer');
-    const followSwitch = makeSwitch(
+    const followCheckbox = makeCheckbox(
       pendingSettings.termlab.files.follow_path !== false,
       (val) => { pendingSettings.termlab.files.follow_path = val; }
     );
@@ -126,7 +132,7 @@
         container,
         'Follow Path',
         'Automatically follow the active terminal working directory in local and remote file panes.',
-        followSwitch
+        followCheckbox
       ),
       'files:follow-path'
     );

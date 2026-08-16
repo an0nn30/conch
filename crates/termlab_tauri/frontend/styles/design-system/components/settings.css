@@ -187,3 +187,96 @@
   border-bottom: 1px solid var(--tl-border);
   flex-shrink: 0;
 }
+
+/* -- Keyboard-shortcut recorder key box (renderers.js's
+   createShortcutRecorder/makeShortcutKeyBox) -- replaces the legacy
+   .settings-shortcut-key (styles/dialogs.css), which hard-coded its
+   recording-state color as a raw hex literal (the same blue as --tl-accent);
+   renamed rather than restyled in place to avoid a load-order collision
+   (dialogs.css still loads after this file and still defines the old
+   selector until Phase 5b Task 4 deletes it, so an in-place restyle would
+   have been overridden by the legacy rule). */
+.tl-settings__shortcut-key {
+  display: inline-block;
+  padding: 2px var(--tl-space-2);
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  background: var(--tl-TextField-background, var(--tl-bg));
+  color: var(--tl-fg);
+  font: 400 11px var(--tl-font-mono);
+  min-width: 20px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+.tl-settings__shortcut-key:hover { border-color: var(--tl-accent); }
+.tl-settings__shortcut-key:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+.tl-settings__shortcut-key.is-recording {
+  border-color: var(--tl-accent);
+  color: var(--tl-accent);
+  animation: tl-settings-shortcut-pulse 1s ease-in-out infinite;
+}
+@keyframes tl-settings-shortcut-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* -- Plugins section: per-plugin type badge (plugins-section.js) --
+   replaces the legacy .settings-plugin-badge (+ .lua/.java modifiers,
+   styles/dialogs.css), which used raw pastel-green/pastel-yellow fill
+   literals with a raw dark-text literal. No JVM reference exists for this
+   control (TermLab's own Plugins page, not part of the settings window
+   capture) so there's no measured color to match; reuses the muted
+   per-color FileColor background tokens (the same tag-tint idiom the
+   reference's file/tab coloring already uses) instead of inventing new
+   saturated badge colors. */
+.tl-settings__plugin-badge {
+  font-size: 9px;
+  padding: 1px var(--tl-space-2);
+  border-radius: var(--tl-radius);
+  text-transform: uppercase;
+  font-weight: 600;
+  flex-shrink: 0;
+  color: var(--tl-fg);
+}
+.tl-settings__plugin-badge--lua { background: var(--tl-FileColor-Green); }
+.tl-settings__plugin-badge--java { background: var(--tl-FileColor-Yellow); }
+
+/* -- Appearance section: theme preview (renderers.js's
+   buildThemePreview/updateThemePreview) -- chrome only (container border,
+   PREVIEW label, swatch divider/grid sizing). The preview's actual text and
+   swatch colors are applied via inline style in updateThemePreview() by
+   design (it renders arbitrary, user-selectable terminal color schemes, not
+   a fixed palette a CSS class could encode) — that mechanism is unchanged.
+   Renamed from the legacy .tp-container/.tp-label/.tp-cursor/
+   .tp-swatch-divider/.tp-swatch-row(--normal)/.tp-swatch (styles/
+   dialogs.css) for the same load-order reason as .tl-settings__shortcut-key
+   above; the color-hook classes those rules coexist with (.tp-fg, .tp-dim,
+   .tp-green, .tp-sw-black, etc.) carry no static CSS of their own in either
+   file — they're pure querySelectorAll hooks for inline-style colors — so
+   they're intentionally left unrenamed. */
+.tl-settings__theme-preview {
+  border-radius: var(--tl-radius);
+  padding: var(--tl-space-3);
+  margin: var(--tl-space-2) 0 var(--tl-space-3);
+  font-family: var(--tl-font-mono);
+  font-size: var(--tl-font-size-ui);
+  line-height: 1.5;
+  border: 1px solid var(--tl-border);
+}
+.tl-settings__theme-preview-label {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  margin-bottom: var(--tl-space-2);
+  text-transform: uppercase;
+}
+.tl-settings__theme-preview-cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1em;
+  vertical-align: text-bottom;
+}
+.tl-settings__theme-preview-divider {
+  margin: var(--tl-space-2) 0 6px 0;
+  border-top: 1px solid var(--tl-border);
+}
+.tl-settings__theme-preview-swatches { display: flex; gap: 4px; }
+.tl-settings__theme-preview-swatches--normal { margin-bottom: 4px; }
+.tl-settings__theme-preview-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }

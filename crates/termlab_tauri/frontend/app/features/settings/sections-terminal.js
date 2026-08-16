@@ -20,7 +20,6 @@
     addSectionLabel(container, 'Typography');
 
     const fontFamilySelect = document.createElement('select');
-    fontFamilySelect.className = 'settings-select';
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
     defaultOpt.textContent = 'System Default';
@@ -36,7 +35,9 @@
     fontFamilySelect.addEventListener('change', () => {
       pendingSettings.terminal.font.normal.family = fontFamilySelect.value;
     });
-    setRowTarget(addRow(container, 'Terminal Font Family', null, fontFamilySelect), 'terminal:font-family');
+    const fontFamilyRow = addRow(container, 'Terminal Font Family', null, fontFamilySelect);
+    global.tlCombo.attach(fontFamilySelect);
+    setRowTarget(fontFamilyRow, 'terminal:font-family');
 
     const fontSizeInput = makeInput('number', pendingSettings.terminal.font.size);
     fontSizeInput.addEventListener('input', () => {
@@ -44,6 +45,7 @@
       if (!isNaN(value)) pendingSettings.terminal.font.size = value;
     });
     setRowTarget(addRow(container, 'Terminal Font Size', null, fontSizeInput), 'terminal:font-size');
+    global.tlSpinner.attach(fontSizeInput);
 
     const offsetXInput = makeInput('number', pendingSettings.terminal.font.offset.x, { step: '0.5' });
     offsetXInput.addEventListener('input', () => {
@@ -51,6 +53,7 @@
       if (!isNaN(value)) pendingSettings.terminal.font.offset.x = value;
     });
     setRowTarget(addRow(container, 'Font Offset X', null, offsetXInput), 'terminal:font-offset-x');
+    global.tlSpinner.attach(offsetXInput);
 
     const offsetYInput = makeInput('number', pendingSettings.terminal.font.offset.y, { step: '0.5' });
     offsetYInput.addEventListener('input', () => {
@@ -58,6 +61,7 @@
       if (!isNaN(value)) pendingSettings.terminal.font.offset.y = value;
     });
     setRowTarget(addRow(container, 'Font Offset Y', null, offsetYInput), 'terminal:font-offset-y');
+    global.tlSpinner.attach(offsetYInput);
 
     addDivider(container);
     addSectionLabel(container, 'Scrolling');
@@ -75,6 +79,7 @@
       addRow(container, 'Scroll Sensitivity', '0.0 to 1.0 (tuned for macOS trackpads)', scrollInput),
       'terminal:scroll-sensitivity'
     );
+    global.tlSpinner.attach(scrollInput);
   }
 
   function renderShell(container, deps) {
@@ -181,7 +186,7 @@
       envContainer.appendChild(addBtn);
 
       const note = document.createElement('div');
-      note.className = 'settings-row-desc';
+      note.className = 'tl-settings__row-desc';
       note.style.marginTop = '8px';
       note.textContent = 'TERM and COLORTERM are always set to xterm-256color and truecolor.';
       envContainer.appendChild(note);
@@ -199,7 +204,7 @@
     const addDivider = d.addDivider || function () {};
     const addRow = d.addRow || function () {};
     const setRowTarget = d.setRowTarget || function (row) { return row; };
-    const makeSwitch = d.makeSwitch || function () { return document.createElement('span'); };
+    const makeCheckbox = d.makeCheckbox || function () { return document.createElement('span'); };
     const makeToggleGroup = d.makeToggleGroup || function () { return document.createElement('span'); };
 
     const h = document.createElement('h3');
@@ -219,18 +224,18 @@
     );
     setRowTarget(addRow(container, 'Cursor Shape', null, shapeToggle), 'cursor:shape');
 
-    const blinkSwitch = makeSwitch(
+    const blinkCheckbox = makeCheckbox(
       pendingSettings.terminal.cursor.style.blinking,
       (val) => { pendingSettings.terminal.cursor.style.blinking = val; }
     );
-    setRowTarget(addRow(container, 'Cursor Blinking', null, blinkSwitch), 'cursor:blinking');
+    setRowTarget(addRow(container, 'Cursor Blinking', null, blinkCheckbox), 'cursor:blinking');
 
     addDivider(container);
     addSectionLabel(container, 'Vi Mode Override');
 
     const viNote = document.createElement('div');
     viNote.dataset.settingId = 'cursor:vi-mode';
-    viNote.className = 'settings-row-desc';
+    viNote.className = 'tl-settings__row-desc';
     viNote.style.marginBottom = '8px';
     viNote.textContent = 'Optional cursor style when vi mode is active in your shell.';
     container.appendChild(viNote);
@@ -265,7 +270,7 @@
     );
     setRowTarget(addRow(container, 'Vi Mode Override', null, viShapeToggle), 'cursor:vi-mode');
 
-    const viBlinkSwitch = makeSwitch(
+    const viBlinkCheckbox = makeCheckbox(
       viStyle ? viStyle.blinking : false,
       (val) => {
         if (pendingSettings.terminal.cursor.vi_mode_style) {
@@ -274,7 +279,7 @@
       }
     );
     viBlinkRow.style.display = viStyle ? '' : 'none';
-    addRow(viBlinkRow, 'Blinking', null, viBlinkSwitch);
+    addRow(viBlinkRow, 'Blinking', null, viBlinkCheckbox);
     container.appendChild(viBlinkRow);
   }
 
