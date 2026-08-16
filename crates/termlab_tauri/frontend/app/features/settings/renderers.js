@@ -14,24 +14,33 @@
   // BESIDE the label, not underneath it as a separate spacer line the way
   // the old two-call addSectionLabel()+addDivider() pair drew it.
   //
-  // addDivider() is kept as a callable no-op: ~20 call sites across
-  // sections-*.js/plugins-section.js (out of Task 1's scope) still call
+  // addDivider() is kept as a callable no-op: ~19 remaining call sites
+  // across sections-*.js (out of Task 1's scope) still call
   // addDivider(container) between two addSectionLabel() calls, matching the
   // old "label, rows, divider, label, rows" convention. Since the rule is
   // now part of the *next* label's own row, that trailing addDivider() call
   // has nothing left to do — .tl-settings__section's own top margin (see
   // components/settings.css) recreates the old spacer's vertical gap.
-  function addSectionLabel(container, text) {
+  //
+  // trailingEl is optional: a node inserted between the label and the rule,
+  // for headers that need an inline action beside the label (e.g. Settings
+  // > Plugins' "Installed Plugins … Rescan" — see plugins-section.js) while
+  // still letting the rule reach the right edge. Returns the constructed
+  // row so a caller can tag it (e.g. dataset.settingId) the same way the
+  // old hand-built header div could.
+  function addSectionLabel(container, text, trailingEl) {
     const row = document.createElement('div');
     row.className = 'tl-settings__section';
     const label = document.createElement('span');
     label.className = 'tl-settings__section-label';
     label.textContent = text;
+    row.appendChild(label);
+    if (trailingEl) row.appendChild(trailingEl);
     const rule = document.createElement('span');
     rule.className = 'tl-settings__rule';
-    row.appendChild(label);
     row.appendChild(rule);
     container.appendChild(row);
+    return row;
   }
 
   function addDivider(_container) {

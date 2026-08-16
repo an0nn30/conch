@@ -136,19 +136,19 @@
 
       addDivider(container);
 
-      const installedHeader = document.createElement('div');
-      installedHeader.dataset.settingId = 'plugins:installed';
-      installedHeader.className = 'settings-installed-header';
-      const installedLabel = document.createElement('div');
-      installedLabel.className = 'settings-section-label';
-      installedLabel.textContent = 'Installed Plugins';
-      installedHeader.appendChild(installedLabel);
-
+      // Uses addSectionLabel's optional trailingEl (Task 1 review fix
+      // round 1, finding 2) instead of the old hand-built
+      // .settings-installed-header/.settings-section-label pair, so this
+      // header gets the same label-beside-rule treatment as every other
+      // section header in the new shell — addDivider() above is a no-op
+      // (see its own comment), so without this the separator here would
+      // have silently vanished and the header would have kept the old,
+      // pre-migration look.
       const rescanLabel = document.createElement('span');
       rescanLabel.textContent = 'Rescan';
       rescanLabel.setAttribute('role', 'button');
       rescanLabel.setAttribute('tabindex', '0');
-      rescanLabel.className = 'settings-rescan-action';
+      rescanLabel.className = 'tl-settings__link';
 
       const handleRescan = async () => {
         rescanLabel.style.pointerEvents = 'none';
@@ -175,8 +175,8 @@
         event.preventDefault();
         handleRescan();
       });
-      installedHeader.appendChild(rescanLabel);
-      container.appendChild(installedHeader);
+      const installedHeader = addSectionLabel(container, 'Installed Plugins', rescanLabel);
+      installedHeader.dataset.settingId = 'plugins:installed';
 
       const pluginListContainer = document.createElement('div');
       container.appendChild(pluginListContainer);

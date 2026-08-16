@@ -224,6 +224,16 @@ assert.equal(document.body.children.length, 0);
         const idx = arr.indexOf(fn);
         if (idx >= 0) arr.splice(idx, 1);
       },
+      // Deliberately does NOT mirror a real browser's native
+      // disabled-suppresses-click behavior — the footer-button-liveness
+      // test below relies on that omission to isolate and exercise
+      // buildFooterButton's own JS-level `btn.disabled` guard (the actual
+      // regression under test) independent of the browser's separate,
+      // redundant native suppression.
+      click() {
+        const fns = (listeners.get('click') || []).slice();
+        for (const fn of fns) fn({ target: this });
+      },
       querySelectorAll(sel) {
         const out = [];
         const walk = (node) => {
@@ -303,6 +313,55 @@ assert.equal(document.body.children.length, 0);
 
   document.body = originalBody;
   console.log('tl-dialog/tl-menu Escape-priority: ok');
+}
+
+// --- Footer button: click must gate on the button's own LIVE `disabled`
+// property, not a frozen copy of the spec taken at build time -----------
+//
+// Regression test for a real bug (design-system-phase-5b task-1 review,
+// fix round 1): buildFooterButton()'s click handler used to check
+// `spec.disabled` — the options object passed to tlDialog.open(), never
+// touched again after open() returns — instead of `btn.disabled`, the
+// button element's own DOM property. A caller with a button that starts
+// disabled and later becomes enabled (e.g. Settings' Apply button,
+// disabled until the store goes dirty — see
+// features/settings/renderers.js's wireApplyDirtyTracking()) only ever
+// gets the <button> element back, so it can only flip `button.disabled`
+// directly. That correctly re-enabled the button visually, but the click
+// handler kept reading the original (still-`true`) spec.disabled forever,
+// so every click silently no-op'd for the dialog's whole lifetime — Apply
+// was dead. Reuses document.createElement = makeRichElement from the
+// Escape-priority block above (only document.body was restored after it).
+{
+  let clicks = 0;
+  const handle = window.tlDialog.open({
+    title: 'Footer button liveness test',
+    buttons: [
+      { label: 'Apply', disabled: true, onSelect: () => { clicks += 1; } },
+    ],
+  });
+
+  const footer = handle.el.children.find((c) => c.className === 'tl-dialog__footer');
+  assert.ok(footer, 'a dialog with buttons should build a footer');
+  const footerEnd = footer.children.find((c) => c.className === 'tl-dialog__footer-end');
+  assert.ok(footerEnd, 'the footer should have a footer-end button group');
+  const applyBtn = footerEnd.children.find((c) => c.textContent === 'Apply');
+  assert.ok(applyBtn, 'the Apply button should exist');
+
+  assert.equal(applyBtn.disabled, true, 'Apply starts disabled per its spec');
+  applyBtn.click();
+  assert.equal(clicks, 0, 'a still-disabled button must not fire onSelect');
+
+  // Simulate what wireApplyDirtyTracking() does when the store goes dirty:
+  // flip the live DOM property directly — the only handle a caller gets
+  // back from tlDialog.open() is the button element itself, never the
+  // original spec object.
+  applyBtn.disabled = false;
+  applyBtn.click();
+  assert.equal(clicks, 1, 'once re-enabled via button.disabled, a click must fire onSelect');
+
+  handle.close();
+  console.log('tl-dialog footer button live-disabled gating: ok');
 }
 
 console.log('ok');

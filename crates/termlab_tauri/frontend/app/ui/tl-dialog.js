@@ -166,8 +166,22 @@
     }
     // Buttons never auto-close the dialog: onSelect decides (e.g. a "Save"
     // button may need to validate before calling handle.close()).
+    //
+    // Gate on btn.disabled (the live DOM property), not spec.disabled (the
+    // options object passed at build time). A caller that toggles the
+    // button's enabled state after creation — e.g. Settings' Apply button,
+    // see wireApplyDirtyTracking() in features/settings/renderers.js — only
+    // has the returned <button> element to mutate, so it sets
+    // `button.disabled = ...` directly; spec.disabled never changes after
+    // this closure runs once at build time. Reading spec.disabled here left
+    // the click handler permanently gated on whatever value was true at
+    // open() (Apply starts disabled), so the button would visually
+    // re-enable but silently no-op on every click for the dialog's whole
+    // lifetime. btn.disabled is the single source of truth for both the
+    // visual state (the browser applies :disabled styling / suppresses
+    // native activation from it) and this click gate.
     btn.addEventListener('click', () => {
-      if (!spec.disabled && typeof spec.onSelect === 'function') spec.onSelect();
+      if (!btn.disabled && typeof spec.onSelect === 'function') spec.onSelect();
     });
     return btn;
   }
