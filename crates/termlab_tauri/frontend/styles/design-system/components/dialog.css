@@ -13,6 +13,20 @@
   display: flex; align-items: center; justify-content: center;
   background: var(--tl-dialog-scrim);
 }
+/* Top-anchored variant: dialogs that behave like a spotlight/search popup
+   rather than a centered modal (e.g. Search Everywhere — see
+   components/palette.css) anchor near the top of the viewport instead of
+   vertically centering. General capability on the overlay (app/ui/
+   tl-dialog.js's open() adds this class when called with { top: true }),
+   not specific to any one caller. 12vh preserves the inset the command
+   palette used before this generalization (its prior ad-hoc
+   .command-palette-overlay rule in styles/dialogs.css, removed by phase 5b
+   task 3) — unverified against a Search Everywhere reference capture (no
+   measurement exists yet; see METRICS.md), so revisit if one arrives. */
+.tl-dialog__overlay--top {
+  align-items: flex-start;
+  padding-top: 12vh;
+}
 .tl-dialog {
   display: flex; flex-direction: column;
   max-height: 84vh;

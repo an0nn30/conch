@@ -1,0 +1,126 @@
+/* Command palette as "Search Everywhere" (IntelliJ) — app/command-palette-
+   runtime.js renders this as a top-anchored tl-dialog body
+   (window.tlDialog.open({ top: true, size: 'lg', body })): a search field
+   at the top, followed by a scrollable, grouped result list.
+
+   No Search Everywhere reference capture exists yet — docs/superpowers/
+   specs/assets/reference/METRICS.md has no measurements for it (see phase
+   5b task 3's brief/report). This file is built from design tokens and the
+   structure of the palette it replaces (styles/dialogs.css's former
+   .command-palette-overlay/.command-palette* rules, deleted by this change)
+   rather than pixel-measured values — treat sizing here as a first pass
+   pending a real comparison. The COLORS are not invented: --tl-
+   SearchEverywhere-* and --tl-List-selection* below are real values scripts/
+   extract_intellij_tokens.py pulled from the JVM theme (tokens-dark.css /
+   tokens-light.css); only their application here (which element gets which
+   token) is unverified against a screenshot.
+
+   BEM-ish naming matching tl-menu.css/tl-settings*: .tl-palette is the root,
+   rendered as the tl-dialog body's sole child and pulled flush to the
+   panel's edges the same way .tl-dialog__body > .tl-settings does in
+   components/settings.css. .tl-palette__* are its parts; .is-active marks
+   the keyboard/mouse-selected row (mirrors .tl-settings__item.is-active and
+   .command-palette-item.active before it). */
+
+.tl-dialog__body > .tl-palette {
+  display: flex;
+  flex-direction: column;
+  height: min(480px, 66vh);
+  margin: 0 calc(var(--tl-space-4) * -1) calc(var(--tl-space-3) * -1);
+}
+
+.tl-palette__input {
+  flex-shrink: 0;
+  width: 100%;
+  border: none;
+  outline: none;
+  background: var(--tl-SearchEverywhere-SearchField-background, var(--tl-control-bg));
+  color: var(--tl-fg);
+  font: 400 15px var(--tl-font-ui);
+  padding: var(--tl-space-3) var(--tl-space-4);
+  border-bottom: 1px solid var(--tl-SearchEverywhere-SearchField-borderColor, var(--tl-border));
+}
+.tl-palette__input::placeholder { color: var(--tl-fg-muted); }
+
+.tl-palette__results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--tl-space-2) 0;
+}
+
+.tl-palette__group + .tl-palette__group { margin-top: var(--tl-space-2); }
+
+.tl-palette__group-title {
+  padding: var(--tl-space-1) var(--tl-space-4);
+  font: 600 11px var(--tl-font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--tl-fg-muted);
+}
+
+.tl-palette__item {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-height: var(--tl-row-h);
+  padding: var(--tl-space-1) var(--tl-space-4);
+  cursor: pointer;
+}
+.tl-palette__item.is-active {
+  background: var(--tl-List-selectionBackground);
+}
+.tl-palette__item.is-active .tl-palette__title,
+.tl-palette__item.is-active .tl-palette__subtitle {
+  color: var(--tl-List-selectionForeground);
+}
+
+.tl-palette__icon {
+  flex-shrink: 0;
+  width: 16px; height: 16px;
+  display: flex; align-items: center; justify-content: center;
+}
+.tl-palette__icon img { display: block; width: 16px; height: 16px; }
+
+.tl-palette__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tl-palette__title {
+  color: var(--tl-fg);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-palette__subtitle {
+  color: var(--tl-fg-muted);
+  font: 400 11px var(--tl-font-ui);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Digit quick-pick badge (1-5) — command-palette-runtime.js only renders
+   this on the first five flat results, regardless of which group they fall
+   into (quickPickIndexFromKey() only ever matches keys 1-5). */
+.tl-palette__shortcut {
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  border-radius: var(--tl-radius);
+  border: 1px solid var(--tl-border);
+  background: var(--tl-panel-bg);
+  color: var(--tl-fg-muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  font: 600 11px var(--tl-font-ui);
+  line-height: 1;
+}
+.tl-palette__item.is-active .tl-palette__shortcut {
+  border-color: var(--tl-List-selectionForeground);
+  color: var(--tl-List-selectionForeground);
+}
+
+.tl-palette__empty {
+  padding: var(--tl-space-3) var(--tl-space-4);
+  color: var(--tl-fg-muted);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+}

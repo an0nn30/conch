@@ -10,6 +10,13 @@
     const refreshTitlebar = deps.refreshTitlebar;
     const refreshSshPanel = deps.refreshSshPanel;
     const MAX_QUICK_RESULTS = 5;
+    // Above 5 (the digit-quick-pick range, unchanged — quickPickIndexFromKey
+    // only ever matches keys 1-5, so raising this cap cannot put a digit
+    // shortcut on anything past the fifth flat result). No reference exists
+    // for how many rows IntelliJ's own Search Everywhere shows before its
+    // "N more items" affordance, so this is a first-pass judgment call, not
+    // a measured value.
+    const MAX_RESULTS = 20;
     const COMMAND_CACHE_TTL_MS = 45000;
 
     let commandPalette = null;
@@ -96,15 +103,20 @@
       ]);
 
       const commands = [];
-      const add = (id, title, subtitle, keywords, run) => {
-        commands.push({ id, title, subtitle, keywords: (keywords || '').toLowerCase(), run });
+      // group buckets the flat, cross-category fuzzy-match results under a
+      // Search Everywhere-style header (renderPaletteResults()) — a broader
+      // classification than `subtitle`, which stays specific (a plugin
+      // name, an ssh detail string, ...). Defaults to 'Actions' so every
+      // existing add() call that predates grouping still lands somewhere.
+      const add = (id, title, subtitle, keywords, run, group) => {
+        commands.push({ id, title, subtitle, keywords: (keywords || '').toLowerCase(), run, group: group || 'Actions' });
       };
 
       add('core:new-tab', 'New Tab', 'Terminal', 'tab terminal create', () => handleMenuAction('new-tab'));
       add('core:new-plain-shell-tab', 'New Plain Shell Tab', 'Terminal', 'tab terminal shell plain default login local pty', () => handleMenuAction('new-plain-shell-tab'));
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
-      add('core:manage-tunnels', 'Manage Tunnels', 'SSH', 'tunnels manager', () => handleMenuAction('manage-tunnels'));
-      add('core:focus-sessions', 'Focus Sessions', 'SSH', 'ssh sessions quick connect', () => handleMenuAction('focus-sessions'));
+      add('core:manage-tunnels', 'Manage Tunnels', 'SSH', 'tunnels manager', () => handleMenuAction('manage-tunnels'), 'Tunnels');
+      add('core:focus-sessions', 'Focus Sessions', 'SSH', 'ssh sessions quick connect', () => handleMenuAction('focus-sessions'), 'SSH Hosts');
       add('core:toggle-left', 'Toggle Left Panel', 'View', 'panel left sidebar files explorer tool windows', () => handleMenuAction('toggle-left-panel'));
       add('core:toggle-right', 'Toggle Right Panel', 'View', 'panel right sidebar sessions ssh tool windows', () => handleMenuAction('toggle-right-panel'));
       add('core:toggle-bottom', 'Toggle Bottom Panel', 'View', 'panel bottom', () => handleMenuAction('toggle-bottom-panel'));
@@ -137,7 +149,8 @@
               await invoke('rebuild_menu').catch(() => {});
               invalidateCommandCache('plugin-disabled');
               refreshTitlebar();
-            }
+            },
+            'Plugins'
           );
         } else {
           add(
@@ -155,7 +168,8 @@
               await invoke('rebuild_menu').catch(() => {});
               invalidateCommandCache('plugin-enabled');
               refreshTitlebar();
-            }
+            },
+            'Plugins'
           );
         }
       }
@@ -168,7 +182,8 @@
           `Connect: ${label}`,
           `${s._group} • ${detail}`,
           `ssh connect server ${label} ${detail} ${s._group}`,
-          () => createSshTab({ serverId: s.id })
+          () => createSshTab({ serverId: s.id }),
+          'SSH Hosts'
         );
       }
 
@@ -185,7 +200,8 @@
               await invoke('tunnel_stop', { tunnelId: t.id });
               invalidateCommandCache('tunnel-stop');
               refreshSshPanel();
-            }
+            },
+            'Tunnels'
           );
         } else {
           add(
@@ -197,7 +213,8 @@
               await invoke('tunnel_start', { tunnelId: t.id });
               invalidateCommandCache('tunnel-start');
               refreshSshPanel();
-            }
+            },
+            'Tunnels'
           );
         }
       }
@@ -230,7 +247,7 @@
         scored.push({ c, score });
       }
       scored.sort((a, b) => b.score - a.score || a.c.title.localeCompare(b.c.title));
-      return scored.slice(0, MAX_QUICK_RESULTS).map((x) => x.c);
+      return scored.slice(0, MAX_RESULTS).map((x) => x.c);
     }
 
     function quickPickIndexFromKey(event) {
@@ -238,6 +255,45 @@
       const key = String(event.key || '');
       if (!/^[1-5]$/.test(key)) return null;
       return Number(key) - 1;
+    }
+
+    // Per-result icon (window.tlIcon), keyed off the command id prefix set
+    // by buildPaletteCommands() above. Not every command has a fitting
+    // vendored icon (vendor/intellij-icons is a small fixed set — see
+    // app/tool-window-runtime.js's 'tunnels' registration, which has the
+    // same "no vendored plug-like icon yet" gap for the same reason) — those
+    // fall through to null and render an empty icon gutter rather than a
+    // broken image, matching tl-menu.js's optional-icon convention.
+    function paletteIconFor(cmd) {
+      const id = String((cmd && cmd.id) || '');
+      if (id === 'core:new-tab' || id === 'core:new-plain-shell-tab') return 'terminal';
+      if (id === 'core:settings') return 'settings';
+      if (id === 'core:focus-sessions') return 'web';
+      if (id === 'core:toggle-left') return 'folder';
+      if (id === 'core:toggle-right') return 'web';
+      if (id === 'core:notifications') return 'notifications';
+      if (id.indexOf('ssh:connect:') === 0) return 'web';
+      if (id.indexOf('plugin:enable:') === 0) return 'add';
+      if (id.indexOf('plugin:disable:') === 0) return 'remove';
+      return null;
+    }
+
+    // Stable-partitions the already-sorted (by fuzzy score) flat result list
+    // into Search-Everywhere-style named sections, in first-appearance
+    // order — so the group holding the single best match sorts first, and
+    // items keep their relative score order within their own group.
+    function groupPaletteResults(results) {
+      const order = [];
+      const buckets = new Map();
+      for (const cmd of results) {
+        const name = cmd.group || 'Actions';
+        if (!buckets.has(name)) {
+          buckets.set(name, []);
+          order.push(name);
+        }
+        buckets.get(name).push(cmd);
+      }
+      return order.map((name) => ({ name, items: buckets.get(name) }));
     }
 
     function renderPaletteResults() {
@@ -248,44 +304,104 @@
       const results = commandPalette.filtered;
       if (!results.length) {
         const empty = document.createElement('div');
-        empty.className = 'command-palette-empty';
+        empty.className = 'tl-palette__empty';
         const q = (commandPalette.inputEl.value || '').trim();
         empty.textContent = q ? 'No matching commands' : 'Start typing to search commands';
         listEl.appendChild(empty);
         return;
       }
 
-      for (let i = 0; i < results.length; i++) {
-        const cmd = results[i];
-        const row = document.createElement('div');
-        row.className = 'command-palette-item' + (i === commandPalette.selectedIndex ? ' active' : '');
-        row.innerHTML =
-          `<div class="command-palette-main">` +
-            `<div class="command-palette-title">${esc(cmd.title)}</div>` +
-            `<div class="command-palette-subtitle">${esc(cmd.subtitle || '')}</div>` +
-          `</div>` +
-          `<div class="command-palette-shortcut">${i + 1}</div>`;
-        row.addEventListener('mouseenter', () => {
-          if (!commandPalette || commandPalette.keyboardMode) return;
-          commandPalette.selectedIndex = i;
-          renderPaletteResults();
-        });
-        row.addEventListener('click', () => executePaletteCommand(i));
-        listEl.appendChild(row);
+      let i = 0;
+      for (const group of groupPaletteResults(results)) {
+        const groupEl = document.createElement('div');
+        groupEl.className = 'tl-palette__group';
+        const titleEl = document.createElement('div');
+        titleEl.className = 'tl-palette__group-title';
+        titleEl.textContent = group.name;
+        groupEl.appendChild(titleEl);
+
+        for (const cmd of group.items) {
+          const idx = i++;
+          const row = document.createElement('div');
+          row.className = 'tl-palette__item' + (idx === commandPalette.selectedIndex ? ' is-active' : '');
+
+          const iconEl = document.createElement('div');
+          iconEl.className = 'tl-palette__icon';
+          const iconName = paletteIconFor(cmd);
+          if (iconName && global.tlIcon && typeof global.tlIcon.create === 'function') {
+            iconEl.appendChild(global.tlIcon.create(iconName, { size: 16, alt: '' }));
+          }
+          row.appendChild(iconEl);
+
+          const mainEl = document.createElement('div');
+          mainEl.className = 'tl-palette__main';
+          const titleRowEl = document.createElement('div');
+          titleRowEl.className = 'tl-palette__title';
+          titleRowEl.textContent = cmd.title;
+          mainEl.appendChild(titleRowEl);
+          if (cmd.subtitle) {
+            const subtitleEl = document.createElement('div');
+            subtitleEl.className = 'tl-palette__subtitle';
+            subtitleEl.textContent = cmd.subtitle;
+            mainEl.appendChild(subtitleEl);
+          }
+          row.appendChild(mainEl);
+
+          // Only the first five flat results ever get a digit badge —
+          // quickPickIndexFromKey() only matches keys 1-5, so this stays in
+          // sync with what Escape/1-5 can actually reach even though the
+          // total result cap (MAX_RESULTS) is well above 5.
+          if (idx < MAX_QUICK_RESULTS) {
+            const shortcutEl = document.createElement('div');
+            shortcutEl.className = 'tl-palette__shortcut';
+            shortcutEl.textContent = String(idx + 1);
+            row.appendChild(shortcutEl);
+          }
+
+          row.addEventListener('mouseenter', () => {
+            if (!commandPalette || commandPalette.keyboardMode) return;
+            commandPalette.selectedIndex = idx;
+            renderPaletteResults();
+          });
+          row.addEventListener('click', () => executePaletteCommand(idx));
+          groupEl.appendChild(row);
+        }
+
+        listEl.appendChild(groupEl);
+      }
+    }
+
+    // Single teardown path for the palette's own state (unregister the
+    // arrow/enter/digit/escape key handler, clear the module-level
+    // reference, optionally refocus the terminal) — invoked from
+    // tlDialog's onClose so it runs on every dialog-close route (our own
+    // Escape handling below, a backdrop click, which tl-dialog handles
+    // internally and never routes through closeCommandPalette()), not just
+    // the one this module drives directly. Mirrors settings/renderers.js's
+    // renderDialogShell() onClose contract.
+    function teardownPaletteState(state, refocus) {
+      if (typeof state.keyHandlerUnregister === 'function') {
+        state.keyHandlerUnregister();
+        state.keyHandlerUnregister = null;
+      }
+      if (commandPalette === state) commandPalette = null;
+      if (refocus) {
+        const pane = getCurrentPane();
+        if (pane && pane.term) pane.term.focus();
       }
     }
 
     function closeCommandPalette(refocus = true) {
       if (!commandPalette) return;
-      if (typeof commandPalette.keyHandlerUnregister === 'function') {
-        commandPalette.keyHandlerUnregister();
-        commandPalette.keyHandlerUnregister = null;
-      }
-      commandPalette.overlayEl.remove();
-      commandPalette = null;
-      if (refocus) {
-        const pane = getCurrentPane();
-        if (pane && pane.term) pane.term.focus();
+      const state = commandPalette;
+      state.pendingRefocus = refocus !== false;
+      if (state.dialogHandle && typeof state.dialogHandle.close === 'function') {
+        // Routes through tl-dialog's own close(), which fires onClose ->
+        // teardownPaletteState(), so this and a backdrop-click dismissal
+        // converge on the same cleanup path.
+        state.dialogHandle.close();
+      } else {
+        teardownPaletteState(state, state.pendingRefocus);
       }
     }
 
@@ -308,22 +424,26 @@
 
     async function openCommandPalette() {
       if (commandPalette) return;
+      if (!global.tlDialog || typeof global.tlDialog.open !== 'function') {
+        console.warn('command-palette: tlDialog unavailable, cannot open palette');
+        return;
+      }
 
-      const overlay = document.createElement('div');
-      overlay.className = 'ssh-overlay command-palette-overlay';
-      const shell = document.createElement('div');
-      shell.className = 'command-palette';
-      shell.innerHTML =
-        `<input class="command-palette-input" placeholder="Type to search commands... (press 1-5 to run)" spellcheck="false" />` +
-        `<div class="command-palette-list"><div class="command-palette-empty">Loading commands…</div></div>`;
-      overlay.appendChild(shell);
-      document.body.appendChild(overlay);
+      const body = document.createElement('div');
+      body.className = 'tl-palette';
+      const input = document.createElement('input');
+      input.className = 'tl-palette__input';
+      input.type = 'text';
+      input.placeholder = 'Type to search commands... (press 1-5 to run)';
+      input.spellcheck = false;
+      const listEl = document.createElement('div');
+      listEl.className = 'tl-palette__results tl-scroll';
+      listEl.innerHTML = '<div class="tl-palette__empty">Loading commands…</div>';
+      body.appendChild(input);
+      body.appendChild(listEl);
 
-      const input = shell.querySelector('.command-palette-input');
-      const listEl = shell.querySelector('.command-palette-list');
       const state = {
-        overlayEl: overlay,
-        shellEl: shell,
+        dialogHandle: null,
         inputEl: input,
         listEl,
         allCommands: [],
@@ -332,15 +452,12 @@
         keyboardMode: false,
         onKeyDown: null,
         keyHandlerUnregister: null,
+        pendingRefocus: true,
       };
       commandPalette = state;
 
-      overlay.addEventListener('mousedown', (event) => {
-        if (event.target === overlay) closeCommandPalette();
-      });
-
       state.onKeyDown = (event) => {
-        if (!commandPalette) return;
+        if (!commandPalette || commandPalette !== state) return false;
         if (event.key === 'Escape') {
           event.preventDefault();
           event.stopPropagation();
@@ -385,12 +502,18 @@
         }
         return false;
       };
+      // Registered above tl-dialog's own Escape handler (priority 225 — see
+      // registerEscape() in app/ui/tl-dialog.js) so THIS handler's Escape
+      // branch — which runs the palette's own teardown via
+      // closeCommandPalette() — wins and tl-dialog's generic handler for
+      // this same dialog instance never fires. Also owns ArrowUp/ArrowDown/
+      // Enter/digit-quick-pick, none of which tl-dialog knows about.
       const keyboardRouter = global.termlabKeyboardRouter;
       if (keyboardRouter && typeof keyboardRouter.register === 'function') {
         state.keyHandlerUnregister = keyboardRouter.register({
           name: 'command-palette',
           priority: 260,
-          isActive: () => !!(commandPalette && commandPalette === state && state.overlayEl && state.overlayEl.isConnected),
+          isActive: () => !!(commandPalette === state && state.dialogHandle && state.dialogHandle.el && state.dialogHandle.el.isConnected),
           onKeyDown: (event) => state.onKeyDown(event) === true,
         });
       } else {
@@ -398,18 +521,29 @@
       }
 
       listEl.addEventListener('mousemove', () => {
-        if (!commandPalette) return;
+        if (commandPalette !== state) return;
         state.keyboardMode = false;
       });
       input.addEventListener('input', () => {
-        if (!commandPalette) return;
+        if (commandPalette !== state) return;
         state.keyboardMode = false;
         state.filtered = filterPaletteCommands(state.allCommands, input.value);
         state.selectedIndex = 0;
         renderPaletteResults();
       });
 
-      setTimeout(() => input.focus(), 0);
+      state.dialogHandle = global.tlDialog.open({
+        top: true,
+        size: 'lg',
+        ariaLabel: 'Search Everywhere',
+        body,
+        onOpen: () => { setTimeout(() => input.focus(), 0); },
+        // Fires on every close route (our own Escape handling above, a
+        // backdrop-mousedown dismissal tl-dialog handles internally and
+        // never routes through closeCommandPalette()) — see
+        // teardownPaletteState()'s comment.
+        onClose: () => teardownPaletteState(state, state.pendingRefocus !== false),
+      });
 
       try {
         state.allCommands = await getPaletteCommands();
@@ -417,7 +551,7 @@
         state.selectedIndex = 0;
         renderPaletteResults();
       } catch (event) {
-        listEl.innerHTML = `<div class="command-palette-empty">Failed to load commands: ${esc(String(event))}</div>`;
+        listEl.innerHTML = `<div class="tl-palette__empty">Failed to load commands: ${esc(String(event))}</div>`;
       }
     }
 

@@ -191,7 +191,7 @@
     const depth = stack.length;
 
     const overlay = document.createElement('div');
-    overlay.className = 'tl-dialog__overlay';
+    overlay.className = 'tl-dialog__overlay' + (opts.top ? ' tl-dialog__overlay--top' : '');
     overlay.style.zIndex = String(zIndexForDepth(depth));
 
     const sizeKey = opts.size === 'sm' || opts.size === 'lg' ? opts.size : 'md';
