@@ -15,31 +15,13 @@
 
   function log(msg) { console.log('[plugin-widgets] ' + msg); }
 
-  function setDialogOverlayAttributes(overlay, label) {
-    if (!overlay) return;
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', String(label || 'Plugin dialog'));
-  }
-
-  function registerOverlayEscape(overlay, name, onEscape) {
-    const keyboardRouter = window.termlabKeyboardRouter;
-    if (!keyboardRouter || typeof keyboardRouter.register !== 'function') {
-      console.warn('plugin-widgets: keyboard router unavailable, skipping escape registration:', name || 'plugin-dialog');
-      return () => {};
-    }
-
-    return keyboardRouter.register({
-      name: name || 'plugin-dialog',
-      priority: 220,
-      isActive: () => !!(overlay && overlay.isConnected),
-      onKeyDown: (event) => {
-        if (!overlay || !overlay.isConnected) return false;
-        if (event.key !== 'Escape') return false;
-        onEscape(event);
-        return true;
-      },
-    });
+  // Duplicate-dialog guard for handleFormDialog/handlePromptDialog/
+  // handleConfirmDialog below: each open dialog tags its tl-dialog panel
+  // with data-plugin-dialog="<pluginName>" (see the onOpen hooks) so a
+  // second prompt from the same plugin while one is already open can be
+  // detected without depending on the removed .ssh-overlay class.
+  function findOpenPluginDialog(pluginName) {
+    return document.querySelector(`[data-plugin-dialog="${CSS.escape(pluginName)}"]`);
   }
 
   function init(opts) {
@@ -834,20 +816,18 @@
   function handleFormDialog(event) {
     const { prompt_id, json } = event.payload;
     const pluginName = prompt_id.split('\0')[0];
-    if (_dialogCooldown.has(pluginName) ||
-        document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+    if (_dialogCooldown.has(pluginName) || findOpenPluginDialog(pluginName)) {
+      invoke('dialog_respond_form', { promptId: prompt_id, result: null }).catch(() => {});
+      return;
+    }
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') {
       invoke('dialog_respond_form', { promptId: prompt_id, result: null }).catch(() => {});
       return;
     }
     let desc;
     try { desc = typeof json === 'string' ? JSON.parse(json) : json; } catch (_) { desc = {}; }
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.setAttribute('data-plugin-dialog', pluginName);
-    overlay.style.zIndex = '4000';
     const title = desc.title || 'Form';
-    setDialogOverlayAttributes(overlay, title || 'Plugin form');
     const fields = desc.fields || [];
     const buttons = desc.buttons || [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'OK' }];
 
@@ -859,145 +839,164 @@
       const hint = f.hint ? ` placeholder="${attr(f.hint)}"` : '';
       const val = f.value != null ? ` value="${attr(String(f.value))}"` : '';
       if (f.type === 'text') {
-        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="text" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></label>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="text" class="tl-input" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></div>`;
       } else if (f.type === 'password') {
-        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="password" data-field="${attr(f.id)}"${val}${hint}></label>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="password" class="tl-input" data-field="${attr(f.id)}"${val}${hint}></div>`;
       } else if (f.type === 'number') {
-        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="number" data-field="${attr(f.id)}"${val}></label>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="number" class="tl-input" data-field="${attr(f.id)}"${val}></div>`;
       } else if (f.type === 'combo') {
         const opts = (f.options || []).map(o => `<option value="${attr(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('');
-        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<select data-field="${attr(f.id)}">${opts}</select></label>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><select class="tl-combo-select" data-field="${attr(f.id)}">${opts}</select></div>`;
       } else if (f.type === 'checkbox') {
         const checked = f.value ? 'checked' : '';
-        fieldsHtml += `<label class="pw-checkbox"><input type="checkbox" data-field="${attr(f.id)}" ${checked}> ${esc(label)}</label>`;
+        fieldsHtml += `<label class="tl-check"><input type="checkbox" data-field="${attr(f.id)}" ${checked}> ${esc(label)}</label>`;
       } else if (f.type === 'host_port') {
-        fieldsHtml += `<div class="ssh-form-row"><label class="ssh-form-label" style="flex:1">${esc(label)}<input type="text" data-field="${attr(f.host_id || 'host')}" value="${attr(f.host_value || '')}" spellcheck="false"></label>`;
-        fieldsHtml += `<label class="ssh-form-label" style="width:80px">Port<input type="number" data-field="${attr(f.port_id || 'port')}" value="${attr(f.port_value || '22')}"></label></div>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="text" class="tl-input" data-field="${attr(f.host_id || 'host')}" value="${attr(f.host_value || '')}" spellcheck="false"></div>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">Port</span><input type="number" class="tl-input" data-field="${attr(f.port_id || 'port')}" value="${attr(f.port_value || '22')}"></div>`;
       } else if (f.type === 'file_picker') {
-        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="text" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></label>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="text" class="tl-input" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></div>`;
       }
     }
 
-    let buttonsHtml = '';
-    for (const b of buttons) {
-      const primary = b.id === 'ok' || b.id === 'save' || b.id === 'save_connect' ? ' primary' : '';
-      buttonsHtml += `<button class="ssh-form-btn${primary}" data-action="${attr(b.id)}">${esc(b.label)}</button>`;
-    }
-
-    overlay.innerHTML = `<div class="ssh-form"><div class="ssh-form-title">${esc(title)}</div><div class="ssh-form-body">${fieldsHtml}</div><div class="ssh-form-buttons">${buttonsHtml}</div></div>`;
-    document.body.appendChild(overlay);
-
-    // Keyboard-first UX: focus the first editable field automatically.
-    setTimeout(() => {
-      const firstInput = overlay.querySelector(
-        '.ssh-form-body input[type="text"], .ssh-form-body input[type="password"], .ssh-form-body input[type="number"], .ssh-form-body select, .ssh-form-body textarea'
-      );
-      if (firstInput && typeof firstInput.focus === 'function') {
-        firstInput.focus();
-        if (firstInput.tagName === 'INPUT' && typeof firstInput.select === 'function') {
-          firstInput.select();
-        }
-      }
-    }, 30);
-
-    let unregisterKeys = null;
+    let handle = null;
+    let done = false;
     const dismiss = (result) => {
+      if (done) return;
+      done = true;
       _dialogCooldown.add(pluginName);
       setTimeout(() => _dialogCooldown.delete(pluginName), 600);
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      unregisterKeys = null;
-      overlay.remove();
       invoke('dialog_respond_form', { promptId: prompt_id, result }).catch(() => {});
+      if (handle) handle.close();
     };
 
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(null); });
-    overlay.querySelectorAll('.ssh-form-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action;
-        if (action === 'cancel') { dismiss(null); return; }
+    const dialogButtons = buttons.map((b) => ({
+      label: b.label,
+      primary: b.id === 'ok' || b.id === 'save' || b.id === 'save_connect',
+      onSelect: () => {
+        if (b.id === 'cancel') { dismiss(null); return; }
         // Collect field values.
-        const values = { _action: action };
-        overlay.querySelectorAll('[data-field]').forEach(el => {
+        const values = { _action: b.id };
+        handle.el.querySelectorAll('[data-field]').forEach(el => {
           const id = el.dataset.field;
           if (el.type === 'checkbox') values[id] = el.checked;
           else values[id] = el.value;
         });
         dismiss(JSON.stringify(values));
-      });
-    });
+      },
+    }));
 
-    unregisterKeys = registerOverlayEscape(overlay, `plugin-form:${pluginName}`, () => {
-      dismiss(null);
+    handle = window.tlDialog.open({
+      title,
+      ariaLabel: title || 'Plugin form',
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = fieldsHtml;
+        bodyEl.querySelectorAll('select.tl-combo-select').forEach((select) => {
+          if (window.tlCombo && typeof window.tlCombo.attach === 'function') window.tlCombo.attach(select);
+        });
+        // Keyboard-first UX: focus the first editable field automatically.
+        setTimeout(() => {
+          let firstInput = bodyEl.querySelector(
+            'input[type="text"], input[type="password"], input[type="number"], select, textarea'
+          );
+          // tlCombo.attach() (above) hides 'combo' fields' native <select>
+          // and shows a .tl-combo button in its place, so the select itself
+          // can no longer receive focus — focus the visible button instead.
+          if (firstInput && firstInput.tagName === 'SELECT') {
+            firstInput = (firstInput._tlCombo && firstInput._tlCombo.button) || null;
+          }
+          if (firstInput && typeof firstInput.focus === 'function') {
+            firstInput.focus();
+            if (firstInput.tagName === 'INPUT' && typeof firstInput.select === 'function') {
+              firstInput.select();
+            }
+          }
+        }, 30);
+      },
+      buttons: dialogButtons,
+      onClose: () => dismiss(null),
+      onOpen: (panelEl) => { panelEl.setAttribute('data-plugin-dialog', pluginName); },
     });
   }
 
   function handlePromptDialog(event) {
     const { prompt_id, message, default_value } = event.payload;
     const pluginName = prompt_id.split('\0')[0];
-    if (_dialogCooldown.has(pluginName) ||
-        document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+    if (_dialogCooldown.has(pluginName) || findOpenPluginDialog(pluginName)) {
       invoke('dialog_respond_prompt', { promptId: prompt_id, value: null }).catch(() => {});
       return;
     }
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.setAttribute('data-plugin-dialog', pluginName);
-    overlay.style.zIndex = '4000';
-    setDialogOverlayAttributes(overlay, 'Plugin prompt');
-    overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Prompt</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div><input class="pw-text-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false"></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="pd-cancel">Cancel</button><button class="ssh-form-btn primary" id="pd-ok">OK</button></div></div>`;
-    document.body.appendChild(overlay);
-    setTimeout(() => overlay.querySelector('#pd-input').focus(), 50);
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') {
+      invoke('dialog_respond_prompt', { promptId: prompt_id, value: null }).catch(() => {});
+      return;
+    }
 
-    let unregisterKeys = null;
+    let handle = null;
+    let done = false;
     const dismiss = (val) => {
+      if (done) return;
+      done = true;
       _dialogCooldown.add(pluginName);
       setTimeout(() => _dialogCooldown.delete(pluginName), 600);
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      unregisterKeys = null;
-      overlay.remove();
       invoke('dialog_respond_prompt', { promptId: prompt_id, value: val }).catch(() => {});
+      if (handle) handle.close();
     };
 
-    overlay.querySelector('#pd-cancel').addEventListener('click', () => dismiss(null));
-    overlay.querySelector('#pd-ok').addEventListener('click', () => dismiss(overlay.querySelector('#pd-input').value));
-    overlay.querySelector('#pd-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') dismiss(overlay.querySelector('#pd-input').value); });
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(null); });
-    unregisterKeys = registerOverlayEscape(overlay, `plugin-prompt:${pluginName}`, () => {
-      dismiss(null);
+    handle = window.tlDialog.open({
+      title: 'Prompt',
+      ariaLabel: 'Plugin prompt',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `<div class="pw-label">${esc(message)}</div><input class="pw-text-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false">`;
+        const input = bodyEl.querySelector('#pd-input');
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') dismiss(input.value); });
+        setTimeout(() => input.focus(), 50);
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: () => dismiss(null) },
+        { label: 'OK', primary: true, onSelect: () => dismiss(handle.el.querySelector('#pd-input').value) },
+      ],
+      onClose: () => dismiss(null),
+      onOpen: (panelEl) => { panelEl.setAttribute('data-plugin-dialog', pluginName); },
     });
   }
 
   function handleConfirmDialog(event) {
     const { prompt_id, message } = event.payload;
     const pluginName = prompt_id.split('\0')[0];
-    if (_dialogCooldown.has(pluginName) ||
-        document.querySelector(`.ssh-overlay[data-plugin-dialog="${CSS.escape(pluginName)}"]`)) {
+    if (_dialogCooldown.has(pluginName) || findOpenPluginDialog(pluginName)) {
       invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: false }).catch(() => {});
       return;
     }
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.setAttribute('data-plugin-dialog', pluginName);
-    overlay.style.zIndex = '4000';
-    setDialogOverlayAttributes(overlay, 'Plugin confirmation');
-    overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Confirm</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="cd-no">No</button><button class="ssh-form-btn primary" id="cd-yes">Yes</button></div></div>`;
-    document.body.appendChild(overlay);
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') {
+      invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: false }).catch(() => {});
+      return;
+    }
 
-    let unregisterKeys = null;
+    let handle = null;
+    let done = false;
     const dismiss = (val) => {
+      if (done) return;
+      done = true;
       _dialogCooldown.add(pluginName);
       setTimeout(() => _dialogCooldown.delete(pluginName), 600);
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      unregisterKeys = null;
-      overlay.remove();
       invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: val }).catch(() => {});
+      if (handle) handle.close();
     };
 
-    overlay.querySelector('#cd-no').addEventListener('click', () => dismiss(false));
-    overlay.querySelector('#cd-yes').addEventListener('click', () => dismiss(true));
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(false); });
-    unregisterKeys = registerOverlayEscape(overlay, `plugin-confirm:${pluginName}`, () => {
-      dismiss(false);
+    handle = window.tlDialog.open({
+      title: 'Confirm',
+      ariaLabel: 'Plugin confirmation',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `<div class="pw-label">${esc(message)}</div>`;
+      },
+      buttons: [
+        { label: 'No', onSelect: () => dismiss(false) },
+        { label: 'Yes', primary: true, onSelect: () => dismiss(true) },
+      ],
+      onClose: () => dismiss(false),
+      onOpen: (panelEl) => { panelEl.setAttribute('data-plugin-dialog', pluginName); },
     });
   }
 

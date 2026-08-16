@@ -31,6 +31,22 @@
   // (active) dialog.
   const stack = [];
 
+  // Listeners for "the dialog stack just went from non-empty to empty" —
+  // e.g. dialog-runtime.js's terminal-refocus logic, which used to infer
+  // this from a MutationObserver counting .ssh-overlay nodes. Fired once
+  // per close() call that empties the stack (not per-dialog), after focus
+  // restoration and the closed dialog's own onClose.
+  const allClosedListeners = [];
+
+  function onAllClosed(listener) {
+    if (typeof listener !== 'function') return () => {};
+    allClosedListeners.push(listener);
+    return function unregister() {
+      const idx = allClosedListeners.indexOf(listener);
+      if (idx !== -1) allClosedListeners.splice(idx, 1);
+    };
+  }
+
   // Elements forced aria-hidden while a dialog is open, with their prior
   // aria-hidden value so it can be restored exactly (see refreshAriaHidden).
   let hiddenSiblings = [];
@@ -197,6 +213,11 @@
         restoreEl.focus();
       }
       if (typeof opts.onClose === 'function') opts.onClose(result);
+      if (!stack.length) {
+        for (const listener of allClosedListeners.slice()) {
+          try { listener(); } catch (error) { console.warn('tl-dialog: onAllClosed listener failed:', error); }
+        }
+      }
     }
     entry.close = close;
 
@@ -277,6 +298,7 @@
     open,
     closeTop,
     count,
+    onAllClosed,
     // Exposed for scripts/tests/test_tl_dialog.mjs — pure logic, no DOM
     // required (matches tl-icon.js's _setDarkVariants precedent).
     _zIndexForDepth: zIndexForDepth,

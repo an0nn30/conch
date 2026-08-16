@@ -1,7 +1,7 @@
 (function initTermLabSshConnectionForm(global) {
   'use strict';
 
-  async function populateAccountPicker(overlay, selectedId, deps) {
+  async function populateAccountPicker(panelEl, selectedId, deps) {
     const d = deps || {};
     const attr = typeof d.attr === 'function'
       ? d.attr
@@ -10,7 +10,7 @@
       ? d.esc
       : attr;
 
-    const select = overlay.querySelector('#cf-vault-account');
+    const select = panelEl.querySelector('#cf-vault-account');
     if (!select) return;
 
     let accounts = [];
@@ -35,13 +35,14 @@
     select.innerHTML = html;
 
     if (selectedId) select.value = selectedId;
-    updateCredentialFieldsVisibility(overlay);
+    if (select._tlCombo && typeof select._tlCombo.refresh === 'function') select._tlCombo.refresh();
+    updateCredentialFieldsVisibility(panelEl);
   }
 
-  function updateCredentialFieldsVisibility(overlay) {
-    const select = overlay.querySelector('#cf-vault-account');
-    const manualCreds = overlay.querySelector('#cf-manual-creds');
-    const accountInfo = overlay.querySelector('#cf-vault-account-info');
+  function updateCredentialFieldsVisibility(panelEl) {
+    const select = panelEl.querySelector('#cf-vault-account');
+    const manualCreds = panelEl.querySelector('#cf-manual-creds');
+    const accountInfo = panelEl.querySelector('#cf-vault-account-info');
     if (!select || !manualCreds || !accountInfo) return;
 
     const value = select.value;
@@ -57,15 +58,21 @@
     accountInfo.style.display = 'none';
   }
 
-  function handleCreateNewAccount(overlay, fallbackId, deps) {
+  function handleCreateNewAccount(panelEl, fallbackId, deps) {
     const d = deps || {};
 
     if (!global.vault) {
       if (d.toast && typeof d.toast.error === 'function') {
         d.toast.error('Vault Unavailable', 'Vault module not loaded');
       }
-      const select = overlay.querySelector('#cf-vault-account');
-      if (select) select.value = fallbackId || '';
+      const select = panelEl.querySelector('#cf-vault-account');
+      if (select) {
+        select.value = fallbackId || '';
+        // Plain .value writes don't trigger tl-combo's change listener or
+        // its attribute/childList MutationObserver, so the visible combo
+        // button's label would otherwise go stale here.
+        if (select._tlCombo && typeof select._tlCombo.refresh === 'function') select._tlCombo.refresh();
+      }
       return;
     }
 
@@ -75,27 +82,27 @@
         const vaultOverlay = document.getElementById('vault-overlay');
         if (vaultOverlay) return;
         clearInterval(checkInterval);
-        populateAccountPicker(overlay, '', d);
+        populateAccountPicker(panelEl, '', d);
       }, 300);
     });
   }
 
-  function submitForm(overlay, existing, andConnect, dismissOverlay, deps) {
+  function submitForm(panelEl, existing, andConnect, dismissForm, deps) {
     const d = deps || {};
     if (typeof d.invoke !== 'function') return;
 
-    const hostInput = overlay.querySelector('#cf-host');
+    const hostInput = panelEl.querySelector('#cf-host');
     const host = hostInput ? hostInput.value.trim() : '';
     if (!host) {
       if (hostInput) hostInput.focus();
       return;
     }
 
-    const labelInput = overlay.querySelector('#cf-label');
-    const portInput = overlay.querySelector('#cf-port');
-    const proxyTypeSelect = overlay.querySelector('#cf-proxy-type');
-    const proxyValueInput = overlay.querySelector('#cf-proxy-value');
-    const folderSelect = overlay.querySelector('#cf-folder');
+    const labelInput = panelEl.querySelector('#cf-label');
+    const portInput = panelEl.querySelector('#cf-port');
+    const proxyTypeSelect = panelEl.querySelector('#cf-proxy-type');
+    const proxyValueInput = panelEl.querySelector('#cf-proxy-value');
+    const folderSelect = panelEl.querySelector('#cf-folder');
 
     const label = labelInput ? labelInput.value.trim() : '';
     const port = parseInt(portInput ? portInput.value : '', 10) || 22;
@@ -106,14 +113,14 @@
     const proxyJump = proxyType === 'jump' && proxyValue ? proxyValue : null;
     const proxyCommand = proxyType === 'command' && proxyValue ? proxyValue : null;
 
-    const accountSelect = overlay.querySelector('#cf-vault-account');
+    const accountSelect = panelEl.querySelector('#cf-vault-account');
     const vaultAccountId = accountSelect && accountSelect.value && accountSelect.value !== '__create__'
       ? accountSelect.value
       : null;
 
-    const userInput = overlay.querySelector('#cf-user');
-    const passwordInput = overlay.querySelector('#cf-password');
-    const keyPathInput = overlay.querySelector('#cf-key-path');
+    const userInput = panelEl.querySelector('#cf-user');
+    const passwordInput = panelEl.querySelector('#cf-password');
+    const keyPathInput = panelEl.querySelector('#cf-key-path');
 
     const user = vaultAccountId
       ? (existing ? existing.user : null)
@@ -137,8 +144,7 @@
       proxy_jump: proxyJump,
     };
 
-    if (typeof dismissOverlay === 'function') dismissOverlay();
-    else if (typeof d.removeOverlay === 'function') d.removeOverlay();
+    dismissForm();
 
     d.invoke('remote_save_server', { entry, folderId })
       .then(() => {
@@ -156,13 +162,11 @@
 
   function showConnectionForm(existing, defaultFolderId, deps) {
     const d = deps || {};
-    if (typeof d.removeOverlay !== 'function') return false;
-    if (typeof d.setOverlayDialogAttributes !== 'function') return false;
-    if (typeof d.registerOverlayKeys !== 'function') return false;
-    if (!d.serverData || !Array.isArray(d.serverData.folders)) return false;
-    if (typeof d.buildProxyJumpOptions !== 'function') return false;
-    if (typeof d.renderProxyJumpOptions !== 'function') return false;
-    if (typeof d.normalizeProxyJump !== 'function') return false;
+    if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return null;
+    if (!d.serverData || !Array.isArray(d.serverData.folders)) return null;
+    if (typeof d.buildProxyJumpOptions !== 'function') return null;
+    if (typeof d.renderProxyJumpOptions !== 'function') return null;
+    if (typeof d.normalizeProxyJump !== 'function') return null;
 
     const attr = typeof d.attr === 'function'
       ? d.attr
@@ -170,8 +174,6 @@
     const esc = typeof d.esc === 'function'
       ? d.esc
       : attr;
-
-    d.removeOverlay();
 
     const isEdit = !!existing;
     const title = isEdit ? 'Edit SSH Connection' : 'New SSH Connection';
@@ -213,183 +215,190 @@
 
     const existingVaultId = existing ? (existing.vault_account_id || '') : '';
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    d.setOverlayDialogAttributes(overlay, title);
-    overlay.innerHTML = `
-      <div class="ssh-form">
-        <div class="ssh-form-title">${esc(title)}</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">Session Name
-            <input type="text" id="cf-label" value="${attr(existing ? existing.label : '')}"
-                   placeholder="optional" spellcheck="false" />
-          </label>
-          <div class="ssh-form-row">
-            <label class="ssh-form-label" style="flex:1">Host / IP
-              <input type="text" id="cf-host" value="${attr(existing ? existing.host : '')}"
-                     placeholder="example.com" spellcheck="false" required />
-            </label>
-            <label class="ssh-form-label" style="width:80px">Port
-              <input type="number" id="cf-port" value="${existing ? existing.port : 22}" min="1" max="65535" />
-            </label>
-          </div>
-          <label class="ssh-form-label">Account
-            <select id="cf-vault-account">
-              <option value="">Manual credentials</option>
-              <option value="__create__">+ Create New Account...</option>
-            </select>
-          </label>
-          <div id="cf-vault-account-info" style="display:none;padding:6px 8px;border-radius:4px;background:var(--bg);border:1px solid var(--selection);margin-bottom:8px;font-size:12px"></div>
-          <div id="cf-manual-creds">
-            <label class="ssh-form-label">Username
-              <input type="text" id="cf-user" value="${attr(existing ? existing.user : '')}"
-                     placeholder="root" spellcheck="false" />
-            </label>
-            <label class="ssh-form-label">Password
-              <input type="password" id="cf-password" value="" placeholder="leave empty for key auth" />
-            </label>
-            <label class="ssh-form-label">Private Key
-              <input type="text" id="cf-key-path" value="${attr(existing && existing.key_path ? existing.key_path : '')}"
-                     placeholder="~/.ssh/id_ed25519" spellcheck="false" />
-            </label>
-          </div>
-          <details class="ssh-form-advanced" ${proxyType !== 'none' ? 'open' : ''}>
-            <summary>Advanced</summary>
-            <label class="ssh-form-label">Proxy Type
-              <select id="cf-proxy-type">
-                <option value="none" ${proxyType === 'none' ? 'selected' : ''}>None</option>
-                <option value="jump" ${proxyType === 'jump' ? 'selected' : ''}>ProxyJump</option>
-                <option value="command" ${proxyType === 'command' ? 'selected' : ''}>ProxyCommand</option>
-              </select>
-            </label>
-            <label class="ssh-form-label" id="cf-proxy-jump-row" style="display:${proxyType === 'jump' ? '' : 'none'}">Proxy Jump Session
-              <select id="cf-proxy-jump-select">
-                <option value="__custom__" ${selectedProxyJumpOption ? '' : 'selected'}>Custom value...</option>
-                ${d.renderProxyJumpOptions(proxyJumpOptions)}
-              </select>
-            </label>
-            <label class="ssh-form-label" id="cf-proxy-value-row" style="display:${proxyType === 'none' ? 'none' : ''}">Proxy Value
-              <input type="text" id="cf-proxy-value" value="${attr(proxyValue)}"
-                     placeholder="user@jumphost or ssh -W %h:%p host" spellcheck="false" />
-            </label>
-          </details>
-          <label class="ssh-form-label">Save to Folder
-            <select id="cf-folder">
-              ${folderOptions.map((folder) =>
-                `<option value="${attr(folder.id)}" ${folder.id === selectedFolder ? 'selected' : ''}>${esc(folder.name)}</option>`
-              ).join('')}
-            </select>
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="cf-cancel">Cancel</button>
-          <button class="ssh-form-btn" id="cf-save">Save</button>
-          <button class="ssh-form-btn primary" id="cf-save-connect">Save & Connect</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    populateAccountPicker(overlay, existingVaultId, d);
-
-    const accountSelect = overlay.querySelector('#cf-vault-account');
-    if (accountSelect) {
-      accountSelect.addEventListener('change', () => {
-        const value = accountSelect.value;
-        if (value === '__create__') {
-          handleCreateNewAccount(overlay, existingVaultId, d);
-          return;
-        }
-        updateCredentialFieldsVisibility(overlay);
-      });
-    }
-
-    const proxyTypeSelect = overlay.querySelector('#cf-proxy-type');
-    const proxyValueInput = overlay.querySelector('#cf-proxy-value');
-    const proxyValueRow = overlay.querySelector('#cf-proxy-value-row');
-    const proxyJumpRow = overlay.querySelector('#cf-proxy-jump-row');
-    const proxyJumpSelect = overlay.querySelector('#cf-proxy-jump-select');
-
-    function syncProxyJumpSelectFromValue() {
-      if (!proxyJumpSelect || !proxyTypeSelect || !proxyValueInput) return;
-      if (proxyTypeSelect.value !== 'jump') return;
-
-      const normalized = d.normalizeProxyJump(proxyValueInput.value);
-      if (!normalized) {
-        proxyJumpSelect.value = '__custom__';
-        return;
-      }
-      const match = proxyJumpOptions.find((opt) => d.normalizeProxyJump(opt.spec) === normalized);
-      proxyJumpSelect.value = match ? match.spec : '__custom__';
-    }
-
-    function syncProxyUi() {
-      if (!proxyTypeSelect || !proxyValueInput || !proxyValueRow || !proxyJumpRow) return;
-      const currentProxyType = proxyTypeSelect.value;
-      proxyJumpRow.style.display = currentProxyType === 'jump' ? '' : 'none';
-      proxyValueRow.style.display = currentProxyType === 'none' ? 'none' : '';
-
-      if (currentProxyType === 'jump') {
-        proxyValueInput.placeholder = 'user@jump-host or jump-host:2222';
-        syncProxyJumpSelectFromValue();
-      } else if (currentProxyType === 'command') {
-        proxyValueInput.placeholder = 'ssh -W %h:%p jump-host';
-      }
-    }
-
-    if (proxyJumpSelect && proxyValueInput) {
-      proxyJumpSelect.addEventListener('change', () => {
-        if (proxyJumpSelect.value === '__custom__') {
-          proxyValueInput.focus();
-          return;
-        }
-        proxyValueInput.value = proxyJumpSelect.value;
-      });
-    }
-
-    if (proxyTypeSelect) proxyTypeSelect.addEventListener('change', syncProxyUi);
-    if (proxyValueInput && proxyTypeSelect) {
-      proxyValueInput.addEventListener('input', () => {
-        if (proxyTypeSelect.value === 'jump') syncProxyJumpSelectFromValue();
-      });
-    }
-
-    if (selectedProxyJumpOption && proxyJumpSelect) {
-      proxyJumpSelect.value = selectedProxyJumpOption.spec;
-    }
-    syncProxyUi();
-
-    const hostInput = overlay.querySelector('#cf-host');
-    setTimeout(() => {
-      if (hostInput) hostInput.focus();
-    }, 50);
-
+    let handle = null;
     let dismissed = false;
     const dismissForm = () => {
       if (dismissed) return;
       dismissed = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      d.removeOverlay();
+      if (handle) handle.close();
     };
 
-    const unregisterKeys = d.registerOverlayKeys(overlay, 'ssh-connection-form', (event) => {
-      if (event.key !== 'Escape') return false;
-      dismissForm();
-      return true;
+    handle = global.tlDialog.open({
+      title,
+      ariaLabel: title,
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="tl-field">
+            <span class="tl-field__label">Session Name</span>
+            <input type="text" class="tl-input" id="cf-label" value="${attr(existing ? existing.label : '')}"
+                   placeholder="optional" spellcheck="false" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Host / IP</span>
+            <input type="text" class="tl-input" id="cf-host" value="${attr(existing ? existing.host : '')}"
+                   placeholder="example.com" spellcheck="false" required />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Port</span>
+            <input type="number" class="tl-input" id="cf-port" value="${existing ? existing.port : 22}" min="1" max="65535" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Account</span>
+            <select class="tl-combo-select" id="cf-vault-account">
+              <option value="">Manual credentials</option>
+              <option value="__create__">+ Create New Account...</option>
+            </select>
+          </div>
+          <div id="cf-vault-account-info" style="display:none;padding:6px 8px;border-radius:4px;background:var(--tl-bg);border:1px solid var(--tl-border);margin-bottom:8px;font-size:12px"></div>
+          <div id="cf-manual-creds">
+            <div class="tl-field">
+              <span class="tl-field__label">Username</span>
+              <input type="text" class="tl-input" id="cf-user" value="${attr(existing ? existing.user : '')}"
+                     placeholder="root" spellcheck="false" />
+            </div>
+            <div class="tl-field">
+              <span class="tl-field__label">Password</span>
+              <input type="password" class="tl-input" id="cf-password" value="" placeholder="leave empty for key auth" />
+            </div>
+            <div class="tl-field">
+              <span class="tl-field__label">Private Key</span>
+              <input type="text" class="tl-input" id="cf-key-path" value="${attr(existing && existing.key_path ? existing.key_path : '')}"
+                     placeholder="~/.ssh/id_ed25519" spellcheck="false" />
+            </div>
+          </div>
+          <details class="ssh-form-advanced" ${proxyType !== 'none' ? 'open' : ''}>
+            <summary>Advanced</summary>
+            <div class="tl-field">
+              <span class="tl-field__label">Proxy Type</span>
+              <select class="tl-combo-select" id="cf-proxy-type">
+                <option value="none" ${proxyType === 'none' ? 'selected' : ''}>None</option>
+                <option value="jump" ${proxyType === 'jump' ? 'selected' : ''}>ProxyJump</option>
+                <option value="command" ${proxyType === 'command' ? 'selected' : ''}>ProxyCommand</option>
+              </select>
+            </div>
+            <div class="tl-field" id="cf-proxy-jump-row" style="display:${proxyType === 'jump' ? '' : 'none'}">
+              <span class="tl-field__label">Proxy Jump Session</span>
+              <select class="tl-combo-select" id="cf-proxy-jump-select">
+                <option value="__custom__" ${selectedProxyJumpOption ? '' : 'selected'}>Custom value...</option>
+                ${d.renderProxyJumpOptions(proxyJumpOptions)}
+              </select>
+            </div>
+            <div class="tl-field" id="cf-proxy-value-row" style="display:${proxyType === 'none' ? 'none' : ''}">
+              <span class="tl-field__label">Proxy Value</span>
+              <input type="text" class="tl-input" id="cf-proxy-value" value="${attr(proxyValue)}"
+                     placeholder="user@jumphost or ssh -W %h:%p host" spellcheck="false" />
+            </div>
+          </details>
+          <div class="tl-field">
+            <span class="tl-field__label">Save to Folder</span>
+            <select class="tl-combo-select" id="cf-folder">
+              ${folderOptions.map((folder) =>
+                `<option value="${attr(folder.id)}" ${folder.id === selectedFolder ? 'selected' : ''}>${esc(folder.name)}</option>`
+              ).join('')}
+            </select>
+          </div>
+        `;
+
+        bodyEl.querySelectorAll('select.tl-combo-select').forEach((select) => {
+          if (global.tlCombo && typeof global.tlCombo.attach === 'function') global.tlCombo.attach(select);
+        });
+
+        // populateAccountPicker/updateCredentialFieldsVisibility/
+        // handleCreateNewAccount only ever query IDs that live inside the
+        // body (never the footer buttons), so bodyEl itself is a valid
+        // stand-in for the old overlay-scoped querySelector root.
+        populateAccountPicker(bodyEl, existingVaultId, d);
+
+        const accountSelect = bodyEl.querySelector('#cf-vault-account');
+        if (accountSelect) {
+          accountSelect.addEventListener('change', () => {
+            const value = accountSelect.value;
+            if (value === '__create__') {
+              handleCreateNewAccount(bodyEl, existingVaultId, d);
+              return;
+            }
+            updateCredentialFieldsVisibility(bodyEl);
+          });
+        }
+
+        const proxyTypeSelect = bodyEl.querySelector('#cf-proxy-type');
+        const proxyValueInput = bodyEl.querySelector('#cf-proxy-value');
+        const proxyValueRow = bodyEl.querySelector('#cf-proxy-value-row');
+        const proxyJumpRow = bodyEl.querySelector('#cf-proxy-jump-row');
+        const proxyJumpSelect = bodyEl.querySelector('#cf-proxy-jump-select');
+
+        function syncProxyJumpSelectFromValue() {
+          if (!proxyJumpSelect || !proxyTypeSelect || !proxyValueInput) return;
+          if (proxyTypeSelect.value !== 'jump') return;
+
+          const normalized = d.normalizeProxyJump(proxyValueInput.value);
+          if (!normalized) {
+            proxyJumpSelect.value = '__custom__';
+            if (proxyJumpSelect._tlCombo) proxyJumpSelect._tlCombo.refresh();
+            return;
+          }
+          const match = proxyJumpOptions.find((opt) => d.normalizeProxyJump(opt.spec) === normalized);
+          proxyJumpSelect.value = match ? match.spec : '__custom__';
+          if (proxyJumpSelect._tlCombo) proxyJumpSelect._tlCombo.refresh();
+        }
+
+        function syncProxyUi() {
+          if (!proxyTypeSelect || !proxyValueInput || !proxyValueRow || !proxyJumpRow) return;
+          const currentProxyType = proxyTypeSelect.value;
+          proxyJumpRow.style.display = currentProxyType === 'jump' ? '' : 'none';
+          proxyValueRow.style.display = currentProxyType === 'none' ? 'none' : '';
+
+          if (currentProxyType === 'jump') {
+            proxyValueInput.placeholder = 'user@jump-host or jump-host:2222';
+            syncProxyJumpSelectFromValue();
+          } else if (currentProxyType === 'command') {
+            proxyValueInput.placeholder = 'ssh -W %h:%p jump-host';
+          }
+        }
+
+        if (proxyJumpSelect && proxyValueInput) {
+          proxyJumpSelect.addEventListener('change', () => {
+            if (proxyJumpSelect.value === '__custom__') {
+              proxyValueInput.focus();
+              return;
+            }
+            proxyValueInput.value = proxyJumpSelect.value;
+          });
+        }
+
+        if (proxyTypeSelect) proxyTypeSelect.addEventListener('change', syncProxyUi);
+        if (proxyValueInput && proxyTypeSelect) {
+          proxyValueInput.addEventListener('input', () => {
+            if (proxyTypeSelect.value === 'jump') syncProxyJumpSelectFromValue();
+          });
+        }
+
+        if (selectedProxyJumpOption && proxyJumpSelect) {
+          proxyJumpSelect.value = selectedProxyJumpOption.spec;
+          if (proxyJumpSelect._tlCombo) proxyJumpSelect._tlCombo.refresh();
+        }
+        syncProxyUi();
+
+        // Host, not the shell's default first-focusable (Session Name),
+        // gets initial focus — same as the original overlay. The shell
+        // focuses its default candidate via requestAnimationFrame right
+        // after open(), so this has to run after that, same as the
+        // original's setTimeout(..., 50).
+        const hostInput = bodyEl.querySelector('#cf-host');
+        setTimeout(() => {
+          if (hostInput) hostInput.focus();
+        }, 50);
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: dismissForm },
+        { label: 'Save', onSelect: () => submitForm(handle.el, existing, false, dismissForm, d) },
+        { label: 'Save & Connect', primary: true, onSelect: () => submitForm(handle.el, existing, true, dismissForm, d) },
+      ],
+      onClose: dismissForm,
     });
 
-    overlay.addEventListener('mousedown', (event) => {
-      if (event.target === overlay) dismissForm();
-    });
-
-    const cancelBtn = overlay.querySelector('#cf-cancel');
-    if (cancelBtn) cancelBtn.addEventListener('click', dismissForm);
-    const saveBtn = overlay.querySelector('#cf-save');
-    if (saveBtn) saveBtn.addEventListener('click', () => submitForm(overlay, existing, false, dismissForm, d));
-    const saveConnectBtn = overlay.querySelector('#cf-save-connect');
-    if (saveConnectBtn) saveConnectBtn.addEventListener('click', () => submitForm(overlay, existing, true, dismissForm, d));
-
-    return true;
+    return handle;
   }
 
   global.termlabSshConnectionForm = {

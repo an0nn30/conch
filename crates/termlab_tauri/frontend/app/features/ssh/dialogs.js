@@ -3,42 +3,17 @@
 
   function showAddFolderDialog(deps) {
     const d = deps || {};
-    if (typeof d.removeOverlay !== 'function') return false;
-    if (typeof d.registerOverlayKeys !== 'function') return false;
     if (typeof d.invoke !== 'function') return false;
     if (typeof d.refreshAll !== 'function') return false;
+    if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return false;
 
-    d.removeOverlay();
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    if (typeof d.setOverlayDialogAttributes === 'function') {
-      d.setOverlayDialogAttributes(overlay, 'Create new folder');
-    }
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">New Folder</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">Name
-            <input type="text" id="fd-name" value="" placeholder="Folder name" spellcheck="false" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="fd-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="fd-create">Create</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    const nameInput = overlay.querySelector('#fd-name');
-    setTimeout(() => nameInput.focus(), 50);
-
+    let handle = null;
+    let nameInput = null;
     let closed = false;
     const dismissDialog = () => {
       if (closed) return;
       closed = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      d.removeOverlay();
+      if (handle) handle.close();
     };
     const doCreate = () => {
       const name = nameInput.value.trim();
@@ -55,71 +30,62 @@
           }
         });
     };
-    const unregisterKeys = d.registerOverlayKeys(overlay, 'ssh-add-folder-dialog', (event) => {
-      if (event.key === 'Escape') {
-        dismissDialog();
-        return true;
-      }
-      if (event.key === 'Enter') {
-        doCreate();
-        return true;
-      }
-      return false;
+
+    handle = global.tlDialog.open({
+      title: 'New Folder',
+      ariaLabel: 'Create new folder',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="tl-field">
+            <span class="tl-field__label">Name</span>
+            <input type="text" class="tl-input" id="fd-name" value="" placeholder="Folder name" spellcheck="false" />
+          </div>
+        `;
+        nameInput = bodyEl.querySelector('#fd-name');
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: dismissDialog },
+        { label: 'Create', primary: true, onSelect: doCreate },
+      ],
+      onClose: dismissDialog,
+      // The old handler mapped Enter to "Create" globally (document-level
+      // capture) regardless of which element inside the dialog had focus —
+      // including a footer button, where a plain body-scoped bubble listener
+      // would miss it (the footer isn't a descendant of the body) and the
+      // button's native Enter-triggers-click would fire instead. Listening
+      // on the fully-built panel (available here, after the footer is
+      // attached) reproduces the old "always wins" behavior.
+      onOpen: (panelEl) => {
+        panelEl.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          doCreate();
+        });
+      },
     });
-    overlay.addEventListener('mousedown', (event) => {
-      if (event.target === overlay) dismissDialog();
-    });
-    overlay.querySelector('#fd-cancel').addEventListener('click', dismissDialog);
-    overlay.querySelector('#fd-create').addEventListener('click', doCreate);
-    return true;
+    if (nameInput) nameInput.focus();
+    return handle;
   }
 
   function showRenameFolderDialog(folder, deps) {
     const d = deps || {};
     if (!folder) return false;
-    if (typeof d.removeOverlay !== 'function') return false;
-    if (typeof d.registerOverlayKeys !== 'function') return false;
     if (typeof d.invoke !== 'function') return false;
     if (typeof d.refreshAll !== 'function') return false;
+    if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return false;
 
     const attr = typeof d.attr === 'function'
       ? d.attr
       : (value) => String(value == null ? '' : value);
 
-    d.removeOverlay();
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    if (typeof d.setOverlayDialogAttributes === 'function') {
-      d.setOverlayDialogAttributes(overlay, 'Rename folder');
-    }
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">Rename Folder</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">Name
-            <input type="text" id="rf-name" value="${attr(folder.name)}" spellcheck="false" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="rf-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="rf-save">Save</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    const nameInput = overlay.querySelector('#rf-name');
-    setTimeout(() => {
-      nameInput.focus();
-      nameInput.select();
-    }, 50);
-
+    let handle = null;
+    let nameInput = null;
     let closed = false;
     const dismissDialog = () => {
       if (closed) return;
       closed = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      d.removeOverlay();
+      if (handle) handle.close();
     };
     const doSave = () => {
       const name = nameInput.value.trim();
@@ -136,76 +102,74 @@
           }
         });
     };
-    const unregisterKeys = d.registerOverlayKeys(overlay, 'ssh-rename-folder-dialog', (event) => {
-      if (event.key === 'Escape') {
-        dismissDialog();
-        return true;
-      }
-      if (event.key === 'Enter') {
-        doSave();
-        return true;
-      }
-      return false;
+
+    handle = global.tlDialog.open({
+      title: 'Rename Folder',
+      ariaLabel: 'Rename folder',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="tl-field">
+            <span class="tl-field__label">Name</span>
+            <input type="text" class="tl-input" id="rf-name" value="${attr(folder.name)}" spellcheck="false" />
+          </div>
+        `;
+        nameInput = bodyEl.querySelector('#rf-name');
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: dismissDialog },
+        { label: 'Save', primary: true, onSelect: doSave },
+      ],
+      onClose: dismissDialog,
+      // See showAddFolderDialog above: Enter must win regardless of which
+      // element inside the dialog has focus, including a footer button.
+      onOpen: (panelEl) => {
+        panelEl.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          doSave();
+        });
+      },
     });
-    overlay.addEventListener('mousedown', (event) => {
-      if (event.target === overlay) dismissDialog();
-    });
-    overlay.querySelector('#rf-cancel').addEventListener('click', dismissDialog);
-    overlay.querySelector('#rf-save').addEventListener('click', doSave);
-    return true;
+    if (nameInput) {
+      nameInput.focus();
+      nameInput.select();
+    }
+    return handle;
   }
 
   function showDeleteConfirmDialog(message, onConfirm, deps) {
     const d = deps || {};
-    if (typeof d.removeOverlay !== 'function') return false;
-    if (typeof d.registerOverlayKeys !== 'function') return false;
-
     const esc = typeof d.esc === 'function'
       ? d.esc
       : (value) => String(value == null ? '' : value);
+    if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return false;
 
-    d.removeOverlay();
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '5000';
-    if (typeof d.setOverlayDialogAttributes === 'function') {
-      d.setOverlayDialogAttributes(overlay, 'Confirm delete');
-    }
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">Confirm Delete</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">${esc(message)}</div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="dc-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="dc-delete" style="background:var(--red);border-color:var(--red)">Delete</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-
+    let handle = null;
     let closed = false;
     const dismiss = () => {
       if (closed) return;
       closed = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      if (overlay.isConnected) overlay.remove();
+      if (handle) handle.close();
     };
-    const unregisterKeys = d.registerOverlayKeys(overlay, 'ssh-delete-confirm-dialog', (event) => {
-      if (event.key !== 'Escape') return false;
-      dismiss();
-      return true;
+
+    handle = global.tlDialog.open({
+      title: 'Confirm Delete',
+      ariaLabel: 'Confirm delete',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `<div class="ssh-auth-message">${esc(message)}</div>`;
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: dismiss },
+        { label: 'Delete', primary: true, danger: true, onSelect: () => {
+          dismiss();
+          if (typeof onConfirm === 'function') onConfirm();
+        } },
+      ],
+      onClose: dismiss,
     });
-    overlay.querySelector('#dc-cancel').addEventListener('click', dismiss);
-    overlay.querySelector('#dc-delete').addEventListener('click', () => {
-      dismiss();
-      if (typeof onConfirm === 'function') onConfirm();
-    });
-    overlay.addEventListener('mousedown', (event) => {
-      if (event.target === overlay) dismiss();
-    });
-    return true;
+    return handle;
   }
 
   global.termlabSshDialogs = {

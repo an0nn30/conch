@@ -12,70 +12,32 @@
     let updateProgressToast = null;
 
     function showRestartDialog() {
-      const overlay = document.createElement('div');
-      overlay.className = 'ssh-overlay';
-      overlay.id = 'update-restart-overlay';
-      overlay.setAttribute('role', 'dialog');
-      overlay.setAttribute('aria-modal', 'true');
-      overlay.setAttribute('aria-label', 'Restart to apply update');
+      if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return;
 
-      const dialog = document.createElement('div');
-      dialog.className = 'ssh-form';
-      dialog.style.width = '400px';
-
-      const title = document.createElement('div');
-      title.className = 'ssh-form-title';
-      title.textContent = 'Update Ready';
-      dialog.appendChild(title);
-
-      const msg = document.createElement('div');
-      msg.style.cssText = 'padding:16px 20px;color:var(--fg);font-size:13px';
-      msg.textContent = 'The update has been installed. Restart now to apply?';
-      dialog.appendChild(msg);
-
-      const buttons = document.createElement('div');
-      buttons.className = 'ssh-form-buttons';
-
-      const laterBtn = document.createElement('button');
-      laterBtn.className = 'ssh-form-btn';
-      laterBtn.textContent = 'Restart Later';
-      laterBtn.addEventListener('click', () => dismiss());
-
-      const restartBtn = document.createElement('button');
-      restartBtn.className = 'ssh-form-btn primary';
-      restartBtn.textContent = 'Restart Now';
-      restartBtn.addEventListener('click', () => {
-        dismiss();
-        invoke('restart_app');
-      });
-
-      buttons.appendChild(laterBtn);
-      buttons.appendChild(restartBtn);
-      dialog.appendChild(buttons);
-
-      let unregisterEscape = null;
+      let handle = null;
+      let dismissed = false;
       const dismiss = () => {
-        if (typeof unregisterEscape === 'function') unregisterEscape();
-        unregisterEscape = null;
-        overlay.remove();
+        if (dismissed) return;
+        dismissed = true;
+        if (handle) handle.close();
       };
 
-      overlay.appendChild(dialog);
-      overlay.addEventListener('mousedown', (event) => { if (event.target === overlay) dismiss(); });
-      const keyboardRouter = global.termlabKeyboardRouter;
-      if (keyboardRouter && typeof keyboardRouter.register === 'function') {
-        unregisterEscape = keyboardRouter.register({
-          name: 'update-restart-dialog',
-          priority: 220,
-          isActive: () => !!overlay.isConnected,
-          onKeyDown: (event) => {
-            if (event.key !== 'Escape') return false;
+      handle = global.tlDialog.open({
+        title: 'Update Ready',
+        ariaLabel: 'Restart to apply update',
+        size: 'sm',
+        body: (bodyEl) => {
+          bodyEl.innerHTML = `<div style="color:var(--fg);font-size:13px">The update has been installed. Restart now to apply?</div>`;
+        },
+        buttons: [
+          { label: 'Restart Later', onSelect: dismiss },
+          { label: 'Restart Now', primary: true, onSelect: () => {
             dismiss();
-            return true;
-          },
-        });
-      }
-      document.body.appendChild(overlay);
+            invoke('restart_app');
+          } },
+        ],
+        onClose: dismiss,
+      });
     }
 
     async function startUpdate() {

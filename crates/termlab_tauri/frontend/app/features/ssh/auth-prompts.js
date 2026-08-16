@@ -12,56 +12,50 @@
     const esc = typeof d.esc === 'function' ? d.esc : (value) => String(value == null ? '' : value);
     const invoke = typeof d.invoke === 'function' ? d.invoke : null;
     if (!invoke) return false;
+    if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return false;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '5000';
-    if (typeof d.setOverlayDialogAttributes === 'function') {
-      d.setOverlayDialogAttributes(overlay, 'SSH host key verification');
-    }
-    overlay.innerHTML = `
-      <div class="ssh-form" style="max-width:520px">
-        <div class="ssh-form-title">SSH Host Key Verification</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">${esc(message)}</div>
-          <pre class="ssh-auth-detail">${esc(detail)}</pre>
-          <div class="ssh-auth-question">Do you want to continue connecting and save this key?</div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="hk-reject">Reject</button>
-          <button class="ssh-form-btn primary" id="hk-accept">Accept & Save</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-
+    let handle = null;
     let done = false;
     const respond = (accepted) => {
       if (done) return;
       done = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      if (overlay.isConnected) overlay.remove();
       invoke('auth_respond_host_key', { promptId, accepted }).catch(() => {});
+      if (handle) handle.close();
     };
-    const unregisterKeys = typeof d.registerOverlayKeys === 'function'
-      ? d.registerOverlayKeys(overlay, 'ssh-host-key-prompt', (keyEvent) => {
-        if (keyEvent.key === 'Escape') {
-          respond(false);
-          return true;
-        }
-        if (keyEvent.key === 'Enter') {
-          respond(true);
-          return true;
-        }
-        return false;
-      })
-      : null;
 
-    overlay.querySelector('#hk-reject').addEventListener('click', () => respond(false));
-    overlay.querySelector('#hk-accept').addEventListener('click', () => respond(true));
-    overlay.addEventListener('mousedown', (mouseEvent) => {
-      if (mouseEvent.target === overlay) respond(false);
+    handle = global.tlDialog.open({
+      title: 'SSH Host Key Verification',
+      ariaLabel: 'SSH host key verification',
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="ssh-auth-message">${esc(message)}</div>
+          <pre class="ssh-auth-detail">${esc(detail)}</pre>
+          <div class="ssh-auth-question">Do you want to continue connecting and save this key?</div>
+        `;
+      },
+      buttons: [
+        { label: 'Reject', onSelect: () => respond(false) },
+        { label: 'Accept & Save', primary: true, onSelect: () => respond(true) },
+      ],
+      // Escape/backdrop dismiss = reject, same as the old overlay.
+      onClose: () => respond(false),
+      // The old overlay-level key handler treated Enter as "accept"
+      // regardless of which element had focus (document-level capture, so
+      // it fired before a focused button's native Enter-triggers-click
+      // could). This body has no input to focus, so the shell's default
+      // focus lands on the first footer button ("Reject") — a plain
+      // body-scoped bubble listener would miss Enter entirely there, since
+      // the footer isn't a descendant of the body, and "Reject" would fire
+      // instead. Listening on the fully-built panel reproduces "always
+      // accept on Enter, whichever element has focus".
+      onOpen: (panelEl) => {
+        panelEl.addEventListener('keydown', (keyEvent) => {
+          if (keyEvent.key !== 'Enter') return;
+          keyEvent.preventDefault();
+          respond(true);
+        });
+      },
     });
     return true;
   }
@@ -76,65 +70,47 @@
     const esc = typeof d.esc === 'function' ? d.esc : (value) => String(value == null ? '' : value);
     const invoke = typeof d.invoke === 'function' ? d.invoke : null;
     if (!invoke) return false;
+    if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return false;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '5000';
-    if (typeof d.setOverlayDialogAttributes === 'function') {
-      d.setOverlayDialogAttributes(overlay, 'SSH authentication');
-    }
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">SSH Authentication</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">${esc(message)}</div>
-          <label class="ssh-form-label">Password
-            <input type="password" id="pw-input" spellcheck="false" autocomplete="off" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="pw-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="pw-connect">Connect</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    setTimeout(() => {
-      const input = overlay.querySelector('#pw-input');
-      if (input) input.focus();
-    }, 50);
-
+    let handle = null;
     let done = false;
     const respond = (password) => {
       if (done) return;
       done = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      if (overlay.isConnected) overlay.remove();
       invoke('auth_respond_password', { promptId, password }).catch(() => {});
+      if (handle) handle.close();
     };
-    const unregisterKeys = typeof d.registerOverlayKeys === 'function'
-      ? d.registerOverlayKeys(overlay, 'ssh-password-prompt', (keyEvent) => {
-        if (keyEvent.key !== 'Escape') return false;
-        respond(null);
-        return true;
-      })
-      : null;
 
-    overlay.querySelector('#pw-cancel').addEventListener('click', () => respond(null));
-    overlay.querySelector('#pw-connect').addEventListener('click', () => {
-      const input = overlay.querySelector('#pw-input');
-      respond(input ? (input.value || null) : null);
-    });
-    const input = overlay.querySelector('#pw-input');
-    if (input) {
-      input.addEventListener('keydown', (keyEvent) => {
-        if (keyEvent.key !== 'Enter') return;
-        respond(input.value || null);
-      });
-    }
-    overlay.addEventListener('mousedown', (mouseEvent) => {
-      if (mouseEvent.target === overlay) respond(null);
+    handle = global.tlDialog.open({
+      title: 'SSH Authentication',
+      ariaLabel: 'SSH authentication',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="ssh-auth-message">${esc(message)}</div>
+          <div class="tl-field">
+            <span class="tl-field__label">Password</span>
+            <input type="password" class="tl-input" id="pw-input" spellcheck="false" autocomplete="off" />
+          </div>
+        `;
+        const input = bodyEl.querySelector('#pw-input');
+        if (input) {
+          input.addEventListener('keydown', (keyEvent) => {
+            if (keyEvent.key !== 'Enter') return;
+            respond(input.value || null);
+          });
+          setTimeout(() => input.focus(), 50);
+        }
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: () => respond(null) },
+        { label: 'Connect', primary: true, onSelect: () => {
+          const input = handle.el.querySelector('#pw-input');
+          respond(input ? (input.value || null) : null);
+        } },
+      ],
+      // Escape/backdrop dismiss = cancel (password null), same as the old overlay.
+      onClose: () => respond(null),
     });
     return true;
   }

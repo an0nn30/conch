@@ -36,31 +36,11 @@
   // Preserves the pre-Phase-2 behavior of always listing ~/.ssh/config hosts by
   // default; the toggle button lets the user *hide* them instead of show them.
   let showSshConfigHosts = true;
-
-  function setOverlayDialogAttributes(overlay, label) {
-    if (!overlay) return;
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', String(label || 'Dialog'));
-  }
-
-  function registerOverlayKeys(overlay, name, onKeyDown) {
-    const keyboardRouter = window.termlabKeyboardRouter;
-    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
-      return keyboardRouter.register({
-        name: name || 'ssh-overlay',
-        priority: 220,
-        isActive: () => !!(overlay && overlay.isConnected),
-        onKeyDown: (event) => {
-          if (!overlay || !overlay.isConnected) return false;
-          return onKeyDown(event) === true;
-        },
-      });
-    }
-
-    console.warn('ssh-panel: keyboard router unavailable, skipping overlay handler registration:', name || 'ssh-overlay');
-    return () => {};
-  }
+  // The tl-dialog handle for whichever dialog this panel most recently
+  // opened (connection form, add/rename-folder, delete-confirm, export).
+  // removeOverlay() below closes only this — never a blanket DOM query —
+  // so it can't reach into keygen/files-panel/plugin/vault/tunnel dialogs.
+  let activeDialogHandle = null;
 
   function invalidateCommandPaletteCache(reason) {
     if (typeof window.__termlabInvalidateCommandPaletteCache === 'function') {
@@ -414,79 +394,39 @@
     }
 
     removeOverlay();
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    setOverlayDialogAttributes(overlay, 'Export connections');
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') {
+      if (window.toast) window.toast.error('Export Failed', 'Dialog shell unavailable.');
+      return;
+    }
 
     // Build checkbox list HTML.
     let serversHtml = '';
     for (const folder of data.folders) {
       serversHtml += `<div class="ssh-export-group">${esc(folder.name)}</div>`;
       for (const s of folder.entries) {
-        serversHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
       }
     }
     if (data.ungrouped.length) {
       serversHtml += `<div class="ssh-export-group">Ungrouped</div>`;
       for (const s of data.ungrouped) {
-        serversHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
       }
     }
     if (data.ssh_config && data.ssh_config.length) {
       serversHtml += `<div class="ssh-export-group">~/.ssh/config</div>`;
       for (const s of data.ssh_config) {
-        serversHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(s.id)}" data-type="server" />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
       }
     }
 
     let tunnelsHtml = '';
     for (const t of tunnels) {
-      tunnelsHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(t.id)}" data-type="tunnel" checked />${esc(t.label)} <span class="ssh-export-dim">(L${t.local_port} → ${esc(t.remote_host)}:${t.remote_port})</span></label>`;
+      tunnelsHtml += `<label class="tl-check"><input type="checkbox" value="${esc(t.id)}" data-type="tunnel" checked />${esc(t.label)} <span class="ssh-export-dim">(L${t.local_port} → ${esc(t.remote_host)}:${t.remote_port})</span></label>`;
     }
 
     const hasServers = data.folders.some(f => f.entries.length) || data.ungrouped.length || (data.ssh_config && data.ssh_config.length);
     const hasTunnels = tunnels.length > 0;
-
-    overlay.innerHTML = `
-      <div class="ssh-form" style="min-width:400px;max-height:80vh;display:flex;flex-direction:column;">
-        <div class="ssh-form-title">Export Connections</div>
-        <div class="ssh-form-body" style="overflow-y:auto;flex:1;">
-          <div style="margin-bottom:8px;">
-            <label style="cursor:pointer;"><input type="checkbox" id="exp-select-all" checked /> Select All</label>
-          </div>
-          ${hasServers ? '<div class="ssh-export-section">Servers</div>' + serversHtml : ''}
-          ${hasTunnels ? '<div class="ssh-export-section"' + (hasServers ? ' style="margin-top:12px;"' : '') + '>Tunnels</div>' + tunnelsHtml : ''}
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="exp-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="exp-export">Export</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-
-    // Select All toggle
-    const selectAll = overlay.querySelector('#exp-select-all');
-    const allBoxes = () => overlay.querySelectorAll('input[data-type]');
-    selectAll.addEventListener('change', () => {
-      allBoxes().forEach(cb => cb.checked = selectAll.checked);
-    });
-
-    let closed = false;
-    const closeExportDialog = () => {
-      if (closed) return;
-      closed = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      removeOverlay();
-    };
-    const unregisterKeys = registerOverlayKeys(overlay, 'ssh-export-dialog', (event) => {
-      if (event.key !== 'Escape') return false;
-      closeExportDialog();
-      return true;
-    });
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeExportDialog(); });
-    overlay.querySelector('#exp-cancel').addEventListener('click', closeExportDialog);
 
     // Build a lookup of all servers by their session key (user@host:port).
     const allServers = [];
@@ -499,73 +439,107 @@
       return allServers.find(s => serverSessionKey(s) === t.session_key);
     }
 
-    overlay.querySelector('#exp-export').addEventListener('click', async () => {
-      let serverIds = [...overlay.querySelectorAll('input[data-type="server"]:checked')].map(cb => cb.value);
-      const tunnelIds = [...overlay.querySelectorAll('input[data-type="tunnel"]:checked')].map(cb => cb.value);
+    let handle = null;
+    let closed = false;
+    const closeExportDialog = () => {
+      if (closed) return;
+      closed = true;
+      if (handle) handle.close();
+    };
 
-      if (serverIds.length === 0 && tunnelIds.length === 0) {
-        if (window.toast) window.toast.error('Export', 'Nothing selected');
-        return;
-      }
+    handle = window.tlDialog.open({
+      title: 'Export Connections',
+      ariaLabel: 'Export connections',
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div style="margin-bottom:8px;">
+            <label class="tl-check"><input type="checkbox" id="exp-select-all" checked /> Select All</label>
+          </div>
+          ${hasServers ? '<div class="ssh-export-section">Servers</div>' + serversHtml : ''}
+          ${hasTunnels ? '<div class="ssh-export-section"' + (hasServers ? ' style="margin-top:12px;"' : '') + '>Tunnels</div>' + tunnelsHtml : ''}
+        `;
 
-      const selectedServerIds = new Set(serverIds);
+        const selectAll = bodyEl.querySelector('#exp-select-all');
+        const allBoxes = () => bodyEl.querySelectorAll('input[data-type]');
+        selectAll.addEventListener('change', () => {
+          allBoxes().forEach(cb => cb.checked = selectAll.checked);
+        });
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: closeExportDialog },
+        { label: 'Export', primary: true, onSelect: async () => {
+          const bodyEl = handle.el;
+          let serverIds = [...bodyEl.querySelectorAll('input[data-type="server"]:checked')].map(cb => cb.value);
+          const tunnelIds = [...bodyEl.querySelectorAll('input[data-type="tunnel"]:checked')].map(cb => cb.value);
 
-      // Check if selected items depend on servers not in the export.
-      const selectedTunnels = tunnels.filter(t => tunnelIds.includes(t.id));
-      const missingDependencies = [];
-      for (const t of selectedTunnels) {
-        const server = findServerForTunnel(t);
-        if (server && !selectedServerIds.has(server.id)) {
-          missingDependencies.push({
-            reason: 'tunnel',
-            sourceId: t.id,
-            sourceLabel: t.label,
-            server,
-          });
-        }
-      }
+          if (serverIds.length === 0 && tunnelIds.length === 0) {
+            if (window.toast) window.toast.error('Export', 'Nothing selected');
+            return;
+          }
 
-      const selectedServers = allServers.filter((s) => selectedServerIds.has(s.id));
-      for (const s of selectedServers) {
-        if (!s.proxy_jump) continue;
-        const depServer = findServerForProxyJump(s.proxy_jump, allServers);
-        if (depServer && !selectedServerIds.has(depServer.id)) {
-          missingDependencies.push({
-            reason: 'proxy_jump',
-            sourceId: s.id,
-            sourceLabel: s.label,
-            server: depServer,
-          });
-        }
-      }
+          const selectedServerIds = new Set(serverIds);
 
-      const dedupedDependencies = dedupeDependencyServers(missingDependencies);
-      if (dedupedDependencies.length > 0) {
-        const shouldInclude = await showDependencyPrompt(dedupedDependencies);
-        if (shouldInclude === null) return; // cancelled
-        if (shouldInclude) {
-          for (const dep of dedupedDependencies) {
-            if (!selectedServerIds.has(dep.server.id)) {
-              selectedServerIds.add(dep.server.id);
-              serverIds.push(dep.server.id);
+          // Check if selected items depend on servers not in the export.
+          const selectedTunnels = tunnels.filter(t => tunnelIds.includes(t.id));
+          const missingDependencies = [];
+          for (const t of selectedTunnels) {
+            const server = findServerForTunnel(t);
+            if (server && !selectedServerIds.has(server.id)) {
+              missingDependencies.push({
+                reason: 'tunnel',
+                sourceId: t.id,
+                sourceLabel: t.label,
+                server,
+              });
             }
           }
-        }
-      }
 
-      closeExportDialog();
-      try {
-        if (!sshDataService || typeof sshDataService.exportSelection !== 'function') {
-          throw new Error('SSH data service unavailable: exportSelection');
-        }
-        await sshDataService.exportSelection(invoke, serverIds, tunnelIds);
-        if (window.toast) window.toast.info('Export', `Exported ${serverIds.length} server(s), ${tunnelIds.length} tunnel(s)`);
-      } catch (e) {
-        if (String(e) === 'Export cancelled') return;
-        console.error('Export failed:', e);
-        if (window.toast) window.toast.error('Export Failed', String(e));
-      }
+          const selectedServers = allServers.filter((s) => selectedServerIds.has(s.id));
+          for (const s of selectedServers) {
+            if (!s.proxy_jump) continue;
+            const depServer = findServerForProxyJump(s.proxy_jump, allServers);
+            if (depServer && !selectedServerIds.has(depServer.id)) {
+              missingDependencies.push({
+                reason: 'proxy_jump',
+                sourceId: s.id,
+                sourceLabel: s.label,
+                server: depServer,
+              });
+            }
+          }
+
+          const dedupedDependencies = dedupeDependencyServers(missingDependencies);
+          if (dedupedDependencies.length > 0) {
+            const shouldInclude = await showDependencyPrompt(dedupedDependencies);
+            if (shouldInclude === null) return; // cancelled
+            if (shouldInclude) {
+              for (const dep of dedupedDependencies) {
+                if (!selectedServerIds.has(dep.server.id)) {
+                  selectedServerIds.add(dep.server.id);
+                  serverIds.push(dep.server.id);
+                }
+              }
+            }
+          }
+
+          closeExportDialog();
+          try {
+            if (!sshDataService || typeof sshDataService.exportSelection !== 'function') {
+              throw new Error('SSH data service unavailable: exportSelection');
+            }
+            await sshDataService.exportSelection(invoke, serverIds, tunnelIds);
+            if (window.toast) window.toast.info('Export', `Exported ${serverIds.length} server(s), ${tunnelIds.length} tunnel(s)`);
+          } catch (e) {
+            if (String(e) === 'Export cancelled') return;
+            console.error('Export failed:', e);
+            if (window.toast) window.toast.error('Export Failed', String(e));
+          }
+        } },
+      ],
+      onClose: closeExportDialog,
     });
+    activeDialogHandle = handle;
   }
 
 
@@ -573,8 +547,6 @@
     if (sshDependencyPromptFeature && typeof sshDependencyPromptFeature.showDependencyPrompt === 'function') {
       const delegated = sshDependencyPromptFeature.showDependencyPrompt(missingDependencies, {
         esc,
-        setOverlayDialogAttributes,
-        registerOverlayKeys,
       });
       if (delegated) return delegated;
     }
@@ -797,11 +769,9 @@
   // ---------------------------------------------------------------------------
 
   function showConnectionForm(existing, defaultFolderId) {
+    removeOverlay();
     if (sshConnectionFormFeature && typeof sshConnectionFormFeature.showConnectionForm === 'function') {
-      const handled = sshConnectionFormFeature.showConnectionForm(existing, defaultFolderId, {
-        removeOverlay,
-        setOverlayDialogAttributes,
-        registerOverlayKeys,
+      const handle = sshConnectionFormFeature.showConnectionForm(existing, defaultFolderId, {
         serverData,
         buildProxyJumpOptions,
         renderProxyJumpOptions,
@@ -813,7 +783,7 @@
         createSshTab: createSshTabFn,
         toast: window.toast,
       });
-      if (handled) return;
+      if (handle) { activeDialogHandle = handle; return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Connection form module is unavailable.');
@@ -825,16 +795,14 @@
   // ---------------------------------------------------------------------------
 
   function showAddFolderDialog() {
+    removeOverlay();
     if (sshDialogsFeature && typeof sshDialogsFeature.showAddFolderDialog === 'function') {
-      const handled = sshDialogsFeature.showAddFolderDialog({
-        removeOverlay,
-        setOverlayDialogAttributes,
-        registerOverlayKeys,
+      const handle = sshDialogsFeature.showAddFolderDialog({
         invoke,
         refreshAll,
         toast: window.toast,
       });
-      if (handled) return;
+      if (handle) { activeDialogHandle = handle; return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Folder dialog module is unavailable.');
@@ -842,17 +810,15 @@
   }
 
   function showRenameFolderDialog(folder) {
+    removeOverlay();
     if (sshDialogsFeature && typeof sshDialogsFeature.showRenameFolderDialog === 'function') {
-      const handled = sshDialogsFeature.showRenameFolderDialog(folder, {
-        removeOverlay,
-        setOverlayDialogAttributes,
-        registerOverlayKeys,
+      const handle = sshDialogsFeature.showRenameFolderDialog(folder, {
         invoke,
         refreshAll,
         toast: window.toast,
         attr,
       });
-      if (handled) return;
+      if (handle) { activeDialogHandle = handle; return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Rename-folder dialog module is unavailable.');
@@ -896,14 +862,12 @@
   }
 
   function showDeleteConfirmDialog(message, onConfirm) {
+    removeOverlay();
     if (sshDialogsFeature && typeof sshDialogsFeature.showDeleteConfirmDialog === 'function') {
-      const handled = sshDialogsFeature.showDeleteConfirmDialog(message, onConfirm, {
-        removeOverlay,
-        setOverlayDialogAttributes,
-        registerOverlayKeys,
+      const handle = sshDialogsFeature.showDeleteConfirmDialog(message, onConfirm, {
         esc,
       });
-      if (handled) return;
+      if (handle) { activeDialogHandle = handle; return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Delete-confirm dialog module is unavailable.');
@@ -947,7 +911,11 @@
   }
 
   function removeOverlay() {
-    document.querySelectorAll('.ssh-overlay').forEach((el) => el.remove());
+    if (activeDialogHandle) {
+      const handle = activeDialogHandle;
+      activeDialogHandle = null;
+      handle.close();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -959,8 +927,6 @@
       const handled = sshAuthPromptsFeature.showHostKeyPrompt(event, {
         invoke,
         esc,
-        setOverlayDialogAttributes,
-        registerOverlayKeys,
       });
       if (handled) return;
     }
@@ -974,8 +940,6 @@
       const handled = sshAuthPromptsFeature.showPasswordPrompt(event, {
         invoke,
         esc,
-        setOverlayDialogAttributes,
-        registerOverlayKeys,
       });
       if (handled) return;
     }

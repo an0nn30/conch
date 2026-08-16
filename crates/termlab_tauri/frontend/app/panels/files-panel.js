@@ -689,130 +689,115 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Small single-field / confirm dialogs — reuse the app-wide .ssh-overlay /
-  // .ssh-form popup styling (see styles/dialogs.css) already used by the SSH,
-  // tunnel, vault, and settings dialogs; no files-panel-specific CSS needed.
+  // Small single-field / confirm dialogs — render through the shared
+  // window.tlDialog shell (app/ui/tl-dialog.js), which owns the overlay,
+  // focus trap, Escape and backdrop dismissal.
   // ---------------------------------------------------------------------------
 
+  // Only one files-panel dialog is ever open at a time (both are opened
+  // from row/context-menu actions), so a single tracked handle is enough to
+  // close "our own" dialog without touching any other module's.
+  let activeFilesDialogHandle = null;
+
   function removeFilesOverlay() {
-    document.querySelectorAll('.fp-dialog-overlay').forEach((el) => el.remove());
-  }
-
-  function setFilesOverlayAttributes(overlay, label) {
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', String(label || 'Dialog'));
-  }
-
-  function registerFilesOverlayKeys(overlay, name, onKeyDown) {
-    const keyboardRouter = window.termlabKeyboardRouter;
-    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
-      return keyboardRouter.register({
-        name: name || 'fp-overlay',
-        priority: 220,
-        isActive: () => !!(overlay && overlay.isConnected),
-        onKeyDown: (event) => {
-          if (!overlay || !overlay.isConnected) return false;
-          return onKeyDown(event) === true;
-        },
-      });
+    if (activeFilesDialogHandle) {
+      const handle = activeFilesDialogHandle;
+      activeFilesDialogHandle = null;
+      handle.close();
     }
-    console.warn('files-panel: keyboard router unavailable, skipping overlay handler registration:', name || 'fp-overlay');
-    return () => {};
   }
 
   function showTextPromptDialog(opts) {
     const o = opts || {};
     removeFilesOverlay();
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') return;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay fp-dialog-overlay';
-    overlay.style.zIndex = '4500';
-    setFilesOverlayAttributes(overlay, o.title);
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">${esc(o.title)}</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">${esc(o.label)}
-            <input type="text" id="fp-dlg-input" value="${attr(o.initialValue || '')}" spellcheck="false" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="fp-dlg-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="fp-dlg-confirm">${esc(o.confirmLabel || 'OK')}</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-
-    const input = overlay.querySelector('#fp-dlg-input');
-    setTimeout(() => { input.focus(); input.select(); }, 50);
-
+    let handle = null;
     let closed = false;
     const dismiss = () => {
       if (closed) return;
       closed = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      overlay.remove();
+      if (activeFilesDialogHandle === handle) activeFilesDialogHandle = null;
+      if (handle) handle.close();
     };
     const confirm = () => {
+      const input = handle.el.querySelector('#fp-dlg-input');
       const value = input.value.trim();
       if (!value) { input.focus(); return; }
       dismiss();
       if (typeof o.onConfirm === 'function') o.onConfirm(value);
     };
-    const unregisterKeys = registerFilesOverlayKeys(overlay, 'fp-text-prompt-dialog', (event) => {
-      if (event.key === 'Escape') { dismiss(); return true; }
-      if (event.key === 'Enter') { confirm(); return true; }
-      return false;
+
+    handle = window.tlDialog.open({
+      title: o.title,
+      ariaLabel: o.title,
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="tl-field">
+            <span class="tl-field__label">${esc(o.label)}</span>
+            <input type="text" class="tl-input" id="fp-dlg-input" value="${attr(o.initialValue || '')}" spellcheck="false" />
+          </div>
+        `;
+        const input = bodyEl.querySelector('#fp-dlg-input');
+        setTimeout(() => { input.focus(); input.select(); }, 50);
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: dismiss },
+        { label: o.confirmLabel || 'OK', primary: true, onSelect: confirm },
+      ],
+      onClose: dismiss,
+      // The old overlay-level key handler mapped Enter to confirm
+      // regardless of which element had focus (document-level capture, so
+      // it fired before a focused button's native Enter-triggers-click
+      // could). A body-scoped bubble listener would miss Enter when focus
+      // is on a footer button (the footer isn't a descendant of the body),
+      // and that button would fire instead — e.g. Tab to Cancel, press
+      // Enter, and the old code still confirmed. Listening on the
+      // fully-built panel reproduces that "always wins" behavior.
+      onOpen: (panelEl) => {
+        panelEl.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          confirm();
+        });
+      },
     });
-    overlay.addEventListener('mousedown', (event) => { if (event.target === overlay) dismiss(); });
-    overlay.querySelector('#fp-dlg-cancel').addEventListener('click', dismiss);
-    overlay.querySelector('#fp-dlg-confirm').addEventListener('click', confirm);
+    activeFilesDialogHandle = handle;
   }
 
   function showConfirmDialog(opts) {
     const o = opts || {};
     removeFilesOverlay();
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') return;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay fp-dialog-overlay';
-    overlay.style.zIndex = '4500';
-    setFilesOverlayAttributes(overlay, o.title);
-    const dangerStyle = o.danger ? ' style="background:var(--red);border-color:var(--red)"' : '';
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">${esc(o.title)}</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">${esc(o.message)}</div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="fp-dlg-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="fp-dlg-confirm"${dangerStyle}>${esc(o.confirmLabel || 'OK')}</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-
+    let handle = null;
     let closed = false;
     const dismiss = () => {
       if (closed) return;
       closed = true;
-      if (typeof unregisterKeys === 'function') unregisterKeys();
-      overlay.remove();
+      if (activeFilesDialogHandle === handle) activeFilesDialogHandle = null;
+      if (handle) handle.close();
     };
     const confirm = () => {
       dismiss();
       if (typeof o.onConfirm === 'function') o.onConfirm();
     };
-    const unregisterKeys = registerFilesOverlayKeys(overlay, 'fp-confirm-dialog', (event) => {
-      if (event.key !== 'Escape') return false;
-      dismiss();
-      return true;
+
+    handle = window.tlDialog.open({
+      title: o.title,
+      ariaLabel: o.title,
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `<div class="ssh-auth-message">${esc(o.message)}</div>`;
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: dismiss },
+        { label: o.confirmLabel || 'OK', primary: true, danger: !!o.danger, onSelect: confirm },
+      ],
+      onClose: dismiss,
     });
-    overlay.addEventListener('mousedown', (event) => { if (event.target === overlay) dismiss(); });
-    overlay.querySelector('#fp-dlg-cancel').addEventListener('click', dismiss);
-    overlay.querySelector('#fp-dlg-confirm').addEventListener('click', confirm);
+    activeFilesDialogHandle = handle;
   }
 
   // ---------------------------------------------------------------------------
