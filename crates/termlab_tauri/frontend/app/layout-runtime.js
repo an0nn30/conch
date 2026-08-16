@@ -6,6 +6,23 @@
     const getCurrentTab = deps.getCurrentTab;
     const renderTree = deps.renderTree;
 
+    // Resizing has two halves with different timing needs. The visual fit must
+    // land in the same frame as the drag or the container shows through below
+    // the terminal; the PTY notification only needs the size the drag settles
+    // on, and firing one SIGWINCH per pointermove makes full-screen apps
+    // redraw continuously. So: fit now, notify on a short trailing timer.
+    const pendingResizes = new Map();
+    let resizeNotifyTimer = null;
+
+    function flushResizeNotifications() {
+      resizeNotifyTimer = null;
+      for (const entry of pendingResizes.values()) {
+        const cmd = entry.pane.type === 'ssh' ? 'ssh_resize' : 'resize_pty';
+        invoke(cmd, { paneId: entry.pane.paneId, cols: entry.cols, rows: entry.rows }).catch(() => {});
+      }
+      pendingResizes.clear();
+    }
+
     function fitAndResizePane(pane) {
       if (!pane || !pane.term || !pane.fitAddon || !pane.spawned) return;
       const dims = pane.fitAddon.proposeDimensions();
@@ -14,8 +31,8 @@
       pane.lastCols = dims.cols;
       pane.lastRows = dims.rows;
       pane.fitAddon.fit();
-      const cmd = pane.type === 'ssh' ? 'ssh_resize' : 'resize_pty';
-      invoke(cmd, { paneId: pane.paneId, cols: dims.cols, rows: dims.rows }).catch(() => {});
+      pendingResizes.set(pane.paneId, { pane, cols: dims.cols, rows: dims.rows });
+      if (resizeNotifyTimer == null) resizeNotifyTimer = setTimeout(flushResizeNotifications, 60);
     }
 
     function fitAndResizeTab(tab) {
@@ -35,12 +52,19 @@
       }
     }
 
-    let fitDebounceTimer = null;
+    // Coalesced to one fit per animation frame rather than debounced: a 100ms
+    // debounce never fires during a continuous drag, so the terminal stayed at
+    // its old size for the whole gesture.
+    let fitFrame = null;
+    const raf = typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame
+      : (cb) => setTimeout(cb, 16);
     function debouncedFitAndResize() {
-      clearTimeout(fitDebounceTimer);
-      fitDebounceTimer = setTimeout(() => {
+      if (fitFrame != null) return;
+      fitFrame = raf(() => {
+        fitFrame = null;
         fitAndResizeTab(getCurrentTab());
-      }, 100);
+      });
     }
 
     function normalizeTabTitle(rawTitle, fallback) {

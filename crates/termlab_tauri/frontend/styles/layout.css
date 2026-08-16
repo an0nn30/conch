@@ -210,7 +210,9 @@
       min-width: 0;
       min-height: 0;
       overflow: hidden;
-      background: var(--bg);
+      /* Terminal surface, not UI chrome: matches xterm's own background so a
+         pane resize never flashes the panel colour before xterm re-fits. */
+      background: var(--tl-terminal-bg, #000);
     }
     #terminal-host.drag-over {
       outline: 2px solid var(--dim-fg);

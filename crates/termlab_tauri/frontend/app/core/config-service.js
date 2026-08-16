@@ -360,6 +360,11 @@
     // itself through toTerminalTheme(). Only the accent palette below stays
     // theme-driven, so status dots keep the active palette's flavor.
     const vars = {
+      // The terminal surface (and only that) tracks the terminal palette, so
+      // the container behind xterm matches its canvas. Without this the panel
+      // colour shows through as a grey band while a drag resizes the pane and
+      // xterm has not re-fitted yet.
+      '--tl-terminal-bg': themeColors.background,
       '--red': themeColors.red,
       '--green': themeColors.green,
       '--yellow': themeColors.yellow,
@@ -367,6 +372,12 @@
       '--cyan': themeColors.cyan,
       '--magenta': themeColors.magenta,
     };
+    // A missing color would be written out as the literal "undefined", which
+    // makes every declaration reading it invalid — for the terminal background
+    // that means a transparent pane rather than the fallback.
+    for (const [name, value] of Object.entries(vars)) {
+      if (typeof value !== 'string' || !value.trim()) delete vars[name];
+    }
     return vars;
   }
 
