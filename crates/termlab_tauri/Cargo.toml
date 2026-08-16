@@ -18,6 +18,7 @@ termlab_core = { workspace = true }
 termlab_plugin = { workspace = true }
 termlab_plugin_sdk = { workspace = true }
 termlab_remote = { workspace = true }
+termlab_share = { path = "../termlab_share" }
 termlab_vault = { path = "../termlab_vault" }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
@@ -35,6 +36,9 @@ parking_lot = { workspace = true }
 env_logger = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
+chrono = { workspace = true }
+hostname = { workspace = true }
+zeroize = { workspace = true }
 arboard = "3"
 font-kit = "0.14"
 ts-rs = { workspace = true }

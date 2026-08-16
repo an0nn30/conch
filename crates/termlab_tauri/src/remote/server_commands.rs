@@ -148,51 +148,6 @@ pub(crate) fn remote_move_server(
     }
 }
 
-/// Export servers and tunnels to a file chosen via native save dialog.
-/// If `server_ids` or `tunnel_ids` are provided, only those items are included.
-#[tauri::command]
-pub(crate) async fn remote_export(
-    app: tauri::AppHandle,
-    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
-    server_ids: Option<Vec<String>>,
-    tunnel_ids: Option<Vec<String>>,
-) -> Result<String, String> {
-    let json = {
-        let state = remote.lock();
-        let mut payload = state
-            .config
-            .to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
-        // Include any selected ~/.ssh/config entries in the export.
-        if let Some(ref ids) = server_ids {
-            for entry in &state.ssh_config_entries {
-                if ids.contains(&entry.id) {
-                    payload.ungrouped.push(entry.clone());
-                }
-            }
-        }
-        serde_json::to_string_pretty(&payload).map_err(|e| format!("Export failed: {e}"))?
-    };
-
-    use tauri_plugin_dialog::DialogExt;
-    let path = app
-        .dialog()
-        .file()
-        .set_file_name("termlab-connections.json")
-        .add_filter("JSON", &["json"])
-        .blocking_save_file();
-
-    match path {
-        Some(path) => {
-            let file_path = path
-                .as_path()
-                .ok_or_else(|| "Invalid file path".to_string())?;
-            std::fs::write(file_path, &json).map_err(|e| format!("Failed to write file: {e}"))?;
-            Ok("Exported successfully".to_string())
-        }
-        None => Err("Export cancelled".to_string()),
-    }
-}
-
 /// Import servers and tunnels from a file chosen via native open dialog.
 #[tauri::command]
 pub(crate) async fn remote_import(

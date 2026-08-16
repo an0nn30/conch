@@ -15,6 +15,7 @@ pub(crate) mod pty;
 mod pty_backend;
 pub(crate) mod remote;
 pub(crate) mod settings;
+pub(crate) mod share_commands;
 pub(crate) mod theme;
 pub(crate) mod updater;
 pub(crate) mod utf8_stream;
@@ -542,7 +543,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::server_commands::remote_set_folder_expanded,
             remote::server_commands::remote_move_server,
             remote::server_commands::remote_duplicate_server,
-            remote::server_commands::remote_export,
+            share_commands::share_export,
             remote::server_commands::remote_import,
             remote::sftp_commands::sftp_list_dir,
             remote::sftp_commands::sftp_stat,

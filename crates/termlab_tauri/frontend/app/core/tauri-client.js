@@ -51,10 +51,11 @@
     REMOTE_RENAME_FOLDER: 'remote_rename_folder',
     REMOTE_SET_FOLDER_EXPANDED: 'remote_set_folder_expanded',
     REMOTE_MOVE_SERVER: 'remote_move_server',
-    REMOTE_EXPORT: 'remote_export',
     REMOTE_IMPORT: 'remote_import',
     REMOTE_DUPLICATE_SERVER: 'remote_duplicate_server',
     REMOTE_GET_SESSIONS: 'remote_get_sessions',
+
+    SHARE_EXPORT: 'share_export',
 
     SFTP_LIST_DIR: 'sftp_list_dir',
     SFTP_STAT: 'sftp_stat',

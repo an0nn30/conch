@@ -49,7 +49,8 @@ pub struct ExportPlan {
 ///
 /// Stages, in order:
 /// 1. Filter `config` to the selected server/tunnel ids and fold in any
-///    selected `ssh_config_entries` (mirrors `remote_export` today).
+///    selected `ssh_config_entries` (mirrors the legacy plaintext JSON
+///    export the task-4 `share_export` command replaced).
 /// 2. Resolve each selected tunnel's host, pulling in servers that were not
 ///    directly selected but are required by a tunnel.
 /// 3. If credentials are excluded, strip vault references and stop.
@@ -98,8 +99,8 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
         .cloned()
         .collect();
 
-    // Fold in selected ~/.ssh/config entries — the behaviour `remote_export`
-    // has today at server_commands.rs:166-172.
+    // Fold in selected ~/.ssh/config entries — the behaviour the legacy
+    // plaintext JSON export used to have (now `share_commands::share_export`).
     for entry in req.ssh_config_entries {
         if req.server_ids.contains(&entry.id) {
             servers.push(entry.clone());

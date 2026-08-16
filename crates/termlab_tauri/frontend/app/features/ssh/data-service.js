@@ -18,8 +18,8 @@
     return Array.isArray(sessions) ? sessions : [];
   }
 
-  async function exportSelection(invoke, serverIds, tunnelIds) {
-    return invoke('remote_export', { serverIds, tunnelIds });
+  async function exportBundle(invoke, serverIds, tunnelIds, includeCredentials, password) {
+    return invoke('share_export', { serverIds, tunnelIds, includeCredentials, password });
   }
 
   async function importConfig(invoke) {
@@ -30,7 +30,7 @@
     getServers,
     getTunnels,
     getSessions,
-    exportSelection,
+    exportBundle,
     importConfig,
   };
 })(window);

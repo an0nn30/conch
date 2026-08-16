@@ -477,6 +477,17 @@
           </div>
           ${hasServers ? '<div class="ssh-export-section">Servers</div>' + serversHtml : ''}
           ${hasTunnels ? '<div class="ssh-export-section"' + (hasServers ? ' style="margin-top:12px;"' : '') + '>Tunnels</div>' + tunnelsHtml : ''}
+          <div class="ssh-export-section" style="margin-top:12px;">Credentials</div>
+          <label class="tl-check"><input type="checkbox" id="exp-include-credentials" />Include saved credentials (the recipient will receive passwords and private keys)</label>
+          <div class="tl-field" style="margin-top:8px;">
+            <label class="tl-field__label" for="exp-password">Bundle password</label>
+            <input type="password" class="tl-input" id="exp-password" autocomplete="new-password" />
+          </div>
+          <div class="tl-field">
+            <label class="tl-field__label" for="exp-password-confirm">Confirm password</label>
+            <input type="password" class="tl-input" id="exp-password-confirm" autocomplete="new-password" />
+          </div>
+          <div class="ssh-export-dim">Anyone with this password can read everything in the bundle.</div>
         `;
 
         const selectAll = bodyEl.querySelector('#exp-select-all');
@@ -485,15 +496,51 @@
           allBoxes().forEach(cb => cb.checked = selectAll.checked);
         });
       },
+      onOpen: (panel) => {
+        // Drive the Export button's enabled state through its live `disabled`
+        // DOM property — tl-dialog's footer-button click gate reads that
+        // property, not the `disabled` value passed to buttons[] at open()
+        // time (see buildFooterButton's comment in app/ui/tl-dialog.js).
+        const bodyEl = panel.querySelector('.tl-dialog__body');
+        const footerEnd = panel.querySelector('.tl-dialog__footer-end');
+        const exportBtn = footerEnd
+          ? Array.from(footerEnd.querySelectorAll('.tl-btn')).find((btn) => btn.textContent === 'Export')
+          : null;
+        if (!bodyEl || !exportBtn) return;
+        const passwordEl = bodyEl.querySelector('#exp-password');
+        const confirmEl = bodyEl.querySelector('#exp-password-confirm');
+        const shareUi = window.termlabShareUi || { canExport };
+        const refreshExportGate = () => {
+          const selectedCount = bodyEl.querySelectorAll('input[data-type]:checked').length;
+          const enabled = shareUi.canExport({
+            selectedCount,
+            password: passwordEl ? passwordEl.value : '',
+            confirm: confirmEl ? confirmEl.value : '',
+          });
+          exportBtn.disabled = !enabled;
+          exportBtn.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+        };
+        bodyEl.addEventListener('input', refreshExportGate);
+        bodyEl.addEventListener('change', refreshExportGate);
+        refreshExportGate();
+      },
       buttons: [
         { label: 'Cancel', onSelect: closeExportDialog },
-        { label: 'Export', primary: true, onSelect: async () => {
+        { label: 'Export', primary: true, disabled: true, onSelect: async () => {
           const bodyEl = handle.el;
           let serverIds = [...bodyEl.querySelectorAll('input[data-type="server"]:checked')].map(cb => cb.value);
           const tunnelIds = [...bodyEl.querySelectorAll('input[data-type="tunnel"]:checked')].map(cb => cb.value);
 
           if (serverIds.length === 0 && tunnelIds.length === 0) {
             if (window.toast) window.toast.error('Export', 'Nothing selected');
+            return;
+          }
+
+          const includeCredentials = !!bodyEl.querySelector('#exp-include-credentials').checked;
+          const password = bodyEl.querySelector('#exp-password').value;
+          const confirmPassword = bodyEl.querySelector('#exp-password-confirm').value;
+          if (!canExport({ selectedCount: serverIds.length + tunnelIds.length, password, confirm: confirmPassword })) {
+            if (window.toast) window.toast.error('Export', 'Enter matching, non-empty passwords.');
             return;
           }
 
@@ -543,20 +590,76 @@
           }
 
           closeExportDialog();
-          try {
-            if (!sshDataService || typeof sshDataService.exportSelection !== 'function') {
-              throw new Error('SSH data service unavailable: exportSelection');
+
+          const runExport = async () => {
+            try {
+              if (!sshDataService || typeof sshDataService.exportBundle !== 'function') {
+                throw new Error('SSH data service unavailable: exportBundle');
+              }
+              const summary = await sshDataService.exportBundle(invoke, serverIds, tunnelIds, includeCredentials, password);
+              showExportSummary(summary);
+            } catch (e) {
+              if (String(e) === 'Export cancelled') return;
+              console.error('Export failed:', e);
+              if (window.toast) window.toast.error('Export Failed', String(e));
             }
-            await sshDataService.exportSelection(invoke, serverIds, tunnelIds);
-            if (window.toast) window.toast.info('Export', `Exported ${serverIds.length} server(s), ${tunnelIds.length} tunnel(s)`);
-          } catch (e) {
-            if (String(e) === 'Export cancelled') return;
-            console.error('Export failed:', e);
-            if (window.toast) window.toast.error('Export Failed', String(e));
+          };
+
+          // Credentials must come from an unlocked vault; run the app's
+          // existing unlock flow (setup/unlock dialog, or an immediate
+          // callback if already unlocked) before hitting the backend, which
+          // itself refuses with "Unlock the vault to include credentials"
+          // rather than prompting — see share_commands.rs::share_export.
+          if (includeCredentials && window.vault && typeof window.vault.ensureUnlocked === 'function') {
+            window.vault.ensureUnlocked(runExport);
+          } else {
+            await runExport();
           }
         } },
       ],
       onClose: closeExportDialog,
+    });
+    trackDialogHandle(handle);
+  }
+
+  /** Pure gate for the export dialog's Export button — exported below as
+   * window.termlabShareUi.canExport so scripts/tests/test_share_export_gate.mjs
+   * can exercise it without a browser. */
+  function canExport({ selectedCount, password, confirm }) {
+    return selectedCount > 0 && !!password && !!confirm && password === confirm;
+  }
+
+  /** Show the export summary — a "Export complete" dialog listing warnings
+   * when there are any, otherwise a toast is enough (per task-4 brief). */
+  function showExportSummary(summary) {
+    const s = summary || {};
+    const warnings = Array.isArray(s.warnings) ? s.warnings : [];
+    if (!warnings.length) {
+      if (window.toast) {
+        window.toast.info('Export complete', `${s.servers || 0} server(s), ${s.tunnels || 0} tunnel(s), ${s.credentials || 0} credential(s) saved to ${s.path || ''}`);
+      }
+      return;
+    }
+    let handle = null;
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      if (handle) handle.close();
+    };
+    handle = window.tlDialog.open({
+      title: 'Export complete',
+      ariaLabel: 'Export complete',
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div>${esc(s.servers || 0)} server(s), ${esc(s.tunnels || 0)} tunnel(s), ${esc(s.credentials || 0)} credential(s) saved to ${esc(s.path || '')}.</div>
+          <div class="ssh-export-section" style="margin-top:12px;">Warnings</div>
+          <ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>
+        `;
+      },
+      buttons: [{ label: 'OK', primary: true, onSelect: close }],
+      onClose: close,
     });
     trackDialogHandle(handle);
   }
@@ -1011,4 +1114,8 @@
   function getServerData() { return serverData; }
 
   exports.sshPanel = { init, refreshAll, refreshSessions, togglePanel, focusQuickConnect, isHidden, getServerData, exportConfig, importConfig, getSelectedServer: () => selectedServer };
+  // Pure export-dialog gate logic, exposed for scripts/tests/test_share_export_gate.mjs
+  // (matches tl-icon.js's/_tl-dialog.js's precedent for exposing pure logic for
+  // browser-less testing).
+  exports.termlabShareUi = { canExport };
 })(window);
