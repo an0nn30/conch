@@ -576,6 +576,11 @@
           }
 
           const dedupedDependencies = dedupeDependencyServers(missingDependencies);
+          // Ids the user was shown and explicitly chose "Export Without" for
+          // — sent to the backend so it can skip auto-pulling them (rather
+          // than the backend inferring "not relevant" from a plain absence
+          // from serverIds, which it cannot tell apart from "declined").
+          let declinedServerIds = [];
           if (dedupedDependencies.length > 0) {
             const shouldInclude = await showDependencyPrompt(dedupedDependencies);
             if (shouldInclude === null) return; // cancelled
@@ -586,6 +591,8 @@
                   serverIds.push(dep.server.id);
                 }
               }
+            } else {
+              declinedServerIds = dedupedDependencies.map((dep) => dep.server.id);
             }
           }
 
@@ -596,7 +603,7 @@
               if (!sshDataService || typeof sshDataService.exportBundle !== 'function') {
                 throw new Error('SSH data service unavailable: exportBundle');
               }
-              const summary = await sshDataService.exportBundle(invoke, serverIds, tunnelIds, includeCredentials, password);
+              const summary = await sshDataService.exportBundle(invoke, serverIds, tunnelIds, includeCredentials, password, declinedServerIds);
               showExportSummary(summary);
             } catch (e) {
               if (String(e) === 'Export cancelled') return;
@@ -629,12 +636,18 @@
     return selectedCount > 0 && !!password && !!confirm && password === confirm;
   }
 
-  /** Show the export summary — a "Export complete" dialog listing warnings
-   * when there are any, otherwise a toast is enough (per task-4 brief). */
+  /** Show the export summary — a "Export complete" dialog listing which
+   * dependency servers were auto-pulled beyond the user's selection and any
+   * warnings, when either is non-empty; otherwise a toast is enough (per
+   * task-4 brief). auto_pulled is always surfaced, even with zero warnings
+   * — silently dropping it is what previously let an auto-pulled dependency
+   * (including its credentials) travel into a bundle unnoticed (2026-08-16
+   * review finding). */
   function showExportSummary(summary) {
     const s = summary || {};
     const warnings = Array.isArray(s.warnings) ? s.warnings : [];
-    if (!warnings.length) {
+    const autoPulled = Array.isArray(s.auto_pulled) ? s.auto_pulled : [];
+    if (!warnings.length && !autoPulled.length) {
       if (window.toast) {
         window.toast.info('Export complete', `${s.servers || 0} server(s), ${s.tunnels || 0} tunnel(s), ${s.credentials || 0} credential(s) saved to ${s.path || ''}`);
       }
@@ -654,8 +667,8 @@
       body: (bodyEl) => {
         bodyEl.innerHTML = `
           <div>${esc(s.servers || 0)} server(s), ${esc(s.tunnels || 0)} tunnel(s), ${esc(s.credentials || 0)} credential(s) saved to ${esc(s.path || '')}.</div>
-          <div class="ssh-export-section" style="margin-top:12px;">Warnings</div>
-          <ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>
+          ${autoPulled.length ? '<div class="ssh-export-section" style="margin-top:12px;">Also included</div><ul>' + autoPulled.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+          ${warnings.length ? '<div class="ssh-export-section" style="margin-top:12px;">Warnings</div><ul>' + warnings.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
         `;
       },
       buttons: [{ label: 'OK', primary: true, onSelect: close }],

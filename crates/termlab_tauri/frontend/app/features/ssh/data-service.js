@@ -18,8 +18,14 @@
     return Array.isArray(sessions) ? sessions : [];
   }
 
-  async function exportBundle(invoke, serverIds, tunnelIds, includeCredentials, password) {
-    return invoke('share_export', { serverIds, tunnelIds, includeCredentials, password });
+  async function exportBundle(invoke, serverIds, tunnelIds, includeCredentials, password, declinedServerIds) {
+    return invoke('share_export', {
+      serverIds,
+      tunnelIds,
+      declinedServerIds: declinedServerIds || [],
+      includeCredentials,
+      password,
+    });
   }
 
   async function importConfig(invoke) {

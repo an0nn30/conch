@@ -270,78 +270,6 @@ pub struct ExportPayload {
 }
 
 impl SshConfig {
-    /// Create an export payload, optionally filtered to specific IDs.
-    pub fn to_export_filtered(
-        &self,
-        server_ids: Option<&[String]>,
-        tunnel_ids: Option<&[String]>,
-    ) -> ExportPayload {
-        let (folders, ungrouped) = match server_ids {
-            None => (self.folders.clone(), self.ungrouped.clone()),
-            Some(ids) => {
-                let ungrouped: Vec<ServerEntry> = self
-                    .ungrouped
-                    .iter()
-                    .filter(|s| ids.contains(&s.id))
-                    .cloned()
-                    .collect();
-                let folders: Vec<ServerFolder> = self
-                    .folders
-                    .iter()
-                    .filter_map(|f| {
-                        let entries: Vec<ServerEntry> = f
-                            .entries
-                            .iter()
-                            .filter(|s| ids.contains(&s.id))
-                            .cloned()
-                            .collect();
-                        if entries.is_empty() {
-                            None
-                        } else {
-                            Some(ServerFolder {
-                                id: f.id.clone(),
-                                name: f.name.clone(),
-                                expanded: f.expanded,
-                                entries,
-                            })
-                        }
-                    })
-                    .collect();
-                (folders, ungrouped)
-            }
-        };
-
-        let tunnels = match tunnel_ids {
-            None => self.tunnels.clone(),
-            Some(ids) => self
-                .tunnels
-                .iter()
-                .filter(|t| ids.contains(&t.id.to_string()))
-                .cloned()
-                .collect(),
-        };
-
-        let mut payload = ExportPayload {
-            version: 1,
-            folders,
-            ungrouped,
-            tunnels,
-        };
-
-        // Strip vault_account_id from exported entries — vault references are
-        // local to this machine and should not leak into portable exports.
-        for entry in &mut payload.ungrouped {
-            entry.vault_account_id = None;
-        }
-        for folder in &mut payload.folders {
-            for entry in &mut folder.entries {
-                entry.vault_account_id = None;
-            }
-        }
-
-        payload
-    }
-
     /// Merge an import payload into the current config.
     /// Assigns new IDs to avoid collisions. Returns counts of imported items.
     pub fn merge_import(&mut self, payload: ExportPayload) -> (usize, usize, usize) {
@@ -761,19 +689,6 @@ Host bastion-target
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: ServerEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.vault_account_id, Some(id));
-    }
-
-    #[test]
-    fn export_strips_vault_account_id() {
-        let mut cfg = SshConfig::default();
-        let mut entry = make_entry("s1", "host1");
-        entry.vault_account_id = Some(uuid::Uuid::new_v4());
-        cfg.add_server(entry);
-
-        let payload = cfg.to_export_filtered(None, None);
-        for server in &payload.ungrouped {
-            assert!(server.vault_account_id.is_none());
-        }
     }
 
     #[test]

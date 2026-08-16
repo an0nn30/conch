@@ -33,6 +33,16 @@ pub struct ExportRequest<'a> {
     pub ssh_config_entries: &'a [ServerEntry],
     pub server_ids: Vec<String>,
     pub tunnel_ids: Vec<String>,
+    /// Server ids the user explicitly declined to auto-pull in as a tunnel
+    /// dependency (the export dialog's dependency prompt, "Export Without").
+    /// Without this, stage 2 has no way to distinguish "the frontend didn't
+    /// think this host was relevant" from "the user was shown this host and
+    /// said no" — both look like a plain absence from `server_ids`. A
+    /// declined id is skipped by stage 2's auto-pull (see
+    /// `resolve_tunnel_host`) and a warning is recorded instead; it has no
+    /// effect on any id already present in `server_ids` or otherwise pulled
+    /// in some other way.
+    pub declined_server_ids: Vec<String>,
     pub include_credentials: bool,
     pub accounts: Vec<VaultAccount>,
     pub source_host: String,
@@ -52,7 +62,9 @@ pub struct ExportPlan {
 ///    selected `ssh_config_entries` (mirrors the legacy plaintext JSON
 ///    export the task-4 `share_export` command replaced).
 /// 2. Resolve each selected tunnel's host, pulling in servers that were not
-///    directly selected but are required by a tunnel.
+///    directly selected but are required by a tunnel — unless the user
+///    declined that specific host (`declined_server_ids`), in which case it
+///    is left out and a warning takes its place.
 /// 3. If credentials are excluded, strip vault references and stop.
 /// 4. Otherwise copy referenced vault accounts into the bundle.
 /// 5. Embed private key material for each copied account's key-based auth.
@@ -61,11 +73,11 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
     let mut warnings = Vec::new();
     let mut auto_pulled = Vec::new();
 
-    // Stage 1: filter to the selection. We deliberately do not delegate to
-    // `SshConfig::to_export_filtered` here: that method strips
-    // `vault_account_id` because the legacy plain-JSON export format is
-    // local-machine-only. This bundle format instead copies the referenced
-    // vault account into the bundle itself, so the link must survive into
+    // Stage 1: filter to the selection. We deliberately do not strip
+    // `vault_account_id` here the way the legacy plain-JSON export used to
+    // (that format was local-machine-only, so the reference was meaningless
+    // off-machine). This bundle format instead copies the referenced vault
+    // account into the bundle itself, so the link must survive into
     // `bundle.servers` for stage 4 to find it.
     let folders: Vec<ServerFolder> = req
         .config
@@ -115,13 +127,23 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
         .cloned()
         .collect();
 
-    // Stage 2: resolve each tunnel's host, pulling in dependencies.
+    // Stage 2: resolve each tunnel's host, pulling in dependencies — except
+    // any the user explicitly declined via the export dialog's dependency
+    // prompt (2026-08-16 ruling: "Export Without" must genuinely exclude the
+    // server, not just leave it out of `server_ids` while still letting a
+    // selected tunnel drag it back in).
+    let declined: HashSet<&str> = req
+        .declined_server_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
     for tunnel in &mut tunnels {
         resolve_tunnel_host(
             tunnel,
             &mut servers,
             req.config,
             req.ssh_config_entries,
+            &declined,
             &mut auto_pulled,
             &mut warnings,
         );
@@ -218,11 +240,20 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
 /// resolved from `ssh_config_entries`, per the spec: import needs a real,
 /// bundled server id to rewrite against, and an ssh_config alias never has
 /// one until we mint it here.
+///
+/// `declined` holds ids the user was shown (via the export dialog's
+/// dependency prompt) and explicitly chose to leave out. A host in
+/// `declined` is never auto-pulled — it is skipped and a warning is
+/// recorded instead — but `declined` has no effect on a host that is
+/// already present in `bundle_servers` some other way (e.g. the user
+/// selected it directly): declining a *dependency* does not retract an
+/// explicit selection.
 fn resolve_tunnel_host(
     tunnel: &mut SavedTunnel,
     bundle_servers: &mut Vec<ServerEntry>,
     known: &SshConfig,
     ssh_config_entries: &[ServerEntry],
+    declined: &HashSet<&str>,
     auto_pulled: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
@@ -232,6 +263,10 @@ fn resolve_tunnel_host(
             return;
         }
         if let Some(entry) = known.find_server(&id) {
+            if declined.contains(entry.id.as_str()) {
+                warnings.push(declined_warning(entry, tunnel));
+                return;
+            }
             pull_in(bundle_servers, entry.clone(), tunnel, auto_pulled);
             return;
         }
@@ -248,6 +283,10 @@ fn resolve_tunnel_host(
         .find(|s| s.host == host && s.port == port)
     {
         if !bundle_servers.iter().any(|s| s.id == entry.id) {
+            if declined.contains(entry.id.as_str()) {
+                warnings.push(declined_warning(entry, tunnel));
+                return;
+            }
             pull_in(bundle_servers, entry.clone(), tunnel, auto_pulled);
         }
         return;
@@ -258,6 +297,10 @@ fn resolve_tunnel_host(
         .find(|s| s.host == host && s.port == port)
     {
         if !bundle_servers.iter().any(|s| s.id == entry.id) {
+            if declined.contains(entry.id.as_str()) {
+                warnings.push(declined_warning(entry, tunnel));
+                return;
+            }
             auto_pulled.push(pull_in_message(entry, tunnel));
             bundle_servers.push(entry.clone());
         }
@@ -282,6 +325,13 @@ fn pull_in_message(entry: &ServerEntry, tunnel: &SavedTunnel) -> String {
     format!(
         "Included host \"{}\" ({}) required by tunnel \"{}\"",
         entry.label, entry.id, tunnel.label
+    )
+}
+
+fn declined_warning(entry: &ServerEntry, tunnel: &SavedTunnel) -> String {
+    format!(
+        "Host \"{}\" was excluded from the export; tunnel \"{}\" will not resolve it on import",
+        entry.label, tunnel.label
     )
 }
 
@@ -366,11 +416,15 @@ mod tests {
     /// `FakeKeys`. `tunnel_ids` entries equal to the literal "t1" are mapped
     /// to the fixture tunnel's real UUID string before being passed to
     /// `plan`, since `SavedTunnel::id` is a `Uuid`, not a friendly string.
+    /// `declined_server_ids` entries equal to the literal "s1" are similarly
+    /// passed through as-is (the fixture server's id is already the plain
+    /// string "s1", unlike the tunnel's UUID).
     fn plan_with(
         server_ids: Vec<String>,
         tunnel_ids: Vec<String>,
         include_credentials: bool,
         keys: FakeKeys,
+        declined_server_ids: Vec<String>,
     ) -> ExportPlan {
         let account_id = Uuid::new_v4();
         let tunnel_id = Uuid::new_v4();
@@ -433,6 +487,7 @@ mod tests {
             ssh_config_entries: &[],
             server_ids,
             tunnel_ids: mapped_tunnel_ids,
+            declined_server_ids,
             include_credentials,
             accounts: vec![account],
             source_host: "test-host".into(),
@@ -484,6 +539,7 @@ mod tests {
             ssh_config_entries: &ssh_config_entries,
             server_ids: vec![],
             tunnel_ids: vec![tunnel_id.to_string()],
+            declined_server_ids: vec![],
             include_credentials: false,
             accounts: vec![],
             source_host: "test-host".into(),
@@ -520,6 +576,7 @@ mod tests {
             ssh_config_entries: &[],
             server_ids: vec![],
             tunnel_ids: vec![tunnel_id.to_string()],
+            declined_server_ids: vec![],
             include_credentials: false,
             accounts: vec![],
             source_host: "test-host".into(),
@@ -531,16 +588,62 @@ mod tests {
 
     #[test]
     fn tunnel_pulls_in_its_host_even_when_unselected() {
-        // server "s1" is NOT in server_ids; the tunnel referencing it is.
-        let plan = plan_with(vec![], vec!["t1".into()], false, FakeKeys(HashMap::new()));
+        // server "s1" is NOT in server_ids; the tunnel referencing it is;
+        // nothing was declined, so the default (pull it in) applies.
+        let plan = plan_with(vec![], vec!["t1".into()], false, FakeKeys(HashMap::new()), vec![]);
         assert_eq!(plan.bundle.servers.len(), 1);
         assert_eq!(plan.bundle.servers[0].id, "s1");
         assert!(plan.auto_pulled.iter().any(|s| s.contains("s1")));
     }
 
+    /// 2026-08-16 ruling: "Export Without" in the dependency prompt must
+    /// genuinely exclude the server — no host entry, no vault account, no
+    /// key material — even though the tunnel that needs it is selected and
+    /// credentials are included (so the key *would* have been embeddable
+    /// had the host been pulled in).
+    #[test]
+    fn declined_tunnel_host_is_not_pulled_in_and_warns() {
+        let mut files = HashMap::new();
+        files.insert(
+            "/home/u/.ssh/id_ed25519".to_string(),
+            b"PRIVATE-KEY-BYTES".to_vec(),
+        );
+        // server "s1" is NOT in server_ids; the tunnel referencing it IS
+        // selected; "s1" is explicitly declined.
+        let plan = plan_with(
+            vec![],
+            vec!["t1".into()],
+            true,
+            FakeKeys(files),
+            vec!["s1".into()],
+        );
+        assert!(
+            plan.bundle.servers.is_empty(),
+            "declined host must not be pulled in: {:?}",
+            plan.bundle.servers
+        );
+        assert!(
+            plan.bundle.vault.accounts.is_empty(),
+            "declined host's vault account must not be copied into the bundle"
+        );
+        assert!(
+            plan.bundle.vault.keys.is_empty(),
+            "declined host's private key must not be embedded into the bundle"
+        );
+        assert!(
+            plan.auto_pulled.is_empty(),
+            "a declined host must not be recorded as auto-pulled"
+        );
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("prod")),
+            "warnings should name the declined host \"prod\": {:?}",
+            plan.warnings
+        );
+    }
+
     #[test]
     fn credentials_off_strips_vault_account_id() {
-        let plan = plan_with(vec!["s1".into()], vec![], false, FakeKeys(HashMap::new()));
+        let plan = plan_with(vec!["s1".into()], vec![], false, FakeKeys(HashMap::new()), vec![]);
         assert!(plan.bundle.servers[0].vault_account_id.is_none());
         assert!(plan.bundle.vault.is_empty());
         assert!(!plan.bundle.metadata.includes_credentials);
@@ -553,7 +656,7 @@ mod tests {
             "/home/u/.ssh/id_ed25519".to_string(),
             b"PRIVATE-KEY-BYTES".to_vec(),
         );
-        let plan = plan_with(vec!["s1".into()], vec![], true, FakeKeys(files));
+        let plan = plan_with(vec!["s1".into()], vec![], true, FakeKeys(files), vec![]);
         assert_eq!(plan.bundle.vault.accounts.len(), 1);
         assert_eq!(plan.bundle.vault.keys.len(), 1);
         // Material is base64 of the file's bytes.
@@ -573,7 +676,7 @@ mod tests {
 
     #[test]
     fn missing_key_file_warns_but_still_exports_the_host() {
-        let plan = plan_with(vec!["s1".into()], vec![], true, FakeKeys(HashMap::new()));
+        let plan = plan_with(vec!["s1".into()], vec![], true, FakeKeys(HashMap::new()), vec![]);
         assert_eq!(plan.bundle.servers.len(), 1, "host must still export");
         assert!(
             plan.warnings

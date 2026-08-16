@@ -69,6 +69,25 @@ pub(crate) struct ShareExportSummary {
     pub tunnels: usize,
     pub credentials: usize,
     pub warnings: Vec<String>,
+    /// Servers pulled into the bundle beyond what the user ticked, because a
+    /// selected tunnel depends on them (see
+    /// `export_planner::resolve_tunnel_host`). Always surfaced, even when
+    /// `warnings` is empty — silently dropping this is what let a declined
+    /// dependency travel into a bundle unnoticed (2026-08-16 review finding).
+    pub auto_pulled: Vec<String>,
+}
+
+/// Grouped selection args for `do_export`, so it stays under clippy's
+/// argument-count lint now that `declined_server_ids` joined the other
+/// selection fields. `share_export` itself must keep its arguments flat —
+/// Tauri command arguments are one per wire key the frontend's `invoke()`
+/// call sends, not a nested object — so it packs them into this struct
+/// immediately on entry instead.
+struct ExportSelection {
+    server_ids: Vec<String>,
+    tunnel_ids: Vec<String>,
+    declined_server_ids: Vec<String>,
+    include_credentials: bool,
 }
 
 /// Export the selected servers/tunnels (and, if `include_credentials`,
@@ -80,6 +99,7 @@ pub(crate) struct ShareExportSummary {
 /// forwarded to `codec::encode` by reference only, and is zeroized before
 /// this function returns on every path — success, planner warning, or
 /// error — via the `do_export`/zeroize split below.
+#[allow(clippy::too_many_arguments)] // Tauri command args are flat by design — see ExportSelection above.
 #[tauri::command]
 pub(crate) async fn share_export(
     app: tauri::AppHandle,
@@ -87,18 +107,17 @@ pub(crate) async fn share_export(
     vault: tauri::State<'_, VaultState>,
     server_ids: Vec<String>,
     tunnel_ids: Vec<String>,
+    declined_server_ids: Vec<String>,
     include_credentials: bool,
     mut password: String,
 ) -> Result<ShareExportSummary, String> {
-    let result = do_export(
-        &app,
-        &remote,
-        &vault,
+    let selection = ExportSelection {
         server_ids,
         tunnel_ids,
+        declined_server_ids,
         include_credentials,
-        &password,
-    );
+    };
+    let result = do_export(&app, &remote, &vault, selection, &password);
     password.zeroize();
     result
 }
@@ -107,11 +126,15 @@ fn do_export(
     app: &tauri::AppHandle,
     remote: &Arc<Mutex<RemoteState>>,
     vault: &VaultState,
-    server_ids: Vec<String>,
-    tunnel_ids: Vec<String>,
-    include_credentials: bool,
+    selection: ExportSelection,
     password: &str,
 ) -> Result<ShareExportSummary, String> {
+    let ExportSelection {
+        server_ids,
+        tunnel_ids,
+        declined_server_ids,
+        include_credentials,
+    } = selection;
     // The vault must already be unlocked; this command does not prompt —
     // the frontend runs its existing unlock flow (window.vault.ensureUnlocked)
     // before calling share_export with include_credentials: true.
@@ -132,6 +155,7 @@ fn do_export(
             ssh_config_entries: &state.ssh_config_entries,
             server_ids,
             tunnel_ids,
+            declined_server_ids,
             include_credentials,
             accounts,
             source_host: local_hostname(),
@@ -181,6 +205,7 @@ fn do_export(
         tunnels: export_plan.bundle.tunnels.len(),
         credentials: export_plan.bundle.vault.accounts.len(),
         warnings: export_plan.warnings,
+        auto_pulled: export_plan.auto_pulled,
     })
 }
 
