@@ -43,7 +43,7 @@
   let bottomZoneWrapEl = null;
   let savedZoneAssignments = null; // populated from backend before registration
   let savedActiveZoneWindows = null; // populated from backend before registration
-  let savedPanelVisibility = { left: null, right: null }; // persisted panel visibility hints
+  let savedPanelVisibility = { left: null, right: null, bottom: null }; // persisted panel visibility hints
   const stripDrag = {
     active: null,
     overlayEl: null,
@@ -117,11 +117,18 @@
     const next = map || {};
     if (typeof next.left === 'boolean') savedPanelVisibility.left = next.left;
     if (typeof next.right === 'boolean') savedPanelVisibility.right = next.right;
+    if (typeof next.bottom === 'boolean') savedPanelVisibility.bottom = next.bottom;
   }
 
+  // The bottom zone is a single zone rather than a top/bottom pair, so it has no
+  // '<side>-top'/'<side>-bottom' keys to look up — its own name is the key.
   function hasPersistedActiveForSide(side) {
-    if (side !== 'left' && side !== 'right') return false;
     const active = savedActiveZoneWindows || {};
+    if (side === 'bottom') {
+      const only = active.bottom;
+      return typeof only === 'string' && only.length > 0;
+    }
+    if (side !== 'left' && side !== 'right') return false;
     const top = active[side + '-top'];
     const bottom = active[side + '-bottom'];
     return (typeof top === 'string' && top.length > 0) || (typeof bottom === 'string' && bottom.length > 0);
@@ -150,8 +157,11 @@
     const side = sideForZone(zone);
     const appRoot = document.getElementById('app');
     const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
-    const persistedSideHidden = (side === 'left' || side === 'right') && savedPanelVisibility[side] === false;
-    const sideHiddenOnBoot = (side === 'left' || side === 'right') && (persistedSideHidden || !isPanelVisible(side));
+    // Applies to the bottom zone too: registration used to force-activate any
+    // window there regardless of saved visibility, which re-opened a bottom zone
+    // the user had closed immediately after boot restored it as hidden.
+    const persistedSideHidden = savedPanelVisibility[side] === false;
+    const sideHiddenOnBoot = persistedSideHidden || !isPanelVisible(side);
     const sideHasPersistedActive = hasPersistedActiveForSide(side);
     const shouldAutoActivate = !zenActive && !sideHiddenOnBoot && !sideHasPersistedActive;
     const savedActiveId = savedActiveZoneWindows && typeof savedActiveZoneWindows[zone] === 'string'

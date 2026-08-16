@@ -204,6 +204,7 @@
             global.toolWindowManager.setPersistedPanelVisibility({
               left: initialLayoutData.files_panel_visible !== false,
               right: initialLayoutData.ssh_panel_visible !== false,
+              bottom: initialLayoutData.bottom_panel_visible !== false,
             });
           }
           if (initialLayoutData.left_split_ratio > 0 && initialLayoutData.left_split_ratio < 1) {
