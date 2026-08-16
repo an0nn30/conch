@@ -73,3 +73,73 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tl-combo .tl-icon { flex-shrink: 0; }
+.tl-field > .tl-spinner { flex: 1 1 auto; min-width: 0; }
+
+/* Numeric spinner — a native <input type="number"> (app/ui/tl-spinner.js
+   wraps it; the input itself is the source of truth, same contract as
+   tl-combo) plus a stepper column built from the SAME pieces as .tl-input
+   (border/background/focus tokens) rather than new visuals, per the
+   reference's "Modal dialog shell" note ("spinner (numeric + up/down
+   stepper)"). No vendored up/down icons exist — vendor/intellij-icons only
+   has chevronDown/chevronRight — so the up button reuses chevronDown
+   rotated 180deg, the same idiom strips.css already uses for the collapsed
+   left-strip toggle. Exact stepper pixel metrics aren't measured yet
+   (METRICS.md has no numeric-field close-up); this is a first pass sized to
+   match .tl-input's 26px height and needs a visual check once Task 4 mounts
+   it in the Add SSH Tunnel dialog's port fields. */
+.tl-spinner {
+  position: relative;
+  display: inline-flex;
+  width: 100%;
+}
+.tl-spinner__input {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  background: var(--tl-TextField-background, var(--tl-bg));
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  height: 26px;
+  padding: 0 22px 0 var(--tl-space-2);
+}
+.tl-spinner__input:focus {
+  outline: none;
+  border-color: var(--tl-base-focusedBorderColor);
+}
+/* The native spin buttons are replaced by .tl-spinner__stepper below, so
+   they're hidden rather than left to double up with it. */
+.tl-spinner__input::-webkit-outer-spin-button,
+.tl-spinner__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.tl-spinner__input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.tl-spinner__stepper {
+  position: absolute;
+  top: 1px; right: 1px; bottom: 1px;
+  width: 18px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--tl-border);
+  border-radius: 0 var(--tl-radius) var(--tl-radius) 0;
+  overflow: hidden;
+}
+.tl-spinner__step {
+  flex: 1 1 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: default;
+  color: var(--tl-fg);
+}
+.tl-spinner__step--up { border-bottom: 1px solid var(--tl-border); }
+.tl-spinner__step:hover:not(:disabled) { background: var(--tl-row-hover); }
+.tl-spinner__step:disabled { opacity: 0.4; cursor: default; }
+.tl-spinner__step .tl-icon { width: 10px; height: 10px; }
+.tl-spinner__step--up .tl-icon { transform: rotate(180deg); }

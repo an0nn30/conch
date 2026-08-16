@@ -40,7 +40,14 @@
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'tl-combo';
-    button.setAttribute('aria-haspopup', 'listbox');
+    // aria-haspopup must agree with what the popup actually is. tl-menu
+    // always renders role="menu" with role="menuitem"/"menuitemcheckbox"
+    // items (see app/ui/tl-menu.js buildItemEl/open) — that's the "Menu
+    // Button" ARIA pattern, not a listbox popup — and this combo reuses
+    // tl-menu unmodified rather than teaching it a second listbox/option
+    // role vocabulary for one consumer. So the trigger advertises "menu" to
+    // match, not "listbox".
+    button.setAttribute('aria-haspopup', 'menu');
     button.setAttribute('aria-expanded', 'false');
 
     const labelEl = document.createElement('span');
