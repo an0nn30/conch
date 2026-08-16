@@ -17,29 +17,22 @@
   const vaultDialogs = exports.termlabVaultDialogs || {};
   const vaultAccountFormFeature = exports.termlabVaultAccountForm || {};
 
-  function setOverlayDialogAttributes(overlay, label) {
-    if (!overlay) return;
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', String(label || 'Dialog'));
-  }
+  // The tl-dialog handle for whichever vault dialog is currently open
+  // (setup, unlock, the main sidebar dialog, or the account form).
+  // removeOverlay() below closes only this — never a blanket DOM query —
+  // so it can't reach into ssh/keygen/files/plugin/tunnel dialogs. Same
+  // pattern as ssh-panel.js's activeDialogHandle/trackDialogHandle.
+  let activeVaultDialogHandle = null;
 
-  function registerScopedOverlayKeys(overlay, name, onKeyDown) {
-    const keyboardRouter = window.termlabKeyboardRouter;
-    if (keyboardRouter && typeof keyboardRouter.register === 'function') {
-      return keyboardRouter.register({
-        name: name || 'vault-overlay',
-        priority: 230,
-        isActive: () => !!(overlay && overlay.isConnected),
-        onKeyDown: (event) => {
-          if (!overlay || !overlay.isConnected) return false;
-          return onKeyDown(event) === true;
-        },
-      });
-    }
-
-    console.warn('vault: keyboard router unavailable, skipping overlay handler registration:', name || 'vault-overlay');
-    return () => {};
+  function trackDialogHandle(handle) {
+    if (!handle) return handle;
+    const originalClose = handle.close;
+    handle.close = function (result) {
+      if (activeVaultDialogHandle === handle) activeVaultDialogHandle = null;
+      return originalClose.call(handle, result);
+    };
+    activeVaultDialogHandle = handle;
+    return handle;
   }
 
   function getVaultStatus() {
@@ -149,8 +142,7 @@
       // Auto-lock fired from backend — dismiss any vault dialogs and clear cache.
       cachedAccounts = [];
       stopLockTimer();
-      const overlay = document.getElementById('vault-overlay');
-      if (overlay) overlay.remove();
+      removeOverlay();
       window.toast.info('Vault Locked', 'The credential vault has been locked.');
     });
   }
@@ -186,15 +178,13 @@
   // ---------------------------------------------------------------------------
 
   function showSetupDialog(onSuccess) {
+    removeOverlay();
     if (vaultDialogs && typeof vaultDialogs.showSetupDialog === 'function') {
-      const handled = vaultDialogs.showSetupDialog(onSuccess, {
-        removeOverlay,
-        setOverlayDialogAttributes,
-        registerScopedOverlayKeys,
+      const handle = vaultDialogs.showSetupDialog(onSuccess, {
         createVault,
         toast: window.toast,
       });
-      if (handled) return;
+      if (handle) { trackDialogHandle(handle); return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('Vault Error', 'Vault setup dialog module is unavailable.');
@@ -206,15 +196,13 @@
   // ---------------------------------------------------------------------------
 
   async function showUnlockDialog(onSuccess) {
+    removeOverlay();
     if (vaultDialogs && typeof vaultDialogs.showUnlockDialog === 'function') {
-      const handled = await vaultDialogs.showUnlockDialog(onSuccess, {
-        removeOverlay,
-        setOverlayDialogAttributes,
-        registerScopedOverlayKeys,
+      const handle = vaultDialogs.showUnlockDialog(onSuccess, {
         unlockVault,
         toast: window.toast,
       });
-      if (handled) return;
+      if (handle) { trackDialogHandle(handle); return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('Vault Error', 'Vault unlock dialog module is unavailable.');
@@ -268,149 +256,134 @@
 
     const status = await getVaultStatus().catch(() => ({ exists: true, locked: false, seconds_remaining: 0 }));
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.id = 'vault-overlay';
-    setOverlayDialogAttributes(overlay, 'Credential vault');
-
-    const dialog = document.createElement('div');
-    dialog.className = 'ssh-form vault-dialog';
-
-    // Title
-    const titleEl = document.createElement('div');
-    titleEl.className = 'ssh-form-title';
-    titleEl.textContent = 'Credential Vault';
-    dialog.appendChild(titleEl);
-
-    // Body = sidebar + content
-    const body = document.createElement('div');
-    body.className = 'vault-body';
-
-    // Sidebar
-    const sidebar = document.createElement('div');
-    sidebar.className = 'vault-sidebar';
-
-    // switchSection — swap content area without rebuilding the dialog.
-    async function switchSection(sectionId) {
-      currentSection = sectionId;
-
-      // Update sidebar active state.
-      sidebar.querySelectorAll('.vault-sidebar-item').forEach((el) => {
-        const isActive = el.dataset.section === sectionId;
-        el.classList.toggle('active', isActive);
-        el.setAttribute('aria-current', isActive ? 'page' : 'false');
-      });
-
-      // Rebuild just the content area.
-      const contentEl = document.getElementById('vault-content');
-      if (!contentEl) return;
-      contentEl.innerHTML = '';
-
-      if (sectionId === 'accounts') {
-        // Re-fetch accounts so additions/edits are reflected.
-        try {
-          accounts = await listAccounts();
-          cachedAccounts = accounts;
-        } catch (_) {}
-        renderAccountsSection(contentEl, accounts);
-      } else if (sectionId === 'keys') {
-        await renderKeysSection(contentEl);
-      } else if (sectionId === 'settings') {
-        try { settings = await getVaultSettings(); } catch (_) {}
-        renderSettingsSection(contentEl, settings);
-      }
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') {
+      window.toast.error('Vault Error', 'Dialog shell module is unavailable.');
+      return;
     }
 
-    for (const sec of VAULT_SECTIONS) {
-      const item = document.createElement('div');
-      item.className = 'vault-sidebar-item' + (sec.id === currentSection ? ' active' : '');
-      item.dataset.section = sec.id;
-      item.textContent = sec.label;
-      item.setAttribute('role', 'button');
-      item.tabIndex = 0;
-      item.setAttribute('aria-current', sec.id === currentSection ? 'page' : 'false');
-      item.addEventListener('click', () => switchSection(sec.id));
-      item.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        switchSection(sec.id);
-      });
-      sidebar.appendChild(item);
-    }
-
-    // Sidebar footer — lock status + lock button
-    const footer = document.createElement('div');
-    footer.className = 'vault-sidebar-footer';
-    footer.innerHTML = `
-      <div class="vault-lock-status">
-        <span class="vault-status-dot unlocked"></span>
-        <span id="vault-lock-countdown">${formatCountdown(status.seconds_remaining)}</span>
-      </div>
-      <button class="vault-lock-btn" id="vault-lock-now">Lock Now</button>
-    `;
-    sidebar.appendChild(footer);
-
-    body.appendChild(sidebar);
-
-    // Content area
-    const content = document.createElement('div');
-    content.className = 'vault-content';
-    content.id = 'vault-content';
-
-    if (currentSection === 'accounts') {
-      renderAccountsSection(content, accounts);
-    } else if (currentSection === 'keys') {
-      await renderKeysSection(content);
-    } else if (currentSection === 'settings') {
-      renderSettingsSection(content, settings);
-    }
-
-    body.appendChild(content);
-    dialog.appendChild(body);
-
-    // Footer buttons
-    const buttons = document.createElement('div');
-    buttons.className = 'ssh-form-buttons';
-    buttons.innerHTML = '<button class="ssh-form-btn" id="vault-close">Close</button>';
-    dialog.appendChild(buttons);
-
-    overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
-
-    // Start countdown timer.
-    startLockTimer(overlay);
-
-    // Events
+    let handle = null;
     let closed = false;
     const closeDialog = () => {
       if (closed) return;
       closed = true;
       stopLockTimer();
-      removeOverlay();
-      if (typeof unregisterKeys === 'function') unregisterKeys();
+      if (handle) handle.close();
     };
-    const unregisterKeys = registerScopedOverlayKeys(overlay, 'vault-main-dialog', (event) => {
-      if (event.key !== 'Escape') return false;
-      closeDialog();
-      return true;
+
+    handle = window.tlDialog.open({
+      title: 'Credential Vault',
+      ariaLabel: 'Credential vault',
+      size: 'lg',
+      body: (bodyEl) => {
+        // Body = sidebar + content — internal layout markup unchanged from
+        // the pre-migration overlay, only the surrounding shell moved.
+        const body = document.createElement('div');
+        body.className = 'vault-body';
+
+        // Sidebar
+        const sidebar = document.createElement('div');
+        sidebar.className = 'vault-sidebar';
+
+        // switchSection — swap content area without rebuilding the dialog.
+        async function switchSection(sectionId) {
+          currentSection = sectionId;
+
+          // Update sidebar active state.
+          sidebar.querySelectorAll('.vault-sidebar-item').forEach((el) => {
+            const isActive = el.dataset.section === sectionId;
+            el.classList.toggle('active', isActive);
+            el.setAttribute('aria-current', isActive ? 'page' : 'false');
+          });
+
+          // Rebuild just the content area.
+          const contentEl = bodyEl.querySelector('#vault-content');
+          if (!contentEl) return;
+          contentEl.innerHTML = '';
+
+          if (sectionId === 'accounts') {
+            // Re-fetch accounts so additions/edits are reflected.
+            try {
+              accounts = await listAccounts();
+              cachedAccounts = accounts;
+            } catch (_) {}
+            renderAccountsSection(contentEl, accounts);
+          } else if (sectionId === 'keys') {
+            await renderKeysSection(contentEl);
+          } else if (sectionId === 'settings') {
+            try { settings = await getVaultSettings(); } catch (_) {}
+            renderSettingsSection(contentEl, settings);
+          }
+        }
+
+        for (const sec of VAULT_SECTIONS) {
+          const item = document.createElement('div');
+          item.className = 'vault-sidebar-item' + (sec.id === currentSection ? ' active' : '');
+          item.dataset.section = sec.id;
+          item.textContent = sec.label;
+          item.setAttribute('role', 'button');
+          item.tabIndex = 0;
+          item.setAttribute('aria-current', sec.id === currentSection ? 'page' : 'false');
+          item.addEventListener('click', () => switchSection(sec.id));
+          item.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            switchSection(sec.id);
+          });
+          sidebar.appendChild(item);
+        }
+
+        // Sidebar footer — lock status + lock button
+        const footer = document.createElement('div');
+        footer.className = 'vault-sidebar-footer';
+        footer.innerHTML = `
+          <div class="vault-lock-status">
+            <span class="vault-status-dot unlocked"></span>
+            <span id="vault-lock-countdown">${formatCountdown(status.seconds_remaining)}</span>
+          </div>
+          <button class="vault-lock-btn" id="vault-lock-now">Lock Now</button>
+        `;
+        sidebar.appendChild(footer);
+
+        body.appendChild(sidebar);
+
+        // Content area
+        const content = document.createElement('div');
+        content.className = 'vault-content';
+        content.id = 'vault-content';
+
+        if (currentSection === 'accounts') {
+          renderAccountsSection(content, accounts);
+        } else if (currentSection === 'keys') {
+          renderKeysSection(content);
+        } else if (currentSection === 'settings') {
+          renderSettingsSection(content, settings);
+        }
+
+        body.appendChild(content);
+        bodyEl.appendChild(body);
+
+        // Start countdown timer — queries #vault-lock-countdown/.vault-status-dot
+        // within bodyEl, same as the old overlay-scoped lookup.
+        startLockTimer(bodyEl);
+
+        bodyEl.querySelector('#vault-lock-now').addEventListener('click', async () => {
+          try {
+            await lockVault();
+            closeDialog();
+            cachedAccounts = [];
+            window.toast.info('Vault Locked', 'Credential vault has been locked.');
+          } catch (e) {
+            window.toast.error('Vault Error', 'Failed to lock vault: ' + e);
+          }
+        });
+      },
+      buttons: [
+        { label: 'Close', onSelect: closeDialog },
+      ],
+      onClose: closeDialog,
     });
 
-    overlay.addEventListener('mousedown', (e) => {
-      if (e.target === overlay) closeDialog();
-    });
-
-    overlay.querySelector('#vault-close').addEventListener('click', closeDialog);
-
-    overlay.querySelector('#vault-lock-now').addEventListener('click', async () => {
-      try {
-        await lockVault();
-        closeDialog();
-        cachedAccounts = [];
-        window.toast.info('Vault Locked', 'Credential vault has been locked.');
-      } catch (e) {
-        window.toast.error('Vault Error', 'Failed to lock vault: ' + e);
-      }
-    });
+    trackDialogHandle(handle);
   }
 
   // ---------------------------------------------------------------------------
@@ -475,11 +448,9 @@
   // ---------------------------------------------------------------------------
 
   async function showAccountForm(existing) {
+    removeOverlay();
     if (vaultAccountFormFeature && typeof vaultAccountFormFeature.showAccountForm === 'function') {
-      const handled = await vaultAccountFormFeature.showAccountForm(existing, {
-        removeOverlay,
-        setOverlayDialogAttributes,
-        registerScopedOverlayKeys,
+      const handle = await vaultAccountFormFeature.showAccountForm(existing, {
         listKeys,
         pickKeyFile,
         updateAccount,
@@ -490,7 +461,7 @@
         toast: window.toast,
         keygen: window.keygen,
       });
-      if (handled) return;
+      if (handle) { trackDialogHandle(handle); return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('Vault Error', 'Vault account form module is unavailable.');
@@ -560,8 +531,11 @@
   // ---------------------------------------------------------------------------
 
   function removeOverlay() {
-    const el = document.getElementById('vault-overlay');
-    if (el) el.remove();
+    if (activeVaultDialogHandle) {
+      const handle = activeVaultDialogHandle;
+      activeVaultDialogHandle = null;
+      handle.close();
+    }
   }
 
   exports.vault = {

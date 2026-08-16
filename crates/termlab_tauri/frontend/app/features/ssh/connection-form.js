@@ -77,10 +77,23 @@
     }
 
     global.vault.ensureUnlocked(() => {
+      // vault.showAccountForm (and any setup/unlock dialog ensureUnlocked
+      // shows first) now renders through the shared tl-dialog stack rather
+      // than a fixed-id `#vault-overlay` div (design-system-phase-5a task
+      // 4), so "has the vault flow fully closed?" is now "has the dialog
+      // stack come back down to this connection form's own depth?" —
+      // captured here, right before showAccountForm layers its dialog(s)
+      // on top, rather than assuming a depth of zero (this form is itself
+      // an open tl-dialog).
+      const baselineDepth = (global.tlDialog && typeof global.tlDialog.count === 'function')
+        ? global.tlDialog.count()
+        : 0;
       global.vault.showAccountForm(null);
       const checkInterval = setInterval(() => {
-        const vaultOverlay = document.getElementById('vault-overlay');
-        if (vaultOverlay) return;
+        const stackDepth = (global.tlDialog && typeof global.tlDialog.count === 'function')
+          ? global.tlDialog.count()
+          : 0;
+        if (stackDepth > baselineDepth) return;
         clearInterval(checkInterval);
         populateAccountPicker(panelEl, '', d);
       }, 300);

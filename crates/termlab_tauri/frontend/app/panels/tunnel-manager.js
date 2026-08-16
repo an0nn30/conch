@@ -7,30 +7,25 @@
   let listen = null;
   let serverDataFn = null; // returns { folders, ungrouped, ssh_config }
 
-  function setOverlayDialogAttributes(overlay, label) {
-    if (!overlay) return;
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-label', String(label || 'Dialog'));
-  }
+  // The tl-dialog handle for whichever "base" tunnel dialog is currently
+  // open (the manager table, or the New/Edit Tunnel form — these three are
+  // mutually exclusive, each replacing the last). removeOverlay() below
+  // closes only this — never a blanket DOM query — so it can't reach into
+  // ssh/vault/keygen/files/plugin dialogs, or even this module's own
+  // delete-confirm/error dialogs, which nest ON TOP of the base dialog and
+  // manage their own local dismiss (see showDeleteDialog/showErrorDialog).
+  // Same pattern as ssh-panel.js's activeDialogHandle/trackDialogHandle.
+  let activeDialogHandle = null;
 
-  function registerOverlayEscape(overlay, name, onEscape) {
-    const keyboardRouter = window.termlabKeyboardRouter;
-    if (!keyboardRouter || typeof keyboardRouter.register !== 'function') {
-      console.warn('tunnel-manager: keyboard router unavailable, skipping escape registration:', name || 'tunnel-overlay');
-      return () => {};
-    }
-    return keyboardRouter.register({
-      name: name || 'tunnel-overlay',
-      priority: 220,
-      isActive: () => !!(overlay && overlay.isConnected),
-      onKeyDown: (event) => {
-        if (!overlay || !overlay.isConnected) return false;
-        if (event.key !== 'Escape') return false;
-        onEscape(event);
-        return true;
-      },
-    });
+  function trackDialogHandle(handle) {
+    if (!handle) return handle;
+    const originalClose = handle.close;
+    handle.close = function (result) {
+      if (activeDialogHandle === handle) activeDialogHandle = null;
+      return originalClose.call(handle, result);
+    };
+    activeDialogHandle = handle;
+    return handle;
   }
 
   function init(opts) {
@@ -60,65 +55,55 @@
 
   function renderManager(tunnels) {
     removeOverlay();
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') return;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.id = 'tunnel-manager-overlay';
-    setOverlayDialogAttributes(overlay, 'SSH tunnels');
-
-    overlay.innerHTML = `
-      <div class="ssh-form tunnel-manager-dialog">
-        <div class="ssh-form-title">SSH Tunnels</div>
-        <div class="tunnel-manager-body">
-          <div class="tunnel-table-wrap">
-            <table class="tunnel-table">
-              <thead>
-                <tr>
-                  <th class="tunnel-col-status">Status</th>
-                  <th>Label</th>
-                  <th>Local</th>
-                  <th>Remote</th>
-                  <th>Via</th>
-                  <th class="tunnel-col-actions"></th>
-                </tr>
-              </thead>
-              <tbody id="tunnel-tbody"></tbody>
-            </table>
-            ${tunnels.length === 0 ? '<div class="tunnel-empty">No tunnels configured</div>' : ''}
-          </div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="tm-close">Close</button>
-          <button class="ssh-form-btn" id="tm-new">New Tunnel\u2026</button>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-
-    const tbody = overlay.querySelector('#tunnel-tbody');
-    for (const t of tunnels) {
-      tbody.appendChild(createTunnelRow(t));
-    }
-
-    // Events
+    let handle = null;
     let closed = false;
-    let unregisterEscape = null;
     const closeManager = () => {
       if (closed) return;
       closed = true;
-      if (typeof unregisterEscape === 'function') unregisterEscape();
-      unregisterEscape = null;
-      removeOverlay();
+      if (handle) handle.close();
     };
 
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeManager(); });
-    overlay.querySelector('#tm-close').addEventListener('click', closeManager);
-    overlay.querySelector('#tm-new').addEventListener('click', () => {
-      closeManager();
-      showNewTunnelForm();
+    handle = window.tlDialog.open({
+      title: 'SSH Tunnels',
+      ariaLabel: 'SSH tunnels',
+      size: 'lg',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="tunnel-manager-body">
+            <div class="tunnel-table-wrap">
+              <table class="tunnel-table">
+                <thead>
+                  <tr>
+                    <th class="tunnel-col-status">Status</th>
+                    <th>Label</th>
+                    <th>Local</th>
+                    <th>Remote</th>
+                    <th>Via</th>
+                    <th class="tunnel-col-actions"></th>
+                  </tr>
+                </thead>
+                <tbody id="tunnel-tbody"></tbody>
+              </table>
+              ${tunnels.length === 0 ? '<div class="tunnel-empty">No tunnels configured</div>' : ''}
+            </div>
+          </div>
+        `;
+
+        const tbody = bodyEl.querySelector('#tunnel-tbody');
+        for (const t of tunnels) {
+          tbody.appendChild(createTunnelRow(t));
+        }
+      },
+      buttons: [
+        { label: 'Close', onSelect: closeManager },
+        { label: 'New Tunnel…', onSelect: () => { closeManager(); showNewTunnelForm(); } },
+      ],
+      onClose: closeManager,
     });
-    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-manager-main', () => closeManager());
+
+    trackDialogHandle(handle);
   }
 
   function createTunnelRow(tunnel) {
@@ -135,7 +120,7 @@
       statusDotClass = 'active';
       statusChipClass = 'active';
     } else if (status === 'connecting') {
-      statusLabel = 'Connecting\u2026';
+      statusLabel = 'Connecting…';
       statusDotClass = 'connecting';
       statusChipClass = 'connecting';
     } else if (status.startsWith('error')) {
@@ -193,7 +178,7 @@
 
     const moreBtn = document.createElement('button');
     moreBtn.className = 'tunnel-action-btn tunnel-action-more';
-    moreBtn.textContent = '\u22ef';
+    moreBtn.textContent = '⋯';
     moreBtn.title = 'More Actions';
     moreBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -243,41 +228,40 @@
     show();
   }
 
+  // Nests ON TOP of the manager dialog (still open behind it) rather than
+  // replacing it — matches the old overlay, which never called
+  // removeOverlay() here and set a raised z-index to layer above the
+  // manager. tl-dialog's stacking (depth-based z-index) does that
+  // automatically now. Local dismiss only: unlike the base dialogs
+  // (manager/new/edit), closing this one never re-shows the manager — it
+  // was never replaced, so there's nothing to restore.
   function showDeleteDialog(tunnel) {
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '3100';
-    setOverlayDialogAttributes(overlay, 'Delete tunnel');
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">Delete Tunnel</div>
-        <div class="ssh-form-body">
-          <div class="ssh-auth-message">Delete <strong>${esc(tunnel.label)}</strong>?</div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="del-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="del-confirm" style="background:var(--red);border-color:var(--red)">Delete</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') return;
 
+    let handle = null;
     let dismissed = false;
-    let unregisterEscape = null;
     const dismiss = () => {
       if (dismissed) return;
       dismissed = true;
-      if (typeof unregisterEscape === 'function') unregisterEscape();
-      unregisterEscape = null;
-      overlay.remove();
+      if (handle) handle.close();
     };
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
-    overlay.querySelector('#del-cancel').addEventListener('click', dismiss);
-    overlay.querySelector('#del-confirm').addEventListener('click', async () => {
-      dismiss();
-      await doDelete(tunnel);
+
+    handle = window.tlDialog.open({
+      title: 'Delete Tunnel',
+      ariaLabel: 'Delete tunnel',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `<div class="ssh-auth-message">Delete <strong>${esc(tunnel.label)}</strong>?</div>`;
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: dismiss },
+        { label: 'Delete', primary: true, danger: true, onSelect: async () => {
+          dismiss();
+          await doDelete(tunnel);
+        } },
+      ],
+      onClose: dismiss,
     });
-    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-delete-dialog', () => dismiss());
   }
 
   // Renders through the shared window.tlMenu component
@@ -319,6 +303,7 @@
 
   function showNewTunnelForm() {
     removeOverlay();
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') return;
 
     const data = serverDataFn ? serverDataFn() : { folders: [], ungrouped: [], ssh_config: [] };
     const allServers = [
@@ -329,80 +314,88 @@
 
     const serverOptions = allServers.map((s) => {
       const key = `${s.user}@${s.host}:${s.port}`;
-      return { key, label: `${s.label} \u2014 ${key}` };
+      return { key, label: `${s.label} — ${key}` };
     });
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    setOverlayDialogAttributes(overlay, 'New SSH tunnel');
-    overlay.innerHTML = `
-      <div class="ssh-form">
-        <div class="ssh-form-title">New SSH Tunnel</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">SSH Server
-            <select id="nt-server">
+    let handle = null;
+    let dismissed = false;
+    // No show() on Escape/backdrop — matches the old overlay, which only
+    // returned to the manager via the explicit Cancel button (or after a
+    // successful/failed Save), never on Escape/backdrop dismissal.
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (handle) handle.close();
+    };
+
+    handle = window.tlDialog.open({
+      title: 'New SSH Tunnel',
+      ariaLabel: 'New SSH tunnel',
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="tl-field">
+            <span class="tl-field__label">SSH Server</span>
+            <select class="tl-combo-select" id="nt-server">
               ${serverOptions.map((s) =>
                 `<option value="${attr(s.key)}">${esc(s.label)}</option>`
               ).join('')}
             </select>
-          </label>
-          <div class="ssh-form-row">
-            <label class="ssh-form-label" style="flex:1">Local Port
-              <input type="number" id="nt-local-port" min="1" max="65535" placeholder="8080" />
-            </label>
-            <label class="ssh-form-label" style="flex:1">Remote Host
-              <input type="text" id="nt-remote-host" value="localhost" spellcheck="false" />
-            </label>
-            <label class="ssh-form-label" style="width:90px">Remote Port
-              <input type="number" id="nt-remote-port" min="1" max="65535" placeholder="80" />
-            </label>
           </div>
-          <label class="ssh-form-label">Label (optional)
-            <input type="text" id="nt-label" placeholder="e.g. Web Server" spellcheck="false" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="nt-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="nt-save">Save & Connect</button>
-        </div>
-      </div>
-    `;
+          <div class="tl-field">
+            <span class="tl-field__label">Local Port</span>
+            <input type="number" class="tl-input" id="nt-local-port" min="1" max="65535" placeholder="8080" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Remote Host</span>
+            <input type="text" class="tl-input" id="nt-remote-host" value="localhost" spellcheck="false" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Remote Port</span>
+            <input type="number" class="tl-input" id="nt-remote-port" min="1" max="65535" placeholder="80" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Label (optional)</span>
+            <input type="text" class="tl-input" id="nt-label" placeholder="e.g. Web Server" spellcheck="false" />
+          </div>
+        `;
 
-    document.body.appendChild(overlay);
-    setTimeout(() => overlay.querySelector('#nt-local-port').focus(), 50);
+        bodyEl.querySelectorAll('select.tl-combo-select').forEach((select) => {
+          if (window.tlCombo && typeof window.tlCombo.attach === 'function') window.tlCombo.attach(select);
+        });
+        // Bind/Target port fields — the reference's spinner case.
+        bodyEl.querySelectorAll('#nt-local-port, #nt-remote-port').forEach((input) => {
+          if (window.tlSpinner && typeof window.tlSpinner.attach === 'function') window.tlSpinner.attach(input);
+        });
 
-    let dismissed = false;
-    let unregisterEscape = null;
-    const dismiss = () => {
-      if (dismissed) return;
-      dismissed = true;
-      if (typeof unregisterEscape === 'function') unregisterEscape();
-      unregisterEscape = null;
-      removeOverlay();
-    };
+        const localPortInput = bodyEl.querySelector('#nt-local-port');
+        setTimeout(() => { if (localPortInput) localPortInput.focus(); }, 50);
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: () => { dismiss(); show(); } },
+        { label: 'Save & Connect', primary: true, onSelect: () => submitNewTunnel(handle.el, dismiss) },
+      ],
+      onClose: dismiss,
+    });
 
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
-    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-new-form', () => dismiss());
-
-    overlay.querySelector('#nt-cancel').addEventListener('click', () => { dismiss(); show(); });
-    overlay.querySelector('#nt-save').addEventListener('click', () => submitNewTunnel(overlay, dismiss));
+    trackDialogHandle(handle);
   }
 
-  async function submitNewTunnel(overlay, dismissOverlay) {
-    const sessionKey = overlay.querySelector('#nt-server').value;
-    const localPort = parseInt(overlay.querySelector('#nt-local-port').value, 10);
-    const remoteHost = overlay.querySelector('#nt-remote-host').value.trim() || 'localhost';
-    const remotePort = parseInt(overlay.querySelector('#nt-remote-port').value, 10);
-    const label = overlay.querySelector('#nt-label').value.trim();
+  async function submitNewTunnel(panelEl, dismissOverlay) {
+    const sessionKey = panelEl.querySelector('#nt-server').value;
+    const localPort = parseInt(panelEl.querySelector('#nt-local-port').value, 10);
+    const remoteHost = panelEl.querySelector('#nt-remote-host').value.trim() || 'localhost';
+    const remotePort = parseInt(panelEl.querySelector('#nt-remote-port').value, 10);
+    const label = panelEl.querySelector('#nt-label').value.trim();
 
     if (!localPort || localPort < 1 || localPort > 65535) {
       window.toast.warn('Invalid Port', 'Local port must be between 1 and 65535.');
-      overlay.querySelector('#nt-local-port').focus();
+      panelEl.querySelector('#nt-local-port').focus();
       return;
     }
     if (!remotePort || remotePort < 1 || remotePort > 65535) {
       window.toast.warn('Invalid Port', 'Remote port must be between 1 and 65535.');
-      overlay.querySelector('#nt-remote-port').focus();
+      panelEl.querySelector('#nt-remote-port').focus();
       return;
     }
 
@@ -444,6 +437,7 @@
 
   function showEditTunnelForm(tunnel) {
     removeOverlay();
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') return;
 
     const data = serverDataFn ? serverDataFn() : { folders: [], ungrouped: [], ssh_config: [] };
     const allServers = [
@@ -454,74 +448,85 @@
 
     const serverOptions = allServers.map((s) => {
       const key = `${s.user}@${s.host}:${s.port}`;
-      return { key, label: `${s.label} \u2014 ${key}` };
+      return { key, label: `${s.label} — ${key}` };
     });
 
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    setOverlayDialogAttributes(overlay, 'Edit SSH tunnel');
-    overlay.innerHTML = `
-      <div class="ssh-form">
-        <div class="ssh-form-title">Edit SSH Tunnel</div>
-        <div class="ssh-form-body">
-          <label class="ssh-form-label">SSH Server
-            <select id="et-server">
+    let handle = null;
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      if (handle) handle.close();
+    };
+
+    handle = window.tlDialog.open({
+      title: 'Edit SSH Tunnel',
+      ariaLabel: 'Edit SSH tunnel',
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div class="tl-field">
+            <span class="tl-field__label">SSH Server</span>
+            <select class="tl-combo-select" id="et-server">
               ${serverOptions.map((s) =>
                 `<option value="${attr(s.key)}" ${s.key === tunnel.session_key ? 'selected' : ''}>${esc(s.label)}</option>`
               ).join('')}
             </select>
-          </label>
-          <div class="ssh-form-row">
-            <label class="ssh-form-label" style="flex:1">Local Port
-              <input type="number" id="et-local-port" value="${tunnel.local_port}" min="1" max="65535" />
-            </label>
-            <label class="ssh-form-label" style="flex:1">Remote Host
-              <input type="text" id="et-remote-host" value="${attr(tunnel.remote_host)}" spellcheck="false" />
-            </label>
-            <label class="ssh-form-label" style="width:90px">Remote Port
-              <input type="number" id="et-remote-port" value="${tunnel.remote_port}" min="1" max="65535" />
-            </label>
           </div>
-          <label class="ssh-form-label">Label
-            <input type="text" id="et-label" value="${attr(tunnel.label)}" spellcheck="false" />
-          </label>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="et-cancel">Cancel</button>
-          <button class="ssh-form-btn primary" id="et-save">Save</button>
-        </div>
-      </div>
-    `;
+          <div class="tl-field">
+            <span class="tl-field__label">Local Port</span>
+            <input type="number" class="tl-input" id="et-local-port" value="${tunnel.local_port}" min="1" max="65535" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Remote Host</span>
+            <input type="text" class="tl-input" id="et-remote-host" value="${attr(tunnel.remote_host)}" spellcheck="false" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Remote Port</span>
+            <input type="number" class="tl-input" id="et-remote-port" value="${tunnel.remote_port}" min="1" max="65535" />
+          </div>
+          <div class="tl-field">
+            <span class="tl-field__label">Label</span>
+            <input type="text" class="tl-input" id="et-label" value="${attr(tunnel.label)}" spellcheck="false" />
+          </div>
+        `;
 
-    document.body.appendChild(overlay);
-    setTimeout(() => overlay.querySelector('#et-local-port').focus(), 50);
+        bodyEl.querySelectorAll('select.tl-combo-select').forEach((select) => {
+          if (window.tlCombo && typeof window.tlCombo.attach === 'function') window.tlCombo.attach(select);
+        });
+        // Bind/Target port fields — the reference's spinner case.
+        bodyEl.querySelectorAll('#et-local-port, #et-remote-port').forEach((input) => {
+          if (window.tlSpinner && typeof window.tlSpinner.attach === 'function') window.tlSpinner.attach(input);
+        });
 
-    let dismissed = false;
-    let unregisterEscape = null;
-    const dismiss = () => {
-      if (dismissed) return;
-      dismissed = true;
-      if (typeof unregisterEscape === 'function') unregisterEscape();
-      unregisterEscape = null;
-      removeOverlay();
-    };
-
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { dismiss(); show(); } });
-    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-edit-form', () => {
-      dismiss();
-      show();
+        const localPortInput = bodyEl.querySelector('#et-local-port');
+        setTimeout(() => { if (localPortInput) localPortInput.focus(); }, 50);
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: () => { dismiss(); show(); } },
+        { label: 'Save', primary: true, onSelect: () => submitEditTunnel(handle.el, tunnel, dismiss) },
+      ],
+      // Escape/backdrop return to the manager here too — matches the old
+      // overlay, where every dismissal path except Save's own (which calls
+      // show() itself once after the network round-trip, see
+      // submitEditTunnel) re-showed it. Gated on the tl-dialog close
+      // reason so Save's dismiss() call (no result argument) doesn't
+      // trigger a second, premature show() on top of its own.
+      onClose: (result) => {
+        dismiss();
+        if (result === 'escape' || result === 'backdrop') show();
+      },
     });
 
-    overlay.querySelector('#et-cancel').addEventListener('click', () => { dismiss(); show(); });
-    overlay.querySelector('#et-save').addEventListener('click', () => submitEditTunnel(overlay, tunnel, dismiss));
+    trackDialogHandle(handle);
   }
 
-  async function submitEditTunnel(overlay, original, dismissOverlay) {
-    const sessionKey = overlay.querySelector('#et-server').value;
-    const localPort = parseInt(overlay.querySelector('#et-local-port').value, 10);
-    const remoteHost = overlay.querySelector('#et-remote-host').value.trim() || 'localhost';
-    const remotePort = parseInt(overlay.querySelector('#et-remote-port').value, 10);
-    const label = overlay.querySelector('#et-label').value.trim();
+  async function submitEditTunnel(panelEl, original, dismissOverlay) {
+    const sessionKey = panelEl.querySelector('#et-server').value;
+    const localPort = parseInt(panelEl.querySelector('#et-local-port').value, 10);
+    const remoteHost = panelEl.querySelector('#et-remote-host').value.trim() || 'localhost';
+    const remotePort = parseInt(panelEl.querySelector('#et-remote-port').value, 10);
+    const label = panelEl.querySelector('#et-label').value.trim();
 
     if (!localPort || localPort < 1 || localPort > 65535) {
       window.toast.warn('Invalid Port', 'Local port must be between 1 and 65535.');
@@ -556,56 +561,41 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Error dialog
+  // Error dialog — nests on top of the manager dialog, same rationale and
+  // local-dismiss-only contract as showDeleteDialog above.
   // ---------------------------------------------------------------------------
 
   function showErrorDialog(title, message, onRetry, onEdit) {
-    // Don't remove the manager overlay — layer this on top
-    const overlay = document.createElement('div');
-    overlay.className = 'ssh-overlay';
-    overlay.style.zIndex = '3100';
-    setOverlayDialogAttributes(overlay, title || 'Tunnel error');
-    overlay.innerHTML = `
-      <div class="ssh-form ssh-form-small">
-        <div class="ssh-form-title">${esc(title)}</div>
-        <div class="ssh-form-body">
-          <div class="ssh-error-text">${esc(message)}</div>
-        </div>
-        <div class="ssh-form-buttons">
-          <button class="ssh-form-btn" id="err-dismiss">Dismiss</button>
-          ${onEdit ? '<button class="ssh-form-btn" id="err-edit">Edit</button>' : ''}
-          ${onRetry ? '<button class="ssh-form-btn primary" id="err-retry">Retry</button>' : ''}
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
+    if (!window.tlDialog || typeof window.tlDialog.open !== 'function') return;
 
+    let handle = null;
     let dismissed = false;
-    let unregisterEscape = null;
     const dismiss = () => {
       if (dismissed) return;
       dismissed = true;
-      if (typeof unregisterEscape === 'function') unregisterEscape();
-      unregisterEscape = null;
-      overlay.remove();
+      if (handle) handle.close();
     };
-    overlay.querySelector('#err-dismiss').addEventListener('click', dismiss);
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(); });
 
-    if (onRetry) {
-      overlay.querySelector('#err-retry').addEventListener('click', () => {
-        dismiss();
-        onRetry();
-      });
-    }
+    const buttons = [
+      { label: 'Dismiss', onSelect: dismiss },
+    ];
     if (onEdit) {
-      overlay.querySelector('#err-edit').addEventListener('click', () => {
-        dismiss();
-        onEdit();
-      });
+      buttons.push({ label: 'Edit', onSelect: () => { dismiss(); onEdit(); } });
+    }
+    if (onRetry) {
+      buttons.push({ label: 'Retry', primary: true, onSelect: () => { dismiss(); onRetry(); } });
     }
 
-    unregisterEscape = registerOverlayEscape(overlay, 'tunnel-error-dialog', () => dismiss());
+    handle = window.tlDialog.open({
+      title: title || 'Tunnel Error',
+      ariaLabel: title || 'Tunnel error',
+      size: 'sm',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `<div class="ssh-error-text">${esc(message)}</div>`;
+      },
+      buttons,
+      onClose: dismiss,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -613,10 +603,11 @@
   // ---------------------------------------------------------------------------
 
   function removeOverlay() {
-    const el = document.getElementById('tunnel-manager-overlay');
-    if (el) el.remove();
-    // Also remove any other ssh-overlay that the new-tunnel form might have created
-    document.querySelectorAll('.ssh-overlay').forEach((el) => el.remove());
+    if (activeDialogHandle) {
+      const handle = activeDialogHandle;
+      activeDialogHandle = null;
+      handle.close();
+    }
   }
 
   const esc = window.utils.esc;
