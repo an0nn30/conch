@@ -150,6 +150,34 @@
       menu.appendChild(buildItemEl(item));
     }
 
+    // Arrow-key navigation between enabled items (wrapping), plus Home/End
+    // to jump to the first/last enabled item. Needed by app/ui/tl-combo.js's
+    // popup (and any other tlMenu consumer) — added here rather than forked
+    // so every menu gets it for free. Enter/Space activation stays on each
+    // item's own keydown listener in buildItemEl(); this only moves focus.
+    menu.addEventListener('keydown', (keyEvent) => {
+      if (keyEvent.key !== 'ArrowDown' && keyEvent.key !== 'ArrowUp' &&
+          keyEvent.key !== 'Home' && keyEvent.key !== 'End') return;
+      const enabledItems = Array.prototype.filter.call(
+        menu.querySelectorAll('.tl-menu__item'),
+        (el) => !el.classList.contains('is-disabled')
+      );
+      if (!enabledItems.length) return;
+      keyEvent.preventDefault();
+      const current = enabledItems.indexOf(document.activeElement);
+      let next;
+      if (keyEvent.key === 'ArrowDown') {
+        next = current === -1 ? 0 : (current + 1) % enabledItems.length;
+      } else if (keyEvent.key === 'ArrowUp') {
+        next = current === -1 ? enabledItems.length - 1 : (current - 1 + enabledItems.length) % enabledItems.length;
+      } else if (keyEvent.key === 'Home') {
+        next = 0;
+      } else {
+        next = enabledItems.length - 1;
+      }
+      enabledItems[next].focus();
+    });
+
     document.body.appendChild(menu);
     activeMenu = menu;
 

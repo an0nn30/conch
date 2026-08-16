@@ -1,0 +1,75 @@
+/* Form controls — checkbox, radio, labelled field row, and the combo-box
+   button rendered by app/ui/tl-combo.js. Measured values come from
+   docs/superpowers/specs/assets/reference/METRICS.md's "Settings window"
+   table: the checkbox is a 14px square, 1px --tl-control-border, fill
+   --tl-control-bg, and a tick drawn in --tl-control-tick (the FOREGROUND
+   color, not the accent) — it is explicitly NOT accent-filled. Getting that
+   wrong (accent-filled box) is the specific mistake this file exists to
+   avoid; see METRICS.md's "Checked checkbox" row. */
+.tl-check, .tl-radio {
+  display: inline-flex; align-items: center; gap: var(--tl-space-2);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  cursor: pointer;
+}
+.tl-check input, .tl-radio input {
+  appearance: none;
+  width: 14px; height: 14px; margin: 0;
+  flex-shrink: 0;
+  background: var(--tl-control-bg);
+  border: 1px solid var(--tl-control-border);
+  border-radius: var(--tl-radius);
+}
+.tl-radio input { border-radius: 50%; }
+.tl-check input:checked, .tl-radio input:checked { border-color: var(--tl-accent); }
+.tl-check input:checked::after {
+  content: ''; display: block;
+  width: 4px; height: 8px; margin: 0 auto;
+  border: solid var(--tl-control-tick);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+.tl-radio input:checked::after {
+  content: ''; display: block;
+  width: 6px; height: 6px; margin: 3px auto;
+  border-radius: 50%;
+  background: var(--tl-control-tick);
+}
+.tl-check input:focus-visible, .tl-radio input:focus-visible {
+  outline: 1px solid var(--tl-accent); outline-offset: 1px;
+}
+
+/* Two-column form row: right-aligned label, control filling the rest.
+   Matches the reference's "Modal dialog shell" layout (right-aligned label
+   column, control column filling the rest). The two-column *checkbox* grid
+   seen in the Settings "UI Options" reference is the caller's layout, not
+   this component's. */
+.tl-field { display: flex; align-items: center; gap: var(--tl-space-3); margin-bottom: var(--tl-space-2); }
+.tl-field__label { flex: 0 0 auto; min-width: 120px; text-align: right; color: var(--tl-fg); font: 400 var(--tl-font-size-ui) var(--tl-font-ui); }
+.tl-field > .tl-input, .tl-field > .tl-combo { flex: 1 1 auto; min-width: 0; }
+
+/* Combo box — wraps a hidden native <select> (app/ui/tl-combo.js). Panel-
+   coloured button, 1px border, label left, chevron right, accent border on
+   focus; full width of its field via .tl-field's flex rule above (or set
+   width: 100% directly when used outside a .tl-field). */
+.tl-combo {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--tl-space-2);
+  width: 100%;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  background: var(--tl-panel-bg);
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  height: 26px;
+  padding: 0 var(--tl-space-2);
+  cursor: default;
+}
+.tl-combo:hover:not(:disabled) { border-color: var(--tl-accent); }
+.tl-combo:focus { outline: none; border-color: var(--tl-accent); }
+.tl-combo:disabled { color: var(--tl-fg-muted); cursor: default; opacity: 0.6; }
+.tl-combo__label {
+  flex: 1 1 auto; min-width: 0; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tl-combo .tl-icon { flex-shrink: 0; }
