@@ -7,14 +7,11 @@
     const keyboardRouter = global.termlabKeyboardRouter;
 
     function initOverlayFocusHandlers() {
-      // True while ANY dialog is open — either a legacy .ssh-overlay (still
-      // used by command-palette-runtime.js, core/dialog-service.js, and
-      // features/settings/renderers.js; migrating those is Phase 5b's job,
-      // not design-system-phase-5a's) or a tl-dialog-shell dialog
-      // (app/ui/tl-dialog.js; everything this phase migrated onto it: SSH,
-      // keygen, files, plugin, About, restart, tunnels, vault).
+      // True while ANY dialog is open. Design-system-phase-5b task 4
+      // migrated the last .ssh-overlay producer (core/dialog-service.js's
+      // confirmPluginPermissions) onto tl-dialog, so every dialog in the app
+      // now shows up in tlDialog.count().
       const isAnyDialogOpen = () =>
-        !!document.querySelector('.ssh-overlay') ||
         !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
 
       const handleEscape = (event) => {
@@ -51,25 +48,13 @@
         }, 0);
       }
 
-      // Legacy dialogs (command-palette-runtime.js, core/dialog-service.js,
-      // features/settings/renderers.js — Phase 5b's job to migrate onto
-      // tl-dialog) still build a plain .ssh-overlay div and el.remove() it
-      // with no lifecycle hook, so a MutationObserver is still needed to
-      // notice when the last one of those closes.
-      let previousOverlayCount = document.querySelectorAll('.ssh-overlay').length;
-      const overlayFocusObserver = new MutationObserver(() => {
-        const overlayCount = document.querySelectorAll('.ssh-overlay').length;
-        if (previousOverlayCount > 0 && overlayCount === 0) {
-          scheduleRefocusAfterOverlayClose();
-        }
-        previousOverlayCount = overlayCount;
-      });
-      overlayFocusObserver.observe(document.body, { childList: true, subtree: true });
-
-      // Migrated dialogs (tl-dialog shell) get an explicit "stack emptied"
-      // callback instead of being inferred from a MutationObserver.
+      // Every dialog now goes through tl-dialog, so the "last dialog closed"
+      // signal comes straight from its onAllClosed() hook — no more
+      // MutationObserver polling document.body for a departed .ssh-overlay.
       if (global.tlDialog && typeof global.tlDialog.onAllClosed === 'function') {
         global.tlDialog.onAllClosed(scheduleRefocusAfterOverlayClose);
+      } else {
+        console.warn('dialog-runtime: tlDialog.onAllClosed unavailable, terminal will not refocus after dialogs close');
       }
     }
 

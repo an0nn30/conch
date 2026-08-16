@@ -449,18 +449,13 @@
         // Don't steal focus back into the terminal if cmd.run() opened some
         // other dialog that should keep it instead (e.g. "Open Settings",
         // or a plugin-permission/ssh-dependency confirm triggered as a
-        // side effect of enabling a plugin or connecting to a host). Two
-        // mechanisms currently coexist: dialogs not yet migrated onto
-        // tl-dialog still render a `.ssh-overlay` (dialog-service.js,
-        // features/ssh/dependency-prompt.js, panels/plugin-widgets.js);
-        // dialogs that HAVE migrated (e.g. Settings — see
-        // features/settings/renderers.js's renderDialogShell()) show up in
-        // tlDialog.count() instead. Checking `.ssh-overlay` alone (as this
-        // used to, back when the palette's own now-removed overlay carried
-        // that class) misses the tl-dialog case entirely.
-        const legacyOverlayOpen = !!document.querySelector('.ssh-overlay');
+        // side effect of enabling a plugin or connecting to a host).
+        // design-system-phase-5b task 4 migrated the last `.ssh-overlay`
+        // producer (dialog-service.js's confirmPluginPermissions) onto
+        // tl-dialog, so every dialog now shows up in tlDialog.count() —
+        // no more need to also check for a `.ssh-overlay` node.
         const tlDialogOpen = !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
-        if (legacyOverlayOpen || tlDialogOpen) return;
+        if (tlDialogOpen) return;
         const pane = getCurrentPane();
         if (pane && pane.term) pane.term.focus();
       }, 80);

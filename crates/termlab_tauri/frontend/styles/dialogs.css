@@ -1,21 +1,12 @@
-    /* -- Form overlay -- */
-    .ssh-overlay {
-      position: fixed; inset: 0; z-index: 3000;
-      background: rgba(0,0,0,0.5); display: flex;
-      align-items: center; justify-content: center;
-    }
-    .ssh-form {
-      background: var(--panel-bg); border: 1px solid var(--active-highlight);
-      border-radius: 10px; width: 460px; max-width: 90vw;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-      font-size: var(--ui-font-normal); line-height: 1.4; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: var(--fg);
-    }
-    .ssh-form-title {
-      padding: 14px 18px 10px; font-size: 15px; font-weight: 600;
-      border-bottom: 1px solid var(--tab-border);
-    }
-    .ssh-form-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+    /* -- Form overlay --
+       .ssh-overlay/.ssh-form/.ssh-form-title/.ssh-form-body/.ssh-form-buttons
+       (the ad-hoc dialog chrome core/dialog-service.js used to build) are
+       gone — design-system-phase-5b task 4 migrated the last producer
+       (confirmPluginPermissions) onto tl-dialog. .ssh-form-label and
+       .ssh-form-btn survive below: other, unmigrated surfaces
+       (vault/sections.js, sections-terminal.js, plugins-section.js) still
+       produce that markup for their own content, independent of any
+       .ssh-overlay/.ssh-form container. */
     .ssh-form-label {
       display: flex; flex-direction: column; gap: 3px;
       font-size: var(--ui-font-small); color: var(--text-muted); font-weight: 500;
@@ -38,10 +29,6 @@
       background-repeat: no-repeat; background-position: right 8px center;
       padding-right: 24px; cursor: pointer;
     }
-    .ssh-form-buttons {
-      display: flex; justify-content: flex-end; gap: 8px;
-      padding: 10px 18px 14px; border-top: 1px solid var(--tab-border);
-    }
     .ssh-form-btn {
       padding: 6px 16px; border: 1px solid var(--tab-border); border-radius: 5px;
       background: var(--input-bg); color: var(--text-secondary); cursor: pointer;
@@ -50,10 +37,6 @@
     .ssh-form-btn:hover { background: var(--tab-border); color: var(--fg); }
     .ssh-form-btn.primary { background: var(--dim-fg); color: var(--fg); border-color: var(--dim-fg); }
     .ssh-form-btn.primary:hover { background: var(--active-highlight); }
-    .plugin-permissions-dialog {
-      min-width: 420px;
-      max-width: 620px;
-    }
     .plugin-permissions-label {
       margin-bottom: 10px;
       font-size: 12px;
@@ -78,15 +61,13 @@
     .ssh-export-section { font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg); margin-bottom: 4px; }
     .ssh-export-group { font-size: var(--ui-font-small); font-weight: 600; color: var(--dim-fg); margin: 8px 0 2px 0; }
     .ssh-export-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; font-size: var(--ui-font-normal); color: var(--fg); line-height: 14px; }
-    .ssh-export-item input[type="checkbox"],
-    .ssh-form-body input[type="checkbox"] {
+    .ssh-export-item input[type="checkbox"] {
       -webkit-appearance: none; appearance: none; margin: 0;
       width: 14px; height: 14px; flex-shrink: 0;
       border: 1px solid var(--active-highlight); border-radius: 3px;
       background: transparent; cursor: pointer;
     }
-    .ssh-export-item input[type="checkbox"]:checked,
-    .ssh-form-body input[type="checkbox"]:checked {
+    .ssh-export-item input[type="checkbox"]:checked {
       background: var(--blue, #7aa2f7); border-color: var(--blue, #7aa2f7);
     }
     .ssh-export-dim { color: var(--dim-fg); font-size: var(--ui-font-small); }
@@ -198,81 +179,17 @@
       flex: 1;
     }
 
-    /* -- Settings dialog -- */
-    .settings-dialog {
-      width: min(750px, 95vw);
-      height: min(560px, 80vh);
-      display: flex;
-      flex-direction: column;
-    }
-    .settings-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
-    .settings-sidebar {
-      width: 250px; border-right: 1px solid var(--tab-border);
-      padding: 12px 0; overflow-y: auto; flex-shrink: 0;
-    }
-    .settings-sidebar-search-wrap { padding: 0 12px 10px; }
-    .settings-sidebar-search {
-      width: 100%;
-      padding: 8px 10px;
-      border: 1px solid var(--tab-border);
-      border-radius: 6px;
-      background: var(--input-bg);
-      color: var(--fg);
-      outline: none;
-      font: 12px/1.3 "JetBrains Mono", monospace;
-    }
-    .settings-sidebar-search:focus { border-color: var(--dim-fg); }
-    .settings-sidebar-group {
-      font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase;
-      color: var(--dim-fg); padding: 8px 14px 4px; letter-spacing: 0.5px;
-    }
-    .settings-sidebar-item {
-      padding: 7px 14px 7px 18px; cursor: pointer;
-      color: var(--text-secondary); font-size: var(--ui-font-normal);
-    }
-    .settings-sidebar-item:hover { background: var(--input-bg); }
-    .settings-sidebar-item:focus-visible {
-      outline: 1px solid var(--dim-fg);
-      outline-offset: -1px;
-      background: var(--input-bg);
-    }
-    .settings-sidebar-item.active { background: var(--active-highlight); color: var(--fg); font-weight: 600; }
-    .settings-sidebar-item.selected {
-      background: color-mix(in srgb, var(--blue) 16%, var(--input-bg));
-      color: var(--fg);
-    }
-    .settings-sidebar-item-search { padding-left: 14px; }
-    .settings-sidebar-item-title { font-size: 13px; color: inherit; }
-    .settings-sidebar-item-desc {
-      margin-top: 2px;
-      font-size: 11px;
-      line-height: 1.35;
-      color: var(--dim-fg);
-    }
-    .settings-sidebar-item.active .settings-sidebar-item-desc { color: var(--text-secondary); }
-    .settings-sidebar-empty {
-      padding: 8px 14px;
-      color: var(--dim-fg);
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    .settings-installed-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding-right: 10px;
-    }
-    .settings-rescan-action {
-      font-size: 12px;
-      color: var(--blue, #7aa2f7);
-      cursor: pointer;
-      user-select: none;
-    }
-    .settings-rescan-action:focus-visible {
-      outline: 1px solid var(--dim-fg);
-      outline-offset: 2px;
-      border-radius: 3px;
-    }
+    /* -- Settings dialog --
+       The modal shell (.settings-dialog/-body/-sidebar*, .settings-content,
+       .settings-row/-row-label, .settings-select/-toggle*/-switch/-footer/
+       -shortcut-key, .settings-installed-header/-rescan-action/-section-label,
+       .settings-plugin-badge) is gone — Settings runs entirely on tl-dialog
+       + the .tl-settings__* component now (styles/design-system/components/
+       settings.css); design-system-phase-5b tasks 1-2 did the rename, this
+       task (4) deletes the now-fully-dead originals. What's left below is
+       genuinely independent content still produced by
+       features/settings/{renderers,plugins-section,sections-keyboard,search}.js
+       that never had a .tl-settings__* replacement. */
     .settings-plugin-empty {
       padding: 16px;
       text-align: center;
@@ -296,16 +213,6 @@
       flex: 1;
       overflow: hidden;
     }
-    .settings-plugin-badge {
-      font-size: 9px;
-      padding: 1px 6px;
-      border-radius: 3px;
-      text-transform: uppercase;
-      font-weight: 600;
-      flex-shrink: 0;
-    }
-    .settings-plugin-badge.lua { background: #a6e3a1; color: #1e1e2e; }
-    .settings-plugin-badge.java { background: #f9e2af; color: #1e1e2e; }
     .settings-plugin-info { min-width: 0; }
     .settings-plugin-name { font-weight: 700; }
     .settings-plugin-meta {
@@ -326,8 +233,6 @@
       border-radius: 6px;
       background: color-mix(in srgb, var(--blue) 10%, transparent);
     }
-    .settings-content { flex: 1; padding: 16px 20px; overflow-y: auto; }
-    .settings-content h3 { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: var(--fg); }
     .settings-search-wrap { margin: 0 0 14px; }
     .settings-search-input { width: min(360px, 100%); }
     .settings-search-empty {
@@ -341,79 +246,17 @@
       padding: 0 1px;
       border-radius: 2px;
     }
-    .settings-section-label {
-      font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.5px; color: var(--dim-fg); margin-bottom: 4px;
-    }
-    .settings-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; gap: 12px; }
-    .settings-row > :first-child { min-width: 0; flex: 1; }
     .settings-row-jump-highlight {
       animation: settings-row-bounce-highlight 720ms cubic-bezier(0.22, 1, 0.36, 1);
       transform-origin: center;
     }
-    .settings-row-label { font-size: var(--ui-font-normal); color: var(--fg); }
     .settings-row-desc { font-size: var(--ui-font-small); color: var(--dim-fg); margin-top: 2px; }
-    .settings-divider { border: none; border-top: 1px solid var(--tab-border); margin: 12px 0; }
     .settings-input {
       padding: 6px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
       border-radius: 5px; color: var(--fg); font: 13px/1.3 "JetBrains Mono", monospace;
       outline: none;
     }
     .settings-input:focus { border-color: var(--dim-fg); }
-    .settings-select {
-      padding: 6px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
-      border-radius: 5px; color: var(--fg); font: 13px/1.3 "JetBrains Mono", monospace;
-      outline: none; -webkit-appearance: none; appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236272a4'/%3E%3C/svg%3E");
-      background-repeat: no-repeat; background-position: right 8px center;
-      padding-right: 24px; cursor: pointer;
-    }
-    .settings-select:focus { border-color: var(--dim-fg); }
-    .settings-toggle-group { display: flex; gap: 0; }
-    .settings-toggle {
-      padding: 5px 12px; border: 1px solid var(--tab-border);
-      background: var(--input-bg); color: var(--text-secondary);
-      font-size: var(--ui-font-normal); cursor: pointer; outline: none;
-    }
-    .settings-toggle:first-child { border-radius: 5px 0 0 5px; }
-    .settings-toggle:last-child { border-radius: 0 5px 5px 0; }
-    .settings-toggle + .settings-toggle { border-left: none; }
-    .settings-toggle.active { background: var(--active-highlight); color: var(--fg); font-weight: 600; }
-    .settings-toggle:focus-visible {
-      outline: 1px solid var(--dim-fg);
-      outline-offset: -1px;
-    }
-    .settings-switch {
-      position: relative; display: inline-block; width: 34px; height: 18px;
-    }
-    .settings-switch input { opacity: 0; width: 0; height: 0; }
-    .settings-switch .slider {
-      position: absolute; inset: 0; background: var(--tab-border);
-      border-radius: 9px; cursor: pointer; transition: background 0.2s;
-    }
-    .settings-switch .slider::before {
-      content: ''; position: absolute; left: 2px; top: 2px;
-      width: 14px; height: 14px; background: var(--fg);
-      border-radius: 50%; transition: transform 0.2s;
-    }
-    .settings-switch input:checked + .slider { background: var(--blue, #7aa2f7); }
-    .settings-switch input:checked + .slider::before { transform: translateX(16px); }
-    .settings-footer {}
-    .settings-shortcut-key {
-      display: inline-block; padding: 2px 6px; border: 1px solid var(--tab-border);
-      border-radius: 3px; background: var(--input-bg); color: var(--fg);
-      font: 11px/1.2 "JetBrains Mono", monospace; min-width: 20px; text-align: center;
-      cursor: pointer; user-select: none;
-    }
-    .settings-shortcut-key:hover { border-color: var(--dim-fg); }
-    .settings-shortcut-key:focus-visible {
-      outline: 1px solid var(--dim-fg);
-      outline-offset: 1px;
-    }
-    .settings-shortcut-key.recording {
-      border-color: var(--blue, #7aa2f7); color: var(--blue, #7aa2f7);
-      animation: shortcut-pulse 1s ease-in-out infinite;
-    }
     @keyframes settings-row-bounce-highlight {
       0% { transform: scale(1); background: transparent; }
       20% { transform: scale(1.018); background: color-mix(in srgb, var(--blue) 18%, transparent); }
@@ -421,21 +264,6 @@
       70% { transform: scale(1.01); background: color-mix(in srgb, var(--blue) 9%, transparent); }
       100% { transform: scale(1); background: transparent; }
     }
-    @keyframes shortcut-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-
-    /* -- Theme preview -- */
-    .tp-container {
-      border-radius: 6px; padding: 14px; margin: 8px 0 12px 0;
-      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-      font-size: var(--ui-font-normal); line-height: 1.5;
-      border: 1px solid var(--tab-border);
-    }
-    .tp-label { font-size: 9px; letter-spacing: 0.1em; margin-bottom: 8px; text-transform: uppercase; }
-    .tp-cursor { display: inline-block; width: 0.6em; height: 1em; vertical-align: text-bottom; }
-    .tp-swatch-divider { margin: 8px 0 6px 0; border-top: 1px solid var(--tab-border); }
-    .tp-swatch-row { display: flex; gap: 4px; }
-    .tp-swatch-row--normal { margin-bottom: 4px; }
-    .tp-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }
 
     /* -- Vault dialog -- */
     .vault-spinner {
@@ -542,9 +370,8 @@
     .vault-settings-form { display: flex; flex-direction: column; gap: 12px; }
     .vault-settings-actions { padding-top: 8px; }
 
-    /* -- Keygen dialog -- */
-    .keygen-dialog { width: 460px; max-width: 94vw; }
-    .keygen-result-dialog { width: 500px; max-width: 94vw; }
+    /* -- Keygen dialog -- (sizing is now tlDialog.open({ size }); no more
+       .keygen-dialog/.keygen-result-dialog container classes) */
     .keygen-path-row {
       display: flex; gap: 6px; align-items: center;
     }
@@ -562,12 +389,6 @@
     }
     .keygen-overwrite-text { color: var(--yellow); flex: 1; }
     .keygen-overwrite-btn { background: var(--yellow); color: var(--bg); }
-    .keygen-success-icon {
-      display: inline-block; width: 20px; height: 20px; line-height: 20px;
-      background: var(--green); color: var(--bg);
-      border-radius: 50%; text-align: center; font-size: 13px; font-weight: 700;
-      margin-right: 6px; vertical-align: middle;
-    }
     .keygen-result-row {
       display: flex; align-items: baseline; gap: 10px; padding: 4px 0;
       border-bottom: 1px solid var(--tab-border);
