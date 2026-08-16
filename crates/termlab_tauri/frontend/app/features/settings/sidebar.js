@@ -145,7 +145,13 @@
 
       if (sectionMatches.length > 0) {
         const header = document.createElement('div');
-        header.className = 'tl-settings__group';
+        // tl-settings__group--static: this header is a plain label, not the
+        // real disclosure-tree toggle button below (which reuses the base
+        // .tl-settings__group class) — without the modifier it inherited
+        // that button's :hover fill (components/settings.css), lighting up
+        // on hover despite having no click handler (phase 5b review
+        // finding 11).
+        header.className = 'tl-settings__group tl-settings__group--static';
         header.textContent = 'Sections';
         sidebar.appendChild(header);
 
@@ -158,13 +164,19 @@
           row.dataset.section = item.id;
           row.setAttribute('aria-current', item.id === getCurrentSection() ? 'page' : 'false');
 
-          const title = document.createElement('div');
+          // <span>, not <div>: row is a real <button> (makeItemButton()),
+          // and <button> is phrasing content — it may only contain other
+          // phrasing content, not flow content like <div> (phase 5b review
+          // finding 11). components/settings.css gives both classes
+          // `display: block` so the stacked title/description layout is
+          // unaffected.
+          const title = document.createElement('span');
           title.className = 'tl-settings__item-title';
           appendHighlightedText(title, item.label, q);
           row.appendChild(title);
 
           if (item.description) {
-            const desc = document.createElement('div');
+            const desc = document.createElement('span');
             desc.className = 'tl-settings__item-desc';
             appendHighlightedText(desc, item.description, q);
             row.appendChild(desc);
@@ -181,7 +193,8 @@
 
       if (settingMatches.length > 0) {
         const header = document.createElement('div');
-        header.className = 'tl-settings__group';
+        // See the "Sections" header above — same non-interactive-header fix.
+        header.className = 'tl-settings__group tl-settings__group--static';
         header.textContent = 'Settings';
         sidebar.appendChild(header);
 
@@ -192,12 +205,15 @@
           row.dataset.section = match.section;
           row.setAttribute('aria-current', match.section === getCurrentSection() ? 'page' : 'false');
 
-          const title = document.createElement('div');
+          // <span>, not <div> — see the identical comment in the "Sections"
+          // block above (finding 11: <button> may only contain phrasing
+          // content).
+          const title = document.createElement('span');
           title.className = 'tl-settings__item-title';
           appendHighlightedText(title, match.label, q);
           row.appendChild(title);
 
-          const desc = document.createElement('div');
+          const desc = document.createElement('span');
           desc.className = 'tl-settings__item-desc';
           appendHighlightedText(desc, match.path || match.sectionLabel, q);
           row.appendChild(desc);

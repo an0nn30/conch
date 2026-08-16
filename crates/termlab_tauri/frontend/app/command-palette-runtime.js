@@ -341,6 +341,7 @@
 
       let groupEl = null;
       let currentGroupName = null;
+      let selectedRowEl = null;
       for (let idx = 0; idx < results.length; idx++) {
         const cmd = results[idx];
         const groupName = cmd.group || 'Actions';
@@ -398,6 +399,25 @@
         });
         row.addEventListener('click', () => executePaletteCommand(idx));
         groupEl.appendChild(row);
+        if (idx === commandPalette.selectedIndex) selectedRowEl = row;
+      }
+
+      // MAX_RESULTS went from 5 to 20 (see above) but .tl-palette__results
+      // is a fixed height: min(480px, 66vh) scrolling box (palette.css) at
+      // ~43px/row, so only about half the results fit without scrolling.
+      // Every call site that moves commandPalette.selectedIndex (ArrowUp/
+      // ArrowDown below, digit quick-pick, mouse hover-select, and the
+      // index-0 reset on each keystroke) re-renders through this function,
+      // so scrolling the selected row into view here — rather than at each
+      // call site — covers all of them in one place. Without this, arrow-
+      // navigating past the fold moved the selection but not the viewport:
+      // the highlight scrolled out of sight, further ArrowDown presses
+      // looked like no-ops, and Enter ran a command the user couldn't see
+      // (phase 5b review finding 3). 'nearest' avoids yanking the list to
+      // center/top on every keystroke when the selected row is already
+      // visible.
+      if (selectedRowEl && typeof selectedRowEl.scrollIntoView === 'function') {
+        selectedRowEl.scrollIntoView({ block: 'nearest' });
       }
     }
 
@@ -416,6 +436,17 @@
       }
       if (commandPalette === state) commandPalette = null;
       if (refocus) {
+        // Same tlDialog.count() guard executePaletteCommand's refocus below
+        // uses, and for the same reason: don't steal focus into the
+        // terminal if another dialog (e.g. Settings) is still open behind
+        // this one. tl-dialog's close() (app/ui/tl-dialog.js) pops this
+        // entry off its stack BEFORE calling onClose -> here, so count()
+        // already reflects only what's left. Missing here previously
+        // (phase 5b review finding 13): dismissing the palette via backdrop
+        // click while Settings was open underneath refocused the terminal
+        // behind the still-open modal.
+        const tlDialogOpen = !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
+        if (tlDialogOpen) return;
         const pane = getCurrentPane();
         if (pane && pane.term) pane.term.focus();
       }

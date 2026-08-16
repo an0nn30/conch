@@ -441,6 +441,15 @@
       el.classList.add('is-recording');
       el.textContent = 'Press keys...';
 
+      // Registered above tl-dialog's own Escape handler (priority 225 — see
+      // registerEscape() in app/ui/tl-dialog.js; same pattern as the command
+      // palette's priority-260 registration in command-palette-runtime.js)
+      // so THIS handler's Escape branch — which only cancels the in-progress
+      // recording — wins while recording is active, instead of tl-dialog's
+      // generic Escape closing the whole modal and discarding unsaved edits
+      // (phase 5b review finding 2). isActive is scoped to "currently
+      // recording", so this registration is a no-op the rest of the time and
+      // tl-dialog's Escape still closes the modal normally.
       recordingUnregister = d.registerGlobalKeyHandler('settings-shortcut-recorder', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -467,7 +476,7 @@
         }
         stopRecording();
         return true;
-      }, () => !!recordingEl && !!recordingRef);
+      }, () => !!recordingEl && !!recordingRef, 230);
     }
 
     function makeShortcutKeyBox(ref) {
@@ -612,7 +621,20 @@
   function wireApplyDirtyTracking(footerEl, scopeEl, d) {
     const applyBtn = Array.from(footerEl.querySelectorAll('.tl-btn')).find((btn) => btn.textContent === 'Apply') || null;
     if (!applyBtn) return { refresh: () => {}, dispose: () => {} };
-    const refresh = () => { applyBtn.disabled = !d.isDirty(); };
+    // tl-dialog.js's buildFooterButton() only sets aria-disabled once, at
+    // build time, from the static spec passed to tlDialog.open() (Apply
+    // always starts disabled). Toggling just the live `disabled` property
+    // here — as this used to do — desyncs the two: a screen reader keeps
+    // reporting Apply as permanently disabled even once the store goes
+    // dirty and it becomes clickable (phase 5b review finding 6). Set both
+    // on every refresh so aria-disabled always matches the property that is
+    // actually gating the click handler (see buildFooterButton's own
+    // comment on why btn.disabled, not spec.disabled, is authoritative).
+    const refresh = () => {
+      const disabled = !d.isDirty();
+      applyBtn.disabled = disabled;
+      applyBtn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    };
     refresh();
     scopeEl.addEventListener('input', refresh);
     scopeEl.addEventListener('change', refresh);
@@ -673,6 +695,18 @@
     });
 
     const panel = handle.el;
+    // tl-dialog's own .tl-dialog__footer (components/dialog.css) carries no
+    // border — right for the generic "Modal dialog shell" pattern (Add SSH
+    // Host/Tunnel, Unlock Vault: METRICS.md notes only "generous padding
+    // above the button row", no divider). The Settings reference capture
+    // (jvm-termlab-settings.png) shows a full-width divider above its
+    // Cancel/Apply/OK row that those other dialogs don't have, so it's
+    // scoped to Settings via this extra class rather than added to the
+    // shared component (phase 5b review finding 9) — see the matching class
+    // added in renderStandaloneShell below and its CSS in
+    // components/settings.css.
+    const dialogFooterEl = panel.querySelector('.tl-dialog__footer');
+    if (dialogFooterEl) dialogFooterEl.classList.add('tl-settings__footer');
     const footerEl = panel.querySelector('.tl-dialog__footer-end') || panel;
     const tracking = wireApplyDirtyTracking(footerEl, panel, d);
 
@@ -705,7 +739,10 @@
     root.appendChild(buildSettingsBody(d));
 
     const footer = document.createElement('div');
-    footer.className = 'tl-dialog__footer';
+    // tl-settings__footer: see renderDialogShell's matching comment above —
+    // the Settings-only top divider (finding 9), not part of the shared
+    // .tl-dialog__footer component.
+    footer.className = 'tl-dialog__footer tl-settings__footer';
     const startEl = document.createElement('div');
     startEl.className = 'tl-dialog__footer-start';
     const helpBtn = document.createElement('button');

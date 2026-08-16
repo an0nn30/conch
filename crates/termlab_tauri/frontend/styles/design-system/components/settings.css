@@ -55,6 +55,23 @@
   padding: var(--tl-space-4);
 }
 
+/* Section page headings (e.g. "Appearance", "Advanced") — every section
+   renderer (sections-appearance.js, sections-basic.js, sections-terminal.js,
+   sections-keyboard.js, plugins-section.js) still emits a plain <h3> as the
+   first child of .tl-settings__content. This replaces the equivalent rule
+   Task 4 deleted from dialogs.css (.settings-content h3 { font-size: 14px;
+   font-weight: 600; margin: 0 0 14px; }) as dead — it was dead only because
+   Task 1 had already renamed the container to .tl-settings__content, and no
+   replacement was ever added, so every page fell back to the UA default
+   heading (16.4px/700) with its margin stripped by base.css's `* { margin:
+   0 }` (finding 4 of the phase 5b review).
+*/
+.tl-settings__content h3 {
+  font: 600 14px var(--tl-font-ui);
+  color: var(--tl-fg);
+  margin: 0 0 14px;
+}
+
 /* -- Sidebar: search field -- */
 
 .tl-settings__search-wrap { padding: 0 var(--tl-space-2) var(--tl-space-2); }
@@ -78,6 +95,14 @@
   outline: 1px solid var(--tl-accent); outline-offset: -1px;
 }
 .tl-settings__group-chevron { flex-shrink: 0; }
+
+/* Search-mode section headers ("Sections", "Settings" — sidebar.js) reuse
+   .tl-settings__group for its typography/padding but are plain, non-
+   interactive <div>s, not the real disclosure-tree toggle <button> above —
+   without this modifier they inherited its :hover fill and looked
+   clickable when they aren't (phase 5b review finding 11). */
+.tl-settings__group--static { cursor: default; }
+.tl-settings__group--static:hover { background: transparent; }
 
 .tl-settings__item {
   display: block;
@@ -109,8 +134,13 @@
   padding: var(--tl-space-1) var(--tl-space-2) var(--tl-space-1) var(--tl-space-4);
   white-space: normal;
 }
-.tl-settings__item-title { font: 400 var(--tl-font-size-ui) var(--tl-font-ui); color: inherit; }
+/* display: block — sidebar.js builds these as <span>, not <div> (their
+   parent is a real <button>, which may only contain phrasing content; see
+   finding 11 of the phase 5b review), so block layout has to be restored
+   explicitly to keep title/description stacked on separate lines. */
+.tl-settings__item-title { display: block; font: 400 var(--tl-font-size-ui) var(--tl-font-ui); color: inherit; }
 .tl-settings__item-desc {
+  display: block;
   margin-top: 2px;
   font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
   line-height: 1.35;
@@ -206,6 +236,24 @@
   border-bottom: 1px solid var(--tl-border);
   flex-shrink: 0;
 }
+
+/* Footer top divider — present in the reference capture
+   (jvm-termlab-settings.png) for Settings specifically, unlike the generic
+   "Modal dialog shell" pattern (Add SSH Host/Tunnel, Unlock Vault), whose
+   METRICS.md entry notes only "generous padding above the button row" with
+   no divider. Scoped to this extra class (added by renderDialogShell/
+   renderStandaloneShell in features/settings/renderers.js) rather than
+   styles/design-system/components/dialog.css's shared .tl-dialog__footer,
+   so those other dialogs are unaffected. Restores the border-top the old
+   `#settings-root .settings-footer` rule had (styles/settings-window.css,
+   deleted as dead by Task 4 when the standalone shell moved onto
+   .tl-dialog__footer — the modal shell never had an equivalent rule to
+   begin with, since it's new in this phase) — finding 9 of the phase 5b
+   review. Applies to both the modal (tl-dialog__footer, a sibling of
+   .tl-dialog__body which wraps .tl-settings) and the standalone window
+   (.tl-dialog__footer as a direct sibling of #settings-root > .tl-settings)
+   so the two entry points keep matching. */
+.tl-settings__footer { border-top: 1px solid var(--tl-border); }
 
 /* -- Keyboard-shortcut recorder key box (renderers.js's
    createShortcutRecorder/makeShortcutKeyBox) -- replaces the legacy

@@ -60,8 +60,12 @@ body {
 }
 
 .settings-titlebar-btn-close:hover {
-  background: #e81123;
-  color: #fff;
+  /* Was #e81123/#fff — named in the plan's Task 2 Step 3 raw-hex sweep, so
+     in scope (unlike the pre-existing hex left alone in dialogs.css). Same
+     token pair components/menu.css's .tl-menu__item.is-danger:hover already
+     uses for a filled-danger hover treatment (phase 5b review finding 12). */
+  background: var(--tl-danger);
+  color: var(--tl-fg);
 }
 
 /* Standalone root container; form controls/styles come from shared dialogs.css

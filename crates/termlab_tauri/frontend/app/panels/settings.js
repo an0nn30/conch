@@ -27,12 +27,12 @@
     ? settingsStoreFactory.create()
     : null;
 
-  function registerGlobalKeyHandler(name, onKeyDown, isActive) {
+  function registerGlobalKeyHandler(name, onKeyDown, isActive, priority) {
     const keyboardRouter = window.termlabKeyboardRouter;
     if (keyboardRouter && typeof keyboardRouter.register === 'function') {
       return keyboardRouter.register({
         name: name || 'settings-key-handler',
-        priority: 210,
+        priority: typeof priority === 'number' ? priority : 210,
         isActive: typeof isActive === 'function' ? isActive : null,
         onKeyDown: (event) => onKeyDown(event) === true,
       });
@@ -198,7 +198,21 @@
       markSkipPluginDraftDiscard: () => store.setSkipPluginDraftDiscardOnClose(true),
       close,
       keepOpen: true,
-      onApplied: () => store.commitPendingAsOriginal(),
+      // markSkipPluginDraftDiscard() above is set unconditionally by
+      // applySettings() on every successful save so the dialog's eventual
+      // close doesn't discard the plugin drafts this Apply just committed
+      // server-side. On the OK/close path that flag is read once and reset
+      // by handleDialogClosed(). Apply keeps the dialog open, though, so
+      // without resetting it here too it stays true indefinitely: Apply ->
+      // change a plugin widget -> Cancel would skip
+      // discard_plugin_settings_drafts and the cancelled (post-Apply) draft
+      // would survive (phase 5b review finding 5). Reset it in the same
+      // tick as the commit so any edits made AFTER this Apply are still
+      // discardable on a later Cancel.
+      onApplied: () => {
+        store.commitPendingAsOriginal();
+        store.setSkipPluginDraftDiscardOnClose(false);
+      },
     });
   }
 
