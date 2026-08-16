@@ -6159,6 +6159,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "termlab_share"
+version = "3.0.0-rc.1"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "termlab_remote",
+ "termlab_vault",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "termlab_tauri"
 version = "3.0.0-rc.1"
 dependencies = [
