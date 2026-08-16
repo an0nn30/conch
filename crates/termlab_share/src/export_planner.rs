@@ -132,11 +132,7 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
     // prompt (2026-08-16 ruling: "Export Without" must genuinely exclude the
     // server, not just leave it out of `server_ids` while still letting a
     // selected tunnel drag it back in).
-    let declined: HashSet<&str> = req
-        .declined_server_ids
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let declined: HashSet<&str> = req.declined_server_ids.iter().map(String::as_str).collect();
     for tunnel in &mut tunnels {
         resolve_tunnel_host(
             tunnel,
@@ -590,7 +586,13 @@ mod tests {
     fn tunnel_pulls_in_its_host_even_when_unselected() {
         // server "s1" is NOT in server_ids; the tunnel referencing it is;
         // nothing was declined, so the default (pull it in) applies.
-        let plan = plan_with(vec![], vec!["t1".into()], false, FakeKeys(HashMap::new()), vec![]);
+        let plan = plan_with(
+            vec![],
+            vec!["t1".into()],
+            false,
+            FakeKeys(HashMap::new()),
+            vec![],
+        );
         assert_eq!(plan.bundle.servers.len(), 1);
         assert_eq!(plan.bundle.servers[0].id, "s1");
         assert!(plan.auto_pulled.iter().any(|s| s.contains("s1")));
@@ -643,7 +645,13 @@ mod tests {
 
     #[test]
     fn credentials_off_strips_vault_account_id() {
-        let plan = plan_with(vec!["s1".into()], vec![], false, FakeKeys(HashMap::new()), vec![]);
+        let plan = plan_with(
+            vec!["s1".into()],
+            vec![],
+            false,
+            FakeKeys(HashMap::new()),
+            vec![],
+        );
         assert!(plan.bundle.servers[0].vault_account_id.is_none());
         assert!(plan.bundle.vault.is_empty());
         assert!(!plan.bundle.metadata.includes_credentials);
@@ -676,7 +684,13 @@ mod tests {
 
     #[test]
     fn missing_key_file_warns_but_still_exports_the_host() {
-        let plan = plan_with(vec!["s1".into()], vec![], true, FakeKeys(HashMap::new()), vec![]);
+        let plan = plan_with(
+            vec!["s1".into()],
+            vec![],
+            true,
+            FakeKeys(HashMap::new()),
+            vec![],
+        );
         assert_eq!(plan.bundle.servers.len(), 1, "host must still export");
         assert!(
             plan.warnings
