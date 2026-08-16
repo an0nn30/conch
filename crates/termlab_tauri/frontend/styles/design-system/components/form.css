@@ -48,6 +48,27 @@
 .tl-field__label { flex: 0 0 auto; min-width: 120px; text-align: right; color: var(--tl-fg); font: 400 var(--tl-font-size-ui) var(--tl-font-ui); }
 .tl-field > .tl-input, .tl-field > .tl-combo { flex: 1 1 auto; min-width: 0; }
 
+/* Collapsible "Advanced" section (native <details>/<summary>) — used by the
+   SSH connection form's proxy options. Replaces the legacy
+   .ssh-form-advanced (styles/dialogs.css), ported to design-system tokens.
+   Nested rows are .tl-field now, which already carries its own
+   margin-bottom for vertical spacing between rows, so unlike the legacy
+   rule there's no need for a separate "+ .tl-field" gap rule here — only
+   horizontal padding so the rows sit inside the bordered box. */
+.tl-details {
+  border: 1px solid var(--tl-border); border-radius: var(--tl-radius); padding: 0;
+  margin-bottom: var(--tl-space-2);
+}
+.tl-details summary {
+  padding: var(--tl-space-2) var(--tl-space-3); cursor: pointer;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui); color: var(--tl-fg-muted);
+  user-select: none;
+}
+.tl-details summary:hover { color: var(--tl-fg); }
+.tl-details[open] summary { border-bottom: 1px solid var(--tl-border); margin-bottom: var(--tl-space-2); }
+.tl-details[open] { padding-bottom: var(--tl-space-2); }
+.tl-details .tl-field { padding: 0 var(--tl-space-3); }
+
 /* Combo box — wraps a hidden native <select> (app/ui/tl-combo.js). Panel-
    coloured button, 1px border, label left, chevron right, accent border on
    focus; full width of its field via .tl-field's flex rule above (or set

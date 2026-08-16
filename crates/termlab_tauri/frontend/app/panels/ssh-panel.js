@@ -42,6 +42,25 @@
   // so it can't reach into keygen/files-panel/plugin/vault/tunnel dialogs.
   let activeDialogHandle = null;
 
+  // Wraps handle.close() so activeDialogHandle self-clears no matter how
+  // the dialog actually closes (Escape, backdrop click, a Cancel/Save
+  // button, or removeOverlay() below) — every showX feature module already
+  // funnels its own dismiss/finish logic through handle.close() at least
+  // once (including from tl-dialog's onClose fallback), so wrapping it here
+  // catches all of them without changing every feature module to also poke
+  // at this panel's private state. Matches keygen.js/files-panel.js, which
+  // self-clear their own tracked handle the same way.
+  function trackDialogHandle(handle) {
+    if (!handle) return handle;
+    const originalClose = handle.close;
+    handle.close = function (result) {
+      if (activeDialogHandle === handle) activeDialogHandle = null;
+      return originalClose.call(handle, result);
+    };
+    activeDialogHandle = handle;
+    return handle;
+  }
+
   function invalidateCommandPaletteCache(reason) {
     if (typeof window.__termlabInvalidateCommandPaletteCache === 'function') {
       window.__termlabInvalidateCommandPaletteCache(reason || 'ssh-panel');
@@ -539,7 +558,7 @@
       ],
       onClose: closeExportDialog,
     });
-    activeDialogHandle = handle;
+    trackDialogHandle(handle);
   }
 
 
@@ -783,7 +802,7 @@
         createSshTab: createSshTabFn,
         toast: window.toast,
       });
-      if (handle) { activeDialogHandle = handle; return; }
+      if (handle) { trackDialogHandle(handle); return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Connection form module is unavailable.');
@@ -802,7 +821,7 @@
         refreshAll,
         toast: window.toast,
       });
-      if (handle) { activeDialogHandle = handle; return; }
+      if (handle) { trackDialogHandle(handle); return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Folder dialog module is unavailable.');
@@ -818,7 +837,7 @@
         toast: window.toast,
         attr,
       });
-      if (handle) { activeDialogHandle = handle; return; }
+      if (handle) { trackDialogHandle(handle); return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Rename-folder dialog module is unavailable.');
@@ -867,7 +886,7 @@
       const handle = sshDialogsFeature.showDeleteConfirmDialog(message, onConfirm, {
         esc,
       });
-      if (handle) { activeDialogHandle = handle; return; }
+      if (handle) { trackDialogHandle(handle); return; }
     }
     if (window.toast && typeof window.toast.error === 'function') {
       window.toast.error('SSH Error', 'Delete-confirm dialog module is unavailable.');

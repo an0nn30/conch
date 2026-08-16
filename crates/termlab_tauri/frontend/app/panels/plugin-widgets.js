@@ -843,7 +843,7 @@
       } else if (f.type === 'password') {
         fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="password" class="tl-input" data-field="${attr(f.id)}"${val}${hint}></div>`;
       } else if (f.type === 'number') {
-        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="number" class="tl-input" data-field="${attr(f.id)}"${val}></div>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="number" class="tl-input tl-spinner-target" data-field="${attr(f.id)}"${val}></div>`;
       } else if (f.type === 'combo') {
         const opts = (f.options || []).map(o => `<option value="${attr(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('');
         fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><select class="tl-combo-select" data-field="${attr(f.id)}">${opts}</select></div>`;
@@ -852,7 +852,7 @@
         fieldsHtml += `<label class="tl-check"><input type="checkbox" data-field="${attr(f.id)}" ${checked}> ${esc(label)}</label>`;
       } else if (f.type === 'host_port') {
         fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="text" class="tl-input" data-field="${attr(f.host_id || 'host')}" value="${attr(f.host_value || '')}" spellcheck="false"></div>`;
-        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">Port</span><input type="number" class="tl-input" data-field="${attr(f.port_id || 'port')}" value="${attr(f.port_value || '22')}"></div>`;
+        fieldsHtml += `<div class="tl-field"><span class="tl-field__label">Port</span><input type="number" class="tl-input tl-spinner-target" data-field="${attr(f.port_id || 'port')}" value="${attr(f.port_value || '22')}"></div>`;
       } else if (f.type === 'file_picker') {
         fieldsHtml += `<div class="tl-field"><span class="tl-field__label">${esc(label)}</span><input type="text" class="tl-input" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></div>`;
       }
@@ -893,6 +893,12 @@
         bodyEl.innerHTML = fieldsHtml;
         bodyEl.querySelectorAll('select.tl-combo-select').forEach((select) => {
           if (window.tlCombo && typeof window.tlCombo.attach === 'function') window.tlCombo.attach(select);
+        });
+        // 'number' fields and host_port's port field keep the native input
+        // as the source of truth (tlSpinner.attach only adds a stepper
+        // column next to it, same contract as tlCombo.attach above).
+        bodyEl.querySelectorAll('input.tl-spinner-target').forEach((input) => {
+          if (window.tlSpinner && typeof window.tlSpinner.attach === 'function') window.tlSpinner.attach(input);
         });
         // Keyboard-first UX: focus the first editable field automatically.
         setTimeout(() => {
@@ -947,7 +953,7 @@
       ariaLabel: 'Plugin prompt',
       size: 'sm',
       body: (bodyEl) => {
-        bodyEl.innerHTML = `<div class="pw-label">${esc(message)}</div><input class="pw-text-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false">`;
+        bodyEl.innerHTML = `<div class="pw-label">${esc(message)}</div><input class="tl-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false">`;
         const input = bodyEl.querySelector('#pd-input');
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') dismiss(input.value); });
         setTimeout(() => input.focus(), 50);

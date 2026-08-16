@@ -267,7 +267,7 @@
                      placeholder="~/.ssh/id_ed25519" spellcheck="false" />
             </div>
           </div>
-          <details class="ssh-form-advanced" ${proxyType !== 'none' ? 'open' : ''}>
+          <details class="tl-details" ${proxyType !== 'none' ? 'open' : ''}>
             <summary>Advanced</summary>
             <div class="tl-field">
               <span class="tl-field__label">Proxy Type</span>
@@ -303,6 +303,14 @@
         bodyEl.querySelectorAll('select.tl-combo-select').forEach((select) => {
           if (global.tlCombo && typeof global.tlCombo.attach === 'function') global.tlCombo.attach(select);
         });
+
+        // Port keeps its own min/max/step attributes and stays the source
+        // of truth (tlSpinner.attach only adds a stepper column next to it,
+        // same contract as tlCombo.attach above).
+        const portInput = bodyEl.querySelector('#cf-port');
+        if (portInput && global.tlSpinner && typeof global.tlSpinner.attach === 'function') {
+          global.tlSpinner.attach(portInput);
+        }
 
         // populateAccountPicker/updateCredentialFieldsVisibility/
         // handleCreateNewAccount only ever query IDs that live inside the

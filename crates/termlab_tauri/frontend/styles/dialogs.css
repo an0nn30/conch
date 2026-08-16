@@ -40,18 +40,6 @@
       background-repeat: no-repeat; background-position: right 8px center;
       padding-right: 24px; cursor: pointer;
     }
-    .ssh-form-advanced {
-      border: 1px solid var(--tab-border); border-radius: 5px; padding: 0;
-    }
-    .ssh-form-advanced summary {
-      padding: 6px 10px; cursor: pointer; font-size: var(--ui-font-small);
-      color: var(--text-muted); user-select: none;
-    }
-    .ssh-form-advanced summary:hover { color: var(--fg); }
-    .ssh-form-advanced[open] summary { border-bottom: 1px solid var(--tab-border); margin-bottom: 8px; }
-    .ssh-form-advanced[open] { padding-bottom: 10px; }
-    .ssh-form-advanced .ssh-form-label { padding: 0 10px; }
-    .ssh-form-advanced .ssh-form-label + .ssh-form-label { margin-top: 8px; }
     .ssh-form-buttons {
       display: flex; justify-content: flex-end; gap: 8px;
       padding: 10px 18px 14px; border-top: 1px solid var(--tab-border);
