@@ -77,23 +77,37 @@
     }
 
     global.vault.ensureUnlocked(() => {
-      // vault.showAccountForm (and any setup/unlock dialog ensureUnlocked
-      // shows first) now renders through the shared tl-dialog stack rather
-      // than a fixed-id `#vault-overlay` div (design-system-phase-5a task
-      // 4), so "has the vault flow fully closed?" is now "has the dialog
-      // stack come back down to this connection form's own depth?" —
-      // captured here, right before showAccountForm layers its dialog(s)
-      // on top, rather than assuming a depth of zero (this form is itself
-      // an open tl-dialog).
-      const baselineDepth = (global.tlDialog && typeof global.tlDialog.count === 'function')
-        ? global.tlDialog.count()
-        : 0;
       global.vault.showAccountForm(null);
+      // vault.showAccountForm now renders through the shared tl-dialog
+      // stack rather than a fixed-id `#vault-overlay` div
+      // (design-system-phase-5a task 4). Watching window.tlDialog.count()
+      // against a captured baseline was tried and rejected: it's an
+      // AMBIENT signal (the whole app's dialog stack, not just vault's),
+      // and it's fooled by a concrete, reachable detour — the account
+      // form's "Generate a new SSH key" link opens keygen.js's dialog
+      // nested on top (doesn't touch the account form), and keygen's
+      // result view's "Create Vault Account with Key" button calls back
+      // into vault.showAccountForm(prefilled), which closes the *original*
+      // account form (dropping the stack back to exactly this function's
+      // baseline) and only *then* awaits listKeys() before reopening a
+      // new, prefilled one. A count()-based poller's next tick during that
+      // await would see "back at baseline," conclude the flow was done,
+      // and repopulate the picker before the account the user is about to
+      // create/save even exists in a dialog yet.
+      //
+      // vault.hasActiveOrPendingDialog() (app/panels/vault.js) is the
+      // fix: it's vault-owned state, not a stack depth, so it's immune to
+      // unrelated dialogs (keygen's included) by construction — it only
+      // ever reflects vault.js's own tracked dialog handle. It also
+      // survives the close-then-reopen gap above: vault.js increments its
+      // own "pending open" counter synchronously, in the same tick as the
+      // close that drops the count to baseline, before awaiting listKeys()
+      // — so there is no tick where this reads "nothing open" during a
+      // vault-internal replace, only once the flow's last dialog is
+      // actually dismissed with nothing replacing it.
       const checkInterval = setInterval(() => {
-        const stackDepth = (global.tlDialog && typeof global.tlDialog.count === 'function')
-          ? global.tlDialog.count()
-          : 0;
-        if (stackDepth > baselineDepth) return;
+        if (global.vault && typeof global.vault.hasActiveOrPendingDialog === 'function'
+          && global.vault.hasActiveOrPendingDialog()) return;
         clearInterval(checkInterval);
         populateAccountPicker(panelEl, '', d);
       }, 300);

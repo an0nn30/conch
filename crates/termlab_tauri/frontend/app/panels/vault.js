@@ -35,6 +35,32 @@
     return handle;
   }
 
+  // Counts in-flight "open a vault dialog" calls between removeOverlay()
+  // tearing down whatever vault dialog was open and the replacement's
+  // tlDialog.open() actually running — several of the wrapper functions
+  // below (showAccountForm, renderVaultDialog) await data (listKeys,
+  // listAccounts, ...) in between, so activeVaultDialogHandle is
+  // momentarily null even though a vault dialog is about to reappear. The
+  // clearest example: keygen.js's "Create Vault Account with Key" button
+  // calls vault.showAccountForm(prefilled), which closes the *existing*
+  // account-form dialog before awaiting listKeys() and reopening a new
+  // one — during that gap activeVaultDialogHandle alone would read as
+  // "nothing open." Each wrapper increments this synchronously right
+  // after removeOverlay() (same tick, no gap) and decrements it in a
+  // finally block once tracking (or the failure path) completes, so
+  // hasActiveOrPendingDialog() below never reports "closed" mid-handoff.
+  let pendingDialogOpens = 0;
+
+  // Vault-owned "is any vault dialog open or about to be" signal — a
+  // deliberately narrow, vault-scoped alternative to polling
+  // window.tlDialog.count() (which reflects the ENTIRE app's dialog
+  // stack, including totally unrelated dialogs like keygen's, ssh's, or
+  // tunnel-manager's). connection-form.js's "+ Create New Account" flow
+  // polls this to know when it's safe to refresh its account picker.
+  function hasActiveOrPendingDialog() {
+    return !!activeVaultDialogHandle || pendingDialogOpens > 0;
+  }
+
   function getVaultStatus() {
     if (!vaultDataService || typeof vaultDataService.getStatus !== 'function') {
       return Promise.reject(new Error('Vault data service unavailable: getStatus'));
@@ -179,15 +205,20 @@
 
   function showSetupDialog(onSuccess) {
     removeOverlay();
-    if (vaultDialogs && typeof vaultDialogs.showSetupDialog === 'function') {
-      const handle = vaultDialogs.showSetupDialog(onSuccess, {
-        createVault,
-        toast: window.toast,
-      });
-      if (handle) { trackDialogHandle(handle); return; }
-    }
-    if (window.toast && typeof window.toast.error === 'function') {
-      window.toast.error('Vault Error', 'Vault setup dialog module is unavailable.');
+    pendingDialogOpens++;
+    try {
+      if (vaultDialogs && typeof vaultDialogs.showSetupDialog === 'function') {
+        const handle = vaultDialogs.showSetupDialog(onSuccess, {
+          createVault,
+          toast: window.toast,
+        });
+        if (handle) { trackDialogHandle(handle); return; }
+      }
+      if (window.toast && typeof window.toast.error === 'function') {
+        window.toast.error('Vault Error', 'Vault setup dialog module is unavailable.');
+      }
+    } finally {
+      pendingDialogOpens--;
     }
   }
 
@@ -197,15 +228,20 @@
 
   async function showUnlockDialog(onSuccess) {
     removeOverlay();
-    if (vaultDialogs && typeof vaultDialogs.showUnlockDialog === 'function') {
-      const handle = vaultDialogs.showUnlockDialog(onSuccess, {
-        unlockVault,
-        toast: window.toast,
-      });
-      if (handle) { trackDialogHandle(handle); return; }
-    }
-    if (window.toast && typeof window.toast.error === 'function') {
-      window.toast.error('Vault Error', 'Vault unlock dialog module is unavailable.');
+    pendingDialogOpens++;
+    try {
+      if (vaultDialogs && typeof vaultDialogs.showUnlockDialog === 'function') {
+        const handle = vaultDialogs.showUnlockDialog(onSuccess, {
+          unlockVault,
+          toast: window.toast,
+        });
+        if (handle) { trackDialogHandle(handle); return; }
+      }
+      if (window.toast && typeof window.toast.error === 'function') {
+        window.toast.error('Vault Error', 'Vault unlock dialog module is unavailable.');
+      }
+    } finally {
+      pendingDialogOpens--;
     }
   }
 
@@ -241,7 +277,15 @@
 
   async function renderVaultDialog() {
     removeOverlay();
+    pendingDialogOpens++;
+    try {
+      await renderVaultDialogInner();
+    } finally {
+      pendingDialogOpens--;
+    }
+  }
 
+  async function renderVaultDialogInner() {
     // Load data for current section.
     let accounts = [];
     let settings = null;
@@ -354,6 +398,13 @@
         if (currentSection === 'accounts') {
           renderAccountsSection(content, accounts);
         } else if (currentSection === 'keys') {
+          // renderKeysSection awaits listKeys() before painting; unlike
+          // switchSection above (which DOES await it, on tab-click), this
+          // initial-open path can't await inside tlDialog's synchronous
+          // body callback. Paint a brief loading state first — reusing
+          // .vault-empty's styling — so the dialog doesn't open on a
+          // blank pane while the fetch is in flight.
+          content.innerHTML = '<div class="vault-empty">Loading…</div>';
           renderKeysSection(content);
         } else if (currentSection === 'settings') {
           renderSettingsSection(content, settings);
@@ -449,22 +500,34 @@
 
   async function showAccountForm(existing) {
     removeOverlay();
-    if (vaultAccountFormFeature && typeof vaultAccountFormFeature.showAccountForm === 'function') {
-      const handle = await vaultAccountFormFeature.showAccountForm(existing, {
-        listKeys,
-        pickKeyFile,
-        updateAccount,
-        addAccount,
-        renderVaultDialog,
-        attr,
-        esc,
-        toast: window.toast,
-        keygen: window.keygen,
-      });
-      if (handle) { trackDialogHandle(handle); return; }
-    }
-    if (window.toast && typeof window.toast.error === 'function') {
-      window.toast.error('Vault Error', 'Vault account form module is unavailable.');
+    // See pendingDialogOpens above: vaultAccountFormFeature.showAccountForm
+    // awaits listKeys() before it opens the replacement dialog, so without
+    // this the window between removeOverlay() (just above) and
+    // trackDialogHandle() (below) would read as "no vault dialog open" to
+    // hasActiveOrPendingDialog() callers — concretely, keygen.js's "Create
+    // Vault Account with Key" button calls back into this exact function
+    // to replace an already-open account form.
+    pendingDialogOpens++;
+    try {
+      if (vaultAccountFormFeature && typeof vaultAccountFormFeature.showAccountForm === 'function') {
+        const handle = await vaultAccountFormFeature.showAccountForm(existing, {
+          listKeys,
+          pickKeyFile,
+          updateAccount,
+          addAccount,
+          renderVaultDialog,
+          attr,
+          esc,
+          toast: window.toast,
+          keygen: window.keygen,
+        });
+        if (handle) { trackDialogHandle(handle); return; }
+      }
+      if (window.toast && typeof window.toast.error === 'function') {
+        window.toast.error('Vault Error', 'Vault account form module is unavailable.');
+      }
+    } finally {
+      pendingDialogOpens--;
     }
   }
 
@@ -546,5 +609,6 @@
     showVaultDialog,
     showAccountForm,
     getAccounts,
+    hasActiveOrPendingDialog,
   };
 })(window);
