@@ -14,6 +14,7 @@
     const layoutRuntime = deps.layoutRuntime;
     const shortcutDebugEnabled = deps.shortcutDebugEnabled;
     const currentWindowLabel = deps.currentWindowLabel;
+    const getTermFontSize = deps.getTermFontSize;
 
     const getActiveTabId = deps.getActiveTabId;
     const setActiveTabId = deps.setActiveTabId;
@@ -130,6 +131,7 @@
           setFocusedPaneId: (paneId) => setFocusedPaneId(paneId),
           setNextTabLabel: (value) => setNextTabLabel(value),
           appEl,
+          getTermFontSize: () => (typeof getTermFontSize === 'function' ? getTermFontSize() : 0),
           setFocusedPane: (paneId) => setFocusedPane(paneId),
           fitAndResizeTab: (tab) => {
             if (layoutRuntime && layoutRuntime.fitAndResizeTab) return layoutRuntime.fitAndResizeTab(tab);
@@ -260,6 +262,22 @@
     // other `__termlab*` escape hatches this app already uses.
     if (tabManager && typeof tabManager.createEditorTab === 'function') {
       global.__termlabCreateEditorTab = (options) => tabManager.createEditorTab(options);
+    }
+
+    // Same problem, one level further out: editor-service.js is a plain script
+    // with no way into this closure, and it needs to ask which pane is focused,
+    // walk every pane, and focus an already-open editor. `panes` is the live
+    // Map main-runtime owns, and paneManager/tabManager are the composed
+    // instances — none of the three has a window handle. Publish read/focus
+    // access under one name rather than letting callers guess at
+    // `global.paneManager`, which does not exist.
+    if (paneManager && tabManager) {
+      global.__termlabPaneAccess = {
+        currentPane: () => paneManager.currentPane(),
+        allPanes: () => panes,
+        setFocusedPane: (paneId) => paneManager.setFocusedPane(paneId),
+        activateTab: (tabId) => tabManager.activateTab(tabId),
+      };
     }
 
     return {

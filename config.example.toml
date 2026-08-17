@@ -140,6 +140,8 @@ navigate_pane_up = "cmd+alt+up"
 navigate_pane_down = "cmd+alt+down"
 navigate_pane_left = "cmd+alt+left"
 navigate_pane_right = "cmd+alt+right"
+new_scratch = "cmd+n"
+save_file = "cmd+s"
 
 # Optional per-plugin shortcut overrides.
 # Key format: "<plugin_name>:<action>".

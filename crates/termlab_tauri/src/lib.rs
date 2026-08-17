@@ -641,6 +641,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             editor_fs::editor_read_file,
             editor_fs::editor_write_file,
             editor_fs::editor_scratch_dir,
+            editor_fs::editor_scratch_list,
             editor_fs::editor_temp_path,
             editor_fs::editor_temp_cleanup,
             editor_fs::editor_temp_sweep,

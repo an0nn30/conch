@@ -46,6 +46,8 @@
       navigate_pane_left: 'navigate-pane-left',
       navigate_pane_right: 'navigate-pane-right',
       settings: 'settings',
+      new_scratch: 'new-scratch',
+      save_file: 'save-file',
     };
 
     function navigatePane(direction) {
@@ -196,6 +198,15 @@
       const runShortcutFallbacks = (event) => {
         const combo = normalizeShortcutEventForPluginFallback(event);
         const coreHit = combo ? coreShortcutFallbacks.find((s) => s.combo === combo) : null;
+        // Returning true consumes the keystroke. cmd+s is a save only inside an
+        // editor pane; in a terminal it must reach the shell unchanged, so bail
+        // out before the generic core branch claims it. getCurrentPane() is the
+        // composed paneManager.currentPane() (via managerDelegates) — the only
+        // accessor that actually resolves the focused pane.
+        if (coreHit && coreHit.action === 'save-file') {
+          const pane = getCurrentPane();
+          if (!pane || pane.kind !== 'editor') return false;
+        }
         if (coreHit) {
           if (coreHit.action === 'navigate-pane-up') navigatePane('up');
           else if (coreHit.action === 'navigate-pane-down') navigatePane('down');

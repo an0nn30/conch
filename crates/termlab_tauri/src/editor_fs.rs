@@ -231,6 +231,23 @@ pub(crate) fn editor_temp_sweep() -> Result<(), String> {
     Ok(())
 }
 
+/// The file names already in the scratch directory, so the frontend can pick
+/// a free scratch name without a round trip per candidate.
+#[tauri::command]
+pub(crate) fn editor_scratch_list() -> Result<Vec<String>, String> {
+    let dir = termlab_core::config::config_dir().join("scratches");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries =
+        fs::read_dir(&dir).map_err(|e| format!("Could not read scratch directory: {e}"))?;
+    Ok(entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,3 +380,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&escape_dir);
     }
 }
+

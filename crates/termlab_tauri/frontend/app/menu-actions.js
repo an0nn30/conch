@@ -71,6 +71,19 @@
         createTab().catch((error) => showStatus('Failed to create tab: ' + String(error)));
         return;
       }
+      if (action === 'new-scratch') {
+        const service = global.termlabEditorService;
+        if (service) service.openScratch();
+        return;
+      }
+      if (action === 'save-file') {
+        // Scoped to editor panes: in a terminal this must not swallow the
+        // keystroke, so shortcut-runtime declines the combo before it reaches
+        // here and the service returns without acting if it is called anyway.
+        const service = global.termlabEditorService;
+        if (service) service.saveActiveEditor();
+        return;
+      }
       if (action === 'new-plain-shell-tab') {
         createPlainShellTab().catch((error) => showStatus('Failed to create plain shell tab: ' + String(error)));
         return;
