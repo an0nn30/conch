@@ -8,6 +8,10 @@
     const setFocusedPaneId = deps.setFocusedPaneId;
     const setNextTabLabel = deps.setNextTabLabel;
     const appEl = deps.appEl;
+    // The configured terminal font size, which editor panes share. Needed at
+    // creation time: without it a new editor view renders at the inherited
+    // page size until some later config change happens to reconfigure it.
+    const getTermFontSize = deps.getTermFontSize;
     const setFocusedPane = deps.setFocusedPane;
     const fitAndResizeTab = deps.fitAndResizeTab;
     const onTabChanged = deps.onTabChanged;
@@ -658,6 +662,14 @@
           dirtyMarker.hidden = !dirty;
         },
       });
+
+      // createEditorView starts with an empty font compartment, so the view
+      // would inherit the page font size and only snap to the configured one
+      // on the next config-changed event. Apply it now.
+      const fontSize = typeof getTermFontSize === 'function' ? getTermFontSize() : 0;
+      if (pane.view && fontSize > 0) {
+        global.termlabEditorPane.setFontSize(pane.view, fontSize);
+      }
 
       activateTab(tabId);
       setFocusedPane(paneId);

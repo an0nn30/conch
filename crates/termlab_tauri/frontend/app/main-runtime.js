@@ -189,6 +189,7 @@
             layoutRuntime,
             shortcutDebugEnabled,
             currentWindowLabel,
+            getTermFontSize: () => termFontSize,
             getActiveTabId: () => activeTabId,
             setActiveTabId: (tabId) => { activeTabId = tabId; },
             setNextTabLabel: (value) => { nextTabLabel = value; },
