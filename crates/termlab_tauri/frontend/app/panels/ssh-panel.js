@@ -67,6 +67,21 @@
     }
   }
 
+  // Export/Import are reachable from the app menu whether or not the Hosts tool
+  // window has ever rendered — in zen mode, or with the right panel closed, it
+  // has not, so init() never ran and `invoke` is still null. Fall back to the
+  // shared client (the same pattern init() already uses for layoutService)
+  // rather than requiring the panel's DOM to exist first.
+  function ensureInvoke() {
+    if (typeof invoke === 'function') return true;
+    const client = window.termlabServices && window.termlabServices.tauriClient;
+    if (client && typeof client.invoke === 'function') {
+      invoke = client.invoke;
+      return true;
+    }
+    return false;
+  }
+
   function init(opts) {
     invoke = opts.invoke;
     listen = opts.listen;
@@ -409,6 +424,10 @@
   }
 
   async function exportConfig() {
+    if (!ensureInvoke()) {
+      if (window.toast) window.toast.error('Export Failed', 'Backend connection unavailable.');
+      return;
+    }
     // Load current data for the selection form.
     let data;
     let tunnels;
@@ -794,6 +813,10 @@
    * for the bundle password or import a legacy file directly, and finish
    * with the unified summary dialog/toast. */
   async function importConfig() {
+    if (!ensureInvoke()) {
+      if (window.toast) window.toast.error('Import Failed', 'Backend connection unavailable.');
+      return;
+    }
     let fileInfo;
     try {
       if (!sshDataService || typeof sshDataService.pickImportFile !== 'function') {
