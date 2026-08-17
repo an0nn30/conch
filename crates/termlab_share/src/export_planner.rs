@@ -137,6 +137,7 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
         resolve_tunnel_host(
             tunnel,
             &mut servers,
+            &folders,
             req.config,
             req.ssh_config_entries,
             &declined,
@@ -160,8 +161,17 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
     };
 
     // Stage 3: credentials excluded — strip vault references and stop.
+    // Every server the bundle carries, whether ungrouped (`bundle.servers`)
+    // or nested inside a folder (`bundle.folders[..].entries`), must lose
+    // its vault reference here — a folder-nested server that kept its
+    // `vault_account_id` while `vault` stayed empty would hand the
+    // recipient a dangling reference to an account that was never bundled.
     if !req.include_credentials {
-        for server in &mut bundle.servers {
+        for server in bundle
+            .servers
+            .iter_mut()
+            .chain(bundle.folders.iter_mut().flat_map(|f| f.entries.iter_mut()))
+        {
             server.vault_account_id = None;
         }
         bundle.metadata.includes_credentials = false;
@@ -172,9 +182,16 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
         };
     }
 
-    // Stage 4: copy referenced vault accounts, de-duplicated by id.
+    // Stage 4: copy referenced vault accounts, de-duplicated by id. Scans
+    // both ungrouped servers and folder-nested ones — a server's location
+    // in a folder must not exempt its vault account from being bundled
+    // (see the Stage 3 comment above for what goes wrong if it is).
     let mut seen: HashSet<Uuid> = HashSet::new();
-    for server in &bundle.servers {
+    let all_servers = bundle
+        .servers
+        .iter()
+        .chain(bundle.folders.iter().flat_map(|f| f.entries.iter()));
+    for server in all_servers {
         let Some(account_id) = server.vault_account_id else {
             continue;
         };
@@ -196,8 +213,13 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
     }
 
     // Stage 6: servers still using the legacy `key_path` field (no vault
-    // account) get a synthesised account so their key travels with them too.
-    for server in &mut bundle.servers {
+    // account) get a synthesised account so their key travels with them
+    // too — again across both ungrouped and folder-nested servers.
+    for server in bundle
+        .servers
+        .iter_mut()
+        .chain(bundle.folders.iter_mut().flat_map(|f| f.entries.iter_mut()))
+    {
         if server.vault_account_id.is_some() {
             continue;
         }
@@ -241,12 +263,19 @@ pub fn plan(req: ExportRequest<'_>, keys: &dyn KeyReader) -> ExportPlan {
 /// dependency prompt) and explicitly chose to leave out. A host in
 /// `declined` is never auto-pulled — it is skipped and a warning is
 /// recorded instead — but `declined` has no effect on a host that is
-/// already present in `bundle_servers` some other way (e.g. the user
-/// selected it directly): declining a *dependency* does not retract an
-/// explicit selection.
+/// already present in the bundle some other way (e.g. the user selected it
+/// directly): declining a *dependency* does not retract an explicit
+/// selection.
+///
+/// "Already present" is checked against both `bundle_servers` (ungrouped)
+/// and `bundle_folders` (folder-nested) — a server the user selected
+/// directly can land in either, and checking only `bundle_servers` would
+/// have this function conclude a folder-nested selection is "missing" and
+/// duplicate it into `bundle_servers` as well.
 fn resolve_tunnel_host(
     tunnel: &mut SavedTunnel,
     bundle_servers: &mut Vec<ServerEntry>,
+    bundle_folders: &[ServerFolder],
     known: &SshConfig,
     ssh_config_entries: &[ServerEntry],
     declined: &HashSet<&str>,
@@ -255,7 +284,7 @@ fn resolve_tunnel_host(
 ) {
     // 1. server_entry_id first.
     if let Some(id) = tunnel.server_entry_id.clone() {
-        if bundle_servers.iter().any(|s| s.id == id) {
+        if host_already_bundled(&id, bundle_servers, bundle_folders) {
             return;
         }
         if let Some(entry) = known.find_server(&id) {
@@ -278,7 +307,7 @@ fn resolve_tunnel_host(
         .all_servers()
         .find(|s| s.host == host && s.port == port)
     {
-        if !bundle_servers.iter().any(|s| s.id == entry.id) {
+        if !host_already_bundled(&entry.id, bundle_servers, bundle_folders) {
             if declined.contains(entry.id.as_str()) {
                 warnings.push(declined_warning(entry, tunnel));
                 return;
@@ -292,7 +321,7 @@ fn resolve_tunnel_host(
         .iter()
         .find(|s| s.host == host && s.port == port)
     {
-        if !bundle_servers.iter().any(|s| s.id == entry.id) {
+        if !host_already_bundled(&entry.id, bundle_servers, bundle_folders) {
             if declined.contains(entry.id.as_str()) {
                 warnings.push(declined_warning(entry, tunnel));
                 return;
@@ -305,6 +334,16 @@ fn resolve_tunnel_host(
     }
 
     warnings.push(unresolvable_warning(tunnel));
+}
+
+/// Whether `id` already names a server somewhere in the bundle being built
+/// — ungrouped or nested inside one of `bundle_folders`.
+fn host_already_bundled(id: &str, bundle_servers: &[ServerEntry], bundle_folders: &[ServerFolder]) -> bool {
+    bundle_servers.iter().any(|s| s.id == id)
+        || bundle_folders
+            .iter()
+            .flat_map(|f| f.entries.iter())
+            .any(|s| s.id == id)
 }
 
 fn pull_in(
@@ -724,5 +763,362 @@ mod tests {
         assert_eq!(plan.bundle.tunnels.len(), 1);
         assert_eq!(plan.bundle.tunnels[0].session_key, "ghost@nowhere:22");
         assert!(plan.warnings.iter().any(|w| w.contains("ghost@nowhere")));
+    }
+
+    /// Regression coverage for a real gap found while writing the Task 7
+    /// round trip: Stages 3/4/6 used to iterate `bundle.servers` only,
+    /// silently ignoring servers nested in `bundle.folders`. A folder-nested
+    /// server's vault account must be copied into the bundle (and its key
+    /// embedded) exactly like an ungrouped one's.
+    #[test]
+    fn folder_nested_vault_backed_server_has_its_account_and_key_bundled() {
+        let account_id = Uuid::new_v4();
+        let server = ServerEntry {
+            id: "nested-1".into(),
+            label: "nested".into(),
+            host: "nested.example.com".into(),
+            port: 22,
+            user: Some("u".into()),
+            auth_method: None,
+            key_path: None,
+            vault_account_id: Some(account_id),
+            proxy_command: None,
+            proxy_jump: None,
+        };
+        let folder = ServerFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            expanded: true,
+            entries: vec![server],
+        };
+        let config = SshConfig {
+            folders: vec![folder],
+            ungrouped: Vec::new(),
+            tunnels: Vec::new(),
+        };
+        let account = VaultAccount {
+            id: account_id,
+            display_name: "nested account".into(),
+            username: "u".into(),
+            auth: AuthMethod::Key {
+                path: "/home/u/.ssh/id_nested".into(),
+                passphrase: None,
+            },
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut files = HashMap::new();
+        files.insert(
+            "/home/u/.ssh/id_nested".to_string(),
+            b"NESTED-KEY-BYTES".to_vec(),
+        );
+
+        let req = ExportRequest {
+            config: &config,
+            ssh_config_entries: &[],
+            server_ids: vec!["nested-1".into()],
+            tunnel_ids: vec![],
+            declined_server_ids: vec![],
+            include_credentials: true,
+            accounts: vec![account],
+            source_host: "test-host".into(),
+            termlab_version: "0.0.0-test".into(),
+        };
+
+        let plan = plan(req, &FakeKeys(files));
+
+        assert_eq!(
+            plan.bundle.vault.accounts.len(),
+            1,
+            "folder-nested server's vault account must be copied in"
+        );
+        assert_eq!(
+            plan.bundle.vault.keys.len(),
+            1,
+            "folder-nested server's key must be embedded"
+        );
+        assert!(plan.warnings.is_empty(), "warnings: {:?}", plan.warnings);
+    }
+
+    /// Companion to the test above: with credentials excluded, a
+    /// folder-nested server's `vault_account_id` must be stripped exactly
+    /// like an ungrouped server's — otherwise it arrives as a dangling
+    /// reference to an account the recipient never receives.
+    #[test]
+    fn folder_nested_server_vault_account_id_is_stripped_when_credentials_off() {
+        let account_id = Uuid::new_v4();
+        let server = ServerEntry {
+            id: "nested-2".into(),
+            label: "nested".into(),
+            host: "nested.example.com".into(),
+            port: 22,
+            user: Some("u".into()),
+            auth_method: None,
+            key_path: None,
+            vault_account_id: Some(account_id),
+            proxy_command: None,
+            proxy_jump: None,
+        };
+        let folder = ServerFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            expanded: true,
+            entries: vec![server],
+        };
+        let config = SshConfig {
+            folders: vec![folder],
+            ungrouped: Vec::new(),
+            tunnels: Vec::new(),
+        };
+
+        let req = ExportRequest {
+            config: &config,
+            ssh_config_entries: &[],
+            server_ids: vec!["nested-2".into()],
+            tunnel_ids: vec![],
+            declined_server_ids: vec![],
+            include_credentials: false,
+            accounts: vec![],
+            source_host: "test-host".into(),
+            termlab_version: "0.0.0-test".into(),
+        };
+
+        let plan = plan(req, &FakeKeys(HashMap::new()));
+
+        assert!(plan.bundle.vault.is_empty());
+        assert!(
+            plan.bundle.folders[0].entries[0].vault_account_id.is_none(),
+            "folder-nested server must have vault_account_id stripped, not just ungrouped ones"
+        );
+    }
+
+    /// Regression coverage for a second bug the Task 7 round trip caught:
+    /// `resolve_tunnel_host` used to check only `bundle_servers` (ungrouped)
+    /// to decide whether a tunnel's host was "already present" before
+    /// pulling it in. A directly-selected, folder-nested server looked
+    /// absent by that check, so a tunnel referencing it got the host pulled
+    /// in a *second* time as a duplicate ungrouped entry.
+    #[test]
+    fn tunnel_referencing_an_already_selected_folder_nested_server_does_not_duplicate_it() {
+        let server = ServerEntry {
+            id: "nested-3".into(),
+            label: "nested".into(),
+            host: "nested3.example.com".into(),
+            port: 22,
+            user: Some("u".into()),
+            auth_method: None,
+            key_path: None,
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        };
+        let folder = ServerFolder {
+            id: "f1".into(),
+            name: "Folder".into(),
+            expanded: true,
+            entries: vec![server],
+        };
+        let tunnel_id = Uuid::new_v4();
+        let tunnel = SavedTunnel {
+            id: tunnel_id,
+            label: "t".into(),
+            session_key: "u@nested3.example.com:22".into(),
+            server_entry_id: Some("nested-3".into()),
+            local_port: 1,
+            remote_host: "x".into(),
+            remote_port: 1,
+            auto_start: false,
+        };
+        let config = SshConfig {
+            folders: vec![folder],
+            ungrouped: Vec::new(),
+            tunnels: vec![tunnel],
+        };
+
+        let req = ExportRequest {
+            config: &config,
+            ssh_config_entries: &[],
+            server_ids: vec!["nested-3".into()],
+            tunnel_ids: vec![tunnel_id.to_string()],
+            declined_server_ids: vec![],
+            include_credentials: false,
+            accounts: vec![],
+            source_host: "test-host".into(),
+            termlab_version: "0.0.0-test".into(),
+        };
+
+        let plan = plan(req, &FakeKeys(HashMap::new()));
+
+        assert_eq!(
+            plan.bundle.folders[0].entries.len(),
+            1,
+            "the folder must still hold exactly its one server"
+        );
+        assert!(
+            plan.bundle.servers.iter().all(|s| s.id != "nested-3"),
+            "the tunnel must not have pulled a duplicate ungrouped copy in: {:?}",
+            plan.bundle.servers
+        );
+        assert!(plan.auto_pulled.is_empty(), "an already-selected host is not an auto-pull");
+    }
+
+    /// Closes a coverage gap in `resolve_tunnel_host`'s decline handling:
+    /// the pre-existing decline test only ever exercised branch 1
+    /// (`server_entry_id` set). This exercises branch 2 — no
+    /// `server_entry_id`, host resolved by matching `session_key` against a
+    /// known server — and pins that a decline is honoured there too.
+    #[test]
+    fn declined_tunnel_host_resolved_by_session_key_is_not_pulled_in() {
+        let tunnel_id = Uuid::new_v4();
+        let account_id = Uuid::new_v4();
+
+        let server = ServerEntry {
+            id: "s-session-key".into(),
+            label: "session-key-host".into(),
+            host: "sk.example.com".into(),
+            port: 22,
+            user: Some("u".into()),
+            auth_method: None,
+            key_path: None,
+            vault_account_id: Some(account_id),
+            proxy_command: None,
+            proxy_jump: None,
+        };
+
+        let tunnel = SavedTunnel {
+            id: tunnel_id,
+            label: "session-key-tunnel".into(),
+            session_key: "u@sk.example.com:22".into(),
+            server_entry_id: None, // forces branch 2, not branch 1
+            local_port: 1111,
+            remote_host: "internal".into(),
+            remote_port: 1111,
+            auto_start: false,
+        };
+
+        let config = SshConfig {
+            folders: Vec::new(),
+            ungrouped: vec![server],
+            tunnels: vec![tunnel],
+        };
+
+        let account = VaultAccount {
+            id: account_id,
+            display_name: "session-key account".into(),
+            username: "u".into(),
+            auth: AuthMethod::Key {
+                path: "/home/u/.ssh/id_session_key".into(),
+                passphrase: None,
+            },
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut files = HashMap::new();
+        files.insert(
+            "/home/u/.ssh/id_session_key".to_string(),
+            b"SESSION-KEY-BYTES".to_vec(),
+        );
+
+        let req = ExportRequest {
+            config: &config,
+            ssh_config_entries: &[],
+            server_ids: vec![], // not directly selected
+            tunnel_ids: vec![tunnel_id.to_string()],
+            declined_server_ids: vec!["s-session-key".into()],
+            include_credentials: true,
+            accounts: vec![account],
+            source_host: "test-host".into(),
+            termlab_version: "0.0.0-test".into(),
+        };
+
+        let plan = plan(req, &FakeKeys(files));
+
+        assert!(
+            plan.bundle.servers.is_empty(),
+            "declined host resolved via session_key must not be pulled in: {:?}",
+            plan.bundle.servers
+        );
+        assert!(plan.bundle.vault.accounts.is_empty());
+        assert!(plan.bundle.vault.keys.is_empty());
+        assert!(plan.auto_pulled.is_empty());
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("session-key-host")),
+            "warnings: {:?}",
+            plan.warnings
+        );
+    }
+
+    /// Branch 3 of the same gap: no `server_entry_id`, host resolved only
+    /// against a `~/.ssh/config` alias (never present in `config` at all).
+    /// A decline here must also be honoured, and — since branch 3 is the
+    /// one place that mutates `tunnel.server_entry_id` — that mutation must
+    /// not happen for a declined alias, or import would treat a
+    /// never-bundled host as resolvable.
+    #[test]
+    fn declined_tunnel_host_resolved_by_ssh_config_alias_is_not_pulled_in() {
+        let tunnel_id = Uuid::new_v4();
+
+        let alias = ServerEntry {
+            id: "sshconfig_declined_bastion".into(),
+            label: "declined-bastion".into(),
+            host: "declined-bastion.example.com".into(),
+            port: 22,
+            user: Some("user".into()),
+            auth_method: Some("key".into()),
+            key_path: None,
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        };
+
+        let tunnel = SavedTunnel {
+            id: tunnel_id,
+            label: "alias-tunnel".into(),
+            session_key: "user@declined-bastion.example.com:22".into(),
+            server_entry_id: None,
+            local_port: 2222,
+            remote_host: "internal".into(),
+            remote_port: 2222,
+            auto_start: false,
+        };
+
+        let config = SshConfig {
+            folders: Vec::new(),
+            ungrouped: Vec::new(),
+            tunnels: vec![tunnel],
+        };
+        let ssh_config_entries = vec![alias];
+
+        let req = ExportRequest {
+            config: &config,
+            ssh_config_entries: &ssh_config_entries,
+            server_ids: vec![],
+            tunnel_ids: vec![tunnel_id.to_string()],
+            declined_server_ids: vec!["sshconfig_declined_bastion".into()],
+            include_credentials: false,
+            accounts: vec![],
+            source_host: "test-host".into(),
+            termlab_version: "0.0.0-test".into(),
+        };
+
+        let plan = plan(req, &FakeKeys(HashMap::new()));
+
+        assert!(
+            plan.bundle.servers.is_empty(),
+            "declined ssh_config alias must not be pulled in: {:?}",
+            plan.bundle.servers
+        );
+        assert!(plan.auto_pulled.is_empty());
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("declined-bastion")),
+            "warnings: {:?}",
+            plan.warnings
+        );
+        assert_eq!(
+            plan.bundle.tunnels[0].server_entry_id, None,
+            "a declined alias must not be minted onto the tunnel's server_entry_id"
+        );
     }
 }
