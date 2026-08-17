@@ -23,7 +23,7 @@ use termlab_vault::model::{AuthMethod, VaultAccount};
 
 use crate::ShareError;
 use crate::bundle::BundledKey;
-use crate::import_planner::{ImportPlan, PlannedItem};
+use crate::import_planner::{ImportPlan, ItemAction, PlannedItem};
 
 /// Where imported vault accounts go. Implemented against the real vault by
 /// the caller (Task 6); tests supply a fake so `import_executor`'s own unit
@@ -198,46 +198,55 @@ fn rewrite_marker_path(path: &mut PathBuf, key_paths: &HashMap<Uuid, PathBuf>) {
     }
 }
 
-// These three apply functions deliberately re-derive Add-vs-Replace from
-// `config`'s actual current contents by id, rather than blindly trusting
-// `planned.action`. `plan()` only knows the config as it stood at planning
-// time; if anything has changed by the time `execute` runs — including,
-// trivially, this same bundle having already been imported once — a stale
-// `Add` must not turn into a duplicate. Matching by id at apply time is what
-// makes `execute` idempotent on its own, independent of how fresh the plan
-// is. `planned.action` remains meaningful as information for the caller
-// (e.g. a UI summary of what will change) even though it is unused here.
+// These three apply functions switch on `planned.action` rather than
+// re-deriving Add-vs-Replace from `config`'s live contents. `ItemAction` is
+// on `PlannedItem` precisely so a consumer (sub-project 2: the per-row
+// Skip/Replace/Rename picker) can override the planner's default and have
+// that choice honoured verbatim — an executor that recomputes the decision
+// from live state cannot respect an explicit override. `Replace` still
+// falls back to a push if the id is unexpectedly absent (e.g. it was
+// removed locally between planning and executing), so this never silently
+// drops an item.
 
 fn apply_folder(config: &mut SshConfig, planned: PlannedItem<ServerFolder>) {
-    match config
-        .folders
-        .iter_mut()
-        .find(|existing| existing.id == planned.item.id)
-    {
-        Some(existing) => *existing = planned.item,
-        None => config.folders.push(planned.item),
+    match planned.action {
+        ItemAction::Add => config.folders.push(planned.item),
+        ItemAction::Replace => match config
+            .folders
+            .iter_mut()
+            .find(|existing| existing.id == planned.item.id)
+        {
+            Some(existing) => *existing = planned.item,
+            None => config.folders.push(planned.item),
+        },
     }
 }
 
 fn apply_server(config: &mut SshConfig, planned: PlannedItem<ServerEntry>) {
-    match config
-        .ungrouped
-        .iter_mut()
-        .find(|existing| existing.id == planned.item.id)
-    {
-        Some(existing) => *existing = planned.item,
-        None => config.ungrouped.push(planned.item),
+    match planned.action {
+        ItemAction::Add => config.ungrouped.push(planned.item),
+        ItemAction::Replace => match config
+            .ungrouped
+            .iter_mut()
+            .find(|existing| existing.id == planned.item.id)
+        {
+            Some(existing) => *existing = planned.item,
+            None => config.ungrouped.push(planned.item),
+        },
     }
 }
 
 fn apply_tunnel(config: &mut SshConfig, planned: PlannedItem<SavedTunnel>) {
-    match config
-        .tunnels
-        .iter_mut()
-        .find(|existing| existing.id == planned.item.id)
-    {
-        Some(existing) => *existing = planned.item,
-        None => config.tunnels.push(planned.item),
+    match planned.action {
+        ItemAction::Add => config.tunnels.push(planned.item),
+        ItemAction::Replace => match config
+            .tunnels
+            .iter_mut()
+            .find(|existing| existing.id == planned.item.id)
+        {
+            Some(existing) => *existing = planned.item,
+            None => config.tunnels.push(planned.item),
+        },
     }
 }
 
@@ -287,11 +296,14 @@ mod tests {
         }
     }
 
-    /// Run the real planner against an empty config, so the resulting plan
-    /// is exactly what `execute` would receive in production, not a
-    /// hand-built stand-in for it.
-    fn plan_from(bundle: &ShareBundle) -> ImportPlan {
-        plan(bundle, &SshConfig::default(), &[])
+    /// Run the real planner against `config`, so the resulting plan is
+    /// exactly what `execute` would receive in production, not a
+    /// hand-built stand-in for it. Callers that want to observe a second
+    /// import correctly classify against what a first `execute()` actually
+    /// wrote must pass that same (now-mutated) `config` back in here rather
+    /// than a fresh default — see `importing_the_same_bundle_twice_...`.
+    fn plan_from(bundle: &ShareBundle, config: &SshConfig) -> ImportPlan {
+        plan(bundle, config, &[])
     }
 
     fn plan_with_one_bundled_key() -> ImportPlan {
@@ -304,7 +316,7 @@ mod tests {
             passphrase: None,
             comment: "id_ed25519".into(),
         });
-        plan_from(&bundle)
+        plan_from(&bundle, &SshConfig::default())
     }
 
     #[test]
@@ -334,13 +346,55 @@ mod tests {
     fn importing_the_same_bundle_twice_does_not_duplicate() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = SshConfig::default();
-        execute(plan_from(&sample_bundle()), &mut config, dir.path(), None).unwrap();
+        let bundle = sample_bundle();
+
+        execute(plan_from(&bundle, &config), &mut config, dir.path(), None).unwrap();
         let after_first = config.ungrouped.len();
-        execute(plan_from(&sample_bundle()), &mut config, dir.path(), None).unwrap();
+        assert_eq!(
+            after_first, 1,
+            "first import of one server must land exactly one entry, not zero or more"
+        );
+
+        // Plan against `config` as the first import actually left it, so
+        // the second plan sees "s1" already present and classifies it as
+        // Replace — the scenario `plan_from` was reworked to allow a test
+        // to observe (see its doc comment).
+        execute(plan_from(&bundle, &config), &mut config, dir.path(), None).unwrap();
         assert_eq!(
             config.ungrouped.len(),
             after_first,
             "second import must replace, not append"
+        );
+    }
+
+    /// A server synthesised (during export) from a legacy `key_path` arrives
+    /// with both `vault_account_id` set and a stale `key_path` still
+    /// pointing at the sender's machine. Import must not "repair" that
+    /// stale path — `vault_account_id` is authoritative, matching the
+    /// existing convention in `SshConfig::has_legacy_entries`. No code path
+    /// in the planner or executor touches `ServerEntry::key_path` at all,
+    /// so this pins that by construction against a future "helpful" fix
+    /// that starts rewriting it.
+    #[test]
+    fn server_with_both_vault_account_id_and_stale_key_path_is_left_untouched() {
+        let account_id = Uuid::new_v4();
+        let mut server = sample_server();
+        server.vault_account_id = Some(account_id);
+        server.key_path = Some("/home/sender/.ssh/id_ed25519".into());
+
+        let mut bundle = sample_bundle();
+        bundle.servers = vec![server];
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SshConfig::default();
+        execute(plan_from(&bundle, &config), &mut config, dir.path(), None).unwrap();
+
+        let imported = config.find_server("s1").expect("server must be imported");
+        assert_eq!(imported.vault_account_id, Some(account_id));
+        assert_eq!(
+            imported.key_path.as_deref(),
+            Some("/home/sender/.ssh/id_ed25519"),
+            "stale sender-machine key_path must be left exactly as it arrived"
         );
     }
 }
