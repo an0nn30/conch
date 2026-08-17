@@ -273,7 +273,7 @@ Write `plan_with_one_new_server`, `plan_with_server_and_dependent_tunnel` and `p
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `cargo test -p termlab_share import_executor`
-Expected: FAIL — the new arms are unhandled, so `Skip` and `Rename` fall through to whatever the current match does.
+Expected: FAIL. Note that Task 1 had to add `Skip => {}` and a `Rename(_)` stub to these matches already — widening the enum broke their exhaustiveness and the workspace would not compile otherwise. `Skip` is therefore already correct; the `Rename(_)` stub writes the item's **original** label, so `rename_changes_the_label_and_preserves_the_id` fails honestly rather than passing for the wrong reason. Your job is to replace that stub with a real implementation, not to add the arms from scratch.
 
 - [ ] **Step 3: Implement**
 
