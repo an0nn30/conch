@@ -15,7 +15,7 @@ use termlab_remote::config::{SavedTunnel, ServerEntry, ServerFolder, SshConfig};
 use termlab_share::codec::{decode, encode};
 use termlab_share::export_planner::{ExportRequest, KeyReader, plan as plan_export};
 use termlab_share::import_executor::{VaultSink, execute};
-use termlab_share::import_planner::plan as plan_import;
+use termlab_share::import_planner::{ConflictStatus, ItemAction, plan as plan_import};
 use termlab_vault::model::{AuthMethod, VaultAccount};
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
@@ -441,4 +441,356 @@ fn export_without_credentials_carries_no_vault_material() {
             .all(|s| s.vault_account_id.is_none()),
         "folder-nested servers must have vault_account_id stripped too"
     );
+}
+
+/// The conflicting counterpart to
+/// `full_round_trip_preserves_ids_and_materialises_keys`'s empty-machine-B
+/// case. Machine B is seeded to hit every `ConflictStatus` at once:
+///
+/// - `srv-same-id` exists on B under the same id as a bundle server
+///   (`SameId`);
+/// - `srv-label-src` is a fresh id in the bundle whose label ("prod")
+///   collides with a *different* local server, `srv-label-dst`
+///   (`LabelCollision`);
+/// - `srv-new` exists nowhere on B (`New`);
+/// - `tunnel-broken` depends on `srv-ghost`, a host machine A has locally
+///   but the export explicitly declines to pull in as a dependency, so it
+///   never enters the bundle at all and resolves on neither the bundle nor
+///   B (`ReferenceBroken`).
+///
+/// Runs the real `export_planner::plan` -> `codec::encode`/`decode` ->
+/// `import_planner::plan` -> `import_executor::execute` pipeline twice
+/// against the same machine-A bundle: once with the plan's defaults
+/// unmodified (against a throwaway clone of B, so the second pass still
+/// starts from B's true original state), and once re-planned with the
+/// `SameId` row overridden to `Skip` and the `LabelCollision` row
+/// overridden to `Rename`.
+#[test]
+fn conflicting_machine_b_produces_every_status_and_honours_overrides() {
+    let account_id = Uuid::new_v4();
+    let tunnel_ok_id = Uuid::new_v4();
+    let tunnel_broken_id = Uuid::new_v4();
+
+    // --- Machine A's selection -------------------------------------------
+    let server_same_id = ServerEntry {
+        id: "srv-same-id".into(),
+        label: "same-id-host".into(),
+        host: "same.example.com".into(),
+        port: 22,
+        user: Some("alice".into()),
+        auth_method: None,
+        key_path: None,
+        vault_account_id: None,
+        proxy_command: None,
+        proxy_jump: None,
+    };
+    let server_label_src = ServerEntry {
+        id: "srv-label-src".into(),
+        label: "prod".into(),
+        host: "labelsrc.example.com".into(),
+        port: 22,
+        user: Some("bob".into()),
+        auth_method: None,
+        key_path: None,
+        vault_account_id: None,
+        proxy_command: None,
+        proxy_jump: None,
+    };
+    let server_new = ServerEntry {
+        id: "srv-new".into(),
+        label: "new-host".into(),
+        host: "new.example.com".into(),
+        port: 22,
+        user: Some("carol".into()),
+        auth_method: None,
+        key_path: None,
+        vault_account_id: Some(account_id),
+        proxy_command: None,
+        proxy_jump: None,
+    };
+    // Present on machine A but never directly selected for export; the
+    // tunnel below depends on it and the export explicitly declines to pull
+    // it in as a dependency, so it never enters the bundle at all — the
+    // fixture for `ReferenceBroken`.
+    let server_ghost = ServerEntry {
+        id: "srv-ghost".into(),
+        label: "ghost-host".into(),
+        host: "ghost.example.com".into(),
+        port: 22,
+        user: Some("dave".into()),
+        auth_method: None,
+        key_path: None,
+        vault_account_id: None,
+        proxy_command: None,
+        proxy_jump: None,
+    };
+
+    let tunnel_ok = SavedTunnel {
+        id: tunnel_ok_id,
+        label: "tunnel-ok".into(),
+        session_key: "carol@new.example.com:22".into(),
+        server_entry_id: Some("srv-new".into()),
+        local_port: 5000,
+        remote_host: "db.internal".into(),
+        remote_port: 5432,
+        auto_start: false,
+    };
+    let tunnel_broken = SavedTunnel {
+        id: tunnel_broken_id,
+        label: "tunnel-broken".into(),
+        session_key: "dave@ghost.example.com:22".into(),
+        server_entry_id: Some("srv-ghost".into()),
+        local_port: 6000,
+        remote_host: "cache.internal".into(),
+        remote_port: 6379,
+        auto_start: false,
+    };
+
+    let config_a = SshConfig {
+        folders: Vec::new(),
+        ungrouped: vec![server_same_id, server_label_src, server_new, server_ghost],
+        tunnels: vec![tunnel_ok, tunnel_broken],
+    };
+
+    let account = VaultAccount {
+        id: account_id,
+        display_name: "new host account".into(),
+        username: "carol".into(),
+        auth: AuthMethod::Password("hunter3".into()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    // --- Export on machine A, with credentials ---------------------------
+    let export_plan = plan_export(
+        ExportRequest {
+            config: &config_a,
+            ssh_config_entries: &[],
+            server_ids: vec![
+                "srv-same-id".into(),
+                "srv-label-src".into(),
+                "srv-new".into(),
+            ],
+            tunnel_ids: vec![tunnel_ok_id.to_string(), tunnel_broken_id.to_string()],
+            declined_server_ids: vec!["srv-ghost".into()],
+            include_credentials: true,
+            accounts: vec![account],
+            source_host: "machine-a".into(),
+            termlab_version: "0.0.0-test".into(),
+        },
+        &FileKeyReader,
+    );
+    assert!(
+        export_plan.bundle.servers.iter().all(|s| s.id != "srv-ghost"),
+        "the declined dependency must never enter the bundle: {:?}",
+        export_plan.bundle.servers
+    );
+    assert!(
+        export_plan.warnings.iter().any(|w| w.contains("ghost-host")),
+        "the decline should be recorded as a warning: {:?}",
+        export_plan.warnings
+    );
+    let broken_in_bundle = export_plan
+        .bundle
+        .tunnels
+        .iter()
+        .find(|t| t.id == tunnel_broken_id)
+        .unwrap();
+    assert_eq!(
+        broken_in_bundle.server_entry_id.as_deref(),
+        Some("srv-ghost"),
+        "the broken tunnel must keep referencing the host that was never bundled"
+    );
+
+    // --- Encrypt, then decrypt --------------------------------------------
+    let bytes = encode(&export_plan.bundle, PASSWORD).unwrap();
+    let bundle = decode(&bytes, PASSWORD).unwrap();
+
+    // --- Machine B: seeded to hit every status at once ---------------------
+    let config_b = SshConfig {
+        folders: Vec::new(),
+        ungrouped: vec![
+            ServerEntry {
+                id: "srv-same-id".into(), // same id as the bundle's srv-same-id
+                label: "old-label".into(),
+                host: "old.example.com".into(),
+                port: 22,
+                user: Some("old-user".into()),
+                auth_method: None,
+                key_path: None,
+                vault_account_id: None,
+                proxy_command: None,
+                proxy_jump: None,
+            },
+            ServerEntry {
+                id: "srv-label-dst".into(), // different id, same label as srv-label-src
+                label: "prod".into(),
+                host: "labeldst.example.com".into(),
+                port: 22,
+                user: Some("eve".into()),
+                auth_method: None,
+                key_path: None,
+                vault_account_id: None,
+                proxy_command: None,
+                proxy_jump: None,
+            },
+        ],
+        tunnels: Vec::new(),
+    };
+
+    // --- Plan against machine B: all four statuses at once, on the rows
+    // expected --------------------------------------------------------
+    let plan_1 = plan_import(&bundle, &config_b, &[]);
+
+    let same_id_row = plan_1
+        .servers
+        .iter()
+        .find(|p| p.item.id == "srv-same-id")
+        .unwrap();
+    assert_eq!(same_id_row.status, ConflictStatus::SameId);
+    assert_eq!(same_id_row.action, ItemAction::Replace);
+
+    let label_collision_row = plan_1
+        .servers
+        .iter()
+        .find(|p| p.item.id == "srv-label-src")
+        .unwrap();
+    assert_eq!(label_collision_row.status, ConflictStatus::LabelCollision);
+    assert_eq!(label_collision_row.action, ItemAction::Add);
+
+    let new_row = plan_1.servers.iter().find(|p| p.item.id == "srv-new").unwrap();
+    assert_eq!(new_row.status, ConflictStatus::New);
+    assert_eq!(new_row.action, ItemAction::Add);
+
+    let broken_row = plan_1
+        .tunnels
+        .iter()
+        .find(|p| p.item.id == tunnel_broken_id)
+        .unwrap();
+    assert_eq!(broken_row.status, ConflictStatus::ReferenceBroken);
+    assert_eq!(broken_row.action, ItemAction::Skip);
+
+    let ok_row = plan_1
+        .tunnels
+        .iter()
+        .find(|p| p.item.id == tunnel_ok_id)
+        .unwrap();
+    assert_eq!(ok_row.status, ConflictStatus::New);
+    assert_eq!(ok_row.action, ItemAction::Add);
+
+    // --- Execute plan_1 unmodified, against a throwaway clone of B so the
+    // overridden pass below still starts from B's true original state -----
+    let key_dir_trial = tempfile::tempdir().unwrap();
+    let mut config_b_trial = config_b.clone();
+    let mut sink_trial = RecordingVaultSink::default();
+    let outcome_trial = execute(
+        plan_1,
+        &mut config_b_trial,
+        key_dir_trial.path(),
+        Some(&mut sink_trial),
+    )
+    .unwrap();
+
+    assert!(
+        config_b_trial.find_tunnel(&tunnel_broken_id).is_none(),
+        "the ReferenceBroken tunnel must not be imported"
+    );
+    assert!(config_b_trial.find_tunnel(&tunnel_ok_id).is_some());
+    assert_eq!(
+        outcome_trial.tunnels, 1,
+        "only the resolvable tunnel counts as imported, not the skipped one"
+    );
+
+    let same_id_after_trial = config_b_trial.find_server("srv-same-id").unwrap();
+    assert_eq!(
+        same_id_after_trial.label, "same-id-host",
+        "Replace must update the existing host in place with the bundle's values"
+    );
+    assert_eq!(same_id_after_trial.host, "same.example.com");
+    assert_eq!(
+        config_b_trial
+            .ungrouped
+            .iter()
+            .filter(|s| s.id == "srv-same-id")
+            .count(),
+        1,
+        "the SameId host must be updated in place, not duplicated"
+    );
+    assert_eq!(
+        outcome_trial.servers, 3,
+        "all three planned servers write on the unmodified pass (Replace + Add + Add)"
+    );
+    assert_eq!(outcome_trial.credentials, 1);
+
+    // --- Re-plan against B's untouched original state, override the SameId
+    // row to Skip and the LabelCollision row to Rename, then execute for
+    // real -------------------------------------------------------------
+    let mut plan_2 = plan_import(&bundle, &config_b, &[]);
+    for row in &mut plan_2.servers {
+        if row.item.id == "srv-same-id" {
+            assert_eq!(row.status, ConflictStatus::SameId);
+            row.action = ItemAction::Skip;
+        }
+        if row.item.id == "srv-label-src" {
+            assert_eq!(row.status, ConflictStatus::LabelCollision);
+            row.action = ItemAction::Rename("prod (2)".into());
+        }
+    }
+
+    let key_dir_final = tempfile::tempdir().unwrap();
+    let mut config_b_final = config_b.clone();
+    let mut sink_final = RecordingVaultSink::default();
+    let outcome_final = execute(
+        plan_2,
+        &mut config_b_final,
+        key_dir_final.path(),
+        Some(&mut sink_final),
+    )
+    .unwrap();
+
+    // The skipped SameId row must leave B's local host exactly as it always
+    // was — B's true original state, never mutated before this point since
+    // the unmodified pass above ran against a separate clone.
+    let same_id_final = config_b_final.find_server("srv-same-id").unwrap();
+    assert_eq!(
+        same_id_final.label, "old-label",
+        "Skip must leave the local host's original values untouched"
+    );
+    assert_eq!(same_id_final.host, "old.example.com");
+    assert_eq!(same_id_final.user.as_deref(), Some("old-user"));
+
+    // The renamed LabelCollision row lands as a new entry carrying the
+    // bundle's id and only the overridden label — everything else about it
+    // is exactly what the bundle carried.
+    let renamed = config_b_final
+        .find_server("srv-label-src")
+        .expect("the renamed host must be imported under the bundle's id");
+    assert_eq!(renamed.label, "prod (2)");
+    assert_eq!(
+        renamed.host, "labelsrc.example.com",
+        "a Rename changes only the label, not the rest of the item"
+    );
+    assert_eq!(renamed.user.as_deref(), Some("bob"));
+
+    // Its label-collision partner, already local before the import, is left
+    // completely alone.
+    let untouched_label_dst = config_b_final.find_server("srv-label-dst").unwrap();
+    assert_eq!(untouched_label_dst.label, "prod");
+    assert_eq!(untouched_label_dst.host, "labeldst.example.com");
+
+    // The New row and the resolvable tunnel still import normally; the
+    // ReferenceBroken tunnel is still skipped on this pass too.
+    assert!(config_b_final.find_server("srv-new").is_some());
+    assert!(config_b_final.find_tunnel(&tunnel_ok_id).is_some());
+    assert!(
+        config_b_final.find_tunnel(&tunnel_broken_id).is_none(),
+        "ReferenceBroken must still be a no-op even on the overridden pass"
+    );
+
+    assert_eq!(
+        outcome_final.servers, 2,
+        "Skip writes nothing; the Rename and the plain New Add each write one"
+    );
+    assert_eq!(outcome_final.tunnels, 1, "the ReferenceBroken tunnel is still excluded");
+    assert_eq!(outcome_final.credentials, 1);
 }
