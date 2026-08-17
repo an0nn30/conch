@@ -201,7 +201,7 @@ For tunnels, replace the `skipped.push(...); continue;` at :142-160 with a `Refe
 
 ```bash
 cargo test -p termlab_share 2>&1 | tail -5
-cargo clippy -p termlab_share --all-targets 2>&1 | grep -E "^(warning|error)" | head
+cargo clippy -p termlab_share --all-targets 2>&1 | grep -B1 -A3 "^warning\|^error" | grep -E "termlab_share|^warning|^error" | head -20   # clippy prints the header and file:line on separate lines, so a single-stage grep for both never matches
 git add crates/termlab_share/src/import_planner.rs
 git commit -m "feat(share): report conflict status per planned import item"
 ```
