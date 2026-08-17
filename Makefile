@@ -216,11 +216,26 @@ ifndef V
 	$(error Usage: make bump V=x.y.z)
 endif
 	@echo "Bumping version to $(V)..."
+	@# CFBundleShortVersionString must be at most three period-separated
+	@# non-negative integers — Apple rejects a pre-release suffix, and Finder
+	@# renders it wrongly. So the marketing version is $(V) with any
+	@# -rc.N/-beta.N stripped, while CFBundleVersion keeps the full string as
+	@# the build identifier. The previous sed only matched purely numeric
+	@# versions, so once the plist held "3.0.0-rc.1" it silently stopped
+	@# matching and every later bump left the bundle stale.
+	$(eval V_NUMERIC := $(shell echo "$(V)" | sed 's/-.*//'))
 	sed -i '' 's/^version = ".*"/version = "$(V)"/' Cargo.toml
-	sed -i '' 's|<string>[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*</string>|<string>$(V)</string>|g' packaging/macos/Info.plist
-	sed -i '' 's|Version="[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"|Version="$(V)"|g' packaging/windows/termlab.wxs
+	python3 scripts/set_bundle_version.py "$(V)" "$(V_NUMERIC)"
+	python3 scripts/set_msi_version.py "$(V_NUMERIC)"
 	cargo check --workspace
-	@echo "Version bumped to $(V). Review with 'git diff', then commit."
+	@# Fail loudly rather than shipping a bundle that disagrees with the binary.
+	@grep -q "<string>$(V_NUMERIC)</string>" packaging/macos/Info.plist \
+		|| { echo "error: Info.plist was not updated to $(V_NUMERIC)"; exit 1; }
+	@grep -q 'Codepage="1252" Version="$(V_NUMERIC)"' packaging/windows/termlab.wxs \
+		|| { echo "error: termlab.wxs Package Version was not updated to $(V_NUMERIC)"; exit 1; }
+	@grep -q 'InstallerVersion="200"' packaging/windows/termlab.wxs \
+		|| { echo "error: InstallerVersion was clobbered — it declares the minimum Windows Installer version and must stay 200"; exit 1; }
+	@echo "Version bumped: Cargo=$(V), bundle short=$(V_NUMERIC). Review with 'git diff', then commit."
 
 .PHONY: release
 release:

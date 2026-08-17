@@ -6112,7 +6112,7 @@ dependencies = [
 
 [[package]]
 name = "termlab_core"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -6124,7 +6124,7 @@ dependencies = [
 
 [[package]]
 name = "termlab_plugin"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 dependencies = [
  "jni",
  "log",
@@ -6139,7 +6139,7 @@ dependencies = [
 
 [[package]]
 name = "termlab_plugin_sdk"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -6147,7 +6147,7 @@ dependencies = [
 
 [[package]]
 name = "termlab_remote"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6171,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "termlab_share"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6187,7 +6187,7 @@ dependencies = [
 
 [[package]]
 name = "termlab_tauri"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6230,7 +6230,7 @@ dependencies = [
 
 [[package]]
 name = "termlab_vault"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 dependencies = [
  "aes-gcm",
  "argon2",

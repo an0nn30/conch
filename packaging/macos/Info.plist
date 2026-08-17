@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.github.an0nn30.termlab</string>
     <key>CFBundleVersion</key>
-    <string>3.0.0-rc.1</string>
+    <string>3.0.0-rc.2</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.0.0-rc.1</string>
+    <string>3.0.0</string>
     <key>CFBundleExecutable</key>
     <string>termlab</string>
     <key>CFBundleIconFile</key>
