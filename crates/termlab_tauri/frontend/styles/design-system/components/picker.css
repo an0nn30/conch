@@ -129,3 +129,29 @@
   text-align: center;
 }
 .tl-picker__empty[hidden] { display: none; }
+
+/* Status pill for the import preview table's conflict column
+   (app/features/ssh/import-preview.js). Tokens only — raw hex belongs in
+   base.css alone. Base is neutral (new/unknown statuses); same_id and
+   label_collision get the accent outline since both need the user's
+   attention, and reference_broken gets the danger outline since it is the
+   one status the user cannot resolve by picking an action. */
+.tl-picker__status {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  color: var(--tl-fg-muted);
+  white-space: nowrap;
+}
+.tl-picker__status--same_id,
+.tl-picker__status--label_collision {
+  color: var(--tl-accent);
+  border-color: var(--tl-accent);
+}
+.tl-picker__status--reference_broken {
+  color: var(--tl-danger);
+  border-color: var(--tl-danger);
+}

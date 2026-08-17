@@ -857,12 +857,19 @@
     await finishImport(fileInfo.path, '');
   }
 
-  /** Call share_import_apply (via data-service's importFile) for an
-   * already-picked `path`, refresh the panel and
-   * show the summary dialog/toast on success. Returns null on success, or
-   * the error message string on failure (the bundle password dialog uses
-   * that to re-show itself with an inline error; the legacy-file direct
-   * path just toasts it). */
+  /** Call share_import_apply (via data-service's importFile, which always
+   * sends `decisions: []`) for an already-picked `path`, refresh the panel
+   * and show the summary dialog/toast on success. Returns null on success,
+   * or the error message string on failure.
+   *
+   * task-5: the bundle path no longer calls this — it has a real preview
+   * table now (see showImportPreviewDialog/applyPreviewDecisions below),
+   * which needs per-row decisions this function's data-service call can't
+   * carry. This remains the legacy-file path's only route to
+   * share_import_apply: a legacy JSON import has no conflicts to preview
+   * (share_import_plan rejects it outright — see do_import_plan in
+   * share_commands.rs), so `decisions: []` (every row keeps the executor's
+   * own default) is not a shim for it, just the correct call. */
   async function runImport(path, password) {
     try {
       if (!sshDataService || typeof sshDataService.importFile !== 'function') {
@@ -877,17 +884,87 @@
     }
   }
 
-  /** Shared tail of the import flow: call runImport and toast on failure.
-   * Used by the legacy-file path in importConfig directly, and by the
-   * bundle path once the vault step (task-4, see continueImportAfterPlan
-   * below) has resolved — vault_state "unlocked" resolves immediately;
-   * "locked"/"absent" resolve after the user unlocks/creates the vault. */
+  /** Shared tail of the legacy-file import path: call runImport and toast
+   * on failure. Only importConfig's legacy-file branch calls this now — see
+   * runImport's doc comment for why the bundle path (task-4's vault step,
+   * task-5's preview dialog) no longer does. */
   async function finishImport(path, password) {
     const err = await runImport(path, password);
     if (err) {
       console.error('Import failed:', err);
       if (window.toast) window.toast.error('Import Failed', err);
     }
+  }
+
+  /** task-5: call share_import_apply directly with real per-row
+   * `decisions` (bypassing sshDataService.importFile, which hardcodes
+   * `decisions: []` for the legacy/no-preview path above — decisions here
+   * vary per row and per import, so there is nothing generic for a
+   * data-service wrapper to add). Mirrors runImport's refresh-then-summary
+   * tail and null-or-message return contract. */
+  async function applyPreviewDecisions(path, password, decisions) {
+    try {
+      const summary = await invoke('share_import_apply', { path, password, decisions: decisions || [] });
+      await refreshAll();
+      showImportSummary(summary);
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  }
+
+  /** task-5: the preview dialog between the vault step and the apply call.
+   * Mounts window.termlabImportPreview (app/features/ssh/import-preview.js)
+   * with the rows share_import_plan produced, lets the user override each
+   * row's action (and bulk-override by status), and on confirm calls
+   * applyPreviewDecisions with those real decisions — replacing the
+   * decisions: [] shim task-4 left in continueImportAfterPlan and the vault
+   * dialogs' success paths. Cancelling aborts the import: share_import_apply
+   * is never called. */
+  function showImportPreviewDialog(path, password, preview) {
+    const rows = Array.isArray(preview && preview.rows) ? preview.rows : [];
+    let handle = null;
+    let closed = false;
+    let mounted = null;
+    const closeDialog = () => {
+      if (closed) return;
+      closed = true;
+      if (handle) handle.close();
+    };
+
+    const confirmImport = async () => {
+      if (!mounted) return;
+      const submitBtn = handle.el.querySelector('.tl-dialog__footer .tl-btn--primary');
+      if (submitBtn) submitBtn.disabled = true;
+      const decisions = mounted.decisions();
+      const err = await applyPreviewDecisions(path, password, decisions);
+      if (err) {
+        if (submitBtn) submitBtn.disabled = false;
+        console.error('Import failed:', err);
+        if (window.toast) window.toast.error('Import Failed', err);
+        return;
+      }
+      closeDialog();
+    };
+
+    handle = window.tlDialog.open({
+      title: 'Review Import',
+      ariaLabel: 'Review import',
+      size: 'lg',
+      body: (bodyEl) => {
+        if (!window.termlabImportPreview || typeof window.termlabImportPreview.mount !== 'function') {
+          bodyEl.innerHTML = '<div class="ssh-export-dim" role="alert">Import preview module unavailable.</div>';
+          return;
+        }
+        mounted = window.termlabImportPreview.mount(bodyEl, rows);
+      },
+      buttons: [
+        { label: 'Cancel', onSelect: closeDialog },
+        { label: 'Import', primary: true, onSelect: confirmImport },
+      ],
+      onClose: closeDialog,
+    });
+    trackDialogHandle(handle);
   }
 
   /** One password field + Unlock button, per task-6 brief. On failure
@@ -976,23 +1053,22 @@
   /** task-4: the vault step. Runs after share_import_plan has decoded the
    * bundle and reported `includes_credentials`/`vault_state`. A
    * credentials-free bundle, or one whose vault is already unlocked,
-   * proceeds straight through to the apply call (still `decisions: []` —
-   * the real preview table is a later task, per task-3's shim). "locked"
-   * and "absent" show a dialog to unlock/create the vault first; the apply
-   * call only happens once that succeeds. Cancelling either vault dialog
+   * proceeds straight through to the preview dialog (task-5). "locked" and
+   * "absent" show a dialog to unlock/create the vault first; the preview
+   * dialog only opens once that succeeds. Cancelling either vault dialog
    * aborts the import — share_import_apply is never called, so nothing is
    * written. */
   async function continueImportAfterPlan(path, password, preview) {
     const p = preview || {};
     if (!p.includes_credentials || p.vault_state === 'unlocked') {
-      await finishImport(path, password);
+      showImportPreviewDialog(path, password, p);
       return;
     }
     if (p.vault_state === 'locked') {
-      showImportVaultUnlockDialog(path, password);
+      showImportVaultUnlockDialog(path, password, p);
       return;
     }
-    showImportVaultCreateDialog(path, password);
+    showImportVaultCreateDialog(path, password, p);
   }
 
   /** task-4, vault_state "locked": one password field + Unlock button,
@@ -1000,8 +1076,11 @@
    * not a new command. On failure (e.g. "Incorrect master password") the
    * SAME dialog re-shows with an inline error, matching
    * showImportPasswordDialog's precedent above. Cancelling aborts the
-   * import: share_import_apply is never called. */
-  function showImportVaultUnlockDialog(path, password) {
+   * import: share_import_apply is never called. `preview` is threaded
+   * through unchanged from share_import_plan (task-5 does not re-run the
+   * planner after the vault unlocks) and handed to showImportPreviewDialog
+   * on success. */
+  function showImportVaultUnlockDialog(path, password, preview) {
     let handle = null;
     let closed = false;
     const closeDialog = () => {
@@ -1053,7 +1132,7 @@
       }
 
       closeDialog();
-      await finishImport(path, password);
+      showImportPreviewDialog(path, password, preview);
     };
 
     handle = window.tlDialog.open({
@@ -1081,8 +1160,11 @@
    * live property (see buildFooterButton in ui/tl-dialog.js; this exact
    * bug — gating on the stale build-time value — was found and fixed
    * earlier in this project). Cancelling aborts the import:
-   * share_import_apply is never called. */
-  function showImportVaultCreateDialog(path, password) {
+   * share_import_apply is never called. `preview` is threaded through
+   * unchanged from share_import_plan and handed to showImportPreviewDialog
+   * on success (see showImportVaultUnlockDialog's note on the same
+   * pattern). */
+  function showImportVaultCreateDialog(path, password, preview) {
     let handle = null;
     let closed = false;
     const closeDialog = () => {
@@ -1156,7 +1238,7 @@
       }
 
       closeDialog();
-      await finishImport(path, password);
+      showImportPreviewDialog(path, password, preview);
     };
 
     handle = window.tlDialog.open({
