@@ -390,17 +390,36 @@
         showStatus('Failed to show window: ' + String(e));
       }
 
-      // Resize to the configured columns x lines. Rust opened the window at a
-      // rough guess (it cannot know the font's cell size), so this is the step
-      // that makes the setting mean what it says. Runs after the first fit, so
-      // the terminal has real measurements, and after zen mode has settled, so
-      // the delta accounts for whatever chrome is actually on screen.
-      try {
+      // Resize to the configured columns x lines.
+      //
+      // This has to run last and verify itself. Rust opened the window at a
+      // rough guess because cell metrics live here, not there — but a single
+      // correction is not enough, because two things change the cell size or
+      // the available space *after* this point: the configured terminal font
+      // is applied by startupTermConfigPromise below (a different font means a
+      // different cell size entirely), and the restored bottom-zone height and
+      // sidebar widths take space from the terminal.
+      //
+      // So it measures, corrects, re-fits, and measures again, stopping as soon
+      // as the terminal reports the requested cell count. The first pass uses
+      // an approximate cell size and lands close; the second uses the now-real
+      // one and lands exactly. The cap keeps a font that cannot hit the target
+      // exactly (fractional cell sizes) from looping forever.
+      async function applyConfiguredWindowSize() {
         const sizer = window.termlabWindowSize;
         const appCfg = window.__termlabAppConfig || {};
-        const pane = getCurrentPane && getCurrentPane();
-        const host = document.getElementById('terminal-host');
-        if (sizer && pane && pane.term && host) {
+        const target = { cols: appCfg.window_columns, rows: appCfg.window_lines };
+        const tauriWin = window.__TAURI__ && window.__TAURI__.window
+          ? window.__TAURI__.window.getCurrentWindow()
+          : null;
+        if (!sizer || !tauriWin) return;
+
+        const MAX_PASSES = 4;
+        for (let pass = 0; pass < MAX_PASSES; pass++) {
+          const pane = getCurrentPane && getCurrentPane();
+          const host = document.getElementById('terminal-host');
+          if (!pane || !pane.term || !host) return;
+
           const delta = sizer.sizeDelta(
             {
               cols: pane.term.cols,
@@ -408,27 +427,23 @@
               width: host.clientWidth,
               height: host.clientHeight,
             },
-            { cols: appCfg.window_columns, rows: appCfg.window_lines },
+            target,
           );
-          if (delta && (delta.dw !== 0 || delta.dh !== 0)) {
-            const win = window.__TAURI__ && window.__TAURI__.window
-              ? window.__TAURI__.window.getCurrentWindow()
-              : null;
-            if (win) {
-              const size = await win.innerSize();
-              const factor = await win.scaleFactor();
-              const { LogicalSize } = window.__TAURI__.window;
-              await win.setSize(new LogicalSize(
-                Math.round(size.width / factor) + delta.dw,
-                Math.round(size.height / factor) + delta.dh,
-              ));
-              debouncedFitAndResize();
-            }
-          }
+          if (!delta) return;                       // 0 = leave it to the system
+          if (delta.dw === 0 && delta.dh === 0) return; // already exact
+
+          const size = await tauriWin.innerSize();
+          const factor = await tauriWin.scaleFactor();
+          const { LogicalSize } = window.__TAURI__.window;
+          await tauriWin.setSize(new LogicalSize(
+            Math.round(size.width / factor) + delta.dw,
+            Math.round(size.height / factor) + delta.dh,
+          ));
+
+          // Let the resize land and the terminal re-fit before measuring again.
+          debouncedFitAndResize();
+          await new Promise((resolve) => setTimeout(resolve, 60));
         }
-      } catch (_) {
-        // A denied window API or a pane that vanished must never stop startup;
-        // the window simply keeps the size Rust gave it.
       }
 
       // Tell the user why this window has no panels — otherwise a window that
@@ -447,7 +462,13 @@
       // first paints.
       requestAnimationFrame(() => {
         debouncedFitAndResize();
-        setTimeout(debouncedFitAndResize, 250);
+        setTimeout(() => {
+          debouncedFitAndResize();
+          // Only now are the font, the bottom-zone height and the sidebar
+          // widths all applied, so this is the first moment the terminal's
+          // measurements reflect what the user will actually see.
+          applyConfiguredWindowSize().catch(() => {});
+        }, 250);
       });
 
       startupTermConfigPromise.then((termConfig) => {
