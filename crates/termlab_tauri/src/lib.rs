@@ -6,6 +6,7 @@
 
 pub(crate) mod cleanup;
 mod commands;
+mod editor_fs;
 pub(crate) mod fonts;
 mod ipc;
 pub(crate) mod menu;
@@ -244,6 +245,15 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                     while let Some(progress) = transfer_rx.blocking_recv() {
                         let _ = handle.emit("transfer-progress", &progress);
                     }
+                })
+                .ok();
+
+            // Sweep orphaned light-editor temp files left by a previous crash.
+            // Uses a std::thread since we're not inside a tokio runtime here.
+            std::thread::Builder::new()
+                .name("editor-temp-sweep".into())
+                .spawn(|| {
+                    let _ = editor_fs::editor_temp_sweep();
                 })
                 .ok();
 
@@ -627,6 +637,13 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             updater::check_for_update,
             updater::install_update,
             updater::restart_app,
+            editor_fs::editor_can_open,
+            editor_fs::editor_read_file,
+            editor_fs::editor_write_file,
+            editor_fs::editor_scratch_dir,
+            editor_fs::editor_temp_path,
+            editor_fs::editor_temp_cleanup,
+            editor_fs::editor_temp_sweep,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
