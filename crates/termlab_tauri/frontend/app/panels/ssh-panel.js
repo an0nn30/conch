@@ -429,31 +429,39 @@
       return;
     }
 
+    // "user@host:port", or just "host:port" when the entry has no user — an
+    // ~/.ssh/config alias without a User directive used to render as "@host:22".
+    const hostLabel = (s) => (s.user ? s.user + '@' : '') + s.host + ':' + s.port;
+
     // Build checkbox list HTML.
     let serversHtml = '';
     for (const folder of data.folders) {
-      serversHtml += `<div class="ssh-export-group">${esc(folder.name)}</div>`;
+      serversHtml += `<div class="ssh-export-group">${esc(folder.name)}</div><div class="tl-check-list">`;
       for (const s of folder.entries) {
-        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(hostLabel(s))})</span></label>`;
       }
+      serversHtml += '</div>';
     }
     if (data.ungrouped.length) {
-      serversHtml += `<div class="ssh-export-group">Ungrouped</div>`;
+      serversHtml += `<div class="ssh-export-group">Ungrouped</div><div class="tl-check-list">`;
       for (const s of data.ungrouped) {
-        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(hostLabel(s))})</span></label>`;
       }
+      serversHtml += '</div>';
     }
     if (data.ssh_config && data.ssh_config.length) {
-      serversHtml += `<div class="ssh-export-group">~/.ssh/config</div>`;
+      serversHtml += `<div class="ssh-export-group">~/.ssh/config</div><div class="tl-check-list">`;
       for (const s of data.ssh_config) {
-        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" />${esc(s.label)} <span class="ssh-export-dim">(${esc(hostLabel(s))})</span></label>`;
       }
+      serversHtml += '</div>';
     }
 
-    let tunnelsHtml = '';
+    let tunnelsHtml = '<div class="tl-check-list">';
     for (const t of tunnels) {
       tunnelsHtml += `<label class="tl-check"><input type="checkbox" value="${esc(t.id)}" data-type="tunnel" checked />${esc(t.label)} <span class="ssh-export-dim">(L${t.local_port} → ${esc(t.remote_host)}:${t.remote_port})</span></label>`;
     }
+    tunnelsHtml += '</div>';
 
     const hasServers = data.folders.some(f => f.entries.length) || data.ungrouped.length || (data.ssh_config && data.ssh_config.length);
     const hasTunnels = tunnels.length > 0;
@@ -496,9 +504,9 @@
             <label class="tl-check"><input type="checkbox" id="exp-select-all" checked /> Select All</label>
           </div>
           ${hasServers ? '<div class="ssh-export-section">Servers</div>' + serversHtml : ''}
-          ${hasTunnels ? '<div class="ssh-export-section"' + (hasServers ? ' style="margin-top:12px;"' : '') + '>Tunnels</div>' + tunnelsHtml : ''}
-          <div class="ssh-export-section" style="margin-top:12px;">Credentials</div>
-          <label class="tl-check"><input type="checkbox" id="exp-include-credentials" />Include saved credentials (the recipient will receive passwords and private keys)</label>
+          ${hasTunnels ? '<div class="ssh-export-section">Tunnels</div>' + tunnelsHtml : ''}
+          <div class="ssh-export-section">Credentials</div>
+          <div class="tl-check-list"><label class="tl-check"><input type="checkbox" id="exp-include-credentials" />Include saved credentials (the recipient will receive passwords and private keys)</label></div>
           <div class="tl-field" style="margin-top:8px;">
             <label class="tl-field__label" for="exp-password">Bundle password</label>
             <input type="password" class="tl-input" id="exp-password" autocomplete="new-password" />
@@ -711,9 +719,9 @@
         body: (bodyEl) => {
           bodyEl.innerHTML = `
             <div>This bundle will contain ${esc(p.servers || 0)} server(s), ${esc(p.tunnels || 0)} tunnel(s), and ${esc(p.credentials || 0)} credential(s).</div>
-            ${keys.length ? '<div class="ssh-export-section" style="margin-top:12px;">Private keys to be embedded</div><ul>' + keys.map((k) => `<li>${esc(k)}</li>`).join('') + '</ul>' : ''}
-            ${autoPulled.length ? '<div class="ssh-export-section" style="margin-top:12px;">Also included</div><ul>' + autoPulled.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
-            ${warnings.length ? '<div class="ssh-export-section" style="margin-top:12px;">Warnings</div><ul>' + warnings.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+            ${keys.length ? '<div class="ssh-export-section">Private keys to be embedded</div><ul>' + keys.map((k) => `<li>${esc(k)}</li>`).join('') + '</ul>' : ''}
+            ${autoPulled.length ? '<div class="ssh-export-section">Also included</div><ul>' + autoPulled.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+            ${warnings.length ? '<div class="ssh-export-section">Warnings</div><ul>' + warnings.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
           `;
         },
         buttons: [
@@ -757,8 +765,8 @@
       body: (bodyEl) => {
         bodyEl.innerHTML = `
           <div>${esc(s.servers || 0)} server(s), ${esc(s.tunnels || 0)} tunnel(s), ${esc(s.credentials || 0)} credential(s) saved to ${esc(s.path || '')}.</div>
-          ${autoPulled.length ? '<div class="ssh-export-section" style="margin-top:12px;">Also included</div><ul>' + autoPulled.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
-          ${warnings.length ? '<div class="ssh-export-section" style="margin-top:12px;">Warnings</div><ul>' + warnings.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+          ${autoPulled.length ? '<div class="ssh-export-section">Also included</div><ul>' + autoPulled.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+          ${warnings.length ? '<div class="ssh-export-section">Warnings</div><ul>' + warnings.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
         `;
       },
       buttons: [{ label: 'OK', primary: true, onSelect: close }],
@@ -929,8 +937,8 @@
       body: (bodyEl) => {
         bodyEl.innerHTML = `
           <div>${esc(headline)}</div>
-          ${heldBack ? '<div class="ssh-export-section" style="margin-top:12px;">Credentials were not imported because this machine has no unlocked vault. Create or unlock your vault and import again.</div>' : ''}
-          ${skipped.length ? '<div class="ssh-export-section" style="margin-top:12px;">Skipped</div><ul>' + skipped.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+          ${heldBack ? '<div class="ssh-export-note">Credentials were not imported because this machine has no unlocked vault. Create or unlock your vault and import again.</div>' : ''}
+          ${skipped.length ? '<div class="ssh-export-section">Skipped</div><ul>' + skipped.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
         `;
       },
       buttons: [{ label: 'OK', primary: true, onSelect: close }],

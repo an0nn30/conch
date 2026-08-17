@@ -59,6 +59,13 @@
     }
     /* -- Export dialog -- */
     .ssh-export-section { font-size: var(--ui-font-small); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg); margin-bottom: 4px; }
+    /* Any section label after the first separates itself from the block above,
+       replacing the inline style="margin-top:12px" that was repeated at nine
+       call sites. */
+    .ssh-export-section:not(:first-child) { margin-top: 12px; }
+    /* A prose message inside a dialog body. Distinct from .ssh-export-section,
+       which is uppercase heading chrome and was being misused for this. */
+    .ssh-export-note { font-size: var(--ui-font-small); color: var(--dim-fg); margin-top: 12px; line-height: 1.4; }
     .ssh-export-group { font-size: var(--ui-font-small); font-weight: 600; color: var(--dim-fg); margin: 8px 0 2px 0; }
     .ssh-export-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; font-size: var(--ui-font-normal); color: var(--fg); line-height: 14px; }
     .ssh-export-item input[type="checkbox"] {

@@ -79,3 +79,14 @@
   cursor: default;
   pointer-events: none;
 }
+
+/* Lists inside a dialog body (export preview, import summary). The browser
+   default is a 40px indent with disc markers, which reads as a stray block in
+   a compact dialog. */
+.tl-dialog__body ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--tl-fg-muted);
+  line-height: 1.5;
+}
+.tl-dialog__body ul li { margin: 1px 0; }

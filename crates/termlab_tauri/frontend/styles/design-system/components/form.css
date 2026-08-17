@@ -21,6 +21,23 @@
   border-radius: var(--tl-radius);
 }
 .tl-radio input { border-radius: 50%; }
+
+/* A vertical list of checkboxes (export/import pickers, multi-select bodies).
+   .tl-check is inline-flex so it can sit inside a settings row; a bare run of
+   them therefore flows inline and collides. This container puts each on its own
+   line and top-aligns the box so a label that wraps to two lines still reads. */
+.tl-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tl-check-list > .tl-check {
+  display: flex;
+  align-items: flex-start;
+}
+.tl-check-list > .tl-check input {
+  margin-top: 2px;
+}
 .tl-check input:checked, .tl-radio input:checked { border-color: var(--tl-accent); }
 .tl-check input:checked::after {
   content: ''; display: block;
