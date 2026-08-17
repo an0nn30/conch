@@ -54,16 +54,20 @@
 
   /** Import an already-picked `path` — routed server-side to the bundle
    * (decode/plan/execute) or legacy JSON (merge_import) path by its own
-   * magic-byte check. `password` is ignored server-side for a legacy
-   * file.
+   * magic-byte check. `password` is ignored server-side for a legacy file.
    *
-   * Calls `share_import_apply` with no decisions, so every row keeps the
-   * planner's default action — the same net behaviour the old combined
-   * import command had. A future task wires this to `share_import_plan`'s
-   * preview and lets the caller pass real `ImportDecision`s here instead
-   * of an empty array. */
-  async function importFile(invoke, path, password) {
-    return invoke('share_import_apply', { path, password, decisions: [] });
+   * `decisions` is the `ImportDecision[]` array to send to
+   * `share_import_apply` — task-5's preview dialog (ssh-panel.js's
+   * showImportPreviewDialog/runImport) passes the real per-row overrides
+   * the user made there. Omitted (or passed as a non-array), it defaults to
+   * `[]`, meaning every row keeps the planner's default action — this is
+   * the only option for the legacy-JSON path (ssh-panel.js's importConfig
+   * calls this with no fourth argument for it): a legacy file has no
+   * conflicts to preview in the first place, since `share_import_plan`
+   * rejects it outright (see do_import_plan in share_commands.rs), so
+   * there is no decisions array to pass. */
+  async function importFile(invoke, path, password, decisions) {
+    return invoke('share_import_apply', { path, password, decisions: Array.isArray(decisions) ? decisions : [] });
   }
 
   /** Plan step of the import flow (task-4): decodes the bundle at `path`

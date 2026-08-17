@@ -155,3 +155,12 @@
   color: var(--tl-danger);
   border-color: var(--tl-danger);
 }
+
+/* Fix round 1, finding 2: a blank rename label reaches the backend as a
+   whole-batch failure ("Rename requires a label") that names no row — this
+   is the inline "which row" marker import-preview.js's updateRenameValidity
+   toggles via aria-invalid, alongside disabling the dialog's Import button.
+   Tokens only, same as the status pill above. */
+.tl-picker__row input[data-role="rename"][aria-invalid="true"] {
+  border-color: var(--tl-danger);
+}

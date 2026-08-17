@@ -85,6 +85,66 @@
     return candidate;
   }
 
+  /** Fix round 1, finding 1: suggestRename's `existingLabels` must reflect
+   * what the OTHER rows in this same batch are about to become, not just
+   * their original labels — otherwise two rows that both originally
+   * collided with the same local label (e.g. two hosts both named "prod")
+   * independently suggest the identical "prod (2)" and the import recreates
+   * the exact collision it exists to resolve. `entries` is the full row
+   * set's CURRENT decisions — `{ kind, label, action, renameLabel }` — and
+   * `index` is which entry a suggestion is being generated for; every other
+   * same-kind, non-skipped entry's currently-resolved label (its live
+   * renameLabel if it is itself mid-rename, else its original label) is
+   * treated as taken, alongside the target's own original label (safe to
+   * assume taken unconditionally: Rename is only offered on label_collision
+   * rows — see ACTIONS_BY_STATUS — whose own label is already confirmed to
+   * collide locally). A 'skip' row creates nothing under this import, so it
+   * contributes nothing to the taken set. Pure; exported for tests. */
+  function suggestRenameFor(entries, index) {
+    const list = Array.isArray(entries) ? entries : [];
+    const target = list[index] || {};
+    const taken = new Set([String(target.label == null ? '' : target.label)]);
+    list.forEach((entry, i) => {
+      if (i === index || !entry) return;
+      if (entry.kind !== target.kind) return;
+      if (entry.action === 'skip') return;
+      const label = entry.action === 'rename' ? entry.renameLabel : entry.label;
+      if (label) taken.add(String(label));
+    });
+    return suggestRename(target.label, Array.from(taken));
+  }
+
+  /** Fix round 1, finding 1: the submit-time guard. Given the plan's `rows`
+   * and the `decisions` chosen for them, finds every (kind, label) pair more
+   * than one non-skip decision would resolve to — e.g. two Renames landing
+   * on the same text despite suggestRenameFor's live avoidance (a user can
+   * always overwrite the suggested text by hand), or a Rename landing on a
+   * label an Add/Replace row is about to (re)create. Returns one array per
+   * colliding label, each holding every offending `{ kind, id, label }` —
+   * empty when the batch is self-consistent. A decision with an empty
+   * rename label is skipped here; that is caught separately (import-preview
+   * disables the Import button while any Rename row is blank; see
+   * mount()'s isValid()). Pure; exported for tests. */
+  function findLabelCollisions(rows, decisions) {
+    const rowByKey = new Map((Array.isArray(rows) ? rows : []).map((r) => [`${r.kind}::${r.id}`, r]));
+    const byLabel = new Map();
+    (Array.isArray(decisions) ? decisions : []).forEach((d) => {
+      if (!d || d.action === 'skip') return;
+      const row = rowByKey.get(`${d.kind}::${d.id}`);
+      if (!row) return;
+      const label = d.action === 'rename' ? String(d.label == null ? '' : d.label).trim() : row.label;
+      if (!label) return;
+      const key = `${d.kind}::${label}`;
+      if (!byLabel.has(key)) byLabel.set(key, []);
+      byLabel.get(key).push({ kind: d.kind, id: d.id, label });
+    });
+    const collisions = [];
+    byLabel.forEach((entries) => {
+      if (entries.length > 1) collisions.push(entries);
+    });
+    return collisions;
+  }
+
   function normalizeRow(row) {
     const r = row || {};
     return {
@@ -146,9 +206,14 @@
    * rows: ImportPreviewRow[] from share_import_plan — { kind, id, label,
    * detail, status, default_action }.
    *
-   * Returns { decisions() } — decisions() reads the live DOM and returns the
-   * ImportDecision[] array share_import_apply expects: one entry per row,
-   * `{ kind, id, action, label? }` with `label` present only for `rename`.
+   * Returns { decisions(), isValid() }. decisions() reads the live DOM and
+   * returns the ImportDecision[] array share_import_apply expects: one entry
+   * per row, `{ kind, id, action, label? }` with `label` present only for
+   * `rename`. isValid() is false while any row currently set to Rename has
+   * a blank label (fix round 1, finding 2) — the caller (ssh-panel.js's
+   * showImportPreviewDialog) gates its Import button on this. It does NOT
+   * check for cross-row label collisions; call findLabelCollisions(rows,
+   * decisions()) at submit time for that (fix round 1, finding 1).
    */
   function mount(container, rows) {
     const list = (Array.isArray(rows) ? rows : []).map(normalizeRow);
@@ -198,8 +263,35 @@
 
     container.querySelectorAll('[data-role="bulk-group"] select[data-role="bulk-action"]').forEach(attachCombo);
 
-    function existingLabelsFor(row) {
-      return list.filter((r) => r.kind === row.kind).map((r) => r.label);
+    // Current per-row decisions, rebuilt fresh on demand (never cached) so a
+    // suggestion generated for one row always sees any rename another row
+    // has already been assigned earlier in the same pass — see
+    // suggestRenameFor's doc comment. `list` (the original plan rows) is
+    // NOT a substitute for this: it is a static snapshot taken once at
+    // mount and was exactly the bug fix round 1 finding 1 reported.
+    function buildEntries() {
+      return bindings.map((b) => ({
+        kind: b.row.kind,
+        label: b.row.label,
+        action: b.selectEl ? b.selectEl.value : 'skip',
+        renameLabel: b.renameEl ? b.renameEl.value : '',
+      }));
+    }
+
+    // Fix round 1, finding 2: a blanked rename input must be findable and
+    // must block submit (see isValid() below) rather than reaching the
+    // backend, which rejects the whole batch with one generic "Rename
+    // requires a label" error naming no row. aria-invalid both drives
+    // picker.css's inline highlight and is a real accessibility signal.
+    function updateRenameValidity(binding) {
+      if (!binding || !binding.renameEl || !binding.selectEl) return;
+      if (binding.selectEl.value !== 'rename') {
+        binding.renameEl.removeAttribute('aria-invalid');
+        return;
+      }
+      const empty = !String(binding.renameEl.value || '').trim();
+      if (empty) binding.renameEl.setAttribute('aria-invalid', 'true');
+      else binding.renameEl.removeAttribute('aria-invalid');
     }
 
     function updateRenameVisibility(binding) {
@@ -208,11 +300,13 @@
       if (isRename) {
         if (binding.renameEl.hidden) {
           binding.renameEl.hidden = false;
-          binding.renameEl.value = suggestRename(binding.row.label, existingLabelsFor(binding.row));
+          const idx = bindings.indexOf(binding);
+          binding.renameEl.value = suggestRenameFor(buildEntries(), idx);
         }
       } else {
         binding.renameEl.hidden = true;
       }
+      updateRenameValidity(binding);
     }
 
     function currentDecisions() {
@@ -226,6 +320,17 @@
 
     function refreshFooter() {
       if (footerEl) footerEl.textContent = summarise(currentDecisions());
+    }
+
+    // Fix round 1, finding 2: every row currently set to Rename must carry a
+    // non-empty label before the caller is allowed to submit — see
+    // showImportPreviewDialog in ssh-panel.js, which gates the dialog's
+    // Import button on this.
+    function isValid() {
+      return bindings.every((b) => {
+        if (!b.selectEl || b.selectEl.value !== 'rename') return true;
+        return !!(b.renameEl && String(b.renameEl.value || '').trim());
+      });
     }
 
     function applyFilter() {
@@ -270,14 +375,25 @@
       }
     });
 
+    // Live validity feedback as the user types a rename — 'change' (fired on
+    // blur/Enter) is too late for "mark the offending row inline so it is
+    // findable" while the user is still typing across several rows.
+    container.addEventListener('input', (e) => {
+      const target = e.target;
+      if (!target || typeof target.matches !== 'function') return;
+      if (!target.matches('[data-role="rename"]')) return;
+      const binding = bindings.find((b) => b.renameEl === target);
+      if (binding) updateRenameValidity(binding);
+    });
+
     if (filterEl) filterEl.addEventListener('input', applyFilter);
 
     bindings.forEach(updateRenameVisibility);
     applyFilter();
     refreshFooter();
 
-    return { decisions: currentDecisions };
+    return { decisions: currentDecisions, isValid };
   }
 
-  exports.termlabImportPreview = { mount, summarise, suggestRename };
+  exports.termlabImportPreview = { mount, summarise, suggestRename, suggestRenameFor, findLabelCollisions };
 })(window);

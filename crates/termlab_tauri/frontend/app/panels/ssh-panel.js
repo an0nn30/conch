@@ -857,25 +857,28 @@
     await finishImport(fileInfo.path, '');
   }
 
-  /** Call share_import_apply (via data-service's importFile, which always
-   * sends `decisions: []`) for an already-picked `path`, refresh the panel
-   * and show the summary dialog/toast on success. Returns null on success,
-   * or the error message string on failure.
+  /** Call share_import_apply (via data-service's importFile) for an
+   * already-picked `path`, refresh the panel and show the summary
+   * dialog/toast on success. Returns null on success, or the error message
+   * string on failure.
    *
-   * task-5: the bundle path no longer calls this — it has a real preview
-   * table now (see showImportPreviewDialog/applyPreviewDecisions below),
-   * which needs per-row decisions this function's data-service call can't
-   * carry. This remains the legacy-file path's only route to
-   * share_import_apply: a legacy JSON import has no conflicts to preview
-   * (share_import_plan rejects it outright — see do_import_plan in
-   * share_commands.rs), so `decisions: []` (every row keeps the executor's
-   * own default) is not a shim for it, just the correct call. */
-  async function runImport(path, password) {
+   * `decisions` is optional and forwarded to importFile as-is — omitted
+   * (the legacy-file path in importConfig, and finishImport below) it
+   * defaults to `[]` inside data-service.js, matching the old combined
+   * import command's behaviour: every row keeps the planner's default
+   * action. task-5's preview dialog (showImportPreviewDialog below) passes
+   * the real per-row overrides the user made there. Fix round 1 (review
+   * finding 3): this used to call `invoke('share_import_apply', …)`
+   * directly for the preview path, bypassing sshDataService the way every
+   * other share_* call in this flow (share_import_plan via planImport)
+   * does not — routed through importFile instead, per data-service.js's
+   * own comment anticipating exactly this extension. */
+  async function runImport(path, password, decisions) {
     try {
       if (!sshDataService || typeof sshDataService.importFile !== 'function') {
         throw new Error('SSH data service unavailable: importFile');
       }
-      const summary = await sshDataService.importFile(invoke, path, password);
+      const summary = await sshDataService.importFile(invoke, path, password, decisions);
       await refreshAll();
       showImportSummary(summary);
       return null;
@@ -884,10 +887,11 @@
     }
   }
 
-  /** Shared tail of the legacy-file import path: call runImport and toast
-   * on failure. Only importConfig's legacy-file branch calls this now — see
-   * runImport's doc comment for why the bundle path (task-4's vault step,
-   * task-5's preview dialog) no longer does. */
+  /** Shared tail of the legacy-file import path: call runImport (no
+   * decisions — see its doc comment) and toast on failure. Only
+   * importConfig's legacy-file branch calls this now — the bundle path
+   * (task-4's vault step, task-5's preview dialog) calls runImport directly
+   * with real decisions instead. */
   async function finishImport(path, password) {
     const err = await runImport(path, password);
     if (err) {
@@ -896,31 +900,27 @@
     }
   }
 
-  /** task-5: call share_import_apply directly with real per-row
-   * `decisions` (bypassing sshDataService.importFile, which hardcodes
-   * `decisions: []` for the legacy/no-preview path above — decisions here
-   * vary per row and per import, so there is nothing generic for a
-   * data-service wrapper to add). Mirrors runImport's refresh-then-summary
-   * tail and null-or-message return contract. */
-  async function applyPreviewDecisions(path, password, decisions) {
-    try {
-      const summary = await invoke('share_import_apply', { path, password, decisions: decisions || [] });
-      await refreshAll();
-      showImportSummary(summary);
-      return null;
-    } catch (e) {
-      return String(e);
-    }
-  }
-
   /** task-5: the preview dialog between the vault step and the apply call.
    * Mounts window.termlabImportPreview (app/features/ssh/import-preview.js)
    * with the rows share_import_plan produced, lets the user override each
    * row's action (and bulk-override by status), and on confirm calls
-   * applyPreviewDecisions with those real decisions — replacing the
-   * decisions: [] shim task-4 left in continueImportAfterPlan and the vault
-   * dialogs' success paths. Cancelling aborts the import: share_import_apply
-   * is never called. */
+   * runImport with those real decisions — replacing the decisions: [] shim
+   * task-4 left in continueImportAfterPlan and the vault dialogs' success
+   * paths. Cancelling aborts the import: share_import_apply is never
+   * called.
+   *
+   * Fix round 1 (review findings 1-2): mounted.isValid() — false while any
+   * Rename row is blank — gates the Import button live, on every 'input'
+   * and 'change' inside the body (typing a label, changing an action,
+   * running a bulk pick can all flip it); import-preview.js also marks the
+   * offending input via aria-invalid so a blank row is findable among
+   * hundreds. Confirm additionally checks findLabelCollisions against the
+   * assembled decisions — isValid() only catches blank labels, not two
+   * different rows resolving to the SAME label (e.g. two Renames a user
+   * typed identically by hand, past what suggestRenameFor's live avoidance
+   * already steers them away from) — and refuses with the offending labels
+   * named rather than letting share_import_apply reject the whole batch
+   * with one row-less error. */
   function showImportPreviewDialog(path, password, preview) {
     const rows = Array.isArray(preview && preview.rows) ? preview.rows : [];
     let handle = null;
@@ -932,12 +932,32 @@
       if (handle) handle.close();
     };
 
+    const syncImportEnabled = () => {
+      if (!handle || !mounted) return;
+      const submitBtn = handle.el.querySelector('.tl-dialog__footer .tl-btn--primary');
+      if (submitBtn) submitBtn.disabled = !mounted.isValid();
+    };
+
     const confirmImport = async () => {
       if (!mounted) return;
+      const decisions = mounted.decisions();
+
+      const findCollisions = window.termlabImportPreview && window.termlabImportPreview.findLabelCollisions;
+      const collisions = typeof findCollisions === 'function' ? findCollisions(rows, decisions) : [];
+      if (collisions.length) {
+        const names = collisions.map((group) => `"${group[0].label}"`).join(', ');
+        if (window.toast) {
+          window.toast.error(
+            'Import Failed',
+            `These items would end up with the same name after import: ${names}. Change one of each pair before importing.`,
+          );
+        }
+        return;
+      }
+
       const submitBtn = handle.el.querySelector('.tl-dialog__footer .tl-btn--primary');
       if (submitBtn) submitBtn.disabled = true;
-      const decisions = mounted.decisions();
-      const err = await applyPreviewDecisions(path, password, decisions);
+      const err = await runImport(path, password, decisions);
       if (err) {
         if (submitBtn) submitBtn.disabled = false;
         console.error('Import failed:', err);
@@ -957,6 +977,19 @@
           return;
         }
         mounted = window.termlabImportPreview.mount(bodyEl, rows);
+        // 'input' catches every keystroke in a rename field (needed for the
+        // button to re-enable/disable live as the user types, not just on
+        // blur); 'change' catches action-select and bulk-action picks. Both
+        // are registered here rather than assumed covered by mount()'s own
+        // internal listeners because THIS handler needs `handle`, which
+        // does not exist yet inside this synchronous body callback (tl-
+        // dialog.js calls opts.body(bodyEl) before assigning its own return
+        // value to the `handle` variable above) — safe because these
+        // listeners only ever fire later, once open() has returned and
+        // `handle` is set, same as showImportVaultCreateDialog's
+        // updateSubmitEnabled precedent.
+        bodyEl.addEventListener('input', syncImportEnabled);
+        bodyEl.addEventListener('change', syncImportEnabled);
       },
       buttons: [
         { label: 'Cancel', onSelect: closeDialog },
@@ -965,6 +998,12 @@
       onClose: closeDialog,
     });
     trackDialogHandle(handle);
+    // Initial sync: default_action is never 'rename' (see action_str's doc
+    // comment in share_commands.rs), so isValid() is true at mount in
+    // practice — but running this once now, rather than trusting that
+    // invariant, means the button's start state is never wrong even if that
+    // ever changes.
+    syncImportEnabled();
   }
 
   /** One password field + Unlock button, per task-6 brief. On failure
