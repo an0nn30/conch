@@ -1,0 +1,131 @@
+/* Picker — a filterable, bounded multi-select list for dialog bodies.
+   Used by the export dialog; sized to stay usable with a few hundred rows. */
+
+.tl-picker__filter {
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.tl-picker__section + .tl-picker__section {
+  margin-top: 12px;
+}
+
+.tl-picker__section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  margin-bottom: 4px;
+}
+
+.tl-picker__section-title {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--tl-fg-muted);
+}
+
+/* Pushes the actions to the trailing edge and keeps the count next to them. */
+.tl-picker__summary {
+  margin-left: auto;
+  color: var(--tl-fg-muted);
+}
+
+.tl-picker__action {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  cursor: pointer;
+  color: var(--tl-accent);
+  font: inherit;
+}
+.tl-picker__action:hover { text-decoration: underline; }
+.tl-picker__action:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+
+/* The bounded box. max-height rather than height so a short list stays short
+   instead of leaving dead space below it. */
+.tl-picker__box {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  background: var(--tl-control-bg);
+  padding: 2px 0;
+}
+
+/* Tunnels are few next to servers; a shorter box keeps the password fields
+   above the fold. */
+.tl-picker__section[data-section="tunnels"] .tl-picker__box {
+  max-height: 120px;
+}
+
+.tl-picker__group[hidden] { display: none; }
+
+/* Sticky so you always know which group you are scrolled into. */
+.tl-picker__group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  width: 100%;
+  padding: 3px 8px;
+  background: var(--tl-control-bg);
+  border: none;
+  border-bottom: 1px solid var(--tl-border);
+  color: var(--tl-fg-muted);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.tl-picker__group-header:hover { color: var(--tl-fg); }
+
+.tl-picker__chevron {
+  width: 0; height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transform: rotate(90deg);
+  transition: transform 80ms linear;
+  flex-shrink: 0;
+}
+.tl-picker__group.is-collapsed .tl-picker__chevron { transform: rotate(0deg); }
+.tl-picker__group.is-collapsed .tl-picker__group-body { display: none; }
+
+.tl-picker__group-count {
+  margin-left: auto;
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.tl-picker__row {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  padding: 2px 8px;
+  min-width: 0;
+}
+.tl-picker__row[hidden] { display: none; }
+.tl-picker__row:hover { background: var(--tl-row-hover); }
+
+.tl-picker__row-label {
+  flex-shrink: 0;
+}
+
+/* The detail (user@host:port) yields first when the row is too narrow, so the
+   name a user scans for is never the part that gets clipped. */
+.tl-picker__row-detail {
+  color: var(--tl-fg-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-picker__empty {
+  padding: 10px 8px;
+  color: var(--tl-fg-muted);
+  text-align: center;
+}
+.tl-picker__empty[hidden] { display: none; }

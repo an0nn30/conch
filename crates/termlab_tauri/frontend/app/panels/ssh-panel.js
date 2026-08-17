@@ -452,37 +452,43 @@
     // ~/.ssh/config alias without a User directive used to render as "@host:22".
     const hostLabel = (s) => (s.user ? s.user + '@' : '') + s.host + ':' + s.port;
 
-    // Build checkbox list HTML.
-    let serversHtml = '';
+    // Picker input. Folder and ungrouped hosts default to checked (they are the
+    // user's own entries); ~/.ssh/config aliases default to unchecked, matching
+    // the previous dialog's defaults.
+    const serverGroups = [];
     for (const folder of data.folders) {
-      serversHtml += `<div class="ssh-export-group">${esc(folder.name)}</div><div class="tl-check-list">`;
-      for (const s of folder.entries) {
-        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(hostLabel(s))})</span></label>`;
-      }
-      serversHtml += '</div>';
+      if (!folder.entries.length) continue;
+      serverGroups.push({
+        label: folder.name,
+        entries: folder.entries.map((s) => ({ id: s.id, label: s.label, detail: hostLabel(s), checked: true })),
+      });
     }
     if (data.ungrouped.length) {
-      serversHtml += `<div class="ssh-export-group">Ungrouped</div><div class="tl-check-list">`;
-      for (const s of data.ungrouped) {
-        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(hostLabel(s))})</span></label>`;
-      }
-      serversHtml += '</div>';
+      serverGroups.push({
+        label: 'Ungrouped',
+        entries: data.ungrouped.map((s) => ({ id: s.id, label: s.label, detail: hostLabel(s), checked: true })),
+      });
     }
     if (data.ssh_config && data.ssh_config.length) {
-      serversHtml += `<div class="ssh-export-group">~/.ssh/config</div><div class="tl-check-list">`;
-      for (const s of data.ssh_config) {
-        serversHtml += `<label class="tl-check"><input type="checkbox" value="${esc(s.id)}" data-type="server" />${esc(s.label)} <span class="ssh-export-dim">(${esc(hostLabel(s))})</span></label>`;
-      }
-      serversHtml += '</div>';
+      serverGroups.push({
+        label: '~/.ssh/config',
+        entries: data.ssh_config.map((s) => ({ id: s.id, label: s.label, detail: hostLabel(s), checked: false })),
+      });
     }
 
-    let tunnelsHtml = '<div class="tl-check-list">';
-    for (const t of tunnels) {
-      tunnelsHtml += `<label class="tl-check"><input type="checkbox" value="${esc(t.id)}" data-type="tunnel" checked />${esc(t.label)} <span class="ssh-export-dim">(L${t.local_port} → ${esc(t.remote_host)}:${t.remote_port})</span></label>`;
-    }
-    tunnelsHtml += '</div>';
+    const tunnelGroups = tunnels.length
+      ? [{
+          label: 'Tunnels',
+          entries: tunnels.map((t) => ({
+            id: t.id,
+            label: t.label,
+            detail: `L${t.local_port} \u2192 ${t.remote_host}:${t.remote_port}`,
+            checked: true,
+          })),
+        }]
+      : [];
 
-    const hasServers = data.folders.some(f => f.entries.length) || data.ungrouped.length || (data.ssh_config && data.ssh_config.length);
+    const hasServers = serverGroups.length > 0;
     const hasTunnels = tunnels.length > 0;
 
     // Build a lookup of all servers by their session key (user@host:port).
@@ -506,6 +512,7 @@
     }
 
     let handle = null;
+    let exportPicker = null;
     let closed = false;
     const closeExportDialog = () => {
       if (closed) return;
@@ -519,11 +526,7 @@
       size: 'md',
       body: (bodyEl) => {
         bodyEl.innerHTML = `
-          <div style="margin-bottom:8px;">
-            <label class="tl-check"><input type="checkbox" id="exp-select-all" checked /> Select All</label>
-          </div>
-          ${hasServers ? '<div class="ssh-export-section">Servers</div>' + serversHtml : ''}
-          ${hasTunnels ? '<div class="ssh-export-section">Tunnels</div>' + tunnelsHtml : ''}
+          <div data-role="picker"></div>
           <div class="ssh-export-section">Credentials</div>
           <div class="tl-check-list"><label class="tl-check"><input type="checkbox" id="exp-include-credentials" />Include saved credentials (the recipient will receive passwords and private keys)</label></div>
           <div class="tl-field" style="margin-top:8px;">
@@ -537,11 +540,16 @@
           <div class="ssh-export-dim">Anyone with this password can read everything in the bundle.</div>
         `;
 
-        const selectAll = bodyEl.querySelector('#exp-select-all');
-        const allBoxes = () => bodyEl.querySelectorAll('input[data-type]');
-        selectAll.addEventListener('change', () => {
-          allBoxes().forEach(cb => cb.checked = selectAll.checked);
-        });
+        const picker = window.termlabExportPicker;
+        const host = bodyEl.querySelector('[data-role="picker"]');
+        if (picker && typeof picker.mount === 'function' && host) {
+          exportPicker = picker.mount(host, [
+            hasServers ? { id: 'servers', label: 'Servers', type: 'server', groups: serverGroups } : null,
+            hasTunnels ? { id: 'tunnels', label: 'Tunnels', type: 'tunnel', groups: tunnelGroups } : null,
+          ].filter(Boolean));
+        } else {
+          console.error('export picker unavailable');
+        }
       },
       onOpen: (panel) => {
         // Drive the Export button's enabled state through its live `disabled`
@@ -570,6 +578,7 @@
         bodyEl.addEventListener('input', refreshExportGate);
         bodyEl.addEventListener('change', refreshExportGate);
         refreshExportGate();
+        if (exportPicker && typeof exportPicker.focusFilter === 'function') exportPicker.focusFilter();
       },
       buttons: [
         { label: 'Cancel', onSelect: closeExportDialog },
