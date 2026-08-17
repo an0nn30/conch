@@ -448,7 +448,10 @@
         const tlDialogOpen = !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
         if (tlDialogOpen) return;
         const pane = getCurrentPane();
-        if (pane && pane.term) pane.term.focus();
+        // An editor pane has no `term`. Without this arm the palette hands
+        // focus back to nothing and the editor silently stops taking keys.
+        if (pane && pane.kind === 'editor' && pane.view) pane.view.focus();
+        else if (pane && pane.term) pane.term.focus();
       }
     }
 
@@ -488,7 +491,10 @@
         const tlDialogOpen = !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
         if (tlDialogOpen) return;
         const pane = getCurrentPane();
-        if (pane && pane.term) pane.term.focus();
+        // An editor pane has no `term`. Without this arm the palette hands
+        // focus back to nothing and the editor silently stops taking keys.
+        if (pane && pane.kind === 'editor' && pane.view) pane.view.focus();
+        else if (pane && pane.term) pane.term.focus();
       }, 80);
     }
 

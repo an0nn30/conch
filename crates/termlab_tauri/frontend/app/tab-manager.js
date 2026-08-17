@@ -93,9 +93,24 @@
       });
     }
 
+    // A composed title describes a terminal — a user@host prefix, a cwd or
+    // foreground program, a PTY size. A tab whose focused pane is not a
+    // terminal (an editor tab, whose label is its filename; a docked plugin
+    // view) has none of that, and composing one destroys the label it does
+    // have.
+    function tabFocusesTerminalPane(tab) {
+      if (!tab || tab.focusedPaneId == null) return false;
+      const pane = getPanes().get(tab.focusedPaneId);
+      return !!(pane && pane.kind === 'terminal');
+    }
+
     // A plugin-supplied name is the user's own label and always wins.
     function refreshTabTitle(tab) {
       if (!tab || tab.pluginRenamed) return;
+      // Guarded here as well as at the poll below: this is the function that
+      // actually overwrites tab.label, the button and the window title, and it
+      // has several callers.
+      if (!tabFocusesTerminalPane(tab)) return;
       const title = composeFor(tab);
       if (!title || title === tab.label) return;
       tab.label = title;
@@ -109,6 +124,13 @@
       if (!tab || typeof getLocalPaneProcess !== 'function') return;
       const paneId = tab.focusedPaneId;
       if (paneId == null) return;
+      // Only a terminal pane has a process to poll. `get_local_pane_process`
+      // (crates/termlab_tauri/src/pty.rs) returns
+      // `PaneProcessInfo { cwd: None, program: None }` for a pane id it does
+      // not know — it never errors — so without this bail-out the reply is
+      // truthy, the cached cwd/program are blanked, and refreshTabTitle
+      // recomposes an editor tab's filename into a bare "user@host".
+      if (!tabFocusesTerminalPane(tab)) return;
       try {
         const info = await getLocalPaneProcess(paneId);
         if (!info) return;

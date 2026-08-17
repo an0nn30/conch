@@ -34,6 +34,16 @@
 
     function refocusActiveTerminal() {
       const pane = currentPane();
+      // A second focus entry point, independent of setFocusedPane — it is what
+      // dialog-runtime calls on Escape and after the last dialog closes. It
+      // cannot delegate to setFocusedPane, which early-returns when the pane is
+      // already the focused one, which is exactly this case. Without the editor
+      // arm, closing Settings leaves focus on <body> while the pane keeps its
+      // `.focused` border: it looks focused and swallows every keystroke.
+      if (pane && pane.kind === 'editor' && pane.view) {
+        pane.view.focus();
+        return true;
+      }
       if (pane && pane.term) {
         pane.term.focus();
         return true;
