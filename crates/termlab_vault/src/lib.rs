@@ -16,6 +16,15 @@ use std::path::PathBuf;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+/// Minimum length enforced on a new vault's master password by
+/// `VaultManager::create` — the single source of truth every caller
+/// inherits (2026-08-17 review finding I4: before this fix, one frontend
+/// dialog enforced 8 characters of its own and a second enforced nothing,
+/// so the same secret shipped under two different policies depending on
+/// which dialog created it). Chosen to match the pre-existing UI-side rule
+/// (`vault/dialogs.js`'s `showSetupDialog`) rather than invent a new number.
+const MIN_MASTER_PASSWORD_LEN: usize = 8;
+
 /// Central vault manager. Holds the decrypted vault in memory while unlocked.
 pub struct VaultManager {
     vault_path: PathBuf,
@@ -59,9 +68,20 @@ impl VaultManager {
     }
 
     /// Create a new vault with the given master password. Saves to disk.
+    ///
+    /// Rejects a password shorter than [`MIN_MASTER_PASSWORD_LEN`] before
+    /// any side effect (no salt generated, no file written) — validating
+    /// here, rather than leaving it to each frontend dialog, is what makes
+    /// the rule apply uniformly regardless of which caller invokes `create`
+    /// (2026-08-17 review finding I4).
     pub fn create(&self, password: &[u8]) -> Result<(), VaultError> {
         if self.vault_exists() {
             return Err(VaultError::Corrupted("vault already exists".into()));
+        }
+        if password.len() < MIN_MASTER_PASSWORD_LEN {
+            return Err(VaultError::WeakPassword(format!(
+                "master password must be at least {MIN_MASTER_PASSWORD_LEN} characters"
+            )));
         }
         let vault = Vault::default();
         // Derive and cache the encryption key so save() doesn't need the password
@@ -317,21 +337,21 @@ mod tests {
         let (mgr, _dir) = make_manager();
         assert!(!mgr.vault_exists());
 
-        mgr.create(b"master").unwrap();
+        mgr.create(b"master-pw").unwrap();
         assert!(mgr.vault_exists());
         assert!(!mgr.is_locked());
 
         mgr.seal();
         assert!(mgr.is_locked());
 
-        mgr.unlock(b"master").unwrap();
+        mgr.unlock(b"master-pw").unwrap();
         assert!(!mgr.is_locked());
     }
 
     #[test]
     fn unlock_wrong_password_fails() {
         let (mgr, _dir) = make_manager();
-        mgr.create(b"correct").unwrap();
+        mgr.create(b"correct-pw").unwrap();
         mgr.seal();
 
         let result = mgr.unlock(b"wrong");
@@ -342,7 +362,7 @@ mod tests {
     #[test]
     fn crud_accounts() {
         let (mgr, _dir) = make_manager();
-        mgr.create(b"master").unwrap();
+        mgr.create(b"master-pw").unwrap();
 
         // Add
         let id = mgr
@@ -376,7 +396,7 @@ mod tests {
     #[test]
     fn operations_fail_when_locked() {
         let (mgr, _dir) = make_manager();
-        mgr.create(b"master").unwrap();
+        mgr.create(b"master-pw").unwrap();
         mgr.seal();
 
         assert!(matches!(mgr.list_accounts(), Err(VaultError::Locked)));
@@ -389,7 +409,7 @@ mod tests {
     #[test]
     fn find_accounts_by_username() {
         let (mgr, _dir) = make_manager();
-        mgr.create(b"master").unwrap();
+        mgr.create(b"master-pw").unwrap();
 
         mgr.add_account("A".into(), "root".into(), AuthMethod::Password("p1".into()))
             .unwrap();
@@ -415,8 +435,37 @@ mod tests {
     #[test]
     fn get_nonexistent_account_returns_error() {
         let (mgr, _dir) = make_manager();
-        mgr.create(b"master").unwrap();
+        mgr.create(b"master-pw").unwrap();
         let result = mgr.get_account(Uuid::new_v4());
         assert!(matches!(result, Err(VaultError::AccountNotFound(_))));
+    }
+
+    /// I4 regression: `create` must reject a master password shorter than
+    /// `MIN_MASTER_PASSWORD_LEN`, and must not leave a vault file behind
+    /// when it does — the rejection has to happen before the salt/derive/
+    /// save sequence runs, not after.
+    #[test]
+    fn create_rejects_a_password_shorter_than_the_minimum() {
+        let (mgr, _dir) = make_manager();
+        let result = mgr.create(b"short1"); // 6 chars
+        assert!(
+            matches!(result, Err(VaultError::WeakPassword(_))),
+            "expected WeakPassword, got {result:?}"
+        );
+        assert!(
+            !mgr.vault_exists(),
+            "a rejected create must not write a vault file to disk"
+        );
+    }
+
+    /// The counterpart to the rejection test above: a password exactly at
+    /// the minimum length must be accepted, pinning the boundary as
+    /// inclusive rather than exclusive.
+    #[test]
+    fn create_accepts_a_password_at_the_minimum_length() {
+        let (mgr, _dir) = make_manager();
+        assert_eq!(b"12345678".len(), MIN_MASTER_PASSWORD_LEN);
+        mgr.create(b"12345678").unwrap();
+        assert!(mgr.vault_exists());
     }
 }

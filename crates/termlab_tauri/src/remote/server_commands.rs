@@ -749,7 +749,7 @@ mod tests {
     fn eager_import_creates_vault_account_for_entry_with_user() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
 
         let mut entry = make_server("prod", "prod.example.com", "deploy", 22);
         assert!(entry.vault_account_id.is_none());
@@ -772,7 +772,7 @@ mod tests {
     fn eager_import_uses_key_auth_when_key_path_present() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
 
         let mut entry = make_server("bastion", "bastion.example.com", "admin", 22);
         entry.key_path = Some("/home/admin/.ssh/id_ed25519".into());
@@ -796,7 +796,7 @@ mod tests {
     fn eager_import_skips_entry_without_user() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
 
         // Entry with no user — should be skipped.
         let mut entry = ServerEntry {
@@ -825,7 +825,7 @@ mod tests {
     fn eager_import_skips_entry_already_linked() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
         let existing_id = mgr
             .add_account(
                 "existing".into(),

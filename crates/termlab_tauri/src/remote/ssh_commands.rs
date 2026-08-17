@@ -622,7 +622,7 @@ mod tests {
     ) -> termlab_vault::VaultAccount {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
         let id = mgr
             .add_account(display_name.into(), username.into(), auth)
             .unwrap();
@@ -709,7 +709,7 @@ mod tests {
     fn try_vault_credentials_returns_none_when_no_account_id() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
         let vault: VaultState = Arc::new(Mutex::new(mgr));
 
         let server = make_server("test", "example.com", "root", 22);
@@ -721,7 +721,7 @@ mod tests {
     fn try_vault_credentials_returns_creds_when_linked() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
         let account_id = mgr
             .add_account(
                 "Deploy".into(),
@@ -746,7 +746,7 @@ mod tests {
     fn try_vault_credentials_returns_err_when_locked() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
         let account_id = mgr
             .add_account(
                 "Deploy".into(),
@@ -769,7 +769,7 @@ mod tests {
     fn try_vault_credentials_errors_when_account_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
         let vault: VaultState = Arc::new(Mutex::new(mgr));
 
         // Server references a vault account that doesn't exist

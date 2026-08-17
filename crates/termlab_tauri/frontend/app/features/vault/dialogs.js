@@ -25,11 +25,13 @@
         if (pwInput) pwInput.focus();
         return;
       }
-      if (pw.length < 8) {
-        if (d.toast && typeof d.toast.warn === 'function') d.toast.warn('Vault', 'Password must be at least 8 characters.');
-        if (pwInput) pwInput.focus();
-        return;
-      }
+      // Fix round 2, I4: no client-side minimum-length check here any more.
+      // This dialog used to enforce 8 characters on its own, independently
+      // of ssh-panel.js's import-flow vault-create dialog (which enforced
+      // nothing) — two different policies for the same secret depending on
+      // which dialog created the vault. The rule now lives once, in
+      // `VaultManager::create` (termlab_vault/src/lib.rs), and its
+      // rejection is surfaced below via the existing catch block instead.
       if (pw !== confirm) {
         if (d.toast && typeof d.toast.warn === 'function') d.toast.warn('Vault', 'Passwords do not match.');
         if (confirmInput) confirmInput.focus();

@@ -24,4 +24,6 @@ pub enum VaultError {
     Serialization(String),
     #[error("keychain error: {0}")]
     Keychain(String),
+    #[error("{0}")]
+    WeakPassword(String),
 }

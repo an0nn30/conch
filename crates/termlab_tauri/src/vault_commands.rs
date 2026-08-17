@@ -594,7 +594,7 @@ mod tests {
     ) -> VaultAccount {
         let dir = tempfile::tempdir().unwrap();
         let mgr = VaultManager::new(dir.path().join("vault.enc"));
-        mgr.create(b"test").unwrap();
+        mgr.create(b"test-password").unwrap();
         let id = mgr
             .add_account(display_name.into(), username.into(), auth)
             .unwrap();
