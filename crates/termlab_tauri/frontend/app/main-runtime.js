@@ -416,7 +416,7 @@
 
         const MAX_PASSES = 4;
         for (let pass = 0; pass < MAX_PASSES; pass++) {
-          const pane = getCurrentPane && getCurrentPane();
+          const pane = currentPane();
           const host = document.getElementById('terminal-host');
           if (!pane || !pane.term || !host) return;
 
@@ -467,7 +467,13 @@
           // Only now are the font, the bottom-zone height and the sidebar
           // widths all applied, so this is the first moment the terminal's
           // measurements reflect what the user will actually see.
-          applyConfiguredWindowSize().catch(() => {});
+          applyConfiguredWindowSize().catch((err) => {
+            // Deliberately not silent: an earlier version referenced an
+            // identifier that does not exist in this scope, and a bare catch
+            // hid the ReferenceError so the resize simply never happened while
+            // appearing to work.
+            console.error('Failed to apply configured window size:', err);
+          });
         }, 250);
       });
 
