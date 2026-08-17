@@ -29,12 +29,16 @@ pub fn decode(data: &[u8], password: &[u8]) -> Result<ShareBundle, ShareError> {
     let (version, plaintext) =
         decrypt_blob(BUNDLE_MAGIC, None, data, password).map_err(map_vault_err)?;
     let plaintext = Zeroizing::new(plaintext);
-    if version > SCHEMA_VERSION {
+    // `0` is never a version a real bundle was ever encoded with
+    // (`SCHEMA_VERSION` starts at `1`) — reject it just like anything above
+    // the version this build understands, rather than only checking the
+    // upper bound (2026-08-16 review finding M9).
+    if version == 0 || version > SCHEMA_VERSION {
         return Err(ShareError::UnsupportedVersion(version));
     }
     let bundle: ShareBundle =
         serde_json::from_slice(&plaintext).map_err(|e| ShareError::Malformed(e.to_string()))?;
-    if bundle.schema_version > SCHEMA_VERSION {
+    if bundle.schema_version == 0 || bundle.schema_version > SCHEMA_VERSION {
         return Err(ShareError::UnsupportedVersion(bundle.schema_version));
     }
     if version != bundle.schema_version {
@@ -111,6 +115,40 @@ mod tests {
         ));
     }
 
+    /// M9 regression: a schema_version of `0` is never one a real bundle was
+    /// ever encoded with (`SCHEMA_VERSION` starts at `1`), so it must be
+    /// rejected exactly like a too-new version rather than silently passing
+    /// the `> SCHEMA_VERSION` check that only guarded the upper bound.
+    #[test]
+    fn zero_schema_version_is_rejected() {
+        let mut b = sample();
+        b.schema_version = 0;
+        let bytes = encode(&b, b"pw").unwrap();
+        assert!(matches!(
+            decode(&bytes, b"pw"),
+            Err(ShareError::UnsupportedVersion(0))
+        ));
+    }
+
+    /// M8 regression, codec level: a bundle file truncated inside the
+    /// ciphertext (fewer bytes left than the AES-GCM authentication tag)
+    /// must be reported distinctly from a wrong password — see
+    /// `termlab_vault::encryption`'s `GCM_TAG_LEN` check, which this
+    /// exercises through the codec's own error mapping
+    /// (`Corrupted` -> `ShareError::NotABundle`).
+    #[test]
+    fn truncated_ciphertext_is_reported_as_not_a_bundle_not_wrong_password() {
+        let bytes = encode(&sample(), b"hunter2").unwrap();
+        // Header: magic(8) | version(4) | salt(16) | nonce(12) = 40 bytes.
+        // Keep the header, leave only a few bytes of ciphertext — short of
+        // the 16-byte GCM tag.
+        let truncated = &bytes[..40 + 3];
+        assert!(matches!(
+            decode(truncated, b"hunter2"),
+            Err(ShareError::NotABundle)
+        ));
+    }
+
     #[test]
     fn envelope_starts_with_the_share_magic() {
         let bytes = encode(&sample(), b"pw").unwrap();
@@ -125,10 +163,22 @@ mod tests {
         // body (and its schema_version) untouched, simulating a hand-edited
         // file where the two disagree. AES-GCM here has no AAD, so the header
         // is not authenticated and this tamper does not break decryption.
+        //
+        // With `SCHEMA_VERSION == 1`, the only integer that passes both the
+        // envelope's and the body's individual valid-range checks is `1`
+        // itself, so there is no tamper value left that reaches the
+        // dedicated envelope-vs-body `Malformed` check below rather than
+        // being caught earlier by the (M9-added) `version == 0` guard or the
+        // pre-existing `version > SCHEMA_VERSION` guard — both of which now
+        // report the more specific `UnsupportedVersion` instead. That
+        // disagreement check remains defense-in-depth for once
+        // `SCHEMA_VERSION` advances past `1` (two genuinely valid version
+        // values that can still disagree); this test now pins the version=0
+        // tamper's actual, more specific outcome.
         bytes[8..12].copy_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
             decode(&bytes, b"pw"),
-            Err(ShareError::Malformed(_))
+            Err(ShareError::UnsupportedVersion(0))
         ));
     }
 }

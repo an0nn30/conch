@@ -118,6 +118,51 @@
       .join('');
   }
 
+  /** Parse a `user@host:port` session key the same way the backend's
+   * `SavedTunnel::parse_session_key` does: split on the first `@`, then the
+   * *last* `:` (so an IPv6 host containing `:` still yields the trailing
+   * port). Returns null for anything that doesn't fit that shape. */
+  function parseSessionKey(sessionKey) {
+    const raw = String(sessionKey || '');
+    const atIdx = raw.indexOf('@');
+    if (atIdx === -1) return null;
+    const user = raw.slice(0, atIdx);
+    const rest = raw.slice(atIdx + 1);
+    const colonIdx = rest.lastIndexOf(':');
+    if (colonIdx === -1) return null;
+    const host = rest.slice(0, colonIdx);
+    const port = parseInt(rest.slice(colonIdx + 1), 10);
+    if (!host || !Number.isFinite(port)) return null;
+    return { user, host, port };
+  }
+
+  /** Resolve a tunnel's dependency host using the same precedence the
+   * backend's `export_planner::resolve_tunnel_host` uses: `server_entry_id`
+   * first (an exact id match against everything visible — folders,
+   * ungrouped, and ~/.ssh/config aliases, in that order, matching how
+   * `servers` here is already assembled), then `session_key` parsed and
+   * matched by host+port only — never by `user`, and never by exact string
+   * equality against the whole session key. The previous implementation
+   * compared `user@host:port` strings verbatim, which silently failed to
+   * find the dependency (so the user was never shown it, and never asked)
+   * whenever a tunnel's `session_key` had gone stale after its host's user
+   * was edited, or whenever the host had no `user` at all (common for
+   * ~/.ssh/config aliases, which produced the literal string
+   * "undefined@host:22"). Mirroring the backend's resolution here is what
+   * keeps the dependency prompt from ever disagreeing with what the
+   * planner actually pulls in (2026-08-16 review finding I3). */
+  function findServerForTunnel(tunnel, servers) {
+    const list = Array.isArray(servers) ? servers : [];
+    const t = tunnel || {};
+    if (t.server_entry_id) {
+      const byId = list.find((s) => s.id === t.server_entry_id);
+      if (byId) return byId;
+    }
+    const parsed = parseSessionKey(t.session_key);
+    if (!parsed) return null;
+    return list.find((s) => s.host === parsed.host && Number(s.port) === parsed.port) || null;
+  }
+
   function dedupeDependencyServers(missingDependencies) {
     const seen = new Set();
     const deduped = [];
@@ -141,5 +186,7 @@
     buildProxyJumpOptions,
     renderProxyJumpOptions,
     dedupeDependencyServers,
+    parseSessionKey,
+    findServerForTunnel,
   };
 })(window);

@@ -11,10 +11,12 @@
 //! call `detect_import_kind` independently rather than trusting a
 //! frontend-supplied `kind` round-tripped from the former. A `legacy_json`
 //! file is hand off to `remote::server_commands::{read_legacy_export_payload,
-//! apply_legacy_import}` — the exact same applying logic `remote_import`
-//! itself now calls, so legacy behaviour (`merge_import`, regenerated ids,
+//! apply_legacy_import}` — the same applying logic the now-removed
+//! `remote_import` command used to call directly (2026-08-16 review finding
+//! M17: it had no frontend caller left once this module's import path
+//! superseded it), so legacy behaviour (`merge_import`, regenerated ids,
 //! `resolve_imported_tunnel_keys`) is untouched, just reachable from a path
-//! that was already picked instead of `remote_import`'s own dialog.
+//! that was already picked rather than that command's own dialog.
 
 use std::io::Read;
 use std::path::Path;
@@ -52,13 +54,15 @@ use crate::vault_commands::VaultState;
 pub(crate) struct FsKeyReader;
 
 impl KeyReader for FsKeyReader {
-    fn read_key(&self, path: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    fn read_key(&self, path: &str) -> Result<termlab_share::export_planner::KeyBytes, String> {
         let expanded = termlab_remote::ssh::expand_tilde(path);
-        let private = std::fs::read(&expanded).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => format!("Key file not found: {path}"),
-            std::io::ErrorKind::PermissionDenied => format!("Can't read key file: {path}"),
-            _ => format!("Can't read key file: {path} ({e})"),
-        })?;
+        let private = zeroize::Zeroizing::new(std::fs::read(&expanded).map_err(|e| {
+            match e.kind() {
+                std::io::ErrorKind::NotFound => format!("Key file not found: {path}"),
+                std::io::ErrorKind::PermissionDenied => format!("Can't read key file: {path}"),
+                _ => format!("Can't read key file: {path} ({e})"),
+            }
+        })?);
         if !looks_like_private_key(&private) {
             return Err(format!("File doesn't look like a private key: {path}"));
         }
@@ -93,12 +97,12 @@ pub(crate) struct ShareExportSummary {
     pub auto_pulled: Vec<String>,
 }
 
-/// Grouped selection args for `do_export`, so it stays under clippy's
-/// argument-count lint now that `declined_server_ids` joined the other
-/// selection fields. `share_export` itself must keep its arguments flat —
-/// Tauri command arguments are one per wire key the frontend's `invoke()`
-/// call sends, not a nested object — so it packs them into this struct
-/// immediately on entry instead.
+/// Grouped selection args for `do_export`/`do_export_preview`, so they stay
+/// under clippy's argument-count lint now that `declined_server_ids` joined
+/// the other selection fields. The Tauri commands themselves must keep
+/// their arguments flat — Tauri command arguments are one per wire key the
+/// frontend's `invoke()` call sends, not a nested object — so each packs
+/// them into this struct immediately on entry instead.
 struct ExportSelection {
     server_ids: Vec<String>,
     tunnel_ids: Vec<String>,
@@ -106,9 +110,138 @@ struct ExportSelection {
     include_credentials: bool,
 }
 
-/// Export the selected servers/tunnels (and, if `include_credentials`,
-/// their vault-backed accounts and key material) into an encrypted
-/// `.termlabshare` bundle chosen via a native save dialog.
+/// Total server entries a bundle carries, counting both `bundle.servers`
+/// (ungrouped) and every entry nested inside `bundle.folders` — a user whose
+/// hosts all live in folders was previously told "0 server(s)" because only
+/// `bundle.servers.len()` was counted (2026-08-16 review finding I7). The
+/// import side already got this right (`import_executor::execute`'s
+/// `servers_count`); this mirrors it for the export summary/preview.
+fn count_bundled_servers(bundle: &termlab_share::ShareBundle) -> usize {
+    bundle.servers.len() + bundle.folders.iter().map(|f| f.entries.len()).sum::<usize>()
+}
+
+/// Run the export planner against `selection` and return the resulting
+/// [`termlab_share::export_planner::ExportPlan`] — pulled out so both the
+/// preview step (`share_export_preview`) and the write step (`share_export`)
+/// run the identical planning logic rather than one re-deriving it. Neither
+/// encodes or writes anything; the caller decides what to do with the
+/// bundle (and, per `embed_key_for_account`, its `BundledKey`s are zeroized
+/// on drop, so a preview caller that only reads counts/names out of it and
+/// drops the rest never holds embedded key material any longer than this
+/// call).
+fn build_export_plan(
+    remote: &Arc<Mutex<RemoteState>>,
+    vault: &VaultState,
+    selection: ExportSelection,
+) -> Result<termlab_share::export_planner::ExportPlan, String> {
+    let ExportSelection {
+        server_ids,
+        tunnel_ids,
+        declined_server_ids,
+        include_credentials,
+    } = selection;
+    // The vault must already be unlocked; this command does not prompt —
+    // the frontend runs its existing unlock flow (window.vault.ensureUnlocked)
+    // before calling share_export/share_export_preview with
+    // include_credentials: true.
+    let accounts = if include_credentials {
+        let vault_mgr = vault.lock();
+        if vault_mgr.is_locked() {
+            return Err("Unlock the vault to include credentials".to_string());
+        }
+        vault_mgr.list_accounts().map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+
+    let state = remote.lock();
+    let req = ExportRequest {
+        config: &state.config,
+        ssh_config_entries: &state.ssh_config_entries,
+        server_ids,
+        tunnel_ids,
+        declined_server_ids,
+        include_credentials,
+        accounts,
+        source_host: local_hostname(),
+        termlab_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    Ok(plan(req, &FsKeyReader))
+}
+
+/// What a `share_export` call with this selection would produce, computed
+/// by actually running the planner — never a frontend-side guess. Returned
+/// to the frontend so it can show the user exactly what will be written
+/// (auto-pulled hosts, which keys would be embedded, every warning) and let
+/// them cancel before anything is encoded or saved to disk, per the design
+/// spec's export step 5 ("Preview... The user confirms or cancels") and
+/// 2026-08-16 review finding I3: today's flow ran the save dialog and wrote
+/// the file *before* showing any of this, with no way to back out.
+///
+/// Deliberately carries no key material — only each embedded key's
+/// `comment` (a filename, e.g. `id_ed25519`; see
+/// `export_planner::embed_key_for_account`) — so the wire payload back to
+/// the frontend never contains secrets, and the full plan (which does hold
+/// key bytes, `Zeroizing` end-to-end) is dropped at the end of this
+/// function rather than cached in any backend state.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub(crate) struct ExportPreview {
+    pub servers: usize,
+    pub tunnels: usize,
+    pub credentials: usize,
+    pub keys: Vec<String>,
+    pub warnings: Vec<String>,
+    pub auto_pulled: Vec<String>,
+}
+
+/// Plan step of the export flow (see [`ExportPreview`]): runs the exact same
+/// planner `share_export` will, and reports what it found, without encoding
+/// or writing anything. No password argument — there is nothing to encrypt
+/// yet.
+#[tauri::command]
+pub(crate) async fn share_export_preview(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
+    server_ids: Vec<String>,
+    tunnel_ids: Vec<String>,
+    declined_server_ids: Vec<String>,
+    include_credentials: bool,
+) -> Result<ExportPreview, String> {
+    let selection = ExportSelection {
+        server_ids,
+        tunnel_ids,
+        declined_server_ids,
+        include_credentials,
+    };
+    let export_plan = build_export_plan(&remote, &vault, selection)?;
+    Ok(ExportPreview {
+        servers: count_bundled_servers(&export_plan.bundle),
+        tunnels: export_plan.bundle.tunnels.len(),
+        credentials: export_plan.bundle.vault.accounts.len(),
+        keys: export_plan
+            .bundle
+            .vault
+            .keys
+            .iter()
+            .map(|k| k.comment.clone())
+            .collect(),
+        warnings: export_plan.warnings,
+        auto_pulled: export_plan.auto_pulled,
+    })
+    // `export_plan` (and the `BundledKey` material it holds) is dropped
+    // here, zeroized via `BundledKey`'s own `Drop` impl — nothing from it
+    // survives this call except the names/counts already copied above.
+}
+
+/// Write step of the export flow (see [`ExportPreview`]): the frontend calls
+/// this only after the user has seen `share_export_preview`'s result and
+/// confirmed. Re-runs the planner rather than reusing a cached plan from the
+/// preview call — deliberately: holding the plaintext plan (embedded key
+/// material included) in backend state between two IPC round trips is a
+/// bigger risk than the cost of planning twice, and `RemoteState`/the vault
+/// can't meaningfully change between the two calls in the single-user
+/// desktop flow this dialog drives.
 ///
 /// Password handling: `password` arrives as a plain `String` command
 /// argument (Tauri has no secret-string type). It is never logged, is
@@ -145,40 +278,7 @@ fn do_export(
     selection: ExportSelection,
     password: &str,
 ) -> Result<ShareExportSummary, String> {
-    let ExportSelection {
-        server_ids,
-        tunnel_ids,
-        declined_server_ids,
-        include_credentials,
-    } = selection;
-    // The vault must already be unlocked; this command does not prompt —
-    // the frontend runs its existing unlock flow (window.vault.ensureUnlocked)
-    // before calling share_export with include_credentials: true.
-    let accounts = if include_credentials {
-        let vault_mgr = vault.lock();
-        if vault_mgr.is_locked() {
-            return Err("Unlock the vault to include credentials".to_string());
-        }
-        vault_mgr.list_accounts().map_err(|e| e.to_string())?
-    } else {
-        Vec::new()
-    };
-
-    let export_plan = {
-        let state = remote.lock();
-        let req = ExportRequest {
-            config: &state.config,
-            ssh_config_entries: &state.ssh_config_entries,
-            server_ids,
-            tunnel_ids,
-            declined_server_ids,
-            include_credentials,
-            accounts,
-            source_host: local_hostname(),
-            termlab_version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-        plan(req, &FsKeyReader)
-    };
+    let export_plan = build_export_plan(remote, vault, selection)?;
 
     let bytes = termlab_share::codec::encode(&export_plan.bundle, password.as_bytes())
         .map_err(|e| e.to_string())?;
@@ -217,7 +317,7 @@ fn do_export(
 
     Ok(ShareExportSummary {
         path: file_path.to_string_lossy().to_string(),
-        servers: export_plan.bundle.servers.len(),
+        servers: count_bundled_servers(&export_plan.bundle),
         tunnels: export_plan.bundle.tunnels.len(),
         credentials: export_plan.bundle.vault.accounts.len(),
         warnings: export_plan.warnings,
@@ -407,6 +507,15 @@ fn do_import(
 
     let key_dir = state.paths.config_dir.join("imported-keys");
     std::fs::create_dir_all(&key_dir).map_err(|e| format!("Failed to prepare key storage: {e}"))?;
+    // Owner-only, matching `~/.ssh` — every bundled key materialised below
+    // lands in here (M12: `create_dir_all` alone leaves default, not
+    // owner-only, permissions on the directory itself).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to secure key storage: {e}"))?;
+    }
 
     let outcome = if use_vault {
         let mut sink = TauriVaultSink { vault: &vault_mgr };
@@ -426,7 +535,15 @@ fn do_import(
     // window's SSH panel — `ssh-panel.js` has no polling or refresh-on-focus
     // — so the event below (mirrors `apply_legacy_import`'s emit for the
     // legacy path) is what actually gets a second window to refresh.
-    termlab_remote::config::save_config(&state.paths.config_dir, &state.config);
+    //
+    // This write must be checked, not fire-and-forget: on a full disk or
+    // read-only config dir, the keys and vault accounts above already
+    // persisted, but `servers.json` would silently not — leaving the user
+    // told "Imported N host(s)..." for hosts that vanish on next launch
+    // (2026-08-16 review finding I5). `save_config`'s fire-and-forget
+    // signature can't surface that, so this uses `try_save_config` instead.
+    termlab_remote::config::try_save_config(&state.paths.config_dir, &state.config)
+        .map_err(|e| format!("Import succeeded but saving the configuration failed: {e}"))?;
     let _ = app.emit(crate::remote::server_commands::SSH_CONFIG_CHANGED_EVENT, ());
 
     Ok(outcome.into())

@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
-use termlab_remote::config::{SavedTunnel, ServerEntry, ServerFolder, SshConfig};
+use termlab_remote::config::{SavedTunnel, ServerEntry, SshConfig};
 use termlab_vault::model::VaultAccount;
 
 use crate::bundle::{BundledKey, ShareBundle};
@@ -31,8 +31,28 @@ pub struct PlannedItem<T> {
     pub action: ItemAction,
 }
 
+/// A bundled folder, planned entry-by-entry rather than as one whole unit.
+///
+/// The export planner deliberately narrows a folder to only the *selected*
+/// entries while keeping the folder's original id (`export_planner.rs`'s
+/// stage 1), so a folder container in a bundle is never the recipient's
+/// complete folder — it is whatever subset the sender chose to share. If
+/// import replaced the local folder's `entries` wholesale with the bundle's,
+/// any locally-owned entry that was never part of the export would be
+/// deleted with no warning (2026-08-16 review finding C1). Planning entries
+/// individually, and having the executor upsert them into the existing
+/// folder rather than replace it, is what keeps a partial re-export from
+/// being destructive.
+#[derive(Debug, Clone)]
+pub struct PlannedFolder {
+    pub id: String,
+    pub name: String,
+    pub expanded: bool,
+    pub entries: Vec<PlannedItem<ServerEntry>>,
+}
+
 pub struct ImportPlan {
-    pub folders: Vec<PlannedItem<ServerFolder>>,
+    pub folders: Vec<PlannedFolder>,
     pub servers: Vec<PlannedItem<ServerEntry>>,
     pub tunnels: Vec<PlannedItem<SavedTunnel>>,
     pub accounts: Vec<PlannedItem<VaultAccount>>,
@@ -59,13 +79,36 @@ pub struct ImportPlan {
 pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uuid]) -> ImportPlan {
     let mut skipped = Vec::new();
 
-    let folders: Vec<PlannedItem<ServerFolder>> = bundle
+    // Existence (and therefore Add-vs-Replace) for any server id — whether
+    // the bundle carries it ungrouped or nested in a folder — is decided
+    // against `config.find_server`, which scans *both* `ungrouped` and every
+    // folder. Scanning only `ungrouped` here (as this used to) meant a
+    // bundle server whose id already existed nested in a local folder was
+    // always classified `Add`, so the executor pushed a second, duplicate
+    // copy into `ungrouped` instead of updating the one already in the
+    // folder (2026-08-16 review finding I2) — this is reachable in
+    // practice because the export planner's tunnel auto-pull always deposits
+    // a dependency host into `bundle.servers` even when it is folder-nested
+    // on the sender.
+    let folders: Vec<PlannedFolder> = bundle
         .folders
         .iter()
         .cloned()
-        .map(|item| {
-            let action = action_for(config.folders.iter().any(|existing| existing.id == item.id));
-            PlannedItem { item, action }
+        .map(|folder| {
+            let entries = folder
+                .entries
+                .into_iter()
+                .map(|item| {
+                    let action = action_for(config.find_server(&item.id).is_some());
+                    PlannedItem { item, action }
+                })
+                .collect();
+            PlannedFolder {
+                id: folder.id,
+                name: folder.name,
+                expanded: folder.expanded,
+                entries,
+            }
         })
         .collect();
 
@@ -74,12 +117,7 @@ pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uu
         .iter()
         .cloned()
         .map(|item| {
-            let action = action_for(
-                config
-                    .ungrouped
-                    .iter()
-                    .any(|existing| existing.id == item.id),
-            );
+            let action = action_for(config.find_server(&item.id).is_some());
             PlannedItem { item, action }
         })
         .collect();

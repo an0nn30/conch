@@ -464,9 +464,18 @@
     for (const s of data.ungrouped) allServers.push(s);
     if (data.ssh_config) for (const s of data.ssh_config) allServers.push(s);
 
-    function serverSessionKey(s) { return s.user + '@' + s.host + ':' + s.port; }
+    // Delegates to ssh-store's findServerForTunnel, which mirrors the
+    // backend planner's own resolution (server_entry_id first, then
+    // session_key matched by host+port) rather than comparing session-key
+    // strings verbatim — see that function's doc comment for why the old
+    // exact-string match let a dependency the export would actually pull in
+    // go unnoticed by this prompt (2026-08-16 review finding I3).
     function findServerForTunnel(t) {
-      return allServers.find(s => serverSessionKey(s) === t.session_key);
+      if (!sshStore || typeof sshStore.findServerForTunnel !== 'function') {
+        console.error('ssh-store missing findServerForTunnel');
+        return null;
+      }
+      return sshStore.findServerForTunnel(t, allServers);
     }
 
     let handle = null;
@@ -623,15 +632,39 @@
             }
           };
 
+          // Preview step (2026-08-16 review finding I3): ask the backend to
+          // actually run the planner and report exactly what it would
+          // export — auto-pulled hosts, embedded keys, warnings — and let
+          // the user cancel before anything is encoded or written. This
+          // runs the real planner, not a frontend guess, so it can never
+          // disagree with what `exportBundle` below is about to produce.
+          const previewThenExport = async () => {
+            let preview;
+            try {
+              if (!sshDataService || typeof sshDataService.previewExport !== 'function') {
+                throw new Error('SSH data service unavailable: previewExport');
+              }
+              preview = await sshDataService.previewExport(invoke, serverIds, tunnelIds, includeCredentials, declinedServerIds);
+            } catch (e) {
+              console.error('Export preview failed:', e);
+              if (window.toast) window.toast.error('Export Failed', String(e));
+              return;
+            }
+            const confirmed = await showExportPreviewDialog(preview);
+            if (!confirmed) return;
+            await runExport();
+          };
+
           // Credentials must come from an unlocked vault; run the app's
           // existing unlock flow (setup/unlock dialog, or an immediate
           // callback if already unlocked) before hitting the backend, which
           // itself refuses with "Unlock the vault to include credentials"
-          // rather than prompting — see share_commands.rs::share_export.
+          // rather than prompting — see share_commands.rs::share_export
+          // (share_export_preview has the same requirement).
           if (includeCredentials && window.vault && typeof window.vault.ensureUnlocked === 'function') {
-            window.vault.ensureUnlocked(runExport);
+            window.vault.ensureUnlocked(previewThenExport);
           } else {
-            await runExport();
+            await previewThenExport();
           }
         } },
       ],
@@ -645,6 +678,52 @@
    * can exercise it without a browser. */
   function canExport({ selectedCount, password, confirm }) {
     return selectedCount > 0 && !!password && !!confirm && password === confirm;
+  }
+
+  /** Show exactly what `share_export_preview` reports would be written —
+   * counts, which private keys would be embedded (by filename/comment,
+   * never material), auto-pulled dependencies, and warnings — and let the
+   * user confirm or cancel before anything is encoded or saved to disk.
+   * This is the design spec's export step 5 ("Preview... The user confirms
+   * or cancels") and closes 2026-08-16 review finding I3: previously the
+   * save dialog ran and the file was written before the user saw any of
+   * this. Resolves `true` on Export, `false` on Cancel or dialog close. */
+  function showExportPreviewDialog(preview) {
+    const p = preview || {};
+    const keys = Array.isArray(p.keys) ? p.keys : [];
+    const autoPulled = Array.isArray(p.auto_pulled) ? p.auto_pulled : [];
+    const warnings = Array.isArray(p.warnings) ? p.warnings : [];
+    return new Promise((resolve) => {
+      let handle = null;
+      let closed = false;
+      let decided = false;
+      const finish = (result) => {
+        decided = true;
+        if (closed) return;
+        closed = true;
+        if (handle) handle.close();
+        resolve(result);
+      };
+      handle = window.tlDialog.open({
+        title: 'Confirm Export',
+        ariaLabel: 'Confirm export',
+        size: 'md',
+        body: (bodyEl) => {
+          bodyEl.innerHTML = `
+            <div>This bundle will contain ${esc(p.servers || 0)} server(s), ${esc(p.tunnels || 0)} tunnel(s), and ${esc(p.credentials || 0)} credential(s).</div>
+            ${keys.length ? '<div class="ssh-export-section" style="margin-top:12px;">Private keys to be embedded</div><ul>' + keys.map((k) => `<li>${esc(k)}</li>`).join('') + '</ul>' : ''}
+            ${autoPulled.length ? '<div class="ssh-export-section" style="margin-top:12px;">Also included</div><ul>' + autoPulled.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+            ${warnings.length ? '<div class="ssh-export-section" style="margin-top:12px;">Warnings</div><ul>' + warnings.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+          `;
+        },
+        buttons: [
+          { label: 'Cancel', onSelect: () => finish(false) },
+          { label: 'Export', primary: true, onSelect: () => finish(true) },
+        ],
+        onClose: () => { if (!decided) finish(false); },
+      });
+      trackDialogHandle(handle);
+    });
   }
 
   /** Show the export summary — a "Export complete" dialog listing which

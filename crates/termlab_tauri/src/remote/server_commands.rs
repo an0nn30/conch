@@ -163,11 +163,10 @@ pub(crate) fn remote_move_server(
 }
 
 /// Read and parse a legacy plaintext JSON export file — the file-reading
-/// half of what used to be `remote_import` in one block. Shared by
-/// `remote_import` below (which picks the file itself via a native dialog)
-/// and `share_commands::share_import` (Task 6), which already has a path
-/// chosen by `share_pick_import_file` and only needs the file read and
-/// validated.
+/// half of what used to be the (now-removed, 2026-08-16 review finding M17:
+/// no frontend caller was left) `remote_import` command. Used by
+/// `share_commands::share_import`, which already has a path chosen by
+/// `share_pick_import_file` and only needs the file read and validated.
 pub(crate) fn read_legacy_export_payload(
     file_path: &std::path::Path,
 ) -> Result<ExportPayload, String> {
@@ -188,10 +187,10 @@ pub(crate) fn read_legacy_export_payload(
 /// persist. Returns the same `(servers, folders, tunnels)` counts
 /// `merge_import` reports.
 ///
-/// This is the applying half of what used to be `remote_import` in one
-/// block — split out so `share_commands::share_import` (Task 6) can drive
-/// the exact same logic for a `legacy_json`-kind file it already has an
-/// open path for, without duplicating any of it. Nothing about
+/// This is the applying half of what used to be the removed `remote_import`
+/// command — split out so `share_commands::share_import` can drive the
+/// exact same logic for a `legacy_json`-kind file it already has an open
+/// path for, without duplicating any of it. Nothing about
 /// `merge_import`, the regenerated-UUID semantics, or
 /// `resolve_imported_tunnel_keys` changes here.
 pub(crate) fn apply_legacy_import(
@@ -259,37 +258,6 @@ pub(crate) fn apply_legacy_import(
     termlab_remote::config::save_config(&state.paths.config_dir, &state.config);
     let _ = app.emit(SSH_CONFIG_CHANGED_EVENT, ());
     (servers, folders, tunnels)
-}
-
-/// Import servers and tunnels from a file chosen via native open dialog.
-#[tauri::command]
-pub(crate) async fn remote_import(
-    app: tauri::AppHandle,
-    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
-    vault: tauri::State<'_, VaultState>,
-) -> Result<String, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let path = app
-        .dialog()
-        .file()
-        .add_filter("JSON", &["json"])
-        .blocking_pick_file();
-
-    let path = match path {
-        Some(p) => p,
-        None => return Err("Import cancelled".to_string()),
-    };
-
-    let file_path = path
-        .as_path()
-        .ok_or_else(|| "Invalid file path".to_string())?;
-    let payload = read_legacy_export_payload(file_path)?;
-
-    let mut state = remote.lock();
-    let (servers, folders, tunnels) = apply_legacy_import(&mut state, &vault, &app, payload);
-    Ok(format!(
-        "Imported {servers} server(s), {folders} folder(s), {tunnels} tunnel(s)"
-    ))
 }
 
 /// Duplicate a server entry.

@@ -18,6 +18,22 @@
     return Array.isArray(sessions) ? sessions : [];
   }
 
+  /** Plan step of the export flow (2026-08-16 review finding I3): runs the
+   * real backend planner and returns exactly what a `share_export` call
+   * with this same selection would produce — auto-pulled hosts, which keys
+   * would be embedded, every warning — without encoding or writing
+   * anything. The caller shows this to the user for confirmation before
+   * calling `exportBundle`. No password: nothing is encrypted at this
+   * step. */
+  async function previewExport(invoke, serverIds, tunnelIds, includeCredentials, declinedServerIds) {
+    return invoke('share_export_preview', {
+      serverIds,
+      tunnelIds,
+      declinedServerIds: declinedServerIds || [],
+      includeCredentials,
+    });
+  }
+
   async function exportBundle(invoke, serverIds, tunnelIds, includeCredentials, password, declinedServerIds) {
     return invoke('share_export', {
       serverIds,
@@ -48,6 +64,7 @@
     getServers,
     getTunnels,
     getSessions,
+    previewExport,
     exportBundle,
     pickImportFile,
     importFile,

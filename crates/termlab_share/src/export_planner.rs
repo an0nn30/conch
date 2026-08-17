@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use termlab_remote::config::{SavedTunnel, ServerEntry, ServerFolder, SshConfig};
 use termlab_vault::model::{AuthMethod, VaultAccount};
@@ -19,13 +20,23 @@ use termlab_vault::model::{AuthMethod, VaultAccount};
 use crate::SCHEMA_VERSION;
 use crate::bundle::{BundleMetadata, BundledKey, BundledVault, ShareBundle};
 
+/// (private bytes, optional public bytes) returned by
+/// [`KeyReader::read_key`] — named so the trait signature doesn't trip
+/// clippy's `type_complexity` lint.
+pub type KeyBytes = (Zeroizing<Vec<u8>>, Option<Vec<u8>>);
+
 /// Reads private (and optionally public) key bytes for a key file path.
 ///
 /// Implemented against the real filesystem by the caller; tests supply a
 /// fake so `export_planner` never performs I/O itself.
 pub trait KeyReader {
-    /// Returns (private bytes, optional public bytes) for a key path.
-    fn read_key(&self, path: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), String>;
+    /// Returns (private bytes, optional public bytes) for a key path. The
+    /// private half is `Zeroizing` — every other hop the private key takes
+    /// on its way into a bundle (`BundledKey`, the JSON encode buffer, the
+    /// decrypt plaintext, the materialised file bytes) is already wiped on
+    /// drop; the raw `fs::read` here used to be the one unzeroized cleartext
+    /// gap in that chain (2026-08-16 review finding I4).
+    fn read_key(&self, path: &str) -> Result<KeyBytes, String>;
 }
 
 pub struct ExportRequest<'a> {
@@ -437,10 +448,10 @@ mod tests {
 
     struct FakeKeys(HashMap<String, Vec<u8>>);
     impl KeyReader for FakeKeys {
-        fn read_key(&self, path: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+        fn read_key(&self, path: &str) -> Result<KeyBytes, String> {
             self.0
                 .get(path)
-                .map(|b| (b.clone(), None))
+                .map(|b| (Zeroizing::new(b.clone()), None))
                 .ok_or_else(|| format!("Key file not found: {path}"))
         }
     }

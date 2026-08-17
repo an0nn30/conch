@@ -23,7 +23,7 @@ use termlab_vault::model::{AuthMethod, VaultAccount};
 
 use crate::ShareError;
 use crate::bundle::BundledKey;
-use crate::import_planner::{ImportPlan, ItemAction, PlannedItem};
+use crate::import_planner::{ImportPlan, ItemAction, PlannedFolder, PlannedItem};
 
 /// Where imported vault accounts go. Implemented against the real vault by
 /// the caller (Task 6); tests supply a fake so `import_executor`'s own unit
@@ -61,20 +61,25 @@ pub fn execute(
     // Counts reported to the caller: total server entries touched,
     // including those nested inside a planned folder (folders themselves
     // have no counter of their own in `ImportOutcome`).
-    let servers_count = servers.len() + folders.iter().map(|f| f.item.entries.len()).sum::<usize>();
+    let servers_count = servers.len() + folders.iter().map(|f| f.entries.len()).sum::<usize>();
     let tunnels_count = tunnels.len();
 
-    // 1. Keys first, so accounts (step 2) and any later inspection have a
-    // real path to rewrite the `termlab-bundle:<key-id>` marker to.
-    let key_paths = materialise_keys(&keys, key_dir)?;
-
-    // 2. Accounts. With no vault open on this machine yet (v1: no inline
-    // vault creation during import), every account is skipped and the
-    // caller is told credentials were held back; hosts and tunnels still
-    // import below.
+    // 1 & 2. Keys, then accounts — but only when a vault is actually open to
+    // receive them. Keys used to be materialised to disk unconditionally,
+    // before this check, so a locked or absent vault still got every
+    // bundled private key written out even while the frontend told the user
+    // "credentials were not imported" (2026-08-16 review finding I6). The
+    // permissions on those files were correct, but writing secret material
+    // the summary claims was never imported is the wrong side to be wrong
+    // on, so keys are now held back right alongside the accounts they
+    // belong to.
+    let bundle_has_credentials = !keys.is_empty() || !accounts.is_empty();
     let (credentials, credentials_held_back) = match vault_sink {
-        None => (0, true),
+        None => (0, bundle_has_credentials),
         Some(sink) => {
+            // Keys first, so accounts have a real path to rewrite the
+            // `termlab-bundle:<key-id>` marker to.
+            let key_paths = materialise_keys(&keys, key_dir)?;
             let mut imported = 0usize;
             for planned in accounts {
                 let mut account = planned.item;
@@ -114,6 +119,19 @@ pub fn execute(
 /// Key ids are UUIDs, so a collision with a file already on disk means this
 /// exact key was materialised by a previous import; it is left alone and
 /// reused rather than rewritten.
+///
+/// The write itself goes to a `.tmp` sibling first, then is renamed onto
+/// `private_path` — never straight to the final name. A previous version of
+/// this function used `create_new` directly on `private_path`, so a process
+/// that died partway through `write_all` (disk full, killed mid-import) left
+/// a *truncated* file already sitting at the final name; every later import
+/// of the same key id then saw "already exists" and reused that truncated
+/// file forever, since existence was the only signal, not completeness
+/// (2026-08-16 review finding M14). With the temp-then-rename write, a
+/// partial write can only ever leave the `.tmp` behind — `private_path`
+/// itself either has the complete key or does not exist at all — so a
+/// re-import after an interruption correctly writes it again instead of
+/// reusing garbage.
 fn materialise_keys(
     keys: &[BundledKey],
     key_dir: &Path,
@@ -121,39 +139,34 @@ fn materialise_keys(
     let mut paths = HashMap::with_capacity(keys.len());
     for key in keys {
         let private_path = key_dir.join(key.id.to_string());
-        match create_owner_only_file(&private_path).map_err(|e| ShareError::Io(e.to_string()))? {
-            Some(mut file) => {
-                let decoded: Zeroizing<Vec<u8>> = Zeroizing::new(
-                    base64::engine::general_purpose::STANDARD
-                        .decode(&key.material)
-                        .map_err(|e| ShareError::Malformed(e.to_string()))?,
-                );
-                file.write_all(&decoded)
-                    .map_err(|e| ShareError::Io(e.to_string()))?;
+        if private_path.exists() {
+            // Already materialised (completely — see the doc comment above
+            // on why existence at this exact path now implies completeness)
+            // by a previous import of the same key id — reuse it, do not
+            // touch its bytes. Its permissions are a different story: a
+            // file left at this exact path by an interrupted earlier run is
+            // not guaranteed to still be 0600 — trusting it blindly would
+            // silently import a private key that's group/world-readable.
+            // Tighten it before `paths` below hands the path to an
+            // account's auth. Unix-only — Windows uses default ACLs here by
+            // design, no counterpart needed.
+            #[cfg(unix)]
+            tighten_permissions_if_needed(&private_path)?;
+        } else {
+            let decoded: Zeroizing<Vec<u8>> = Zeroizing::new(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&key.material)
+                    .map_err(|e| ShareError::Malformed(e.to_string()))?,
+            );
+            write_owner_only_atomically(&private_path, &decoded)
+                .map_err(|e| ShareError::Io(e.to_string()))?;
 
-                if let Some(public) = &key.public_material {
-                    let decoded_pub = base64::engine::general_purpose::STANDARD
-                        .decode(public)
-                        .map_err(|e| ShareError::Malformed(e.to_string()))?;
-                    fs::write(key_dir.join(format!("{}.pub", key.id)), decoded_pub)
-                        .map_err(|e| ShareError::Io(e.to_string()))?;
-                }
-            }
-            None => {
-                // Already materialised by a previous import of the same
-                // key id — reuse it, do not touch its bytes. Its
-                // permissions are a different story: a file left at this
-                // exact path by an interrupted earlier run (the process
-                // died between `create_owner_only_file` and this key ever
-                // completing a full import) is not guaranteed to still be
-                // 0600 — trusting it blindly would silently import a
-                // private key that's group/world-readable. Tighten it
-                // before `paths` below hands the path to an account's
-                // auth. Unix-only, matching `create_owner_only_file`'s own
-                // `#[cfg(unix)]` — Windows uses default ACLs here by
-                // design, no counterpart needed.
-                #[cfg(unix)]
-                tighten_permissions_if_needed(&private_path)?;
+            if let Some(public) = &key.public_material {
+                let decoded_pub = base64::engine::general_purpose::STANDARD
+                    .decode(public)
+                    .map_err(|e| ShareError::Malformed(e.to_string()))?;
+                fs::write(key_dir.join(format!("{}.pub", key.id)), decoded_pub)
+                    .map_err(|e| ShareError::Io(e.to_string()))?;
             }
         }
         paths.insert(key.id, private_path);
@@ -177,11 +190,19 @@ fn tighten_permissions_if_needed(path: &Path) -> Result<(), ShareError> {
     Ok(())
 }
 
-/// Create `path` for exclusive writing with owner-only (`0600`) permissions
-/// on Unix, set at creation time via `OpenOptions` rather than a later
-/// `chmod`. Returns `Ok(None)` if the file already exists (treated as an
-/// intentional collision-is-reuse case, not an error).
-fn create_owner_only_file(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+/// Write `data` to `path` with owner-only (`0600`) permissions on Unix, set
+/// at creation time via `OpenOptions` rather than a later `chmod` (never
+/// write then chmod — a world-readable window, even briefly, defeats the
+/// point), by writing to a `<path>.tmp` sibling first and renaming it onto
+/// `path` only once the write has fully succeeded. Any stale `.tmp` left by
+/// a previous interrupted attempt at this exact path is removed first so it
+/// cannot block `create_new`.
+fn write_owner_only_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+    let _ = fs::remove_file(&tmp_path);
+
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -189,11 +210,13 @@ fn create_owner_only_file(path: &Path) -> std::io::Result<Option<std::fs::File>>
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    match opts.open(path) {
-        Ok(file) => Ok(Some(file)),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-        Err(e) => Err(e),
+    {
+        let mut file = opts.open(&tmp_path)?;
+        file.write_all(data)?;
     }
+    fs::rename(&tmp_path, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp_path);
+    })
 }
 
 /// Rewrite the export planner's `termlab-bundle:<key-id>` marker (see
@@ -225,9 +248,9 @@ fn rewrite_marker_path(path: &mut PathBuf, key_paths: &HashMap<Uuid, PathBuf>) {
     }
 }
 
-// These three apply functions switch on `planned.action` rather than
-// re-deriving Add-vs-Replace from `config`'s live contents. `ItemAction` is
-// on `PlannedItem` precisely so a consumer (sub-project 2: the per-row
+// These apply functions switch on `planned.action` rather than re-deriving
+// Add-vs-Replace from `config`'s live contents. `ItemAction` is on
+// `PlannedItem` precisely so a consumer (sub-project 2: the per-row
 // Skip/Replace/Rename picker) can override the planner's default and have
 // that choice honoured verbatim — an executor that recomputes the decision
 // from live state cannot respect an explicit override. `Replace` still
@@ -235,32 +258,76 @@ fn rewrite_marker_path(path: &mut PathBuf, key_paths: &HashMap<Uuid, PathBuf>) {
 // removed locally between planning and executing), so this never silently
 // drops an item.
 
-fn apply_folder(config: &mut SshConfig, planned: PlannedItem<ServerFolder>) {
-    match planned.action {
-        ItemAction::Add => config.folders.push(planned.item),
-        ItemAction::Replace => match config
-            .folders
-            .iter_mut()
-            .find(|existing| existing.id == planned.item.id)
-        {
-            Some(existing) => *existing = planned.item,
-            None => config.folders.push(planned.item),
-        },
+/// Upsert a bundled folder into `config`: create it if no local folder has
+/// this id, otherwise update its metadata (name, expanded) in place — but
+/// never replace its `entries` wholesale. Each entry is applied
+/// individually via [`apply_server_entry`], so a local entry that was never
+/// part of this bundle (the sender exported a narrower subset of a folder
+/// they don't own alone) survives the import untouched. See
+/// [`crate::import_planner::PlannedFolder`] for why the planner already
+/// hands entries over one at a time rather than as a whole folder.
+fn apply_folder(config: &mut SshConfig, planned: PlannedFolder) {
+    let folder_idx = match config.folders.iter().position(|f| f.id == planned.id) {
+        Some(idx) => {
+            config.folders[idx].name = planned.name;
+            config.folders[idx].expanded = planned.expanded;
+            idx
+        }
+        None => {
+            config.folders.push(ServerFolder {
+                id: planned.id,
+                name: planned.name,
+                expanded: planned.expanded,
+                entries: Vec::new(),
+            });
+            config.folders.len() - 1
+        }
+    };
+
+    for planned_entry in planned.entries {
+        match planned_entry.action {
+            ItemAction::Add => config.folders[folder_idx].entries.push(planned_entry.item),
+            ItemAction::Replace => {
+                if !apply_server_entry(config, &planned_entry.item) {
+                    config.folders[folder_idx].entries.push(planned_entry.item);
+                }
+            }
+        }
     }
 }
 
 fn apply_server(config: &mut SshConfig, planned: PlannedItem<ServerEntry>) {
     match planned.action {
         ItemAction::Add => config.ungrouped.push(planned.item),
-        ItemAction::Replace => match config
-            .ungrouped
-            .iter_mut()
-            .find(|existing| existing.id == planned.item.id)
-        {
-            Some(existing) => *existing = planned.item,
-            None => config.ungrouped.push(planned.item),
-        },
+        ItemAction::Replace => {
+            if !apply_server_entry(config, &planned.item) {
+                config.ungrouped.push(planned.item);
+            }
+        }
     }
+}
+
+/// Update the server entry with `item.id` wherever it currently lives in
+/// `config` — ungrouped or nested inside any folder — and report whether it
+/// was found. A bundle server planned as `Replace` (its id already exists
+/// somewhere in `config`, per `import_planner::plan`'s use of
+/// `config.find_server`) must be updated at that actual location: a
+/// `Replace` that only ever looked in `ungrouped` (or only in one specific
+/// folder) would leave the existing copy stale and, worse, let the caller's
+/// own "not found, so push" fallback create a second, duplicate copy
+/// elsewhere (2026-08-16 review finding I2).
+fn apply_server_entry(config: &mut SshConfig, item: &ServerEntry) -> bool {
+    if let Some(existing) = config.ungrouped.iter_mut().find(|e| e.id == item.id) {
+        *existing = item.clone();
+        return true;
+    }
+    for folder in &mut config.folders {
+        if let Some(existing) = folder.entries.iter_mut().find(|e| e.id == item.id) {
+            *existing = item.clone();
+            return true;
+        }
+    }
+    false
 }
 
 fn apply_tunnel(config: &mut SshConfig, planned: PlannedItem<SavedTunnel>) {
@@ -346,17 +413,32 @@ mod tests {
         plan_from(&bundle, &SshConfig::default())
     }
 
+    /// Records every account handed to it. Good enough to prove
+    /// `execute`'s vault-facing behaviour without opening a real vault.
+    #[derive(Default)]
+    struct FakeVaultSink {
+        accounts: Vec<VaultAccount>,
+    }
+
+    impl VaultSink for FakeVaultSink {
+        fn upsert_account(&mut self, account: VaultAccount) -> Result<(), String> {
+            self.accounts.push(account);
+            Ok(())
+        }
+    }
+
     #[test]
-    fn materialises_bundled_keys_with_owner_only_permissions() {
+    fn materialises_bundled_keys_with_owner_only_permissions_when_vault_sink_present() {
         let dir = tempfile::tempdir().unwrap();
         let plan = plan_with_one_bundled_key();
         let mut config = SshConfig::default();
-        let out = execute(plan, &mut config, dir.path(), None).unwrap();
+        let mut sink = FakeVaultSink::default();
+        let out = execute(plan, &mut config, dir.path(), Some(&mut sink)).unwrap();
         let written = std::fs::read(dir.path().join(format!("{KEY_ID}"))).unwrap();
         assert_eq!(written, b"PRIVATE-KEY-BYTES");
         assert!(
-            out.credentials_held_back,
-            "no vault sink means credentials are held back"
+            !out.credentials_held_back,
+            "a vault sink was supplied, credentials must not be held back"
         );
         #[cfg(unix)]
         {
@@ -367,6 +449,47 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "key must be owner-read/write only");
         }
+    }
+
+    /// I6 regression: with no vault open on this machine, the frontend tells
+    /// the user "credentials were not imported" — so the bundled private key
+    /// must genuinely not be written to disk either, not just held back from
+    /// the vault. Materialising it anyway (the pre-fix behaviour) meant the
+    /// permissions were correct but the summary was lying about what
+    /// happened (2026-08-16 review finding I6).
+    #[test]
+    fn no_vault_sink_holds_back_keys_and_does_not_write_them_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan_with_one_bundled_key();
+        let mut config = SshConfig::default();
+        let out = execute(plan, &mut config, dir.path(), None).unwrap();
+
+        assert!(
+            !dir.path().join(format!("{KEY_ID}")).exists(),
+            "a bundled key must not be written to disk when there is no vault sink to hold its account"
+        );
+        assert_eq!(out.credentials, 0);
+        assert!(
+            out.credentials_held_back,
+            "the bundle did carry a key, so credentials_held_back must be true"
+        );
+    }
+
+    /// M15 regression: `credentials_held_back` must reflect whether the
+    /// *bundle* actually carried credentials, not just whether a vault sink
+    /// was supplied. A bundle with no keys and no accounts imported with no
+    /// vault open has nothing to hold back, so the frontend must not pop the
+    /// "credentials were not imported" dialog for it.
+    #[test]
+    fn no_vault_sink_but_bundle_has_no_credentials_does_not_flag_held_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = sample_bundle(); // no keys, no accounts
+        let mut config = SshConfig::default();
+        let out = execute(plan_from(&bundle, &config), &mut config, dir.path(), None).unwrap();
+        assert!(
+            !out.credentials_held_back,
+            "nothing to hold back: the bundle carried no keys or accounts"
+        );
     }
 
     /// A file already sitting at the key's target path (e.g. left behind by
@@ -386,7 +509,8 @@ mod tests {
 
         let plan = plan_with_one_bundled_key();
         let mut config = SshConfig::default();
-        execute(plan, &mut config, dir.path(), None).unwrap();
+        let mut sink = FakeVaultSink::default();
+        execute(plan, &mut config, dir.path(), Some(&mut sink)).unwrap();
 
         let written = std::fs::read(&key_path).unwrap();
         assert_eq!(
@@ -398,6 +522,34 @@ mod tests {
             mode & 0o777,
             0o600,
             "a reused key file must be tightened to owner-only permissions"
+        );
+    }
+
+    /// M14 regression: a `.tmp` file left behind at the key's target name by
+    /// a previous run that died mid-write must not block (or be mistaken
+    /// for) a correct materialisation on the next import. Before the fix, a
+    /// truncated write could land directly at the final path and then be
+    /// "reused" forever; the temp-then-rename write means the final path
+    /// only ever exists complete, so a stale `.tmp` is simply overwritten.
+    #[test]
+    fn stale_tmp_file_from_an_interrupted_write_does_not_block_a_correct_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp_path = dir.path().join(format!("{KEY_ID}.tmp"));
+        std::fs::write(&tmp_path, b"PARTIAL-GARBAGE-FROM-A-DEAD-PROCESS").unwrap();
+
+        let plan = plan_with_one_bundled_key();
+        let mut config = SshConfig::default();
+        let mut sink = FakeVaultSink::default();
+        execute(plan, &mut config, dir.path(), Some(&mut sink)).unwrap();
+
+        let written = std::fs::read(dir.path().join(format!("{KEY_ID}"))).unwrap();
+        assert_eq!(
+            written, b"PRIVATE-KEY-BYTES",
+            "the final file must contain the complete, correct key material"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "the .tmp file must be consumed by the rename, not left behind"
         );
     }
 
@@ -454,6 +606,143 @@ mod tests {
             imported.key_path.as_deref(),
             Some("/home/sender/.ssh/id_ed25519"),
             "stale sender-machine key_path must be left exactly as it arrived"
+        );
+    }
+
+    fn make_server(id: &str, label: &str, host: &str, user: &str) -> ServerEntry {
+        ServerEntry {
+            id: id.into(),
+            label: label.into(),
+            host: host.into(),
+            port: 22,
+            user: Some(user.into()),
+            auth_method: None,
+            key_path: None,
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        }
+    }
+
+    fn bundle_with_folder(folder: ServerFolder) -> ShareBundle {
+        ShareBundle {
+            schema_version: crate::SCHEMA_VERSION,
+            metadata: sample_metadata(),
+            folders: vec![folder],
+            servers: Vec::new(),
+            tunnels: Vec::new(),
+            vault: BundledVault::default(),
+        }
+    }
+
+    /// C1 regression: machine B already has folder "prod" holding two hosts
+    /// — "a" (which the sender also has and is re-exporting) and
+    /// "bobs-own-host" (local-only, never part of the sender's export). A
+    /// bundle that re-exports "prod" with just "a" must update "a" in
+    /// place and leave "bobs-own-host" exactly as it was — not delete it,
+    /// as the pre-fix whole-folder `Replace` used to (2026-08-16 review
+    /// finding C1). This is exactly the non-empty-machine-B fixture the
+    /// original per-task tests never exercised, which is why the bug got
+    /// through.
+    #[test]
+    fn importing_a_partial_folder_re_export_does_not_delete_local_only_entries() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let host_a = make_server("a", "a", "a.example.com", "alice");
+        let bobs_host = make_server("bobs-own-host", "bob's host", "bob.example.com", "bob");
+
+        let mut config = SshConfig::default();
+        config.folders.push(ServerFolder {
+            id: "prod".into(),
+            name: "Prod".into(),
+            expanded: true,
+            entries: vec![host_a.clone(), bobs_host.clone()],
+        });
+
+        let mut updated_a = host_a.clone();
+        updated_a.label = "a (renamed by sender)".into();
+        let bundle = bundle_with_folder(ServerFolder {
+            id: "prod".into(),
+            name: "Prod".into(),
+            expanded: true,
+            entries: vec![updated_a],
+        });
+
+        let outcome = execute(plan_from(&bundle, &config), &mut config, dir.path(), None).unwrap();
+        assert!(outcome.skipped.is_empty(), "skipped: {:?}", outcome.skipped);
+
+        let prod = config
+            .folders
+            .iter()
+            .find(|f| f.id == "prod")
+            .expect("folder must still exist");
+        assert_eq!(
+            prod.entries.len(),
+            2,
+            "bob's own host must survive the import: {:?}",
+            prod.entries
+        );
+        assert!(
+            prod.entries.iter().any(|e| e.id == "bobs-own-host"),
+            "bobs-own-host must not have been deleted: {:?}",
+            prod.entries
+        );
+        let a_after = prod
+            .entries
+            .iter()
+            .find(|e| e.id == "a")
+            .expect("host a must still be present");
+        assert_eq!(
+            a_after.label, "a (renamed by sender)",
+            "the entry actually present in the bundle must still be updated in place"
+        );
+    }
+
+    /// I2 regression: machine B already has host "a" nested inside folder
+    /// "prod". A later bundle carries "a" as an *ungrouped* server (the
+    /// shape a tunnel's auto-pulled dependency always takes on export,
+    /// regardless of where the host lived on the sender's machine — see
+    /// `export_planner.rs`'s `resolve_tunnel_host`). Importing it must
+    /// update the existing folder-nested entry in place, not create a
+    /// second, duplicate copy in `ungrouped` (2026-08-16 review finding
+    /// I2).
+    #[test]
+    fn bundle_server_matching_an_existing_folder_nested_host_updates_it_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let host_a = make_server("a", "a", "a.example.com", "alice");
+        let mut config = SshConfig::default();
+        config.folders.push(ServerFolder {
+            id: "prod".into(),
+            name: "Prod".into(),
+            expanded: true,
+            entries: vec![host_a.clone()],
+        });
+
+        let mut updated_a = host_a.clone();
+        updated_a.label = "a (from bundle)".into();
+        let bundle = ShareBundle {
+            schema_version: crate::SCHEMA_VERSION,
+            metadata: sample_metadata(),
+            folders: Vec::new(),
+            servers: vec![updated_a],
+            tunnels: Vec::new(),
+            vault: BundledVault::default(),
+        };
+
+        let outcome = execute(plan_from(&bundle, &config), &mut config, dir.path(), None).unwrap();
+        assert!(outcome.skipped.is_empty(), "skipped: {:?}", outcome.skipped);
+
+        assert_eq!(
+            config.ungrouped.len(),
+            0,
+            "must not create a duplicate ungrouped copy: {:?}",
+            config.ungrouped
+        );
+        assert_eq!(config.folders[0].entries.len(), 1);
+        assert_eq!(
+            config.folders[0].entries[0].label, "a (from bundle)",
+            "the existing folder-nested host must be updated in place"
         );
     }
 }

@@ -60,11 +60,11 @@ export const COMMANDS = {
   REMOTE_RENAME_FOLDER: 'remote_rename_folder',
   REMOTE_SET_FOLDER_EXPANDED: 'remote_set_folder_expanded',
   REMOTE_MOVE_SERVER: 'remote_move_server',
-  REMOTE_IMPORT: 'remote_import',
   REMOTE_DUPLICATE_SERVER: 'remote_duplicate_server',
   REMOTE_GET_SESSIONS: 'remote_get_sessions',
 
   // Share bundles
+  SHARE_EXPORT_PREVIEW: 'share_export_preview',
   SHARE_EXPORT: 'share_export',
   SHARE_PICK_IMPORT_FILE: 'share_pick_import_file',
   SHARE_IMPORT: 'share_import',

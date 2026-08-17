@@ -18,6 +18,14 @@ const FORMAT_VERSION: u32 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
+/// AES-256-GCM's authentication tag length. A ciphertext shorter than this
+/// cannot possibly be a genuine blob — no key would ever decrypt it — so it
+/// is rejected as `Corrupted` before an AEAD decrypt is even attempted. This
+/// check is purely structural (a length comparison, independent of
+/// `password`), so distinguishing it from `WrongPassword` does not create a
+/// password oracle: an attacker learns nothing about the password from it,
+/// only that the file is too short to be well-formed at all.
+const GCM_TAG_LEN: usize = 16;
 
 const ARGON2_M_COST: u32 = 65536;
 const ARGON2_T_COST: u32 = 3;
@@ -89,6 +97,17 @@ pub fn decrypt_blob(
     let salt = &data[12..12 + SALT_LEN];
     let nonce_bytes = &data[12 + SALT_LEN..header_len];
     let ciphertext = &data[header_len..];
+    // A ciphertext shorter than the GCM tag itself cannot be genuine at any
+    // password — report it as corrupted rather than sending the caller into
+    // a "wrong password" retype loop for a file that is simply truncated
+    // (2026-08-16 review finding M8). Beyond this point, AEAD failure is
+    // cryptographically indistinguishable between "wrong key" and "tampered
+    // ciphertext" by design, so anything longer than the tag still maps to
+    // `WrongPassword` — weakening that would turn decryption into a
+    // corruption oracle.
+    if ciphertext.len() < GCM_TAG_LEN {
+        return Err(VaultError::Corrupted("ciphertext too short".into()));
+    }
     let key = derive_key(password, salt)?;
     let cipher =
         Aes256Gcm::new_from_slice(&key).map_err(|e| VaultError::Encryption(e.to_string()))?;
@@ -572,6 +591,36 @@ mod tests {
         let out = encrypt_blob(TEST_MAGIC, 1, b"x", b"pw").unwrap();
         assert!(matches!(
             decrypt_blob(TEST_MAGIC, None, &out[..20], b"pw"),
+            Err(VaultError::Corrupted(_))
+        ));
+    }
+
+    /// M8 regression: a file truncated *inside* the ciphertext — long enough
+    /// to pass the header-length check, but with fewer bytes left over than
+    /// the GCM authentication tag itself — must be reported as corrupted,
+    /// not as a wrong password. Before this fix, any ciphertext shorter
+    /// than the tag still reached the AEAD decrypt call and failed there,
+    /// indistinguishable from a genuine wrong password, sending the user
+    /// into a retype loop for a file no password could ever open.
+    #[test]
+    fn blob_rejects_ciphertext_shorter_than_the_gcm_tag() {
+        let out = encrypt_blob(TEST_MAGIC, 1, b"hello world", b"pw").unwrap();
+        let header_len = 8 + 4 + SALT_LEN + NONCE_LEN;
+        // Keep the full header, drop everything after it, then leave only 5
+        // bytes of "ciphertext" — well short of the 16-byte GCM tag.
+        let truncated = &out[..header_len + 5];
+        assert!(
+            matches!(
+                decrypt_blob(TEST_MAGIC, None, truncated, b"pw"),
+                Err(VaultError::Corrupted(_))
+            ),
+            "a ciphertext shorter than the GCM tag must be reported as corrupted, with the right password"
+        );
+        // The same file must also fail correctly with the *wrong* password
+        // — this check is a structural length gate, not something a
+        // correct password can bypass to still get "corrupted".
+        assert!(matches!(
+            decrypt_blob(TEST_MAGIC, None, truncated, b"wrong"),
             Err(VaultError::Corrupted(_))
         ));
     }

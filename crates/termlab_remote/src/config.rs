@@ -243,14 +243,33 @@ pub fn load_config(config_dir: &Path) -> SshConfig {
 /// Persist the SSH config to `config_dir/servers.json`.
 /// Creates `config_dir` if it does not exist.
 /// Uses atomic writes (tmp + rename) to prevent corruption.
+///
+/// Failures are logged and otherwise swallowed — this is the fire-and-forget
+/// form most callers want after an in-memory mutation they've already
+/// applied regardless of whether the save succeeds. A caller that needs to
+/// know the save actually landed (e.g. before telling the user an import
+/// succeeded) should use [`try_save_config`] instead — see its doc comment
+/// for why that distinction matters (2026-08-16 review finding I5).
 pub fn save_config(config_dir: &Path, config: &SshConfig) {
-    let _ = fs::create_dir_all(config_dir);
-    if let Ok(json) = serde_json::to_string_pretty(config) {
-        let path = config_dir.join("servers.json");
-        if let Err(e) = atomic_write(&path, json.as_bytes()) {
-            log::error!("Failed to save servers.json atomically: {e}");
-        }
+    if let Err(e) = try_save_config(config_dir, config) {
+        log::error!("Failed to save servers.json atomically: {e}");
     }
+}
+
+/// Fallible twin of [`save_config`]. A caller that reports success to the
+/// user based on this write must check this `Result` rather than the
+/// fire-and-forget `save_config` — on a full disk or read-only config
+/// directory, `save_config` used to silently drop the write while the
+/// caller still told the user their import succeeded, so the newly
+/// imported hosts (and, for a share-bundle import, the keys and vault
+/// accounts that *did* persist) would vanish on next launch (2026-08-16
+/// review finding I5).
+pub fn try_save_config(config_dir: &Path, config: &SshConfig) -> std::io::Result<()> {
+    fs::create_dir_all(config_dir)?;
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let path = config_dir.join("servers.json");
+    atomic_write(&path, json.as_bytes())
 }
 
 // ---------------------------------------------------------------------------

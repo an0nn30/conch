@@ -28,9 +28,9 @@ const PASSWORD: &[u8] = b"correct horse battery staple";
 struct FileKeyReader;
 
 impl KeyReader for FileKeyReader {
-    fn read_key(&self, path: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    fn read_key(&self, path: &str) -> Result<termlab_share::export_planner::KeyBytes, String> {
         std::fs::read(path)
-            .map(|bytes| (bytes, None))
+            .map(|bytes| (zeroize::Zeroizing::new(bytes), None))
             .map_err(|e| format!("Key file not found: {path} ({e})"))
     }
 }
