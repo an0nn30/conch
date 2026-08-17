@@ -55,9 +55,15 @@
   /** Import an already-picked `path` — routed server-side to the bundle
    * (decode/plan/execute) or legacy JSON (merge_import) path by its own
    * magic-byte check. `password` is ignored server-side for a legacy
-   * file. */
+   * file.
+   *
+   * Calls `share_import_apply` with no decisions, so every row keeps the
+   * planner's default action — the same net behaviour the old combined
+   * import command had. A future task wires this to `share_import_plan`'s
+   * preview and lets the caller pass real `ImportDecision`s here instead
+   * of an empty array. */
   async function importFile(invoke, path, password) {
-    return invoke('share_import', { path, password });
+    return invoke('share_import_apply', { path, password, decisions: [] });
   }
 
   global.termlabSshFeatureDataService = {

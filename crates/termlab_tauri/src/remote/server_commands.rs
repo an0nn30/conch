@@ -165,7 +165,7 @@ pub(crate) fn remote_move_server(
 /// Read and parse a legacy plaintext JSON export file — the file-reading
 /// half of what used to be the (now-removed, 2026-08-16 review finding M17:
 /// no frontend caller was left) `remote_import` command. Used by
-/// `share_commands::share_import`, which already has a path chosen by
+/// `share_commands::share_import_apply`, which already has a path chosen by
 /// `share_pick_import_file` and only needs the file read and validated.
 pub(crate) fn read_legacy_export_payload(
     file_path: &std::path::Path,
@@ -188,7 +188,7 @@ pub(crate) fn read_legacy_export_payload(
 /// `merge_import` reports.
 ///
 /// This is the applying half of what used to be the removed `remote_import`
-/// command — split out so `share_commands::share_import` can drive the
+/// command — split out so `share_commands::share_import_apply` can drive the
 /// exact same logic for a `legacy_json`-kind file it already has an open
 /// path for, without duplicating any of it. Nothing about
 /// `merge_import`, the regenerated-UUID semantics, or

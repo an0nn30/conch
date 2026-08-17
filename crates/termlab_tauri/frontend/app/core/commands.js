@@ -67,7 +67,8 @@ export const COMMANDS = {
   SHARE_EXPORT_PREVIEW: 'share_export_preview',
   SHARE_EXPORT: 'share_export',
   SHARE_PICK_IMPORT_FILE: 'share_pick_import_file',
-  SHARE_IMPORT: 'share_import',
+  SHARE_IMPORT_PLAN: 'share_import_plan',
+  SHARE_IMPORT_APPLY: 'share_import_apply',
 
   // SFTP / Local FS
   SFTP_LIST_DIR: 'sftp_list_dir',

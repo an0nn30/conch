@@ -7,16 +7,25 @@
 //! is now the only export path registered in `lib.rs`.
 //!
 //! Import routes by the file's magic bytes, never its extension (a renamed
-//! file must still work): `share_pick_import_file` and `share_import` both
-//! call `detect_import_kind` independently rather than trusting a
-//! frontend-supplied `kind` round-tripped from the former. A `legacy_json`
-//! file is hand off to `remote::server_commands::{read_legacy_export_payload,
+//! file must still work): `share_pick_import_file`, `share_import_plan` and
+//! `share_import_apply` all call `detect_import_kind` independently rather
+//! than trusting a frontend-supplied `kind` round-tripped from the former. A
+//! `legacy_json` file is hand off to
+//! `remote::server_commands::{read_legacy_export_payload,
 //! apply_legacy_import}` — the same applying logic the now-removed
 //! `remote_import` command used to call directly (2026-08-16 review finding
 //! M17: it had no frontend caller left once this module's import path
 //! superseded it), so legacy behaviour (`merge_import`, regenerated ids,
 //! `resolve_imported_tunnel_keys`) is untouched, just reachable from a path
 //! that was already picked rather than that command's own dialog.
+//!
+//! Import used to be one combined command; it now splits into a
+//! plan step (`share_import_plan`, decodes and plans against current state,
+//! mutates nothing) and an apply step (`share_import_apply`, re-decodes,
+//! re-plans, overlays the caller's per-row decisions, then executes) so the
+//! frontend can show a conflict preview between the two. The apply step
+//! deliberately re-decodes and re-plans rather than reusing a plan cached
+//! from the preview call — see `share_import_apply`'s doc comment.
 
 use std::io::Read;
 use std::path::Path;
@@ -28,8 +37,10 @@ use tauri::Emitter;
 use ts_rs::TS;
 use zeroize::Zeroize;
 
+use termlab_remote::config::{SavedTunnel, ServerEntry};
 use termlab_share::export_planner::{ExportRequest, KeyReader, plan};
 use termlab_share::import_executor::{ImportOutcome, VaultSink, execute};
+use termlab_share::import_planner::{ConflictStatus, ImportPlan, ItemAction, PlannedItem};
 use termlab_vault::VaultManager;
 use termlab_vault::model::VaultAccount;
 
@@ -349,7 +360,7 @@ pub(crate) struct ImportFileInfo {
 /// Offer a native open dialog for both bundle and legacy JSON files, then
 /// classify the chosen file by its magic bytes (see `detect_import_kind`)
 /// so the frontend knows whether to prompt for a password before calling
-/// `share_import`.
+/// `share_import_plan`.
 #[tauri::command]
 pub(crate) async fn share_pick_import_file(
     app: tauri::AppHandle,
@@ -395,6 +406,195 @@ fn detect_import_kind(path: &Path) -> Result<&'static str, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// share_import_plan
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub(crate) struct ImportPreviewRow {
+    pub kind: String,
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub status: String,
+    pub default_action: String,
+}
+
+/// What `share_import_apply` would do with every decision left at its
+/// default — computed by actually running the planner, never guessed on the
+/// frontend. Mutates nothing: no file is written, no config is touched, no
+/// vault is opened beyond a read of its lock state.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub(crate) struct ImportPreview {
+    pub rows: Vec<ImportPreviewRow>,
+    pub includes_credentials: bool,
+    pub vault_state: String,
+}
+
+/// One user override for a previewed row, matched back to a re-planned row
+/// by `(kind, id)` — see `share_import_apply`'s doc comment for why matching
+/// rather than positional/cached state is used.
+#[derive(serde::Deserialize)]
+pub(crate) struct ImportDecision {
+    pub kind: String,
+    pub id: String,
+    pub action: String,
+    pub label: Option<String>,
+}
+
+/// Plan step of the import flow (see [`ImportPreview`]): decodes the bundle
+/// and runs the exact same planner `share_import_apply` will, against
+/// current `config` and the vault's current account ids, and reports the
+/// result as flat rows for a table. Never writes anything — not to `config`,
+/// not to disk, not to the vault.
+#[tauri::command]
+pub(crate) async fn share_import_plan(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
+    path: String,
+    mut password: String,
+) -> Result<ImportPreview, String> {
+    let result = do_import_plan(&remote, &vault, &path, &password);
+    password.zeroize();
+    result
+}
+
+fn do_import_plan(
+    remote: &Arc<Mutex<RemoteState>>,
+    vault: &VaultState,
+    path: &str,
+    password: &str,
+) -> Result<ImportPreview, String> {
+    let file_path = Path::new(path);
+    let kind = detect_import_kind(file_path)?;
+    if kind != "bundle" {
+        // The legacy JSON path has no conflicts to preview — it always
+        // regenerates ids and appends. The frontend never calls this for a
+        // `legacy_json` file (see `importConfig`'s branch on
+        // `share_pick_import_file`'s `kind`); this guards against a
+        // misrouted call instead of planning nonsense.
+        return Err("Legacy JSON imports have no preview".to_string());
+    }
+
+    let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+    let bundle =
+        termlab_share::codec::decode(&bytes, password.as_bytes()).map_err(|e| e.to_string())?;
+
+    let vault_mgr = vault.lock();
+    let existing_account_ids: Vec<uuid::Uuid> = if !vault_mgr.is_locked() {
+        vault_mgr
+            .list_accounts()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|a| a.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let vault_state = if !vault_mgr.vault_exists() {
+        "absent"
+    } else if vault_mgr.is_locked() {
+        "locked"
+    } else {
+        "unlocked"
+    };
+    drop(vault_mgr);
+
+    let state = remote.lock();
+    let import_plan =
+        termlab_share::import_planner::plan(&bundle, &state.config, &existing_account_ids);
+    drop(state);
+
+    Ok(ImportPreview {
+        rows: flatten_import_rows(&import_plan),
+        includes_credentials: bundle.metadata.includes_credentials,
+        vault_state: vault_state.to_string(),
+    })
+}
+
+/// Flatten an [`ImportPlan`] into display rows: folder entries and ungrouped
+/// servers both become `kind: "host"` (the recipient's config doesn't
+/// distinguish them for conflict purposes — see
+/// `import_planner::plan`'s use of `config.find_server`, which scans both),
+/// tunnels become `"tunnel"`, and vault accounts become `"credential"`.
+/// Bundled keys produce no rows — see the design spec: a key is never
+/// independently meaningful to a user and always follows whichever account
+/// survives the user's decisions.
+fn flatten_import_rows(plan: &ImportPlan) -> Vec<ImportPreviewRow> {
+    let mut rows = Vec::new();
+    for folder in &plan.folders {
+        rows.extend(folder.entries.iter().map(host_row));
+    }
+    rows.extend(plan.servers.iter().map(host_row));
+    rows.extend(plan.tunnels.iter().map(tunnel_row));
+    rows.extend(plan.accounts.iter().map(credential_row));
+    rows
+}
+
+fn host_row(planned: &PlannedItem<ServerEntry>) -> ImportPreviewRow {
+    ImportPreviewRow {
+        kind: "host".to_string(),
+        id: planned.item.id.clone(),
+        label: planned.item.label.clone(),
+        detail: match &planned.item.user {
+            Some(user) => format!("{user}@{}:{}", planned.item.host, planned.item.port),
+            None => format!("{}:{}", planned.item.host, planned.item.port),
+        },
+        status: status_str(planned.status).to_string(),
+        default_action: action_str(&planned.action).to_string(),
+    }
+}
+
+fn tunnel_row(planned: &PlannedItem<SavedTunnel>) -> ImportPreviewRow {
+    ImportPreviewRow {
+        kind: "tunnel".to_string(),
+        id: planned.item.id.to_string(),
+        label: planned.item.label.clone(),
+        detail: format!(
+            "L{} → {}:{}",
+            planned.item.local_port, planned.item.remote_host, planned.item.remote_port
+        ),
+        status: status_str(planned.status).to_string(),
+        default_action: action_str(&planned.action).to_string(),
+    }
+}
+
+fn credential_row(planned: &PlannedItem<VaultAccount>) -> ImportPreviewRow {
+    ImportPreviewRow {
+        kind: "credential".to_string(),
+        id: planned.item.id.to_string(),
+        label: planned.item.display_name.clone(),
+        detail: planned.item.username.clone(),
+        status: status_str(planned.status).to_string(),
+        default_action: action_str(&planned.action).to_string(),
+    }
+}
+
+fn status_str(status: ConflictStatus) -> &'static str {
+    match status {
+        ConflictStatus::New => "new",
+        ConflictStatus::SameId => "same_id",
+        ConflictStatus::LabelCollision => "label_collision",
+        ConflictStatus::ReferenceBroken => "reference_broken",
+    }
+}
+
+/// The planner never defaults an item to `Rename` (see `classify` in
+/// `import_planner.rs`) — `Rename` only ever arrives as a user override via
+/// `ImportDecision`, applied in `apply_decisions` below — so this arm is
+/// unreachable in practice for `default_action`, but is handled rather than
+/// panicking in case that ever changes.
+fn action_str(action: &ItemAction) -> &'static str {
+    match action {
+        ItemAction::Add => "add",
+        ItemAction::Replace => "replace",
+        ItemAction::Skip => "skip",
+        ItemAction::Rename(_) => "rename",
+    }
+}
+
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub(crate) struct ShareImportSummary {
@@ -436,36 +636,113 @@ impl VaultSink for TauriVaultSink<'_> {
     }
 }
 
-/// Import `path` (as previously chosen by `share_pick_import_file`),
-/// routed by its own magic-byte check rather than trusting a
-/// frontend-supplied kind.
+/// Turn one frontend [`ImportDecision`] into the [`ItemAction`] it names.
+/// `"rename"` with no label is rejected outright — a silent no-op here
+/// would mean the user picked "rename" in the UI and nothing happened, with
+/// no error to explain why.
+fn action_from_decision(decision: &ImportDecision) -> Result<ItemAction, String> {
+    match decision.action.as_str() {
+        "add" => Ok(ItemAction::Add),
+        "replace" => Ok(ItemAction::Replace),
+        "skip" => Ok(ItemAction::Skip),
+        "rename" => match &decision.label {
+            Some(label) => Ok(ItemAction::Rename(label.clone())),
+            None => Err("Rename requires a label".to_string()),
+        },
+        other => Err(format!("Unknown import action: {other}")),
+    }
+}
+
+fn decision_for<'a>(
+    decisions: &'a [ImportDecision],
+    kind: &str,
+    id: &str,
+) -> Option<&'a ImportDecision> {
+    decisions.iter().find(|d| d.kind == kind && d.id == id)
+}
+
+/// Overlay the frontend's per-row `decisions` onto a freshly re-planned
+/// `plan`, matched by `(kind, id)` rather than position — see
+/// `share_import_apply`'s doc comment for why the plan is rebuilt from
+/// scratch on every apply call rather than reused from the preview. A row
+/// with no matching decision keeps the default `.action` the planner already
+/// gave it (covers both "the user didn't touch this row" and "this row is
+/// new since the preview was shown"); a decision whose `(kind, id)` matches
+/// nothing in `plan` is silently unused (covers "this row existed in the
+/// preview but is gone now").
+fn apply_decisions(plan: &mut ImportPlan, decisions: &[ImportDecision]) -> Result<(), String> {
+    for folder in &mut plan.folders {
+        for entry in &mut folder.entries {
+            if let Some(d) = decision_for(decisions, "host", &entry.item.id) {
+                entry.action = action_from_decision(d)?;
+            }
+        }
+    }
+    for entry in &mut plan.servers {
+        if let Some(d) = decision_for(decisions, "host", &entry.item.id) {
+            entry.action = action_from_decision(d)?;
+        }
+    }
+    for entry in &mut plan.tunnels {
+        let id = entry.item.id.to_string();
+        if let Some(d) = decision_for(decisions, "tunnel", &id) {
+            entry.action = action_from_decision(d)?;
+        }
+    }
+    for entry in &mut plan.accounts {
+        let id = entry.item.id.to_string();
+        if let Some(d) = decision_for(decisions, "credential", &id) {
+            entry.action = action_from_decision(d)?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply step of the import flow (see [`ImportPreview`]): the frontend calls
+/// this after the user has seen `share_import_plan`'s preview and confirmed,
+/// passing back whatever `ImportDecision`s override the planner's defaults.
+///
+/// Re-reads `path`, re-decodes and re-plans from scratch rather than reusing
+/// a plan cached from the preview call — deliberately: holding the decoded
+/// bundle (private key material included) in backend state between two IPC
+/// round trips is a bigger risk than the cost of planning twice, mirroring
+/// `share_export`'s preview/write split. The cost is that the plan may have
+/// moved under us between the two calls, so decisions are matched to the
+/// re-planned rows by `(kind, id)`: a decision for a row that no longer
+/// exists is ignored, and a row that appeared keeps its default (see
+/// `apply_decisions`).
+///
+/// Routed by its own magic-byte check rather than trusting a
+/// frontend-supplied kind, same as `share_import_plan`.
 ///
 /// Password handling mirrors `share_export`: `password` arrives as a plain
 /// `String` command argument (Tauri has no secret-string type), is never
 /// logged, is forwarded to `codec::decode` by reference only, and is
 /// zeroized before this function returns on every path via the
-/// `do_import`/zeroize split below. A `legacy_json` file ignores the
+/// `do_import_apply`/zeroize split below. A `legacy_json` file ignores the
 /// password (that format has no encryption); it is zeroized anyway for
 /// uniformity.
 #[tauri::command]
-pub(crate) async fn share_import(
+pub(crate) async fn share_import_apply(
     app: tauri::AppHandle,
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
     vault: tauri::State<'_, VaultState>,
     path: String,
     mut password: String,
+    decisions: Vec<ImportDecision>,
 ) -> Result<ShareImportSummary, String> {
-    let result = do_import(&app, &remote, &vault, &path, &password);
+    let result = do_import_apply(&app, &remote, &vault, &path, &password, decisions);
     password.zeroize();
     result
 }
 
-fn do_import(
+fn do_import_apply(
     app: &tauri::AppHandle,
     remote: &Arc<Mutex<RemoteState>>,
     vault: &VaultState,
     path: &str,
     password: &str,
+    decisions: Vec<ImportDecision>,
 ) -> Result<ShareImportSummary, String> {
     let file_path = Path::new(path);
     let kind = detect_import_kind(file_path)?;
@@ -502,8 +779,9 @@ fn do_import(
         Vec::new()
     };
 
-    let import_plan =
+    let mut import_plan =
         termlab_share::import_planner::plan(&bundle, &state.config, &existing_account_ids);
+    apply_decisions(&mut import_plan, &decisions)?;
 
     let key_dir = state.paths.config_dir.join("imported-keys");
     std::fs::create_dir_all(&key_dir).map_err(|e| format!("Failed to prepare key storage: {e}"))?;

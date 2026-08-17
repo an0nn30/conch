@@ -856,7 +856,8 @@
     }
   }
 
-  /** Call share_import for an already-picked `path`, refresh the panel and
+  /** Call share_import_apply (via data-service's importFile) for an
+   * already-picked `path`, refresh the panel and
    * show the summary dialog/toast on success. Returns null on success, or
    * the error message string on failure (the bundle password dialog uses
    * that to re-show itself with an inline error; the legacy-file direct
