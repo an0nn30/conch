@@ -3,7 +3,9 @@
   "productName": "TermLab",
   "identifier": "com.termlab.app",
   "build": {
-    "frontendDist": "frontend"
+    "frontendDist": "frontend",
+    "beforeDevCommand": "npm --prefix crates/termlab_tauri/frontend ci && npm --prefix crates/termlab_tauri/frontend run build:vendor",
+    "beforeBuildCommand": "npm --prefix crates/termlab_tauri/frontend ci && npm --prefix crates/termlab_tauri/frontend run build:vendor"
   },
   "app": {
     "withGlobalTauri": true,

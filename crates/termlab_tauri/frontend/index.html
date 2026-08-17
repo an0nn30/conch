@@ -91,6 +91,11 @@
        canvas context before the WebGL texture atlas is built, causing the
        terminal to render with a fallback font.  The canvas renderer in
        xterm.js 5.x is fast enough for interactive use. -->
+
+  <!-- CodeMirror 6, bundled by frontend/build-vendor.mjs. Generated, git-ignored;
+       run `npm run build:vendor` in frontend/ if this 404s. -->
+  <script src="vendor/codemirror/codemirror.js"></script>
+
   <script src="app/core/utils.js"></script>
   <script src="app/core/pane-title.js"></script>
   <script src="app/core/window-size.js"></script>
