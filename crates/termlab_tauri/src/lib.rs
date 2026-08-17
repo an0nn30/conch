@@ -46,6 +46,28 @@ pub(crate) struct TauriState {
 }
 
 /// Launch the Tauri-based UI.
+/// First approximation of the pixel size for a columns x lines setting.
+///
+/// Deliberately rough: the real cell size depends on the font, which only
+/// exists inside the webview, so the frontend measures a fitted terminal and
+/// corrects this to the exact cell count (app/core/window-size.js). This just
+/// needs to be close enough that the correction is not a visible jump.
+///
+/// 0 columns/lines means "leave it to the system", which here means falling
+/// back to a sensible default window rather than collapsing to nothing.
+pub(crate) fn estimate_window_px(dims: &termlab_core::config::WindowDimensions) -> (f64, f64) {
+    const APPROX_CELL_W: f64 = 8.0;
+    const APPROX_CELL_H: f64 = 16.0;
+    const CHROME_W: f64 = 40.0;
+    const CHROME_H: f64 = 50.0;
+    if dims.columns == 0 || dims.lines == 0 {
+        return (1200.0, 800.0);
+    }
+    let w = (dims.columns as f64) * APPROX_CELL_W + CHROME_W;
+    let h = (dims.lines as f64) * APPROX_CELL_H + CHROME_H;
+    (w.max(600.0), h.max(400.0))
+}
+
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
     // Use the user's home directory as a stable "workspace" label rather than
     // the process's actual cwd (current_dir() titled the window after the
@@ -67,21 +89,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     let vault_state: vault_commands::VaultState =
         Arc::new(Mutex::new(termlab_vault::VaultManager::new(vault_path)));
 
-    // Load persisted window size, falling back to config dimensions.
-    let persisted = config::load_persistent_state().unwrap_or_default();
+    // Window size comes from the configured columns x lines, never from the
+    // last session's pixels. Restoring the saved size made the setting inert
+    // after first run, and meant a window spawned from a full-screen one opened
+    // full-screen. This is only a first approximation — real cell metrics live
+    // in the webview, so the frontend corrects it to the exact cell count once
+    // the terminal has measured itself (app/core/window-size.js).
     let cfg_dims = &config.window.dimensions;
-    let cfg_w = (cfg_dims.columns.max(80) as f64) * 8.0 + 40.0; // rough cell→pixel
-    let cfg_h = (cfg_dims.lines.max(24) as f64) * 16.0 + 50.0;
-    let initial_width = if persisted.layout.window_width > 100.0 {
-        persisted.layout.window_width as f64
-    } else {
-        cfg_w.max(600.0)
-    };
-    let initial_height = if persisted.layout.window_height > 100.0 {
-        persisted.layout.window_height as f64
-    } else {
-        cfg_h.max(400.0)
-    };
+    let (initial_width, initial_height) = estimate_window_px(cfg_dims);
+    // Still needed for zoom, which is genuinely a restored preference.
+    let persisted = config::load_persistent_state().unwrap_or_default();
     let user_wants_decorations = !matches!(
         config.window.decorations,
         termlab_core::config::WindowDecorations::None

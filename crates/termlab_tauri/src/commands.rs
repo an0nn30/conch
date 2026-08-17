@@ -270,6 +270,11 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     let logical_h = size.height as f64 / scale;
 
     let mut state = config::load_persistent_state().unwrap_or_default();
+    // Recorded for diagnostics only. Nothing reads these back for sizing any
+    // more: windows open at the configured columns x lines (see
+    // estimate_window_px and app/core/window-size.js), so restoring the last
+    // session's pixels would defeat that setting — and made a window spawned
+    // from a full-screen one open full-screen.
     state.layout.window_width = logical_w as f32;
     state.layout.window_height = logical_h as f32;
     if let Some(w) = layout.ssh_panel_width {

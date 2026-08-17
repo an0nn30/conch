@@ -106,19 +106,13 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         }
     };
 
-    let persisted = config::load_persistent_state().unwrap_or_default();
-    let w = if persisted.layout.window_width > 100.0 {
-        persisted.layout.window_width as f64
-    } else {
-        1200.0
-    };
-    let h = if persisted.layout.window_height > 100.0 {
-        persisted.layout.window_height as f64
-    } else {
-        800.0
-    };
-
     let user_cfg = config::load_user_config().unwrap_or_default();
+    // Same rule as the first window: the configured columns x lines decide the
+    // size, not the previous session's pixels and not the parent window's.
+    // Opening a new window off a full-screen one used to inherit its size.
+    let (w, h) = crate::estimate_window_px(&user_cfg.window.dimensions);
+    // Still needed for zoom, which is genuinely a restored preference.
+    let persisted = config::load_persistent_state().unwrap_or_default();
     let user_wants_dec = !matches!(
         user_cfg.window.decorations,
         termlab_core::config::WindowDecorations::None
