@@ -175,6 +175,18 @@
     global.tlCombo.attach(decoSelect);
     setRowTarget(decoRow, 'appearance:window-decorations');
 
+    const zenNewWindowCheckbox = makeCheckbox(
+      pendingSettings.window.new_window_zen_mode !== false,
+      (val) => { pendingSettings.window.new_window_zen_mode = val; }
+    );
+    const zenNewWindowRow = addRow(
+      container,
+      'New windows open in zen mode',
+      'Extra windows (⇧⌘N) start with the panels hidden, whatever this window shows',
+      zenNewWindowCheckbox
+    );
+    setRowTarget(zenNewWindowRow, 'appearance:new-window-zen-mode');
+
     if (typeof navigator !== 'undefined' && navigator.platform.includes('Mac')) {
       const menuBarCheckbox = makeCheckbox(
         !!pendingSettings.termlab.ui.native_menu_bar,

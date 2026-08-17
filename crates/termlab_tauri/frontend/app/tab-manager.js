@@ -141,6 +141,10 @@
       } catch (_) {
         // A missing/denied Tauri window API must never break tab switching.
       }
+      // In zen mode the OS titlebar is gone, so the drag strip shows the same
+      // string. Harmless when not in zen: the element is hidden.
+      const dragHandle = document.getElementById('drag-handle');
+      if (dragHandle) dragHandle.textContent = title === 'TermLab' ? '' : title;
     }
 
     async function resolveWorkspaceFromLaunch() {

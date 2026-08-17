@@ -131,7 +131,31 @@
             rightVisible: layoutData.ssh_panel_visible !== false,
             bottomVisible: layoutData.bottom_panel_visible !== false,
           };
-          if (layoutData.zen_mode === true) {
+          // A window opened with Cmd+Shift+N starts in zen mode when the
+          // setting is on, whatever the saved layout says: the usual shape is
+          // one main window with the panels showing and extra windows used as
+          // bare terminals. create_new_window labels these "window-N"; the
+          // first window is "main".
+          //
+          // __termlabZenIsSessionDefault marks zen as belonging to this window
+          // only. tool-window-runtime.js's save path reads it and persists the
+          // INHERITED zen state instead of the live one, so a throwaway window
+          // never teaches the shared layout to open the main window in zen.
+          // Toggling zen by hand clears the flag (menu-actions.js), making the
+          // choice persist as usual.
+          let zenOn = layoutData.zen_mode === true;
+          try {
+            const label = await invoke('current_window_label');
+            const isSecondaryWindow = typeof label === 'string' && label.startsWith('window-');
+            if (isSecondaryWindow && appCfg && appCfg.new_window_zen_mode !== false) {
+              zenOn = true;
+              window.__termlabZenIsSessionDefault = true;
+            }
+          } catch (_) {
+            // No window label: treat it as the main window and honour the
+            // saved layout.
+          }
+          if (zenOn) {
             document.getElementById('app').classList.add('zen-mode');
           } else {
             document.getElementById('app').classList.remove('zen-mode');

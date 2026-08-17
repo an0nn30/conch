@@ -49,6 +49,15 @@ impl Default for WindowDimensions {
 pub struct WindowConfig {
     pub dimensions: WindowDimensions,
     pub decorations: WindowDecorations,
+    /// Open additional windows (Cmd+Shift+N) in zen mode regardless of the
+    /// saved layout's own zen state.
+    ///
+    /// The common shape is one main window with the panels showing and extra
+    /// windows used as bare terminals, so this defaults on. A window opened
+    /// this way does NOT persist zen back into the shared layout — see
+    /// tool-window-runtime.js's save path — otherwise the main window would
+    /// inherit it on next launch.
+    pub new_window_zen_mode: bool,
 }
 
 impl Default for WindowConfig {
@@ -56,6 +65,7 @@ impl Default for WindowConfig {
         Self {
             dimensions: WindowDimensions::default(),
             decorations: WindowDecorations::default(),
+            new_window_zen_mode: true,
         }
     }
 }
@@ -72,6 +82,16 @@ mod tests {
     fn parse_dec(toml_str: &str) -> Result<WindowDecorations, toml::de::Error> {
         let w: DecWrapper = toml::from_str(toml_str)?;
         Ok(w.decorations)
+    }
+
+    #[test]
+    fn new_window_zen_mode_defaults_on_and_round_trips() {
+        assert!(WindowConfig::default().new_window_zen_mode);
+        let parsed: WindowConfig = toml::from_str("new_window_zen_mode = false").unwrap();
+        assert!(!parsed.new_window_zen_mode);
+        // Absent from an existing config file: the default still applies.
+        let empty: WindowConfig = toml::from_str("").unwrap();
+        assert!(empty.new_window_zen_mode);
     }
 
     #[test]

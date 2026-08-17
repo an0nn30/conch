@@ -90,7 +90,15 @@
           files_panel_visible: leftVisible,
           bottom_panel_visible: bottomVisible,
           bottom_panel_height: rememberRealBottomHeight(bottomZoneWrapEl ? bottomZoneWrapEl.offsetHeight : 0),
-          zen_mode: !!(appRoot && appRoot.classList.contains('zen-mode')),
+          // A window whose zen came from the "new windows open in zen"
+          // default persists the state it INHERITED, not the live one.
+          // Otherwise a throwaway window would write zen_mode = true into the
+          // shared layout and the main window would open in zen next launch —
+          // the flag is cleared the moment the user toggles zen by hand, so a
+          // deliberate choice still persists.
+          zen_mode: window.__termlabZenIsSessionDefault === true
+            ? window.__termlabInitialZenMode === true
+            : !!(appRoot && appRoot.classList.contains('zen-mode')),
           tool_window_zones: twm.getZoneAssignments(),
           active_tool_windows: typeof twm.getActiveZoneAssignments === 'function'
             ? twm.getActiveZoneAssignments()

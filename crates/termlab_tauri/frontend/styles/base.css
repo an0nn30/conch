@@ -39,6 +39,21 @@
       -webkit-app-region: drag;
     }
     #drag-handle.visible { display: block; }
+    /* In zen mode the grab strip doubles as the titlebar: it is the only
+       chrome left, so it carries what the active tab would otherwise show.
+       Centred and muted so it reads as chrome, not as content. */
+    #drag-handle {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      color: var(--dim-fg);
+      font-size: var(--ui-font-small);
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      padding: 0 80px; /* clear of the traffic lights on macOS */
+    }
+    #drag-handle.visible { display: flex; }
 
     html.no-animations *,
     html.no-animations *::before,

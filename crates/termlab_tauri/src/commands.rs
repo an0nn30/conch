@@ -29,6 +29,7 @@ pub(crate) fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json:
         "appearance_mode": format!("{:?}", cfg.colors.appearance_mode).to_lowercase(),
         "zen_mode_shortcut": cfg.termlab.keyboard.zen_mode,
         "decorations": dec,
+        "new_window_zen_mode": cfg.window.new_window_zen_mode,
         "platform": std::env::consts::OS,
         "debug_build": cfg!(debug_assertions),
         "notification_position": cfg.termlab.ui.notification_position,

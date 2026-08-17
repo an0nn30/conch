@@ -144,6 +144,9 @@
         return;
       }
       if (action === 'zen-mode') {
+        // An explicit toggle is a real preference: stop treating this window's
+        // zen state as a session-only default so it persists again.
+        window.__termlabZenIsSessionDefault = false;
         const appRoot = document.getElementById('app');
 
         if (!zenState.active) {
