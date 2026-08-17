@@ -5,7 +5,7 @@
   position: absolute;
   inset: 0;
   overflow: hidden;
-  background: var(--tl-terminal-bg);
+  background: var(--tl-terminal-bg, var(--tl-bg));
 }
 
 .editor-pane-host .cm-editor {

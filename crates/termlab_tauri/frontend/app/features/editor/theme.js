@@ -23,7 +23,7 @@
     const muted = token('--tl-fg-muted');
     const accent = token('--tl-accent');
     const border = token('--tl-border');
-    const selection = token('--tl-selection', '--tl-accent');
+    const selection = token('--tl-selection-bg', '--tl-accent');
     const rowHover = token('--tl-row-hover');
 
     const theme = CM.EditorView.theme({
@@ -42,11 +42,11 @@
     const t = CM.tags;
     const highlight = CM.HighlightStyle.define([
       { tag: [t.keyword, t.controlKeyword, t.moduleKeyword], color: accent },
-      { tag: [t.string, t.special(t.string)], color: token('--tl-success', '--tl-accent') },
+      { tag: [t.string, t.special(t.string)], color: token('--green', '--tl-accent') },
       { tag: [t.comment, t.lineComment, t.blockComment], color: muted, fontStyle: 'italic' },
-      { tag: [t.number, t.bool, t.null], color: token('--tl-warning', '--tl-accent') },
-      { tag: [t.function(t.variableName), t.definition(t.variableName)], color: fg },
-      { tag: [t.typeName, t.className], color: accent },
+      { tag: [t.number, t.bool, t.null], color: token('--yellow', '--tl-accent') },
+      { tag: [t.function(t.variableName), t.definition(t.variableName)], color: token('--blue', '--tl-fg') },
+      { tag: [t.typeName, t.className], color: token('--cyan', '--tl-accent') },
       { tag: t.propertyName, color: fg },
       { tag: t.operator, color: muted },
       { tag: t.invalid, color: token('--tl-danger') },
