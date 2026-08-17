@@ -138,6 +138,66 @@ impl PtyBackend {
     pub fn current_dir(&self) -> Option<String> {
         self.process_id.and_then(cwd_for_pid)
     }
+
+    /// Name of the program currently in the foreground of this PTY, or None
+    /// when that is just the shell itself.
+    ///
+    /// The shell is deliberately reported as None: a title reading
+    /// "dustin@mbp: zsh" says nothing a user wants, and the caller falls back
+    /// to the working directory instead. Only a program the user actually
+    /// started (vim, ssh, cargo) is worth naming.
+    pub fn foreground_program(&self) -> Option<String> {
+        let shell_pid = self.process_id?;
+        let pgid = foreground_pgid(&self.master)?;
+        // The foreground group is the shell's own when nothing else is running.
+        if pgid == shell_pid {
+            return None;
+        }
+        process_name_for_pid(pgid)
+    }
+}
+
+/// The foreground process group of a PTY, via tcgetpgrp(3) on the master fd.
+#[cfg(unix)]
+fn foreground_pgid(master: &Box<dyn MasterPty + Send>) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let fd = master.as_raw_fd()?;
+    let pgid = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+    if pgid <= 0 { None } else { Some(pgid as u32) }
+}
+
+#[cfg(not(unix))]
+fn foreground_pgid(_master: &Box<dyn MasterPty + Send>) -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_name_for_pid(pid: u32) -> Option<String> {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = comm.trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+#[cfg(target_os = "macos")]
+fn process_name_for_pid(pid: u32) -> Option<String> {
+    let mut buf = [0u8; 256]; // PROC_PIDPATHINFO_MAXSIZE is larger, but a name is short
+    let rc = unsafe {
+        libc::proc_name(
+            pid as libc::c_int,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as u32,
+        )
+    };
+    if rc <= 0 {
+        return None;
+    }
+    let name = std::str::from_utf8(&buf[..rc as usize]).ok()?.trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_name_for_pid(_pid: u32) -> Option<String> {
+    None
 }
 
 #[cfg(target_os = "linux")]

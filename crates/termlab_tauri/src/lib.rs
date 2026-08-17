@@ -502,6 +502,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             pty::resize_pty,
             pty::close_pty,
             pty::get_local_pane_cwd,
+            pty::get_local_pane_process,
+            pty::get_host_identity,
             commands::current_window_label,
             commands::set_active_pane,
             commands::get_saved_layout,

@@ -41,6 +41,8 @@
     const refreshSshSessions = deps.refreshSshSessions;
     const setWindowTitle = deps.setWindowTitle;
     const getLocalPaneCwd = deps.getLocalPaneCwd;
+    const getLocalPaneProcess = deps.getLocalPaneProcess;
+    const getHostIdentity = deps.getHostIdentity;
     const getWorkspaceDir = deps.getWorkspaceDir;
 
     // Window title = "<workspace basename> – <active tab title>", falling
@@ -66,6 +68,62 @@
       return last || trimmed;
     }
 
+    // ---- Tab titles -------------------------------------------------------
+    // Composed by app/core/pane-title.js from a snapshot of the pane's state:
+    // "dustin@mbp: ~/projects/conch — 120×30". The pieces arrive from three
+    // places — user/host once at startup, cwd/foreground program from a poll on
+    // the active tab, and the size from the pane's own fit — so each is cached
+    // on the tab and the title is recomposed whenever any of them moves.
+    let hostIdentity = { user: '', host: '' };
+    let homeDir = '';
+
+    function composeFor(tab) {
+      const composer = window.termlabPaneTitle;
+      if (!composer || !tab) return null;
+      const pane = tab.focusedPaneId != null ? getPanes().get(tab.focusedPaneId) : null;
+      return composer.composeTitle({
+        user: hostIdentity.user,
+        host: hostIdentity.host,
+        home: homeDir,
+        cwd: tab.titleCwd,
+        program: tab.titleProgram,
+        oscTitle: tab.oscTitle,
+        cols: pane ? pane.lastCols : 0,
+        rows: pane ? pane.lastRows : 0,
+      });
+    }
+
+    // A plugin-supplied name is the user's own label and always wins.
+    function refreshTabTitle(tab) {
+      if (!tab || tab.pluginRenamed) return;
+      const title = composeFor(tab);
+      if (!title || title === tab.label) return;
+      tab.label = title;
+      setTabLabel(tab.button, title);
+      tab.button.title = title;
+      if (tab === currentTab()) updateWindowTitle();
+    }
+
+    async function pollActiveTabProcess() {
+      const tab = currentTab();
+      if (!tab || typeof getLocalPaneProcess !== 'function') return;
+      const paneId = tab.focusedPaneId;
+      if (paneId == null) return;
+      try {
+        const info = await getLocalPaneProcess(paneId);
+        if (!info) return;
+        // Only the active tab is polled; a tab switch re-polls immediately, so
+        // a stale reply for a tab that is no longer active is discarded.
+        if (currentTab() !== tab) return;
+        tab.titleCwd = info.cwd || '';
+        tab.titleProgram = info.program || '';
+        refreshTabTitle(tab);
+      } catch (_) {
+        // A pane that has exited, or a platform without process introspection
+        // (Windows): keep whatever the title already says.
+      }
+    }
+
     function updateWindowTitle() {
       if (typeof setWindowTitle !== 'function') return;
       const tab = currentTab();
@@ -73,8 +131,10 @@
       if (!tab) {
         title = 'TermLab';
       } else {
-        const tabTitle = getTabLabel(tab.button) || tab.label || 'Terminal';
-        title = workspaceBasename ? (workspaceBasename + ' – ' + tabTitle) : tabTitle;
+        // The window title mirrors the active tab exactly. It used to prefix
+        // the workspace basename; the tab title now carries user@host and the
+        // path itself, so the prefix was duplicating what follows it.
+        title = getTabLabel(tab.button) || tab.label || 'Terminal';
       }
       try {
         Promise.resolve(setWindowTitle(title)).catch(() => {});
@@ -116,6 +176,25 @@
     // Kick off the authoritative (launch-cwd) resolution immediately; the
     // per-tab fallback below only fires if this hasn't produced a value yet.
     resolveWorkspaceFromLaunch();
+
+    // user/host/home never change while the app runs, so they are fetched once
+    // rather than on every poll tick.
+    if (typeof getHostIdentity === 'function') {
+      Promise.resolve(getHostIdentity()).then((id) => {
+        if (!id) return;
+        hostIdentity = { user: id.user || '', host: id.host || '' };
+        homeDir = id.home || '';
+        const tab = currentTab();
+        if (tab) refreshTabTitle(tab);
+      }).catch(() => {});
+    }
+
+    // Poll only the active tab: a background tab's cwd is not on screen, and
+    // the cost of this is one IPC round trip per second regardless of how many
+    // tabs are open. TITLE_POLL_MS is slow enough to be free and fast enough
+    // that a `cd` shows up before the user looks away.
+    const TITLE_POLL_MS = 1000;
+    setInterval(pollActiveTabProcess, TITLE_POLL_MS);
 
     function makeTabButton(label, onClose) {
       const button = document.createElement('button');
@@ -249,6 +328,9 @@
       if (!tabs.has(tabId)) return;
 
       setActiveTabId(tabId);
+      // Re-poll straight away rather than letting the newly active tab show a
+      // title up to a full poll interval stale.
+      pollActiveTabProcess();
       if (global) {
         global.__termlabActiveTabId = tabId;
         try {
@@ -405,11 +487,13 @@
       button.addEventListener('click', () => activateTab(tabId));
       term.onTitleChange((title) => {
         if (tab.pluginRenamed) return;
-        const tabTitle = normalizeTabTitle(title, tab.label);
+        // An explicit title from the shell or a program is a deliberate
+        // statement about what the pane is doing, so it becomes the body of the
+        // composed title (which still appends the size) rather than replacing
+        // the whole label.
+        tab.oscTitle = normalizeTabTitle(title, '');
         tab.hasCustomTitle = true;
-        setTabLabel(tab.button, tabTitle);
-        tab.button.title = tabTitle;
-        updateWindowTitle();
+        refreshTabTitle(tab);
       });
       term.onData((data) => {
         if (!pane.spawned) return;

@@ -206,6 +206,67 @@ pub(crate) fn close_pty(
     state.ptys.lock().remove(&key);
 }
 
+/// Local account and machine name for titles ("dustin@mbp: ...").
+///
+/// Neither changes while the app runs, so the frontend fetches this once at
+/// startup rather than including it in the per-tick pane poll. The hostname is
+/// shortened at the first dot: "mbp.local" reads as "mbp", matching what a
+/// shell prompt shows.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub(crate) struct HostIdentity {
+    pub user: String,
+    pub host: String,
+    /// Used to collapse a leading home directory to "~" in titles.
+    pub home: String,
+}
+
+#[tauri::command]
+pub(crate) fn get_host_identity() -> HostIdentity {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
+    let host = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .map(|h| h.split('.').next().unwrap_or(&h).to_string())
+        .unwrap_or_default();
+    let home = dirs::home_dir()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+    HostIdentity { user, host, home }
+}
+
+/// Working directory plus foreground program for a local pane, in one call.
+///
+/// The title poll runs on a timer for the active tab, so this deliberately
+/// returns both halves together rather than making the frontend issue two IPC
+/// round trips per tick. `program` is None when the shell itself is in the
+/// foreground — see `PtyBackend::foreground_program`.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub(crate) struct PaneProcessInfo {
+    pub cwd: Option<String>,
+    pub program: Option<String>,
+}
+
+#[tauri::command]
+pub(crate) fn get_local_pane_process(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, TauriState>,
+    pane_id: u32,
+) -> PaneProcessInfo {
+    let key = session_key(window.label(), pane_id);
+    let guard = state.ptys.lock();
+    match guard.get(&key) {
+        Some(pty) => PaneProcessInfo {
+            cwd: pty.current_dir(),
+            program: pty.foreground_program(),
+        },
+        None => PaneProcessInfo { cwd: None, program: None },
+    }
+}
+
 #[tauri::command]
 pub(crate) fn get_local_pane_cwd(
     window: tauri::WebviewWindow,

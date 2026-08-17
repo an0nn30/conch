@@ -173,6 +173,8 @@
             }
           },
           getLocalPaneCwd: (paneId) => invoke('get_local_pane_cwd', { paneId }).catch(() => null),
+          getLocalPaneProcess: (paneId) => invoke('get_local_pane_process', { paneId }).catch(() => null),
+          getHostIdentity: () => invoke('get_host_identity').catch(() => null),
           getWorkspaceDir: () => invoke('get_workspace_dir').catch(() => null),
           allocateTabId: () => allocTabId(),
           allocatePaneId: () => allocPaneId(),
