@@ -40,9 +40,20 @@
     const cellHeight = height / rows;
     if (!isFinite(cellWidth) || !isFinite(cellHeight)) return null;
 
+    // Already exactly right — say so, so the caller can stop.
+    if (cols === wantCols && rows === wantRows) return { dw: 0, dh: 0 };
+
+    // Aim for the MIDDLE of the band that yields the target count, not its
+    // lower edge. xterm's fit floors (cols = floor(width / cellWidth)), so
+    // sizing to exactly `target * cellWidth` lands on the boundary and a
+    // sub-pixel shortfall silently costs a column — and because the next pass
+    // computes the same sub-pixel delta, it never recovers. Half a cell of
+    // headroom puts us safely inside the band in either direction.
+    const targetW = (wantCols + 0.5) * cellWidth;
+    const targetH = (wantRows + 0.5) * cellHeight;
     return {
-      dw: Math.round((wantCols - cols) * cellWidth),
-      dh: Math.round((wantRows - rows) * cellHeight),
+      dw: Math.round(targetW - width),
+      dh: Math.round(targetH - height),
     };
   }
 

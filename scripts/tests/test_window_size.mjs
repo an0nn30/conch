@@ -32,10 +32,11 @@ const { sizeDelta } = sandbox.termlabWindowSize;
 // A terminal measuring 80x24 in an 800x480 box has 10x20 cells. Growing it to
 // 102x46 needs 22 more columns and 22 more rows.
 const current = { cols: 80, rows: 24, width: 800, height: 480 };
-assertDelta(sizeDelta(current, { cols: 102, rows: 46 }), 220, 440, 'grow to 102x46');
+// 10x20 cells: 102.5 cells wide = 1025px (from 800), 46.5 tall = 930px (from 480).
+assertDelta(sizeDelta(current, { cols: 102, rows: 46 }), 225, 450, 'grow to 102x46');
 
 // Shrinking yields negatives rather than clamping to zero.
-assertDelta(sizeDelta(current, { cols: 60, rows: 20 }), -200, -80, 'shrink');
+assertDelta(sizeDelta(current, { cols: 60, rows: 20 }), -195, -70, 'shrink');
 
 // Already the right size: no movement, but still a delta rather than null, so
 // callers can distinguish "nothing to do" from "cannot compute".
@@ -44,8 +45,14 @@ assertDelta(sizeDelta(current, { cols: 80, rows: 24 }), 0, 0, 'already correct')
 // Fractional cell sizes round rather than accumulating error.
 assertDelta(
   sizeDelta({ cols: 80, rows: 24, width: 803, height: 484 }, { cols: 81, rows: 25 }),
-  10, 20, 'fractional cells round',
+  15, 30, 'fractional cells round',
 );
+
+// The bug this bias exists for: one column short, with a fractional cell size.
+// Aiming at the boundary yields a delta that floors back to the same count, so
+// the loop sticks. The delta must clear the boundary instead.
+const oneShort = sizeDelta({ cols: 89, rows: 30, width: 748, height: 528 }, { cols: 90, rows: 30 });
+assert.ok(oneShort.dw >= Math.ceil(748 / 89), 'must add at least a full cell to gain a column');
 
 // 0 columns/lines is the documented "leave the window alone" escape hatch.
 assert.strictEqual(sizeDelta(current, { cols: 0, rows: 46 }), null);
