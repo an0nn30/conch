@@ -112,7 +112,15 @@
     const contents = pane.view.state.doc.toString();
     try {
       await invoke('editor_write_file', { path: pane.filePath, contents });
-      pane.view.termlabResetDirty();
+      // `dirty` is a plain boolean, not a diff against the document, and the
+      // update listener stops firing once it is set. So a keystroke that lands
+      // between the snapshot above and this line is on screen but not in the
+      // file — clearing the flag unconditionally would mark it saved and, once
+      // the close guards read pane.dirty, discard it without a prompt. Only
+      // reset when the buffer still matches the bytes that were written.
+      if (pane.view.state.doc.toString() === contents) {
+        pane.view.termlabResetDirty();
+      }
       if (pane.remote) await uploadRemote(pane);
     } catch (error) {
       toastError('Save Failed', String(error));
