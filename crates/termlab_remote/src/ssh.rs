@@ -257,7 +257,8 @@ pub(crate) async fn connect_via_proxy(
 
     #[cfg(windows)]
     let child = {
-        use std::os::windows::process::CommandExt;
+        // tokio::process::Command has an inherent creation_flags on Windows, so
+        // std::os::windows::process::CommandExt is not needed here.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         Command::new("cmd")
             .arg("/C")
