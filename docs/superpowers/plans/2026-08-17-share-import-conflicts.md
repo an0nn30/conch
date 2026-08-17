@@ -137,8 +137,10 @@ Expected: FAIL to compile — `ConflictStatus` does not exist.
 - [ ] **Step 3: Implement**
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
-#[ts(export)]
+// No serde/ts-rs derives: termlab_share is a pure domain crate with neither
+// dependency, and the Tauri layer maps this to a string for the frontend
+// (ImportPreviewRow::status in Task 3). Keep it that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictStatus {
     New,
     SameId,
