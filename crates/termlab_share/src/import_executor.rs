@@ -60,9 +60,25 @@ pub fn execute(
 
     // Counts reported to the caller: total server entries touched,
     // including those nested inside a planned folder (folders themselves
-    // have no counter of their own in `ImportOutcome`).
-    let servers_count = servers.len() + folders.iter().map(|f| f.entries.len()).sum::<usize>();
-    let tunnels_count = tunnels.len();
+    // have no counter of their own in `ImportOutcome`). Counted from
+    // `.action`, not `.len()` — a `Skip` row (e.g. a `ReferenceBroken`
+    // tunnel from `import_planner::plan`) still lives in the plan so the
+    // frontend can show it, but `apply_tunnel`/`apply_server` write nothing
+    // for it, so counting it here used to report "1 tunnel imported" for a
+    // tunnel that never touched `config` at all.
+    let servers_count = servers
+        .iter()
+        .filter(|p| actually_writes(&p.action))
+        .count()
+        + folders
+            .iter()
+            .flat_map(|f| f.entries.iter())
+            .filter(|p| actually_writes(&p.action))
+            .count();
+    let tunnels_count = tunnels
+        .iter()
+        .filter(|p| actually_writes(&p.action))
+        .count();
 
     // 1 & 2. Keys, then accounts — but only when a vault is actually open to
     // receive them. Keys used to be materialised to disk unconditionally,
@@ -82,6 +98,16 @@ pub fn execute(
             let key_paths = materialise_keys(&keys, key_dir)?;
             let mut imported = 0usize;
             for planned in accounts {
+                // Same reasoning as the server/tunnel counts above: a
+                // `Skip` row must not be written or counted. No account is
+                // planned as `Skip` today (the planner never produces
+                // `LabelCollision` for accounts and always has a caller-
+                // supplied id list to check `SameId` against), but this
+                // keeps writing and counting consistent with `.action`
+                // rather than relying on that staying true.
+                if !actually_writes(&planned.action) {
+                    continue;
+                }
                 let mut account = planned.item;
                 rewrite_key_marker(&mut account.auth, &key_paths);
                 sink.upsert_account(account).map_err(ShareError::Io)?;
@@ -246,6 +272,15 @@ fn rewrite_marker_path(path: &mut PathBuf, key_paths: &HashMap<Uuid, PathBuf>) {
     if let Some(real_path) = key_paths.get(&id) {
         *path = real_path.clone();
     }
+}
+
+/// Whether `action` actually writes the item somewhere (`Add`/`Replace`/
+/// `Rename`) as opposed to leaving `config`/the vault untouched (`Skip`).
+/// Used both by the `apply_*` functions below and by `execute`'s outcome
+/// counts, so the two can never drift apart the way they did before a
+/// `ReferenceBroken` tunnel's `Skip` row was still counted as imported.
+fn actually_writes(action: &ItemAction) -> bool {
+    !matches!(action, ItemAction::Skip)
 }
 
 // These apply functions switch on `planned.action` rather than re-deriving
@@ -764,6 +799,48 @@ mod tests {
         assert_eq!(
             config.folders[0].entries[0].label, "a (from bundle)",
             "the existing folder-nested host must be updated in place"
+        );
+    }
+
+    /// Regression: `execute` used to compute `outcome.tunnels` as
+    /// `tunnels.len()` before applying anything, which was accurate only
+    /// because an unresolvable tunnel never reached `plan.tunnels` at all.
+    /// Now that `import_planner::plan` keeps it as a `ReferenceBroken`/
+    /// `Skip` row instead of dropping it, a raw `.len()` counts a tunnel
+    /// that `apply_tunnel`'s `Skip => {}` writes nothing for — the frontend
+    /// would report "1 tunnel imported" for an import that changed nothing.
+    #[test]
+    fn unresolvable_tunnel_does_not_inflate_the_reported_tunnel_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = ShareBundle {
+            schema_version: crate::SCHEMA_VERSION,
+            metadata: sample_metadata(),
+            folders: Vec::new(),
+            servers: Vec::new(),
+            tunnels: vec![SavedTunnel {
+                id: Uuid::new_v4(),
+                label: "dangling".into(),
+                session_key: "u@ghost.example.com:22".into(),
+                server_entry_id: Some("ghost".into()),
+                local_port: 5432,
+                remote_host: "db.internal".into(),
+                remote_port: 5432,
+                auto_start: false,
+            }],
+            vault: BundledVault::default(),
+        };
+
+        let mut config = SshConfig::default();
+        let outcome = execute(plan_from(&bundle, &config), &mut config, dir.path(), None).unwrap();
+
+        assert_eq!(
+            outcome.tunnels, 0,
+            "a ReferenceBroken/Skip tunnel writes nothing, so it must not be counted as imported"
+        );
+        assert!(
+            config.tunnels.is_empty(),
+            "the tunnel must genuinely not have been written: {:?}",
+            config.tunnels
         );
     }
 }

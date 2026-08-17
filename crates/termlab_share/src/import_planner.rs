@@ -405,6 +405,78 @@ mod tests {
         (bundle, config)
     }
 
+    /// Same id-outranks-label-collision shape as
+    /// `fixture_id_match_and_label_collision`, but for a folder-nested
+    /// entry rather than a flat `bundle.servers` one — pins that precedence
+    /// through `classify()` for every call site sharing it, not just the
+    /// one the original test happened to cover.
+    fn fixture_folder_nested_id_match_and_label_collision() -> (ShareBundle, SshConfig) {
+        let mut bundle = empty_bundle();
+        let mut incoming = make_server("shared-id", "bundle.example.com");
+        incoming.label = "renamed-label".into();
+        bundle.folders = vec![ServerFolder {
+            id: "folder-1".into(),
+            name: "Folder".into(),
+            expanded: true,
+            entries: vec![incoming],
+        }];
+
+        let mut config = SshConfig::default();
+        let mut same_id = make_server("shared-id", "old.example.com");
+        same_id.label = "old-name".into();
+        config.add_server(same_id);
+        let mut different_id_same_label = make_server("other-id", "other.example.com");
+        different_id_same_label.label = "renamed-label".into();
+        config.add_server(different_id_same_label);
+
+        (bundle, config)
+    }
+
+    /// Same id-outranks-label-collision shape, but for a tunnel — pins the
+    /// precedence for the tunnel call site too.
+    fn fixture_tunnel_id_match_and_label_collision() -> (ShareBundle, SshConfig) {
+        let shared_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+
+        let mut bundle = empty_bundle();
+        bundle.tunnels = vec![SavedTunnel {
+            id: shared_id,
+            label: "renamed-label".into(),
+            session_key: "u@host.example.com:22".into(),
+            server_entry_id: None,
+            local_port: 5432,
+            remote_host: "db.internal".into(),
+            remote_port: 5432,
+            auto_start: false,
+        }];
+
+        let mut config = SshConfig::default();
+        config.tunnels = vec![
+            SavedTunnel {
+                id: shared_id,
+                label: "old-name".into(),
+                session_key: "u@old.example.com:22".into(),
+                server_entry_id: None,
+                local_port: 5432,
+                remote_host: "db.internal".into(),
+                remote_port: 5432,
+                auto_start: false,
+            },
+            SavedTunnel {
+                id: other_id,
+                label: "renamed-label".into(),
+                session_key: "u@other.example.com:22".into(),
+                server_entry_id: None,
+                local_port: 5432,
+                remote_host: "db.internal".into(),
+                remote_port: 5432,
+                auto_start: false,
+            },
+        ];
+
+        (bundle, config)
+    }
+
     /// A tunnel whose `server_entry_id` names a host carried in this same
     /// bundle (not yet in local config) — it resolves once the host is
     /// imported alongside it.
@@ -507,6 +579,28 @@ mod tests {
         let p = plan(&bundle, &config, &[]);
         assert_eq!(p.servers[0].status, ConflictStatus::SameId);
         assert_eq!(p.servers[0].action, ItemAction::Replace);
+    }
+
+    /// The precedence rule only holds everywhere because folder entries,
+    /// servers, and tunnels all route through the same `classify()` — this
+    /// pins it for the folder-nested call site specifically, so a future
+    /// refactor that special-cases one call site breaks a test here rather
+    /// than breaking silently.
+    #[test]
+    fn an_id_match_outranks_a_label_collision_for_folder_nested_entries() {
+        let (bundle, config) = fixture_folder_nested_id_match_and_label_collision();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.folders[0].entries[0].status, ConflictStatus::SameId);
+        assert_eq!(p.folders[0].entries[0].action, ItemAction::Replace);
+    }
+
+    /// Same as above, pinned for the tunnel call site.
+    #[test]
+    fn an_id_match_outranks_a_label_collision_for_tunnels() {
+        let (bundle, config) = fixture_tunnel_id_match_and_label_collision();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.tunnels[0].status, ConflictStatus::SameId);
+        assert_eq!(p.tunnels[0].action, ItemAction::Replace);
     }
 
     #[test]
