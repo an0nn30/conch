@@ -722,6 +722,23 @@ fn conflicting_machine_b_produces_every_status_and_honours_overrides() {
     );
     assert_eq!(outcome_trial.credentials, 1);
 
+    // MINOR fold-in (2026-08-17 review): the unmodified pass leaves the
+    // LabelCollision row at its default action (`Add`), which recreates the
+    // exact label collision `ConflictStatus::LabelCollision` exists to warn
+    // about in the first place — both hosts now share the label "prod".
+    // This was never actually asserted even though the fixture already
+    // proved it.
+    let label_src_after_trial = config_b_trial.find_server("srv-label-src").unwrap();
+    assert_eq!(
+        label_src_after_trial.label, "prod",
+        "the LabelCollision row's default Add carries the bundle's own label through unchanged"
+    );
+    let label_dst_after_trial = config_b_trial.find_server("srv-label-dst").unwrap();
+    assert_eq!(
+        label_dst_after_trial.label, "prod",
+        "the pre-existing local host it collided with is left with its original label"
+    );
+
     // --- Re-plan against B's untouched original state, override the SameId
     // row to Skip and the LabelCollision row to Rename, then execute for
     // real -------------------------------------------------------------
@@ -793,4 +810,88 @@ fn conflicting_machine_b_produces_every_status_and_honours_overrides() {
     );
     assert_eq!(outcome_final.tunnels, 1, "the ReferenceBroken tunnel is still excluded");
     assert_eq!(outcome_final.credentials, 1);
+}
+
+/// C1 regression: a caller that hands the executor a stale `Add` for a row
+/// re-planning now classifies as `SameId` — e.g. `try_save_config` failing
+/// on a full disk, the toast appearing, the user clicking Import again
+/// while the re-plan (invisible to them) already says `SameId`; or two
+/// windows applying the same bundle, the second racing in after the first
+/// already landed — must not duplicate the entry. Before the fix,
+/// `import_executor::apply_server`'s `Add` arm pushed unconditionally
+/// rather than looking the id up first the way its `Replace` sibling
+/// already did, so this exact sequence left two `ServerEntry` rows sharing
+/// id "s1" in `config.ungrouped` (2026-08-17 review finding C1, reproduced
+/// with a real probe). Runs the real export/import pipeline (not a
+/// hand-built plan) end to end: plan → execute → re-plan (now `SameId`) →
+/// force `Add` → execute again → assert exactly one entry survives.
+#[test]
+fn a_stale_forced_add_on_a_since_replaced_same_id_row_does_not_duplicate() {
+    let key_dir = tempfile::tempdir().unwrap();
+
+    let server = ServerEntry {
+        id: "s1".into(),
+        label: "prod".into(),
+        host: "prod.example.com".into(),
+        port: 22,
+        user: Some("alice".into()),
+        auth_method: None,
+        key_path: None,
+        vault_account_id: None,
+        proxy_command: None,
+        proxy_jump: None,
+    };
+    let config_a = SshConfig {
+        folders: Vec::new(),
+        ungrouped: vec![server],
+        tunnels: Vec::new(),
+    };
+
+    let export_plan = plan_export(
+        ExportRequest {
+            config: &config_a,
+            ssh_config_entries: &[],
+            server_ids: vec!["s1".into()],
+            tunnel_ids: Vec::new(),
+            declined_server_ids: Vec::new(),
+            include_credentials: false,
+            accounts: Vec::new(),
+            source_host: "machine-a".into(),
+            termlab_version: "0.0.0-test".into(),
+        },
+        &FileKeyReader,
+    );
+    let bytes = encode(&export_plan.bundle, PASSWORD).unwrap();
+    let bundle = decode(&bytes, PASSWORD).unwrap();
+
+    // First import: "s1" is New, lands exactly once.
+    let mut config_b = SshConfig::default();
+    let plan_1 = plan_import(&bundle, &config_b, &[]);
+    execute(plan_1, &mut config_b, key_dir.path(), None).unwrap();
+    assert_eq!(
+        config_b.ungrouped.iter().filter(|s| s.id == "s1").count(),
+        1,
+        "the first import must land exactly one entry"
+    );
+
+    // Second pass: re-planning against B's now-mutated state correctly
+    // classifies "s1" as SameId/Replace, but the caller forces it back to
+    // Add anyway — standing in for a stale decision echoed from a preview
+    // taken before the first import landed. The executor's own Add arm
+    // must still land exactly one entry, not push a duplicate.
+    let mut plan_2 = plan_import(&bundle, &config_b, &[]);
+    let row = plan_2
+        .servers
+        .iter_mut()
+        .find(|p| p.item.id == "s1")
+        .unwrap();
+    assert_eq!(row.status, ConflictStatus::SameId);
+    row.action = ItemAction::Add;
+
+    execute(plan_2, &mut config_b, key_dir.path(), None).unwrap();
+    assert_eq!(
+        config_b.ungrouped.iter().filter(|s| s.id == "s1").count(),
+        1,
+        "a stale/forced Add on an id that already exists must update in place, not duplicate"
+    );
 }

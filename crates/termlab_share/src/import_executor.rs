@@ -9,7 +9,7 @@
 //! id created by an earlier one (an account's rewritten key path, a
 //! tunnel's host), that id already resolves.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ use termlab_vault::model::{AuthMethod, VaultAccount};
 
 use crate::ShareError;
 use crate::bundle::BundledKey;
-use crate::import_planner::{ImportPlan, ItemAction, PlannedFolder, PlannedItem};
+use crate::import_planner::{ConflictStatus, ImportPlan, ItemAction, PlannedFolder, PlannedItem};
 
 /// Where imported vault accounts go. Implemented against the real vault by
 /// the caller (Task 6); tests supply a fake so `import_executor`'s own unit
@@ -55,7 +55,7 @@ pub fn execute(
         tunnels,
         accounts,
         keys,
-        skipped,
+        skipped: planner_skipped,
     } = plan;
 
     // Counts reported to the caller: total server entries touched,
@@ -80,6 +80,36 @@ pub fn execute(
         .filter(|p| actually_writes(&p.action))
         .count();
 
+    // I1 (2026-08-17 review): collect every row the plan actually leaves
+    // unwritten, by label, before anything below consumes `folders`/
+    // `servers`/`tunnels`/`accounts` by value. `planner_skipped` (renamed
+    // from `skipped` above) is `import_planner::plan`'s own field, which no
+    // code in this crate has pushed to since the `ReferenceBroken` rework —
+    // it is folded in anyway for forward compatibility, but every row this
+    // function reports today comes from `collect_skipped` below, not from
+    // it.
+    let mut skipped = Vec::new();
+    for folder in &folders {
+        for entry in &folder.entries {
+            collect_skipped(&mut skipped, &entry.item.label, entry.status, &entry.action);
+        }
+    }
+    for entry in &servers {
+        collect_skipped(&mut skipped, &entry.item.label, entry.status, &entry.action);
+    }
+    for entry in &tunnels {
+        collect_skipped(&mut skipped, &entry.item.label, entry.status, &entry.action);
+    }
+    for entry in &accounts {
+        collect_skipped(
+            &mut skipped,
+            &entry.item.display_name,
+            entry.status,
+            &entry.action,
+        );
+    }
+    skipped.extend(planner_skipped);
+
     // 1 & 2. Keys, then accounts — but only when a vault is actually open to
     // receive them. Keys used to be materialised to disk unconditionally,
     // before this check, so a locked or absent vault still got every
@@ -89,22 +119,38 @@ pub fn execute(
     // the summary claims was never imported is the wrong side to be wrong
     // on, so keys are now held back right alongside the accounts they
     // belong to.
+    //
+    // C2 (2026-08-17 review): that same principle applies one level down —
+    // a key bundled alongside an account the user chose to Skip must not be
+    // materialised either, even though a vault sink exists to take *other*
+    // accounts. Before this fix, `materialise_keys` ran over every bundled
+    // key unconditionally as soon as any vault sink was present, so a
+    // skipped credential's private key still landed on disk at
+    // `<key_dir>/<key-id>`, referenced by nothing and invisible to the user
+    // (the summary correctly said "0 credential(s)"). Only the keys
+    // referenced (via the `termlab-bundle:<key-id>` marker —
+    // `export_planner::embed_key_for_account`) by an account that actually
+    // survives `actually_writes` are materialised now.
     let bundle_has_credentials = !keys.is_empty() || !accounts.is_empty();
     let (credentials, credentials_held_back) = match vault_sink {
         None => (0, bundle_has_credentials),
         Some(sink) => {
+            let surviving_key_ids: HashSet<Uuid> = accounts
+                .iter()
+                .filter(|p| actually_writes(&p.action))
+                .filter_map(|p| bundle_marker_id(&p.item.auth))
+                .collect();
+            let keys_to_materialise: Vec<BundledKey> = keys
+                .into_iter()
+                .filter(|k| surviving_key_ids.contains(&k.id))
+                .collect();
             // Keys first, so accounts have a real path to rewrite the
             // `termlab-bundle:<key-id>` marker to.
-            let key_paths = materialise_keys(&keys, key_dir)?;
+            let key_paths = materialise_keys(&keys_to_materialise, key_dir)?;
             let mut imported = 0usize;
             for planned in accounts {
                 // Same reasoning as the server/tunnel counts above: a
-                // `Skip` row must not be written or counted. No account is
-                // planned as `Skip` today (the planner never produces
-                // `LabelCollision` for accounts and always has a caller-
-                // supplied id list to check `SameId` against), but this
-                // keeps writing and counting consistent with `.action`
-                // rather than relying on that staying true.
+                // `Skip` row must not be written or counted.
                 if !actually_writes(&planned.action) {
                     continue;
                 }
@@ -136,6 +182,37 @@ pub fn execute(
         skipped,
         credentials_held_back,
     })
+}
+
+/// Push `label` onto `out` when `action` is `Skip` — a `ReferenceBroken` row
+/// (always `Skip`, per `import_planner::plan`) is annotated with why, since
+/// "prod" and "prod (broken reference)" both showing up under the same
+/// "Skipped" heading with no distinction would leave a user unable to tell
+/// a deliberate skip from a tunnel the planner could never have resolved.
+fn collect_skipped(out: &mut Vec<String>, label: &str, status: ConflictStatus, action: &ItemAction) {
+    if !matches!(action, ItemAction::Skip) {
+        return;
+    }
+    if status == ConflictStatus::ReferenceBroken {
+        out.push(format!("{label} (broken reference)"));
+    } else {
+        out.push(label.to_string());
+    }
+}
+
+/// The bundled key id a `termlab-bundle:<id>` marker in `auth` names, if
+/// any — a read-only counterpart to `rewrite_marker_path` used by C2's
+/// pre-filter to decide which keys are even worth materialising, before any
+/// of them are written to disk.
+fn bundle_marker_id(auth: &AuthMethod) -> Option<Uuid> {
+    let path = match auth {
+        AuthMethod::Key { path, .. } => path,
+        AuthMethod::KeyAndPassword { key_path, .. } => key_path,
+        AuthMethod::Password(_) => return None,
+    };
+    path.to_str()
+        .and_then(|s| s.strip_prefix("termlab-bundle:"))
+        .and_then(|s| Uuid::parse_str(s).ok())
 }
 
 /// Write each bundled key's material to `key_dir/<id>`, creating the file
@@ -288,10 +365,23 @@ fn actually_writes(action: &ItemAction) -> bool {
 // `PlannedItem` precisely so a consumer (sub-project 2: the per-row
 // Skip/Replace/Rename picker) can override the planner's default and have
 // that choice honoured verbatim — an executor that recomputes the decision
-// from live state cannot respect an explicit override. `Replace` still
-// falls back to a push if the id is unexpectedly absent (e.g. it was
-// removed locally between planning and executing), so this never silently
-// drops an item.
+// from live state cannot respect an explicit override.
+//
+// `Add` and `Replace` share the same body below: look the id up first, and
+// only push a new entry on a miss. `Add` used to push unconditionally,
+// trusting that a caller only ever sends `Add` for an id that doesn't exist
+// yet — true for a fresh plan, but not for a caller replaying a stale
+// decision (a retried apply after the first one already landed, or two
+// windows applying the same bundle) against a plan that has since been
+// re-planned to `SameId`. An unconditional push then created a second entry
+// under an id `config` already had (2026-08-17 review finding C1). Making
+// `Add` idempotent — one id, one entry, regardless of which action a caller
+// hands the executor — restores that invariant no matter which of this
+// module's several caller shapes (the legacy `decisions: []` path,
+// hand-built plans in tests, share_commands.rs's `apply_decisions`, any
+// future frontend) is doing the calling. The only behaviour this changes is
+// exactly that stale case: a genuinely new id still lands as a fresh push,
+// since the lookup misses.
 
 /// Upsert a bundled folder into `config`: create it if no local folder has
 /// this id, otherwise update its metadata (name, expanded) in place — but
@@ -321,8 +411,7 @@ fn apply_folder(config: &mut SshConfig, planned: PlannedFolder) {
 
     for planned_entry in planned.entries {
         match planned_entry.action {
-            ItemAction::Add => config.folders[folder_idx].entries.push(planned_entry.item),
-            ItemAction::Replace => {
+            ItemAction::Add | ItemAction::Replace => {
                 if !apply_server_entry(config, &planned_entry.item) {
                     config.folders[folder_idx].entries.push(planned_entry.item);
                 }
@@ -351,8 +440,7 @@ fn apply_folder(config: &mut SshConfig, planned: PlannedFolder) {
 
 fn apply_server(config: &mut SshConfig, planned: PlannedItem<ServerEntry>) {
     match planned.action {
-        ItemAction::Add => config.ungrouped.push(planned.item),
-        ItemAction::Replace => {
+        ItemAction::Add | ItemAction::Replace => {
             if !apply_server_entry(config, &planned.item) {
                 config.ungrouped.push(planned.item);
             }
@@ -398,8 +486,7 @@ fn apply_server_entry(config: &mut SshConfig, item: &ServerEntry) -> bool {
 
 fn apply_tunnel(config: &mut SshConfig, planned: PlannedItem<SavedTunnel>) {
     match planned.action {
-        ItemAction::Add => config.tunnels.push(planned.item),
-        ItemAction::Replace => match config
+        ItemAction::Add | ItemAction::Replace => match config
             .tunnels
             .iter_mut()
             .find(|existing| existing.id == planned.item.id)
@@ -486,6 +573,14 @@ mod tests {
         plan(bundle, config, &[])
     }
 
+    /// A bundle carrying one key AND the account that references it via the
+    /// `termlab-bundle:<key-id>` marker (`export_planner::embed_key_for_account`'s
+    /// convention) — a bundled key is never independently meaningful in
+    /// production (see `flatten_import_rows`'s doc comment in
+    /// `share_commands.rs`), and since C2 (2026-08-17 review), `execute`
+    /// only materialises a key an actually-surviving account references, so
+    /// a fixture with a key and no owning account no longer exercises the
+    /// materialisation path at all.
     fn plan_with_one_bundled_key() -> ImportPlan {
         let mut bundle = sample_bundle();
         bundle.vault.keys.push(BundledKey {
@@ -495,6 +590,17 @@ mod tests {
             public_material: None,
             passphrase: None,
             comment: "id_ed25519".into(),
+        });
+        bundle.vault.accounts.push(VaultAccount {
+            id: Uuid::new_v4(),
+            display_name: "key account".into(),
+            username: "u".into(),
+            auth: AuthMethod::Key {
+                path: PathBuf::from(format!("termlab-bundle:{KEY_ID}")),
+                passphrase: None,
+            },
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         });
         plan_from(&bundle, &SshConfig::default())
     }
@@ -992,5 +1098,141 @@ mod tests {
         let entries = &config.folders[0].entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "b");
+    }
+
+    /// I1 regression: `ImportOutcome::skipped` used to always be empty — the
+    /// planner's own `skipped` field (folded into it verbatim) has had no
+    /// producer since the `ReferenceBroken` rework, so nothing ever landed
+    /// there and the frontend's "N skipped" was permanently 0 (2026-08-17
+    /// review finding I1). Five rows, three `Skip`-actioned (a plain
+    /// user-chosen skip, a `SameId` skip, and a `ReferenceBroken` tunnel
+    /// skip), two `Add`-actioned, must report exactly the three skipped
+    /// labels — the broken-reference one annotated with why.
+    #[test]
+    fn skipping_three_of_five_rows_reports_all_three_by_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SshConfig::default();
+
+        let plan = ImportPlan {
+            folders: Vec::new(),
+            servers: vec![
+                PlannedItem {
+                    item: make_server("s1", "keep-me", "a.example.com", "u"),
+                    status: crate::import_planner::ConflictStatus::New,
+                    action: ItemAction::Add,
+                },
+                PlannedItem {
+                    item: make_server("s2", "skip-me-1", "b.example.com", "u"),
+                    status: crate::import_planner::ConflictStatus::New,
+                    action: ItemAction::Skip,
+                },
+                PlannedItem {
+                    item: make_server("s3", "skip-me-2", "c.example.com", "u"),
+                    status: crate::import_planner::ConflictStatus::SameId,
+                    action: ItemAction::Skip,
+                },
+            ],
+            tunnels: vec![PlannedItem {
+                item: SavedTunnel {
+                    id: Uuid::new_v4(),
+                    label: "skip-me-tunnel".into(),
+                    session_key: "u@ghost.example.com:22".into(),
+                    server_entry_id: Some("ghost".into()),
+                    local_port: 5432,
+                    remote_host: "db.internal".into(),
+                    remote_port: 5432,
+                    auto_start: false,
+                },
+                status: crate::import_planner::ConflictStatus::ReferenceBroken,
+                action: ItemAction::Skip,
+            }],
+            accounts: vec![PlannedItem {
+                item: VaultAccount {
+                    id: Uuid::new_v4(),
+                    display_name: "keep-account".into(),
+                    username: "u".into(),
+                    auth: AuthMethod::Password("x".into()),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+                status: crate::import_planner::ConflictStatus::New,
+                action: ItemAction::Add,
+            }],
+            keys: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        let outcome = execute(plan, &mut config, dir.path(), None).unwrap();
+        assert_eq!(
+            outcome.skipped.len(),
+            3,
+            "3 of the 5 rows are Skip-actioned: {:?}",
+            outcome.skipped
+        );
+        assert!(outcome.skipped.iter().any(|s| s == "skip-me-1"));
+        assert!(outcome.skipped.iter().any(|s| s == "skip-me-2"));
+        assert!(
+            outcome
+                .skipped
+                .iter()
+                .any(|s| s.contains("skip-me-tunnel") && s.contains("broken reference")),
+            "the ReferenceBroken row must be annotated with why, not just its label: {:?}",
+            outcome.skipped
+        );
+    }
+
+    /// C2 regression: a bundled key must not be materialised to disk when
+    /// the only account referencing it is `Skip`-actioned. Before this fix,
+    /// `materialise_keys` ran over every bundled key unconditionally as
+    /// soon as any vault sink was present, so the key landed at
+    /// `<key_dir>/<id>` — referenced by nothing, invisible in the UI, while
+    /// the summary correctly reported "0 credential(s)" (2026-08-17 review
+    /// finding C2, same defect class as 2026-08-16's I6 one level up).
+    #[test]
+    fn skipped_credential_leaves_no_key_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SshConfig::default();
+        let mut sink = FakeVaultSink::default();
+
+        let plan = ImportPlan {
+            folders: Vec::new(),
+            servers: Vec::new(),
+            tunnels: Vec::new(),
+            accounts: vec![PlannedItem {
+                item: VaultAccount {
+                    id: Uuid::new_v4(),
+                    display_name: "skip me".into(),
+                    username: "u".into(),
+                    auth: AuthMethod::Key {
+                        path: PathBuf::from(format!("termlab-bundle:{KEY_ID}")),
+                        passphrase: None,
+                    },
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+                status: crate::import_planner::ConflictStatus::New,
+                action: ItemAction::Skip,
+            }],
+            keys: vec![BundledKey {
+                id: KEY_ID,
+                original_path: "/home/u/.ssh/id_ed25519".into(),
+                material: base64::engine::general_purpose::STANDARD.encode(b"SECRET-KEY-BYTES"),
+                public_material: None,
+                passphrase: None,
+                comment: "id_ed25519".into(),
+            }],
+            skipped: Vec::new(),
+        };
+
+        let outcome = execute(plan, &mut config, dir.path(), Some(&mut sink)).unwrap();
+        assert_eq!(
+            outcome.credentials, 0,
+            "the skipped account must not be counted as imported"
+        );
+        assert!(
+            !dir.path().join(format!("{KEY_ID}")).exists(),
+            "a key referenced only by a skipped account must not be written to disk"
+        );
+        assert!(sink.accounts.is_empty());
     }
 }
