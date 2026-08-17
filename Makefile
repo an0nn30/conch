@@ -1,6 +1,7 @@
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 APP      = TermLab.app
 DIST     = dist
+ICNS     = crates/termlab_tauri/icons/icon.icns
 
 # ---------------------------------------------------------------------------
 # Default
@@ -12,7 +13,8 @@ help:
 	@echo "Local builds (run on the target platform):"
 	@echo "  build          Build release binary"
 	@echo "  build-all      Build release binary + Java Plugin SDK"
-	@echo "  dmg-native     Build DMG for current macOS architecture"
+	@echo "  app            Build TermLab.app for current macOS architecture"
+	@echo "  dmg-native     Build DMG + .app for current macOS architecture"
 	@echo "  dmg-universal  Build universal DMG (ARM64 + x86_64, macOS only)"
 	@echo "  deb            Build .deb package (run on Linux)"
 	@echo "  rpm            Build .rpm package (run on Linux)"
@@ -53,41 +55,96 @@ build:
 build-all: java-sdk build
 
 # ---------------------------------------------------------------------------
+# macOS packaging helpers
+#
+# These targets used to end their create-dmg call with `|| true`, so a missing
+# tool or a failed image still printed "Built ..." and exited 0 with no DMG on
+# disk. Everything below fails loudly instead: the prerequisites are checked
+# up front with actionable messages, and each target verifies its own output
+# exists before claiming success.
+# ---------------------------------------------------------------------------
+.PHONY: check-macos-tools
+check-macos-tools:
+	@[ "$$(uname)" = "Darwin" ] || { echo "error: macOS-only target (this is $$(uname))"; exit 1; }
+	@command -v create-dmg >/dev/null 2>&1 || \
+		echo "note: create-dmg not found, falling back to hdiutil (plain window layout). brew install create-dmg for the styled one."
+	@[ -f packaging/macos/Info.plist ] || { echo "error: packaging/macos/Info.plist is missing"; exit 1; }
+	@[ -f "$(ICNS)" ] || { echo "error: app icon missing at $(ICNS)"; exit 1; }
+
+# Assemble $(APP) from an already-built binary at $(1).
+define assemble_app
+	rm -rf "$(APP)"
+	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
+	cp $(1) "$(APP)/Contents/MacOS/termlab"
+	cp packaging/macos/Info.plist "$(APP)/Contents/"
+	cp "$(ICNS)" "$(APP)/Contents/Resources/termlab.icns"
+	codesign --remove-signature "$(APP)" 2>/dev/null || true
+	codesign --force --deep --sign - "$(APP)"
+	@[ -x "$(APP)/Contents/MacOS/termlab" ] || { echo "error: app bundle has no executable"; exit 1; }
+	@[ -f "$(APP)/Contents/Resources/termlab.icns" ] || { echo "error: app bundle has no icon"; exit 1; }
+endef
+
+# Build a DMG named $(1) from the assembled $(APP).
+define make_dmg
+	@mkdir -p "$(DIST)"
+	rm -rf dmg-staging
+	mkdir -p dmg-staging
+	cp -R "$(APP)" dmg-staging/
+	ln -s /Applications dmg-staging/Applications
+	rm -f "$(1)"
+	@if command -v create-dmg >/dev/null 2>&1; then \
+		rm -f dmg-staging/Applications; \
+		create-dmg \
+			--volname "TermLab" \
+			--window-pos 200 120 \
+			--window-size 600 400 \
+			--icon-size 80 \
+			--icon "TermLab.app" 150 200 \
+			--hide-extension "TermLab.app" \
+			--app-drop-link 450 200 \
+			--no-internet-enable \
+			"$(1)" \
+			"dmg-staging/"; \
+	else \
+		hdiutil create -volname "TermLab" -srcfolder dmg-staging -ov -format UDZO "$(1)"; \
+	fi
+	rm -rf dmg-staging
+	@[ -f "$(1)" ] || { echo "error: DMG creation reported success but $(1) does not exist"; exit 1; }
+	@hdiutil verify "$(1)" >/dev/null 2>&1 || { echo "error: $(1) failed hdiutil verify"; exit 1; }
+	@echo "Built $(1) ($$(du -h "$(1)" | cut -f1))"
+endef
+
+# ---------------------------------------------------------------------------
+# macOS — .app only (current architecture)
+# ---------------------------------------------------------------------------
+.PHONY: app
+app: java-sdk build
+	@[ "$$(uname)" = "Darwin" ] || { echo "error: macOS-only target (this is $$(uname))"; exit 1; }
+	@[ -f packaging/macos/Info.plist ] || { echo "error: packaging/macos/Info.plist is missing"; exit 1; }
+	@[ -f "$(ICNS)" ] || { echo "error: app icon missing at $(ICNS)"; exit 1; }
+	@mkdir -p "$(DIST)"
+	$(call assemble_app,target/release/termlab)
+	rm -rf "$(DIST)/$(APP)"
+	mv "$(APP)" "$(DIST)/"
+	@echo "Built $(DIST)/$(APP)"
+
+# ---------------------------------------------------------------------------
 # macOS — DMG (current architecture)
 # ---------------------------------------------------------------------------
 .PHONY: dmg-native
-dmg-native: build
-	@mkdir -p "$(DIST)"
-	rm -rf "$(APP)"
-	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
-	cp target/release/termlab "$(APP)/Contents/MacOS/"
-	cp packaging/macos/Info.plist "$(APP)/Contents/"
-	@if [ -f crates/termlab_tauri/icons/icon.icns ]; then \
-		cp crates/termlab_tauri/icons/icon.icns "$(APP)/Contents/Resources/termlab.icns"; \
-	fi
-	codesign --remove-signature "$(APP)" 2>/dev/null || true
-	codesign --force --deep --sign - "$(APP)"
-	mkdir -p dmg-staging && mv "$(APP)" dmg-staging/
-	create-dmg \
-		--volname "TermLab" \
-		--window-pos 200 120 \
-		--window-size 600 400 \
-		--icon-size 80 \
-		--icon "TermLab.app" 150 200 \
-		--hide-extension "TermLab.app" \
-		--app-drop-link 450 200 \
-		--no-internet-enable \
-		"$(DIST)/TermLab-v$(VERSION)-$(shell uname -m).dmg" \
-		"dmg-staging/" || true
-	rm -rf dmg-staging
-	@echo "Built $(DIST)/TermLab-v$(VERSION)-$(shell uname -m).dmg"
+dmg-native: check-macos-tools java-sdk build
+	$(call assemble_app,target/release/termlab)
+	$(call make_dmg,$(DIST)/TermLab-v$(VERSION)-$(shell uname -m).dmg)
+	rm -rf "$(DIST)/$(APP)"
+	mv "$(APP)" "$(DIST)/"
+	@echo "Also kept $(DIST)/$(APP)"
 
 # ---------------------------------------------------------------------------
 # macOS — Universal DMG (ARM64 + x86_64)
 # ---------------------------------------------------------------------------
 .PHONY: dmg-universal
-dmg-universal: java-sdk
-	rustup target add aarch64-apple-darwin x86_64-apple-darwin 2>/dev/null || true
+dmg-universal: check-macos-tools java-sdk
+	rustup target add aarch64-apple-darwin x86_64-apple-darwin
 	cargo build --release -p termlab_tauri --target=aarch64-apple-darwin
 	cargo build --release -p termlab_tauri --target=x86_64-apple-darwin
 	@mkdir -p "$(DIST)"
@@ -97,26 +154,16 @@ dmg-universal: java-sdk
 		target/aarch64-apple-darwin/release/termlab \
 		target/x86_64-apple-darwin/release/termlab \
 		-output "$(APP)/Contents/MacOS/termlab"
+	@lipo -archs "$(APP)/Contents/MacOS/termlab" | grep -q "arm64" || { echo "error: universal binary missing arm64"; exit 1; }
+	@lipo -archs "$(APP)/Contents/MacOS/termlab" | grep -q "x86_64" || { echo "error: universal binary missing x86_64"; exit 1; }
 	cp packaging/macos/Info.plist "$(APP)/Contents/"
-	@if [ -f crates/termlab_tauri/icons/icon.icns ]; then \
-		cp crates/termlab_tauri/icons/icon.icns "$(APP)/Contents/Resources/termlab.icns"; \
-	fi
+	cp "$(ICNS)" "$(APP)/Contents/Resources/termlab.icns"
 	codesign --remove-signature "$(APP)" 2>/dev/null || true
 	codesign --force --deep --sign - "$(APP)"
-	mkdir -p dmg-staging && mv "$(APP)" dmg-staging/
-	create-dmg \
-		--volname "TermLab" \
-		--window-pos 200 120 \
-		--window-size 600 400 \
-		--icon-size 80 \
-		--icon "TermLab.app" 150 200 \
-		--hide-extension "TermLab.app" \
-		--app-drop-link 450 200 \
-		--no-internet-enable \
-		"$(DIST)/TermLab-v$(VERSION).dmg" \
-		"dmg-staging/" || true
-	rm -rf dmg-staging
-	@echo "Built $(DIST)/TermLab-v$(VERSION).dmg"
+	$(call make_dmg,$(DIST)/TermLab-v$(VERSION).dmg)
+	rm -rf "$(DIST)/$(APP)"
+	mv "$(APP)" "$(DIST)/"
+	@echo "Also kept $(DIST)/$(APP)"
 
 # ---------------------------------------------------------------------------
 # Linux — .deb (run on Linux, builds natively)

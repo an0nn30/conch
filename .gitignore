@@ -44,3 +44,9 @@ plugins/
 
 # Python bytecode cache
 scripts/__pycache__/
+
+# Packaging output
+dist/
+dmg-staging/
+*.dmg
+Archive.zip
