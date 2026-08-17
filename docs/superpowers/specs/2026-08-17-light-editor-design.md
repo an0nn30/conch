@@ -67,7 +67,10 @@ No `@codemirror/autocomplete` — completions are an explicit non-goal, and leav
 - `tauri.conf.json` gains `"beforeBuildCommand"` and `"beforeDevCommand"`, both running `npm --prefix crates/termlab_tauri/frontend ci && npm --prefix crates/termlab_tauri/frontend run build:vendor`. It has neither key today; `frontendDist` stays `"frontend"`.
 - `.gitignore` gains `crates/termlab_tauri/frontend/vendor/codemirror/` and `crates/termlab_tauri/frontend/node_modules/`.
 - `package-lock.json` is committed. `npm ci` — not `npm install` — so versions are pinned by the lockfile.
-- The three CI build jobs (`ubuntu`, `macos`, `windows` in `.github/workflows/ci.yml`) each gain `actions/setup-node@v4` before their build step. The `lint` job does not need it.
+- **CI (`ci.yml`) needs no change.** Its four jobs run only `cargo fmt`, `cargo test --workspace`, and `cargo clippy` — none of which build the frontend.
+- **Release (`release.yml`) does.** Four jobs produce app binaries and each gains `actions/setup-node@v4`:
+  - `macos` and `windows` run `cargo tauri build`, so `beforeBuildCommand` fires and only Node itself is needed.
+  - `linux-amd64` and `linux-arm64` run `cargo build --release -p termlab_tauri` **without** the Tauri CLI, so `beforeBuildCommand` never fires. Each needs an explicit `npm ci && npm run build:vendor` step before the build, or it ships a binary whose `index.html` points at a bundle that was never generated.
 - `index.html` and `settings.html` gain `<script src="vendor/codemirror/codemirror.js"></script>` alongside the existing xterm tags.
 
 **Accepted cost:** a fresh clone can no longer build without Node installed. This is the price of a build step over a committed blob, and it is deliberate — CodeMirror upgrades become a version bump instead of a manual re-vendor, and future npm dependencies follow the same path.
@@ -266,7 +269,7 @@ The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have 
 - **Bundle size.** The full language set is roughly 1 MB minified. Measure after the first build; drop language packages if it is worse than expected.
 - **The eight `kind === 'terminal'` guards.** The table above is from a grep, and a guard that needs an editor arm but does not get one fails silently rather than loudly — a font change that skips editor panes looks like nothing happened. Each needs a deliberate answer, not a pattern-matched one.
 - **Close guards across three paths.** Window close and app quit go through Tauri, not the tab manager. An unguarded path silently discards a user's work, which is the worst failure this feature can have.
-- **First build step in the project.** CI, the Makefile's DMG targets, and a fresh clone all now depend on Node. The Makefile targets invoke Tauri, so `beforeBuildCommand` covers them, but this needs verifying rather than assuming.
+- **A missing bundle fails silently.** `beforeBuildCommand` only fires under `cargo tauri build` / `cargo tauri dev`. Any path that builds with plain `cargo` — the two Linux release jobs, and a developer running `cargo run` — produces an app whose `index.html` references a bundle that does not exist, and the failure surfaces as an editor that quietly does nothing. `editor-service.js` must check for `window.CM6` at first use and show an explicit "editor bundle missing — run npm run build:vendor" notification rather than throwing into the void. The Makefile's DMG targets go through Tauri and are covered, but that needs confirming rather than assuming.
 
 ## Follow-ups
 
