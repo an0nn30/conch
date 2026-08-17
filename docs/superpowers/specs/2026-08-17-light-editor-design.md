@@ -104,7 +104,7 @@ Panes already carry a `kind`, and `plugin_view` is already a non-terminal kind (
 | `pane-manager.js:83,88,214,268,269,288` | Focus, close, and session-persistence. Editor arm: focus the `EditorView`; on close run the dirty guard; persist as an editor entry. |
 | `tab-manager.js:375,376,379` | Close plumbing. Editor arm mirroring the `plugin_view` branch. |
 
-**Session persistence.** `pane-manager.js:268` currently writes `type: pane.kind === 'terminal' ? pane.type : 'local'`. Editor panes persist their `filePath` and reopen on next launch, reading the file fresh. A file that no longer exists reopens as a notification and no tab. Remote-bound editors do **not** persist — the SSH session behind them is gone.
+**No session persistence.** The app does not restore tabs or panes across launches for any pane kind — there is no workspace-session mechanism to extend. Editor tabs are therefore in-memory like every other tab, and a scratch survives a restart only as a file on disk, to be reopened by hand. Building workspace restore is a separate feature; it is listed under Follow-ups.
 
 ### 3. Rust: File I/O and Guards
 
@@ -164,9 +164,9 @@ The basename is preserved so the language mapping picks the right mode. The hash
 
 This is where the defects will be. Three paths currently ask nothing and all three must:
 
-1. **Tab close** — `tab-manager.js` close handler.
-2. **Window close** — the Tauri close-requested handler.
-3. **App quit.**
+1. **Tab close** — `tab-manager.js`'s `closeTab`, already `async`, so it can await the dialog.
+2. **Window close** — `lib.rs`'s `on_window_event` handles only `Focused` and `Destroyed` today; a `WindowEvent::CloseRequested` arm is new work. It calls `api.prevent_close()`, emits an event to that window, and closes only when the frontend answers that nothing is dirty or the user chose to discard.
+3. **App quit** — the quit menu item and `cmd+q`, which route through `handleMenuAction` and must run the same check before proceeding.
 
 Each shows a Save / Discard / Cancel dialog naming the file. Cancel aborts the close entirely. With several dirty editors, the dialog is per-file, in tab order, and Cancel on any one aborts the whole operation.
 
@@ -218,7 +218,7 @@ Note the deviation from the app's `cmd+shift+*` convention: `cmd+s` for save is 
 | Upload fails | Error notification with Retry action | Temp file preserved; retry re-uploads it |
 | Write fails (disk full, permissions) | Error notification | Original file intact — the write goes through a temp file and rename |
 | Temp dir unwritable | Notification: "Cannot create temp file for editing" | No tab |
-| Persisted editor file gone at launch | Notification naming the path | No tab |
+| File deleted between listing and open | Notification naming the path | No tab |
 
 ## Testing
 
@@ -238,7 +238,7 @@ The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have 
 
 **Manual verification:**
 
-1. `cmd+n` → type → `cmd+s` → close → reopen the app → the scratch tab is back with its contents.
+1. `cmd+n` → type → `cmd+s` → close the tab → reopen the file from the SFTP local pane → the contents are there.
 2. Double-click a local file in the SFTP local pane → edit → save → verify on disk.
 3. Double-click a remote file → edit → save → verify on the remote from a terminal.
 4. Kill the SSH connection, then save a remote-bound editor → error notification with Retry → reconnect → Retry succeeds.
@@ -256,7 +256,7 @@ The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have 
 2. No auto-reload for files changed underneath an open tab.
 3. Non-UTF-8 files are read lossily; saving one rewrites the replacement characters.
 4. Size cap and blocklist are hard-coded, not user-configurable.
-5. Remote-bound editors do not survive a restart.
+5. Open tabs do not survive a restart — the app has no workspace-session restore for any pane kind.
 6. No Save-All; each editor saves independently.
 7. Scratch files accumulate on disk until the user deletes them.
 8. Building the app now requires Node.
@@ -275,3 +275,4 @@ The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have 
 - Auto-reload for changed files.
 - Configurable size cap and blocklist.
 - A scratches browser.
+- Workspace session restore — reopening tabs (terminal and editor alike) on launch.
