@@ -125,7 +125,14 @@ pub fn write_text_file(path: &str, contents: &str) -> Result<(), String> {
             .map(|e| format!("{}.", e.to_string_lossy()))
             .unwrap_or_default()
     ));
-    fs::write(&tmp, contents).map_err(|e| format!("Could not write {path}: {e}"))?;
+    fs::write(&tmp, contents).map_err(|e| {
+        // `fs::write` is create-then-write_all: a write that fails partway
+        // still leaves the created file on disk. Clean it up so a failed
+        // write never leaves litter that also blocks the empty-parent climb
+        // in `editor_temp_cleanup`.
+        let _ = fs::remove_file(&tmp);
+        format!("Could not write {path}: {e}")
+    })?;
     fs::rename(&tmp, target).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         format!("Could not replace {path}: {e}")
@@ -182,10 +189,23 @@ pub(crate) fn editor_temp_path(host_label: String, remote_path: String) -> Resul
 /// Delete a temp file and any parent directories it leaves empty, without
 /// escaping the temp root — a caller passing an arbitrary path must not be
 /// able to delete outside it.
+///
+/// `Path::starts_with` is a lexical, component-wise prefix check: it does not
+/// resolve `..`, so a path like `<root>/../etc/passwd` lexically starts with
+/// `root` even though the OS would delete a file outside it. Rather than
+/// `canonicalize` (which fails when the target has already been removed), we
+/// reject outright any path containing a `..` component at all, then apply
+/// the lexical prefix check to what is left.
 #[tauri::command]
 pub(crate) fn editor_temp_cleanup(path: String) -> Result<(), String> {
     let root = temp_root();
     let target = PathBuf::from(&path);
+    if target
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("Refusing to clean a path outside the editor temp root".into());
+    }
     if !target.starts_with(&root) {
         return Err("Refusing to clean a path outside the editor temp root".into());
     }
@@ -318,5 +338,28 @@ mod tests {
         assert!(outside.exists(), "a path outside the root must survive");
 
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn cleanup_rejects_dot_dot_traversal_outside_the_temp_root() {
+        let root = temp_root();
+        let escape_dir = std::env::temp_dir().join("termlab-cleanup-escape-test");
+        let _ = std::fs::remove_dir_all(&escape_dir);
+        std::fs::create_dir_all(&escape_dir).unwrap();
+        let victim = escape_dir.join("victim.txt");
+        std::fs::write(&victim, "keep me").unwrap();
+
+        // Lexically this path starts with `root` — a naive `starts_with`
+        // check would accept it — but it resolves outside `root` once the
+        // OS follows the `..` component.
+        let escaping_path = root
+            .join("..")
+            .join("termlab-cleanup-escape-test")
+            .join("victim.txt");
+
+        assert!(editor_temp_cleanup(escaping_path.to_string_lossy().into_owned()).is_err());
+        assert!(victim.exists(), "a path escaping the root via .. must survive");
+
+        let _ = std::fs::remove_dir_all(&escape_dir);
     }
 }
