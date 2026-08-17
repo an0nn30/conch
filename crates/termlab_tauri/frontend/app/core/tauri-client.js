@@ -127,6 +127,7 @@
     PTY_EXIT: 'pty-exit',
     MENU_ACTION: 'menu-action',
     CONFIG_CHANGED: 'config-changed',
+    SSH_CONFIG_CHANGED: 'ssh-config-changed',
     SSH_HOST_KEY_PROMPT: 'ssh-host-key-prompt',
     SSH_PASSWORD_PROMPT: 'ssh-password-prompt',
     VAULT_LOCKED: 'vault-locked',

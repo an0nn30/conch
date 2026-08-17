@@ -221,6 +221,17 @@
     // Vault auto-save prompt
     listen('vault-auto-save-prompt', handleVaultAutoSavePrompt);
 
+    // A server/tunnel import (legacy JSON or bundle — see
+    // share_commands.rs/remote/server_commands.rs) landed, possibly from a
+    // different window (windows.rs::create_new_window opens more
+    // index.html-backed windows, each running its own copy of this panel
+    // with no polling or refresh-on-focus of its own). Refresh so this
+    // window's Hosts/Tunnels lists don't go stale relative to what was just
+    // imported elsewhere. Harmless no-op refetch on the window that
+    // triggered the import itself, since its own import flow already calls
+    // refreshAll() directly.
+    listen('ssh-config-changed', refreshAll);
+
     // Resize drag + state restore
     initResize();
     restoreLayout();

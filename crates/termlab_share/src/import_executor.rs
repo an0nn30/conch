@@ -141,13 +141,40 @@ fn materialise_keys(
             }
             None => {
                 // Already materialised by a previous import of the same
-                // key id — reuse it, do not touch its bytes or its
-                // permissions.
+                // key id — reuse it, do not touch its bytes. Its
+                // permissions are a different story: a file left at this
+                // exact path by an interrupted earlier run (the process
+                // died between `create_owner_only_file` and this key ever
+                // completing a full import) is not guaranteed to still be
+                // 0600 — trusting it blindly would silently import a
+                // private key that's group/world-readable. Tighten it
+                // before `paths` below hands the path to an account's
+                // auth. Unix-only, matching `create_owner_only_file`'s own
+                // `#[cfg(unix)]` — Windows uses default ACLs here by
+                // design, no counterpart needed.
+                #[cfg(unix)]
+                tighten_permissions_if_needed(&private_path)?;
             }
         }
         paths.insert(key.id, private_path);
     }
     Ok(paths)
+}
+
+/// If `path`'s current permission bits aren't exactly owner-only (`0600`),
+/// tighten them. Used only for the reuse branch of `materialise_keys` — a
+/// freshly created file already gets `0600` atomically via
+/// `create_owner_only_file`'s `OpenOptions::mode`, so this never runs on
+/// that path.
+#[cfg(unix)]
+fn tighten_permissions_if_needed(path: &Path) -> Result<(), ShareError> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(path).map_err(|e| ShareError::Io(e.to_string()))?;
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| ShareError::Io(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Create `path` for exclusive writing with owner-only (`0600`) permissions
@@ -340,6 +367,38 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "key must be owner-read/write only");
         }
+    }
+
+    /// A file already sitting at the key's target path (e.g. left behind by
+    /// an interrupted earlier import — the process died before completing
+    /// the same key id) with loose permissions must not be trusted as-is:
+    /// `materialise_keys` should tighten it to 0600 on the reuse path,
+    /// without touching its bytes.
+    #[test]
+    #[cfg(unix)]
+    fn reused_key_file_with_loose_permissions_is_tightened_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join(format!("{KEY_ID}"));
+        std::fs::write(&key_path, b"PRE-EXISTING-BYTES").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let plan = plan_with_one_bundled_key();
+        let mut config = SshConfig::default();
+        execute(plan, &mut config, dir.path(), None).unwrap();
+
+        let written = std::fs::read(&key_path).unwrap();
+        assert_eq!(
+            written, b"PRE-EXISTING-BYTES",
+            "reuse must not rewrite the file's bytes"
+        );
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "a reused key file must be tightened to owner-only permissions"
+        );
     }
 
     #[test]

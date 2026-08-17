@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use tauri::Emitter;
 use ts_rs::TS;
 use zeroize::Zeroize;
 
@@ -348,17 +349,19 @@ impl VaultSink for TauriVaultSink<'_> {
 /// uniformity.
 #[tauri::command]
 pub(crate) async fn share_import(
+    app: tauri::AppHandle,
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
     vault: tauri::State<'_, VaultState>,
     path: String,
     mut password: String,
 ) -> Result<ShareImportSummary, String> {
-    let result = do_import(&remote, &vault, &path, &password);
+    let result = do_import(&app, &remote, &vault, &path, &password);
     password.zeroize();
     result
 }
 
 fn do_import(
+    app: &tauri::AppHandle,
     remote: &Arc<Mutex<RemoteState>>,
     vault: &VaultState,
     path: &str,
@@ -370,7 +373,7 @@ fn do_import(
     if kind == "legacy_json" {
         let payload = read_legacy_export_payload(file_path)?;
         let mut state = remote.lock();
-        let (servers, _folders, tunnels) = apply_legacy_import(&mut state, vault, payload);
+        let (servers, _folders, tunnels) = apply_legacy_import(&mut state, vault, app, payload);
         return Ok(ShareImportSummary {
             servers,
             tunnels,
@@ -418,12 +421,13 @@ fn do_import(
     }
     // `RemoteState` is a single app-managed value shared by every window's
     // Tauri commands (see `lib.rs`'s `.manage(remote_state)`), so mutating
-    // `state.config` in place and persisting it here — exactly as
-    // `apply_legacy_import` above already does for the legacy path — is
-    // sufficient for both the main and settings windows to see the import
-    // on their next `remote_get_servers`/`tunnel_get_all` call; there is no
-    // separate per-window copy to reconcile.
+    // `state.config` in place and persisting it here keeps every window's
+    // *backend* view in sync. That alone doesn't repaint a second open
+    // window's SSH panel — `ssh-panel.js` has no polling or refresh-on-focus
+    // — so the event below (mirrors `apply_legacy_import`'s emit for the
+    // legacy path) is what actually gets a second window to refresh.
     termlab_remote::config::save_config(&state.paths.config_dir, &state.config);
+    let _ = app.emit(crate::remote::server_commands::SSH_CONFIG_CHANGED_EVENT, ());
 
     Ok(outcome.into())
 }

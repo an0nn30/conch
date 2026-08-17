@@ -149,6 +149,11 @@ export const EVENTS = {
   // Config
   CONFIG_CHANGED: 'config-changed',
 
+  // SSH config (servers/folders/tunnels) changed — e.g. an import landed,
+  // possibly from a different window; distinct from CONFIG_CHANGED, which
+  // is theme/font hot-reload only.
+  SSH_CONFIG_CHANGED: 'ssh-config-changed',
+
   // SSH auth prompts
   SSH_HOST_KEY_PROMPT: 'ssh-host-key-prompt',
   SSH_PASSWORD_PROMPT: 'ssh-password-prompt',

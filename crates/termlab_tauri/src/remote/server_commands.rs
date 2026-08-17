@@ -4,12 +4,26 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use tauri::Emitter;
 use ts_rs::TS;
 
 use termlab_remote::config::{ExportPayload, SavedTunnel, ServerEntry, ServerFolder};
 
 use super::RemoteState;
 use crate::vault_commands::VaultState;
+
+/// Emitted after any successful import (legacy JSON via `apply_legacy_import`
+/// below, or a bundle via `share_commands::do_import`) so every open
+/// `index.html` window — not just the one that ran the import — refreshes
+/// its SSH panel. `RemoteState` is one `Arc<Mutex<_>>` shared by every
+/// window's Tauri commands, but that only keeps the *backend* in sync;
+/// `ssh-panel.js` has no polling or refresh-on-focus, so a second window
+/// opened via `windows::create_new_window` would otherwise show stale
+/// Hosts/Tunnels lists until the user manually refreshes it. Deliberately a
+/// distinct name from `config-changed`, which is scoped to theme/font
+/// hot-reload (`watcher.rs`, `settings.rs`) — reusing it would trigger
+/// unrelated UI refresh logic.
+pub(crate) const SSH_CONFIG_CHANGED_EVENT: &str = "ssh-config-changed";
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -183,6 +197,7 @@ pub(crate) fn read_legacy_export_payload(
 pub(crate) fn apply_legacy_import(
     state: &mut RemoteState,
     vault: &VaultState,
+    app: &tauri::AppHandle,
     payload: ExportPayload,
 ) -> (usize, usize, usize) {
     let existing_tunnel_ids: Vec<uuid::Uuid> = state.config.tunnels.iter().map(|t| t.id).collect();
@@ -242,6 +257,7 @@ pub(crate) fn apply_legacy_import(
     }
 
     termlab_remote::config::save_config(&state.paths.config_dir, &state.config);
+    let _ = app.emit(SSH_CONFIG_CHANGED_EVENT, ());
     (servers, folders, tunnels)
 }
 
@@ -270,7 +286,7 @@ pub(crate) async fn remote_import(
     let payload = read_legacy_export_payload(file_path)?;
 
     let mut state = remote.lock();
-    let (servers, folders, tunnels) = apply_legacy_import(&mut state, &vault, payload);
+    let (servers, folders, tunnels) = apply_legacy_import(&mut state, &vault, &app, payload);
     Ok(format!(
         "Imported {servers} server(s), {folders} folder(s), {tunnels} tunnel(s)"
     ))
