@@ -450,29 +450,31 @@ mod tests {
             auto_start: false,
         }];
 
-        let mut config = SshConfig::default();
-        config.tunnels = vec![
-            SavedTunnel {
-                id: shared_id,
-                label: "old-name".into(),
-                session_key: "u@old.example.com:22".into(),
-                server_entry_id: None,
-                local_port: 5432,
-                remote_host: "db.internal".into(),
-                remote_port: 5432,
-                auto_start: false,
-            },
-            SavedTunnel {
-                id: other_id,
-                label: "renamed-label".into(),
-                session_key: "u@other.example.com:22".into(),
-                server_entry_id: None,
-                local_port: 5432,
-                remote_host: "db.internal".into(),
-                remote_port: 5432,
-                auto_start: false,
-            },
-        ];
+        let config = SshConfig {
+            tunnels: vec![
+                SavedTunnel {
+                    id: shared_id,
+                    label: "old-name".into(),
+                    session_key: "u@old.example.com:22".into(),
+                    server_entry_id: None,
+                    local_port: 5432,
+                    remote_host: "db.internal".into(),
+                    remote_port: 5432,
+                    auto_start: false,
+                },
+                SavedTunnel {
+                    id: other_id,
+                    label: "renamed-label".into(),
+                    session_key: "u@other.example.com:22".into(),
+                    server_entry_id: None,
+                    local_port: 5432,
+                    remote_host: "db.internal".into(),
+                    remote_port: 5432,
+                    auto_start: false,
+                },
+            ],
+            ..Default::default()
+        };
 
         (bundle, config)
     }

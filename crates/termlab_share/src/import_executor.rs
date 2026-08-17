@@ -327,15 +327,23 @@ fn apply_folder(config: &mut SshConfig, planned: PlannedFolder) {
                     config.folders[folder_idx].entries.push(planned_entry.item);
                 }
             }
-            // `Skip`/`Rename` are not produced by the planner for folder
-            // entries yet (Task 1 only adds them as available actions; the
-            // per-row override that lets a caller choose one is a later
-            // task). Match them exhaustively now rather than leaving a
-            // wildcard arm that would silently swallow real handling once
-            // that task lands.
+            // `Skip` writes nothing and must not be counted — see
+            // `actually_writes`.
             ItemAction::Skip => {}
-            ItemAction::Rename(_) => {
-                config.folders[folder_idx].entries.push(planned_entry.item);
+            // A rename keeps the item's id (tunnels reference hosts by id
+            // within a bundle; changing it would orphan them) and only
+            // overwrites the label, then applies like `Replace`/`Add`: update
+            // in place wherever the id already lives locally, or push as new
+            // if it doesn't. A `LabelCollision` entry has no local id match
+            // by definition, so this is an `Add` in practice — the id check
+            // just keeps the arm correct if a caller ever sets `Rename` on a
+            // `SameId` entry instead.
+            ItemAction::Rename(label) => {
+                let mut item = planned_entry.item;
+                item.label = label;
+                if !apply_server_entry(config, &item) {
+                    config.folders[folder_idx].entries.push(item);
+                }
             }
         }
     }
@@ -349,10 +357,19 @@ fn apply_server(config: &mut SshConfig, planned: PlannedItem<ServerEntry>) {
                 config.ungrouped.push(planned.item);
             }
         }
-        // See the comment in `apply_folder`: not reachable from the planner
-        // yet, matched exhaustively in anticipation of the per-row override.
+        // `Skip` writes nothing and must not be counted — see
+        // `actually_writes`.
         ItemAction::Skip => {}
-        ItemAction::Rename(_) => config.ungrouped.push(planned.item),
+        // See the matching comment on `apply_folder`'s `Rename` arm: keep
+        // the id, overwrite only the label, then behave like `Replace`/`Add`
+        // depending on whether that id already exists somewhere in `config`.
+        ItemAction::Rename(label) => {
+            let mut item = planned.item;
+            item.label = label;
+            if !apply_server_entry(config, &item) {
+                config.ungrouped.push(item);
+            }
+        }
     }
 }
 
@@ -393,10 +410,23 @@ fn apply_tunnel(config: &mut SshConfig, planned: PlannedItem<SavedTunnel>) {
         // A `ReferenceBroken` tunnel (its host resolves nowhere) is planned
         // with action `Skip` by `import_planner::plan` precisely so it must
         // NOT be applied here — this is the load-bearing case, not a
-        // leftover default. `Rename` is not reachable from the planner yet;
-        // matched exhaustively in anticipation of the per-row override.
+        // leftover default.
         ItemAction::Skip => {}
-        ItemAction::Rename(_) => config.tunnels.push(planned.item),
+        // Same rename semantics as `apply_server`/`apply_folder`: keep the
+        // id, overwrite only the label, then update in place or push
+        // depending on whether the id already exists among `config.tunnels`.
+        ItemAction::Rename(label) => {
+            let mut item = planned.item;
+            item.label = label;
+            match config
+                .tunnels
+                .iter_mut()
+                .find(|existing| existing.id == item.id)
+            {
+                Some(existing) => *existing = item,
+                None => config.tunnels.push(item),
+            }
+        }
     }
 }
 
@@ -842,5 +872,125 @@ mod tests {
             "the tunnel must genuinely not have been written: {:?}",
             config.tunnels
         );
+    }
+
+    /// Builds an `ImportPlan` directly (rather than running the real
+    /// planner) with a single new ungrouped server, id "s1" / label "prod",
+    /// planned as `Add`. Tests override `.action` to exercise `Skip` and
+    /// `Rename` without needing a real conflict against a live `config`.
+    fn plan_with_one_new_server() -> ImportPlan {
+        ImportPlan {
+            folders: Vec::new(),
+            servers: vec![PlannedItem {
+                item: sample_server(),
+                status: crate::import_planner::ConflictStatus::New,
+                action: ItemAction::Add,
+            }],
+            tunnels: Vec::new(),
+            accounts: Vec::new(),
+            keys: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    /// Same single server as `plan_with_one_new_server`, plus a tunnel whose
+    /// `server_entry_id` names it — both planned as `Add`, built directly
+    /// rather than through the planner.
+    fn plan_with_server_and_dependent_tunnel() -> ImportPlan {
+        let mut plan = plan_with_one_new_server();
+        plan.tunnels.push(PlannedItem {
+            item: SavedTunnel {
+                id: Uuid::new_v4(),
+                label: "tunnel-to-prod".into(),
+                session_key: "u@prod.example.com:22".into(),
+                server_entry_id: Some("s1".into()),
+                local_port: 5432,
+                remote_host: "db.internal".into(),
+                remote_port: 5432,
+                auto_start: false,
+            },
+            status: crate::import_planner::ConflictStatus::New,
+            action: ItemAction::Add,
+        });
+        plan
+    }
+
+    /// A folder with two entries, ids "a" and "b", both planned as `Add`,
+    /// built directly rather than through the planner.
+    fn plan_with_folder_of_two() -> ImportPlan {
+        ImportPlan {
+            folders: vec![PlannedFolder {
+                id: "prod".into(),
+                name: "Prod".into(),
+                expanded: true,
+                entries: vec![
+                    PlannedItem {
+                        item: make_server("a", "a", "a.example.com", "alice"),
+                        status: crate::import_planner::ConflictStatus::New,
+                        action: ItemAction::Add,
+                    },
+                    PlannedItem {
+                        item: make_server("b", "b", "b.example.com", "bob"),
+                        status: crate::import_planner::ConflictStatus::New,
+                        action: ItemAction::Add,
+                    },
+                ],
+            }],
+            servers: Vec::new(),
+            tunnels: Vec::new(),
+            accounts: Vec::new(),
+            keys: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn skip_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SshConfig::default();
+        let mut plan = plan_with_one_new_server();
+        plan.servers[0].action = ItemAction::Skip;
+        let out = execute(plan, &mut config, dir.path(), None).unwrap();
+        assert!(
+            config.ungrouped.is_empty(),
+            "a skipped server must not be written"
+        );
+        assert_eq!(out.servers, 0, "and must not be counted as imported");
+    }
+
+    #[test]
+    fn rename_changes_the_label_and_preserves_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SshConfig::default();
+        let mut plan = plan_with_one_new_server(); // id "s1", label "prod"
+        plan.servers[0].action = ItemAction::Rename("prod (2)".into());
+        execute(plan, &mut config, dir.path(), None).unwrap();
+        assert_eq!(config.ungrouped[0].label, "prod (2)");
+        assert_eq!(config.ungrouped[0].id, "s1", "the id must survive a rename");
+    }
+
+    #[test]
+    fn a_tunnel_still_resolves_to_a_host_that_was_renamed() {
+        // Tunnels reference hosts by id within a bundle. A rename that changed
+        // the id would orphan them, which is why the id is preserved above.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SshConfig::default();
+        let mut plan = plan_with_server_and_dependent_tunnel(); // tunnel -> "s1"
+        plan.servers[0].action = ItemAction::Rename("renamed".into());
+        execute(plan, &mut config, dir.path(), None).unwrap();
+        assert_eq!(config.tunnels.len(), 1, "the tunnel must still import");
+        assert_eq!(config.tunnels[0].server_entry_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn skip_on_a_folder_nested_entry_leaves_the_rest_of_the_folder_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SshConfig::default();
+        let mut plan = plan_with_folder_of_two(); // entries "a" and "b"
+        plan.folders[0].entries[0].action = ItemAction::Skip;
+        execute(plan, &mut config, dir.path(), None).unwrap();
+        let entries = &config.folders[0].entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "b");
     }
 }
