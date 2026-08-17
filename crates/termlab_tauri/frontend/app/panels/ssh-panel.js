@@ -11,6 +11,11 @@
   let resizeHandleEl = null;
   let layoutService = null;
   const sshDataService = exports.termlabSshFeatureDataService || {};
+  // Only vault_create/vault_unlock (task-4's inline import vault step) are
+  // called through this — reuses the existing vault feature's data-service
+  // rather than reaching into the vault crate or duplicating the invoke
+  // calls. Loaded before this file in index.html.
+  const vaultDataService = exports.termlabVaultFeatureDataService || {};
   const sshStore = exports.termlabSshStore || {};
   const sshActions = exports.termlabSshActions || {};
   const sshView = exports.termlabSshView || {};
@@ -849,11 +854,7 @@
       return;
     }
 
-    const err = await runImport(fileInfo.path, '');
-    if (err) {
-      console.error('Import failed:', err);
-      if (window.toast) window.toast.error('Import Failed', err);
-    }
+    await finishImport(fileInfo.path, '');
   }
 
   /** Call share_import_apply (via data-service's importFile) for an
@@ -876,12 +877,33 @@
     }
   }
 
+  /** Shared tail of the import flow: call runImport and toast on failure.
+   * Used by the legacy-file path in importConfig directly, and by the
+   * bundle path once the vault step (task-4, see continueImportAfterPlan
+   * below) has resolved — vault_state "unlocked" resolves immediately;
+   * "locked"/"absent" resolve after the user unlocks/creates the vault. */
+  async function finishImport(path, password) {
+    const err = await runImport(path, password);
+    if (err) {
+      console.error('Import failed:', err);
+      if (window.toast) window.toast.error('Import Failed', err);
+    }
+  }
+
   /** One password field + Unlock button, per task-6 brief. On failure
    * (wrong password, not a bundle, newer schema version — see
    * share_commands.rs's ShareError-derived messages) the SAME dialog is
    * re-rendered with an inline error rather than closed and reopened,
    * matching vault/dialogs.js's showUnlockDialog precedent of keeping the
-   * dialog open across a failed attempt. */
+   * dialog open across a failed attempt.
+   *
+   * task-4: on success this no longer applies the import directly. It
+   * calls share_import_plan (via planImport) to learn whether the bundle
+   * carries credentials and, if so, what state this machine's vault is in,
+   * and hands off to continueImportAfterPlan to resolve that before the
+   * apply call. A decode failure (including a wrong bundle password) still
+   * surfaces here as an inline error, since share_import_plan decodes the
+   * bundle the same way share_import_apply does. */
   function showImportPasswordDialog(path) {
     let handle = null;
     let closed = false;
@@ -919,14 +941,22 @@
       if (submitBtn) submitBtn.disabled = true;
       if (input) input.disabled = true;
 
-      const err = await runImport(path, password);
-      if (err === null) {
-        closeDialog();
+      let preview;
+      try {
+        if (!sshDataService || typeof sshDataService.planImport !== 'function') {
+          throw new Error('SSH data service unavailable: planImport');
+        }
+        preview = await sshDataService.planImport(invoke, path, password);
+      } catch (e) {
+        errorMsg = String(e);
+        if (submitBtn) submitBtn.disabled = false;
+        if (input) input.disabled = false;
+        if (bodyEl) render(bodyEl);
         return;
       }
-      errorMsg = err;
-      if (submitBtn) submitBtn.disabled = false;
-      if (bodyEl) render(bodyEl);
+
+      closeDialog();
+      await continueImportAfterPlan(path, password, preview);
     };
 
     handle = window.tlDialog.open({
@@ -937,6 +967,206 @@
       buttons: [
         { label: 'Cancel', onSelect: closeDialog },
         { label: 'Unlock', primary: true, onSelect: submitUnlock },
+      ],
+      onClose: closeDialog,
+    });
+    trackDialogHandle(handle);
+  }
+
+  /** task-4: the vault step. Runs after share_import_plan has decoded the
+   * bundle and reported `includes_credentials`/`vault_state`. A
+   * credentials-free bundle, or one whose vault is already unlocked,
+   * proceeds straight through to the apply call (still `decisions: []` —
+   * the real preview table is a later task, per task-3's shim). "locked"
+   * and "absent" show a dialog to unlock/create the vault first; the apply
+   * call only happens once that succeeds. Cancelling either vault dialog
+   * aborts the import — share_import_apply is never called, so nothing is
+   * written. */
+  async function continueImportAfterPlan(path, password, preview) {
+    const p = preview || {};
+    if (!p.includes_credentials || p.vault_state === 'unlocked') {
+      await finishImport(path, password);
+      return;
+    }
+    if (p.vault_state === 'locked') {
+      showImportVaultUnlockDialog(path, password);
+      return;
+    }
+    showImportVaultCreateDialog(path, password);
+  }
+
+  /** task-4, vault_state "locked": one password field + Unlock button,
+   * calling the existing `vault_unlock` command (vault_commands.rs:137) —
+   * not a new command. On failure (e.g. "Incorrect master password") the
+   * SAME dialog re-shows with an inline error, matching
+   * showImportPasswordDialog's precedent above. Cancelling aborts the
+   * import: share_import_apply is never called. */
+  function showImportVaultUnlockDialog(path, password) {
+    let handle = null;
+    let closed = false;
+    const closeDialog = () => {
+      if (closed) return;
+      closed = true;
+      if (handle) handle.close();
+    };
+    let errorMsg = '';
+
+    const render = (bodyEl) => {
+      bodyEl.innerHTML = `
+        <div>This bundle contains saved credentials. Unlock your vault to import them.</div>
+        <div class="tl-field">
+          <label class="tl-field__label" for="imp-vault-unlock-password">Master password</label>
+          <input type="password" class="tl-input" id="imp-vault-unlock-password" autocomplete="current-password" />
+        </div>
+        ${errorMsg ? `<div class="ssh-export-dim" role="alert">${esc(errorMsg)}</div>` : ''}
+      `;
+      const input = bodyEl.querySelector('#imp-vault-unlock-password');
+      if (input) {
+        input.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          submitUnlock();
+        });
+        setTimeout(() => input.focus(), 50);
+      }
+    };
+
+    const submitUnlock = async () => {
+      const bodyEl = handle.el.querySelector('.tl-dialog__body');
+      const input = bodyEl ? bodyEl.querySelector('#imp-vault-unlock-password') : null;
+      const submitBtn = handle.el.querySelector('.tl-dialog__footer .tl-btn--primary');
+      const vaultPassword = input ? input.value : '';
+      if (submitBtn) submitBtn.disabled = true;
+      if (input) input.disabled = true;
+
+      try {
+        if (!vaultDataService || typeof vaultDataService.unlockVault !== 'function') {
+          throw new Error('Vault data service unavailable: unlockVault');
+        }
+        await vaultDataService.unlockVault(invoke, vaultPassword);
+      } catch (e) {
+        errorMsg = String(e);
+        if (submitBtn) submitBtn.disabled = false;
+        if (input) input.disabled = false;
+        if (bodyEl) render(bodyEl);
+        return;
+      }
+
+      closeDialog();
+      await finishImport(path, password);
+    };
+
+    handle = window.tlDialog.open({
+      title: 'Unlock Vault',
+      ariaLabel: 'Unlock vault to import credentials',
+      size: 'sm',
+      body: render,
+      buttons: [
+        { label: 'Cancel', onSelect: closeDialog },
+        { label: 'Unlock', primary: true, onSelect: submitUnlock },
+      ],
+      onClose: closeDialog,
+    });
+    trackDialogHandle(handle);
+  }
+
+  /** task-4, vault_state "absent": master password + confirm, submitted
+   * through the existing `vault_create` command (vault_commands.rs:122).
+   * Whatever password rule VaultManager::create enforces is the only rule
+   * enforced here — this dialog adds none of its own (no minimum-length
+   * check, unlike vault/dialogs.js's showSetupDialog). The Create Vault
+   * button's enabled state is driven off the live `disabled` DOM property
+   * on the 'input' events below, not the `disabled` value passed to
+   * `buttons[]` at open time — tl-dialog's footer click gate reads the
+   * live property (see buildFooterButton in ui/tl-dialog.js; this exact
+   * bug — gating on the stale build-time value — was found and fixed
+   * earlier in this project). Cancelling aborts the import:
+   * share_import_apply is never called. */
+  function showImportVaultCreateDialog(path, password) {
+    let handle = null;
+    let closed = false;
+    const closeDialog = () => {
+      if (closed) return;
+      closed = true;
+      if (handle) handle.close();
+    };
+    let errorMsg = '';
+
+    const updateSubmitEnabled = () => {
+      const bodyEl = handle.el.querySelector('.tl-dialog__body');
+      const submitBtn = handle.el.querySelector('.tl-dialog__footer .tl-btn--primary');
+      if (!bodyEl || !submitBtn) return;
+      const pwInput = bodyEl.querySelector('#imp-vault-create-password');
+      const confirmInput = bodyEl.querySelector('#imp-vault-create-confirm');
+      const pwVal = pwInput ? pwInput.value : '';
+      const confirmVal = confirmInput ? confirmInput.value : '';
+      submitBtn.disabled = !pwVal || !confirmVal || pwVal !== confirmVal;
+    };
+
+    const render = (bodyEl) => {
+      bodyEl.innerHTML = `
+        <div>This bundle contains saved credentials. To store them you need a vault on this machine. Pick a master password — you'll use it to unlock the vault from now on.</div>
+        <div class="tl-field">
+          <label class="tl-field__label" for="imp-vault-create-password">Master password</label>
+          <input type="password" class="tl-input" id="imp-vault-create-password" autocomplete="new-password" />
+        </div>
+        <div class="tl-field">
+          <label class="tl-field__label" for="imp-vault-create-confirm">Confirm password</label>
+          <input type="password" class="tl-input" id="imp-vault-create-confirm" autocomplete="new-password" />
+        </div>
+        ${errorMsg ? `<div class="ssh-export-dim" role="alert">${esc(errorMsg)}</div>` : ''}
+      `;
+      const pwInput = bodyEl.querySelector('#imp-vault-create-password');
+      const confirmInput = bodyEl.querySelector('#imp-vault-create-confirm');
+      for (const el of [pwInput, confirmInput]) {
+        if (!el) continue;
+        el.addEventListener('input', updateSubmitEnabled);
+        el.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          submitCreate();
+        });
+      }
+      setTimeout(() => { if (pwInput) pwInput.focus(); }, 50);
+    };
+
+    const submitCreate = async () => {
+      const bodyEl = handle.el.querySelector('.tl-dialog__body');
+      const submitBtn = handle.el.querySelector('.tl-dialog__footer .tl-btn--primary');
+      if (submitBtn && submitBtn.disabled) return;
+      const pwInput = bodyEl ? bodyEl.querySelector('#imp-vault-create-password') : null;
+      const confirmInput = bodyEl ? bodyEl.querySelector('#imp-vault-create-confirm') : null;
+      const vaultPassword = pwInput ? pwInput.value : '';
+      if (submitBtn) submitBtn.disabled = true;
+      if (pwInput) pwInput.disabled = true;
+      if (confirmInput) confirmInput.disabled = true;
+
+      try {
+        if (!vaultDataService || typeof vaultDataService.createVault !== 'function') {
+          throw new Error('Vault data service unavailable: createVault');
+        }
+        await vaultDataService.createVault(invoke, vaultPassword);
+      } catch (e) {
+        errorMsg = String(e);
+        // Fields come back empty after this re-render, so leaving submitBtn
+        // disabled (set above) is already the correct state — no explicit
+        // reset needed, unlike the unlock dialogs above.
+        if (bodyEl) render(bodyEl);
+        return;
+      }
+
+      closeDialog();
+      await finishImport(path, password);
+    };
+
+    handle = window.tlDialog.open({
+      title: 'Create Vault',
+      ariaLabel: 'Create vault to import credentials',
+      size: 'sm',
+      body: render,
+      buttons: [
+        { label: 'Cancel', onSelect: closeDialog },
+        { label: 'Create Vault', primary: true, disabled: true, onSelect: submitCreate },
       ],
       onClose: closeDialog,
     });

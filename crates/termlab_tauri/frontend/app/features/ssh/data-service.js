@@ -66,6 +66,18 @@
     return invoke('share_import_apply', { path, password, decisions: [] });
   }
 
+  /** Plan step of the import flow (task-4): decodes the bundle at `path`
+   * with `password` and reports `includes_credentials` and `vault_state`
+   * ("absent" | "locked" | "unlocked") without writing anything — not to
+   * config, not to disk, not to the vault. The caller uses this to resolve
+   * the vault (create/unlock it) before the apply call. Only valid for a
+   * bundle file; the backend rejects a legacy JSON path with "Legacy JSON
+   * imports have no preview" (ssh-panel.js's importConfig never calls this
+   * for one — see its branch on `share_pick_import_file`'s `kind`). */
+  async function planImport(invoke, path, password) {
+    return invoke('share_import_plan', { path, password });
+  }
+
   global.termlabSshFeatureDataService = {
     getServers,
     getTunnels,
@@ -74,5 +86,6 @@
     exportBundle,
     pickImportFile,
     importFile,
+    planImport,
   };
 })(window);
