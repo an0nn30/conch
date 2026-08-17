@@ -28,8 +28,20 @@
     });
   }
 
-  async function importConfig(invoke) {
-    return invoke('remote_import');
+  /** Open the native picker (offers both *.termlabshare and *.json) and
+   * classify the chosen file by its magic bytes — never its extension —
+   * so a renamed file still routes correctly. See
+   * share_commands.rs::detect_import_kind. */
+  async function pickImportFile(invoke) {
+    return invoke('share_pick_import_file');
+  }
+
+  /** Import an already-picked `path` — routed server-side to the bundle
+   * (decode/plan/execute) or legacy JSON (merge_import) path by its own
+   * magic-byte check. `password` is ignored server-side for a legacy
+   * file. */
+  async function importFile(invoke, path, password) {
+    return invoke('share_import', { path, password });
   }
 
   global.termlabSshFeatureDataService = {
@@ -37,6 +49,7 @@
     getTunnels,
     getSessions,
     exportBundle,
-    importConfig,
+    pickImportFile,
+    importFile,
   };
 })(window);

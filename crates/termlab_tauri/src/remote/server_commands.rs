@@ -148,37 +148,43 @@ pub(crate) fn remote_move_server(
     }
 }
 
-/// Import servers and tunnels from a file chosen via native open dialog.
-#[tauri::command]
-pub(crate) async fn remote_import(
-    app: tauri::AppHandle,
-    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
-    vault: tauri::State<'_, VaultState>,
-) -> Result<String, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let path = app
-        .dialog()
-        .file()
-        .add_filter("JSON", &["json"])
-        .blocking_pick_file();
-
-    let path = match path {
-        Some(p) => p,
-        None => return Err("Import cancelled".to_string()),
-    };
-
-    let file_path = path
-        .as_path()
-        .ok_or_else(|| "Invalid file path".to_string())?;
+/// Read and parse a legacy plaintext JSON export file — the file-reading
+/// half of what used to be `remote_import` in one block. Shared by
+/// `remote_import` below (which picks the file itself via a native dialog)
+/// and `share_commands::share_import` (Task 6), which already has a path
+/// chosen by `share_pick_import_file` and only needs the file read and
+/// validated.
+pub(crate) fn read_legacy_export_payload(
+    file_path: &std::path::Path,
+) -> Result<ExportPayload, String> {
     let json =
         std::fs::read_to_string(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
-
     let payload: ExportPayload =
         serde_json::from_str(&json).map_err(|e| format!("Invalid import file: {e}"))?;
     if payload.version != 1 {
         return Err(format!("Unsupported export version: {}", payload.version));
     }
-    let mut state = remote.lock();
+    Ok(payload)
+}
+
+/// Apply an already-parsed legacy `payload` to `state`: merge it in
+/// (regenerating ids, as `merge_import` always has), resolve newly
+/// imported tunnels' session keys against known servers, optionally link
+/// legacy entries to skeleton vault accounts (`vault_eager_import`), and
+/// persist. Returns the same `(servers, folders, tunnels)` counts
+/// `merge_import` reports.
+///
+/// This is the applying half of what used to be `remote_import` in one
+/// block — split out so `share_commands::share_import` (Task 6) can drive
+/// the exact same logic for a `legacy_json`-kind file it already has an
+/// open path for, without duplicating any of it. Nothing about
+/// `merge_import`, the regenerated-UUID semantics, or
+/// `resolve_imported_tunnel_keys` changes here.
+pub(crate) fn apply_legacy_import(
+    state: &mut RemoteState,
+    vault: &VaultState,
+    payload: ExportPayload,
+) -> (usize, usize, usize) {
     let existing_tunnel_ids: Vec<uuid::Uuid> = state.config.tunnels.iter().map(|t| t.id).collect();
 
     // Capture pre-import lengths so we can find newly added entries afterwards.
@@ -190,7 +196,7 @@ pub(crate) async fn remote_import(
     // Resolve session_keys of newly imported tunnels: if a tunnel's host
     // matches a known server with a different user, rewrite the session_key
     // so it matches on activation without needing an edit+save cycle.
-    resolve_imported_tunnel_keys(&mut state, &existing_tunnel_ids);
+    resolve_imported_tunnel_keys(state, &existing_tunnel_ids);
 
     // With vault_eager_import: create skeleton vault accounts for imported
     // server entries that have user/key_path legacy fields but no vault link.
@@ -232,10 +238,39 @@ pub(crate) async fn remote_import(
     // Suppress unused-variable warnings when feature is disabled.
     #[cfg(not(feature = "vault_eager_import"))]
     {
-        let _ = (ungrouped_before, folders_before, &vault);
+        let _ = (ungrouped_before, folders_before, vault);
     }
 
     termlab_remote::config::save_config(&state.paths.config_dir, &state.config);
+    (servers, folders, tunnels)
+}
+
+/// Import servers and tunnels from a file chosen via native open dialog.
+#[tauri::command]
+pub(crate) async fn remote_import(
+    app: tauri::AppHandle,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file();
+
+    let path = match path {
+        Some(p) => p,
+        None => return Err("Import cancelled".to_string()),
+    };
+
+    let file_path = path
+        .as_path()
+        .ok_or_else(|| "Invalid file path".to_string())?;
+    let payload = read_legacy_export_payload(file_path)?;
+
+    let mut state = remote.lock();
+    let (servers, folders, tunnels) = apply_legacy_import(&mut state, &vault, payload);
     Ok(format!(
         "Imported {servers} server(s), {folders} folder(s), {tunnels} tunnel(s)"
     ))

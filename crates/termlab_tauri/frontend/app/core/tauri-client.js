@@ -56,6 +56,8 @@
     REMOTE_GET_SESSIONS: 'remote_get_sessions',
 
     SHARE_EXPORT: 'share_export',
+    SHARE_PICK_IMPORT_FILE: 'share_pick_import_file',
+    SHARE_IMPORT: 'share_import',
 
     SFTP_LIST_DIR: 'sftp_list_dir',
     SFTP_STAT: 'sftp_stat',

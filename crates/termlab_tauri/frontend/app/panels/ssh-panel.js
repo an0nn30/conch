@@ -691,19 +691,162 @@
     return Promise.resolve(null);
   }
 
+  /** Pick a file (bundle or legacy JSON, routed by the backend's magic-byte
+   * check — see share_commands.rs::detect_import_kind), then either prompt
+   * for the bundle password or import a legacy file directly, and finish
+   * with the unified summary dialog/toast. */
   async function importConfig() {
+    let fileInfo;
     try {
-      if (!sshDataService || typeof sshDataService.importConfig !== 'function') {
-        throw new Error('SSH data service unavailable: importConfig');
+      if (!sshDataService || typeof sshDataService.pickImportFile !== 'function') {
+        throw new Error('SSH data service unavailable: pickImportFile');
       }
-      const msg = await sshDataService.importConfig(invoke);
-      await refreshAll();
-      if (window.toast) window.toast.info('Import', msg);
+      fileInfo = await sshDataService.pickImportFile(invoke);
     } catch (e) {
       if (String(e) === 'Import cancelled') return;
       console.error('Import failed:', e);
       if (window.toast) window.toast.error('Import Failed', String(e));
+      return;
     }
+
+    if (!fileInfo || !fileInfo.path) return;
+
+    if (fileInfo.kind === 'bundle') {
+      showImportPasswordDialog(fileInfo.path);
+      return;
+    }
+
+    const err = await runImport(fileInfo.path, '');
+    if (err) {
+      console.error('Import failed:', err);
+      if (window.toast) window.toast.error('Import Failed', err);
+    }
+  }
+
+  /** Call share_import for an already-picked `path`, refresh the panel and
+   * show the summary dialog/toast on success. Returns null on success, or
+   * the error message string on failure (the bundle password dialog uses
+   * that to re-show itself with an inline error; the legacy-file direct
+   * path just toasts it). */
+  async function runImport(path, password) {
+    try {
+      if (!sshDataService || typeof sshDataService.importFile !== 'function') {
+        throw new Error('SSH data service unavailable: importFile');
+      }
+      const summary = await sshDataService.importFile(invoke, path, password);
+      await refreshAll();
+      showImportSummary(summary);
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  }
+
+  /** One password field + Unlock button, per task-6 brief. On failure
+   * (wrong password, not a bundle, newer schema version — see
+   * share_commands.rs's ShareError-derived messages) the SAME dialog is
+   * re-rendered with an inline error rather than closed and reopened,
+   * matching vault/dialogs.js's showUnlockDialog precedent of keeping the
+   * dialog open across a failed attempt. */
+  function showImportPasswordDialog(path) {
+    let handle = null;
+    let closed = false;
+    const closeDialog = () => {
+      if (closed) return;
+      closed = true;
+      if (handle) handle.close();
+    };
+    let errorMsg = '';
+
+    const render = (bodyEl) => {
+      bodyEl.innerHTML = `
+        <div class="tl-field">
+          <label class="tl-field__label" for="imp-bundle-password">Bundle password</label>
+          <input type="password" class="tl-input" id="imp-bundle-password" autocomplete="current-password" />
+        </div>
+        ${errorMsg ? `<div class="ssh-export-dim" role="alert">${esc(errorMsg)}</div>` : ''}
+      `;
+      const input = bodyEl.querySelector('#imp-bundle-password');
+      if (input) {
+        input.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          submitUnlock();
+        });
+        setTimeout(() => input.focus(), 50);
+      }
+    };
+
+    const submitUnlock = async () => {
+      const bodyEl = handle.el.querySelector('.tl-dialog__body');
+      const input = bodyEl ? bodyEl.querySelector('#imp-bundle-password') : null;
+      const submitBtn = handle.el.querySelector('.tl-dialog__footer .tl-btn--primary');
+      const password = input ? input.value : '';
+      if (submitBtn) submitBtn.disabled = true;
+      if (input) input.disabled = true;
+
+      const err = await runImport(path, password);
+      if (err === null) {
+        closeDialog();
+        return;
+      }
+      errorMsg = err;
+      if (submitBtn) submitBtn.disabled = false;
+      if (bodyEl) render(bodyEl);
+    };
+
+    handle = window.tlDialog.open({
+      title: 'Import Bundle',
+      ariaLabel: 'Import bundle',
+      size: 'sm',
+      body: render,
+      buttons: [
+        { label: 'Cancel', onSelect: closeDialog },
+        { label: 'Unlock', primary: true, onSelect: submitUnlock },
+      ],
+      onClose: closeDialog,
+    });
+    trackDialogHandle(handle);
+  }
+
+  /** Show the unified import summary — "Imported N host(s), M tunnel(s), K
+   * credential(s). S skipped." (task-6 brief) — as a toast when there is
+   * nothing more to say, or a dialog listing skipped entries and, when
+   * credentials were held back for lack of an unlocked vault, the line
+   * telling the user how to get them next time. */
+  function showImportSummary(summary) {
+    const s = summary || {};
+    const skipped = Array.isArray(s.skipped) ? s.skipped : [];
+    const heldBack = !!s.credentials_held_back;
+    const headline = `Imported ${s.servers || 0} host(s), ${s.tunnels || 0} tunnel(s), ${s.credentials || 0} credential(s). ${skipped.length} skipped.`;
+
+    if (!skipped.length && !heldBack) {
+      if (window.toast) window.toast.info('Import complete', headline);
+      return;
+    }
+
+    let handle = null;
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      if (handle) handle.close();
+    };
+    handle = window.tlDialog.open({
+      title: 'Import complete',
+      ariaLabel: 'Import complete',
+      size: 'md',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = `
+          <div>${esc(headline)}</div>
+          ${heldBack ? '<div class="ssh-export-section" style="margin-top:12px;">Credentials were not imported because this machine has no unlocked vault. Create or unlock your vault and import again.</div>' : ''}
+          ${skipped.length ? '<div class="ssh-export-section" style="margin-top:12px;">Skipped</div><ul>' + skipped.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
+        `;
+      },
+      buttons: [{ label: 'OK', primary: true, onSelect: close }],
+      onClose: close,
+    });
+    trackDialogHandle(handle);
   }
 
   async function refreshSessions() {

@@ -1,12 +1,23 @@
-//! Encrypted `.termlabshare` bundle export — wires `termlab_share`'s pure
-//! `export_planner` and `codec` to a real filesystem `KeyReader` and a Tauri
-//! command.
+//! Encrypted `.termlabshare` bundle export/import — wires `termlab_share`'s
+//! pure `export_planner`/`import_planner`/`import_executor` and `codec` to a
+//! real filesystem `KeyReader`/`VaultSink` and Tauri commands.
 //!
 //! Export is encrypted-only: the legacy plaintext export command has been
 //! removed from `remote/server_commands.rs`, and this module's `share_export`
-//! is now the only export path registered in `lib.rs`. Import is Task 6's
-//! responsibility; `remote_import` is untouched here.
+//! is now the only export path registered in `lib.rs`.
+//!
+//! Import routes by the file's magic bytes, never its extension (a renamed
+//! file must still work): `share_pick_import_file` and `share_import` both
+//! call `detect_import_kind` independently rather than trusting a
+//! frontend-supplied `kind` round-tripped from the former. A `legacy_json`
+//! file is hand off to `remote::server_commands::{read_legacy_export_payload,
+//! apply_legacy_import}` — the exact same applying logic `remote_import`
+//! itself now calls, so legacy behaviour (`merge_import`, regenerated ids,
+//! `resolve_imported_tunnel_keys`) is untouched, just reachable from a path
+//! that was already picked instead of `remote_import`'s own dialog.
 
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -15,8 +26,12 @@ use ts_rs::TS;
 use zeroize::Zeroize;
 
 use termlab_share::export_planner::{ExportRequest, KeyReader, plan};
+use termlab_share::import_executor::{ImportOutcome, VaultSink, execute};
+use termlab_vault::VaultManager;
+use termlab_vault::model::VaultAccount;
 
 use crate::remote::RemoteState;
+use crate::remote::server_commands::{apply_legacy_import, read_legacy_export_payload};
 use crate::vault_commands::VaultState;
 
 // ---------------------------------------------------------------------------
@@ -214,4 +229,201 @@ fn local_hostname() -> String {
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "unknown-host".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Import
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub(crate) struct ImportFileInfo {
+    pub path: String,
+    /// `"bundle"` for an encrypted `.termlabshare` file, `"legacy_json"` for
+    /// anything else — decided by `detect_import_kind`'s magic-byte check,
+    /// never by the file's extension.
+    pub kind: String,
+}
+
+/// Offer a native open dialog for both bundle and legacy JSON files, then
+/// classify the chosen file by its magic bytes (see `detect_import_kind`)
+/// so the frontend knows whether to prompt for a password before calling
+/// `share_import`.
+#[tauri::command]
+pub(crate) async fn share_pick_import_file(
+    app: tauri::AppHandle,
+) -> Result<ImportFileInfo, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("TermLab Share Bundle", &[termlab_share::BUNDLE_EXTENSION])
+        .add_filter("Legacy JSON Export", &["json"])
+        .blocking_pick_file();
+
+    let path = match path {
+        Some(p) => p,
+        None => return Err("Import cancelled".to_string()),
+    };
+    let file_path = path
+        .as_path()
+        .ok_or_else(|| "Invalid file path".to_string())?;
+    let kind = detect_import_kind(file_path)?;
+
+    Ok(ImportFileInfo {
+        path: file_path.to_string_lossy().to_string(),
+        kind: kind.to_string(),
+    })
+}
+
+/// Decide `bundle` vs `legacy_json` from `path`'s first 8 bytes — never
+/// from its extension, so a bundle (or legacy export) renamed to the other
+/// extension still routes correctly. `TRMLBSHR`
+/// (`termlab_share::BUNDLE_MAGIC`) means an encrypted bundle; anything
+/// else, including a file shorter than 8 bytes, is treated as the legacy
+/// plaintext JSON format — whose own parser raises a clear "Invalid import
+/// file" error if the bytes aren't actually JSON.
+fn detect_import_kind(path: &Path) -> Result<&'static str, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("Failed to read file: {e}"))?;
+    let mut magic = [0u8; 8];
+    match file.read_exact(&mut magic) {
+        Ok(()) if &magic == termlab_share::BUNDLE_MAGIC => Ok("bundle"),
+        Ok(()) => Ok("legacy_json"),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok("legacy_json"),
+        Err(e) => Err(format!("Failed to read file: {e}")),
+    }
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub(crate) struct ShareImportSummary {
+    pub servers: usize,
+    pub tunnels: usize,
+    pub credentials: usize,
+    pub skipped: Vec<String>,
+    /// True when the bundle carried credentials but they were held back
+    /// because no vault is unlocked on this machine (hosts and tunnels are
+    /// still imported). Always `false` for a `legacy_json` import — that
+    /// format never carries vault credentials.
+    pub credentials_held_back: bool,
+}
+
+impl From<ImportOutcome> for ShareImportSummary {
+    fn from(outcome: ImportOutcome) -> Self {
+        Self {
+            servers: outcome.servers,
+            tunnels: outcome.tunnels,
+            credentials: outcome.credentials,
+            skipped: outcome.skipped,
+            credentials_held_back: outcome.credentials_held_back,
+        }
+    }
+}
+
+/// Adapts the real, unlocked `VaultManager` to `import_executor`'s
+/// `VaultSink` trait so `execute` can upsert imported accounts without
+/// `termlab_share` depending on `termlab_vault`'s Tauri-facing state type.
+struct TauriVaultSink<'a> {
+    vault: &'a VaultManager,
+}
+
+impl VaultSink for TauriVaultSink<'_> {
+    fn upsert_account(&mut self, account: VaultAccount) -> Result<(), String> {
+        self.vault
+            .upsert_account(account)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Import `path` (as previously chosen by `share_pick_import_file`),
+/// routed by its own magic-byte check rather than trusting a
+/// frontend-supplied kind.
+///
+/// Password handling mirrors `share_export`: `password` arrives as a plain
+/// `String` command argument (Tauri has no secret-string type), is never
+/// logged, is forwarded to `codec::decode` by reference only, and is
+/// zeroized before this function returns on every path via the
+/// `do_import`/zeroize split below. A `legacy_json` file ignores the
+/// password (that format has no encryption); it is zeroized anyway for
+/// uniformity.
+#[tauri::command]
+pub(crate) async fn share_import(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
+    path: String,
+    mut password: String,
+) -> Result<ShareImportSummary, String> {
+    let result = do_import(&remote, &vault, &path, &password);
+    password.zeroize();
+    result
+}
+
+fn do_import(
+    remote: &Arc<Mutex<RemoteState>>,
+    vault: &VaultState,
+    path: &str,
+    password: &str,
+) -> Result<ShareImportSummary, String> {
+    let file_path = Path::new(path);
+    let kind = detect_import_kind(file_path)?;
+
+    if kind == "legacy_json" {
+        let payload = read_legacy_export_payload(file_path)?;
+        let mut state = remote.lock();
+        let (servers, _folders, tunnels) = apply_legacy_import(&mut state, vault, payload);
+        return Ok(ShareImportSummary {
+            servers,
+            tunnels,
+            credentials: 0,
+            skipped: Vec::new(),
+            credentials_held_back: false,
+        });
+    }
+
+    let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+    let bundle =
+        termlab_share::codec::decode(&bytes, password.as_bytes()).map_err(|e| e.to_string())?;
+
+    let mut state = remote.lock();
+    let vault_mgr = vault.lock();
+    let use_vault = !vault_mgr.is_locked();
+
+    let existing_account_ids: Vec<uuid::Uuid> = if use_vault {
+        vault_mgr
+            .list_accounts()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|a| a.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let import_plan =
+        termlab_share::import_planner::plan(&bundle, &state.config, &existing_account_ids);
+
+    let key_dir = state.paths.config_dir.join("imported-keys");
+    std::fs::create_dir_all(&key_dir).map_err(|e| format!("Failed to prepare key storage: {e}"))?;
+
+    let outcome = if use_vault {
+        let mut sink = TauriVaultSink { vault: &vault_mgr };
+        execute(import_plan, &mut state.config, &key_dir, Some(&mut sink))
+    } else {
+        execute(import_plan, &mut state.config, &key_dir, None)
+    }
+    .map_err(|e| e.to_string())?;
+
+    if use_vault {
+        vault_mgr.save().map_err(|e| e.to_string())?;
+    }
+    // `RemoteState` is a single app-managed value shared by every window's
+    // Tauri commands (see `lib.rs`'s `.manage(remote_state)`), so mutating
+    // `state.config` in place and persisting it here — exactly as
+    // `apply_legacy_import` above already does for the legacy path — is
+    // sufficient for both the main and settings windows to see the import
+    // on their next `remote_get_servers`/`tunnel_get_all` call; there is no
+    // separate per-window copy to reconcile.
+    termlab_remote::config::save_config(&state.paths.config_dir, &state.config);
+
+    Ok(outcome.into())
 }

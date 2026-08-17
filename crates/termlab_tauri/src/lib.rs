@@ -544,6 +544,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::server_commands::remote_move_server,
             remote::server_commands::remote_duplicate_server,
             share_commands::share_export,
+            share_commands::share_pick_import_file,
+            share_commands::share_import,
             remote::server_commands::remote_import,
             remote::sftp_commands::sftp_list_dir,
             remote::sftp_commands::sftp_stat,

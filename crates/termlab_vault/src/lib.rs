@@ -182,6 +182,24 @@ impl VaultManager {
         Ok(())
     }
 
+    /// Insert `account` verbatim, or replace an existing account that has
+    /// the same id. Unlike `add_account`, the id is caller-supplied rather
+    /// than freshly generated — used by bundle import
+    /// (`termlab_share::import_executor::VaultSink`), where an account's id
+    /// must survive the round trip unchanged so a `ServerEntry`'s
+    /// `vault_account_id` (set on the exporting machine and never rewritten
+    /// during import) still resolves to it afterwards.
+    pub fn upsert_account(&self, account: VaultAccount) -> Result<(), VaultError> {
+        let mut guard = self.vault.lock();
+        let vault = guard.as_mut().ok_or(VaultError::Locked)?;
+        match vault.accounts.iter_mut().find(|a| a.id == account.id) {
+            Some(existing) => *existing = account,
+            None => vault.accounts.push(account),
+        }
+        self.lock_manager.touch();
+        Ok(())
+    }
+
     /// Delete an account by ID. Returns true if found and removed.
     pub fn delete_account(&self, id: Uuid) -> Result<bool, VaultError> {
         let mut guard = self.vault.lock();

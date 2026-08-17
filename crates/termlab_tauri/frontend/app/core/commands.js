@@ -66,6 +66,8 @@ export const COMMANDS = {
 
   // Share bundles
   SHARE_EXPORT: 'share_export',
+  SHARE_PICK_IMPORT_FILE: 'share_pick_import_file',
+  SHARE_IMPORT: 'share_import',
 
   // SFTP / Local FS
   SFTP_LIST_DIR: 'sftp_list_dir',
