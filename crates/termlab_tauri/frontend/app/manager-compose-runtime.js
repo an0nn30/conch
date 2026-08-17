@@ -252,6 +252,16 @@
       managerDelegates.setTabManager(tabManager);
     }
 
+    // The composed tabManager instance lives inside main-runtime's closure and
+    // has no window handle. `global.termlabTabManager` is the FACTORY ({create}),
+    // not an instance, so it cannot be used to open an editor tab. Publish the
+    // one entry point that callers outside the closure need — the editor
+    // service and the file-open command — under its own name, alongside the
+    // other `__termlab*` escape hatches this app already uses.
+    if (tabManager && typeof tabManager.createEditorTab === 'function') {
+      global.__termlabCreateEditorTab = (options) => tabManager.createEditorTab(options);
+    }
+
     return {
       paneManager,
       tabManager,

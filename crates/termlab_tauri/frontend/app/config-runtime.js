@@ -37,6 +37,14 @@
           if (pane.kind === 'terminal' && pane.term) {
             pane.term.options.theme = newTheme;
           }
+          // The editor's colours come from the --tl-* variables, which
+          // applyThemeCss above has just rewritten, so a rebuild is all that is
+          // needed. Font size is not available at this site; it is applied in
+          // the terminal-config block below, which is the only place the new
+          // size exists.
+          if (pane.kind === 'editor' && pane.view && global.termlabEditorPane) {
+            global.termlabEditorPane.refreshTheme(pane.view);
+          }
         }
 
         const appCfg = await invoke('get_app_config');
@@ -60,7 +68,14 @@
               pane.term.options.fontFamily = newTermFont;
               pane.term.options.fontSize = newTermSize;
             }
+            if (pane.kind === 'editor' && pane.view && global.termlabEditorPane) {
+              global.termlabEditorPane.setFontSize(pane.view, newTermSize);
+            }
           }
+          // The rAF pass below is a re-fit/re-paint for xterm only: CodeMirror
+          // reflows itself when the font compartment is reconfigured, and an
+          // editor pane has no fitAddon and no term to refresh. Deliberately
+          // left terminal-only.
           requestAnimationFrame(() => {
             for (const pane of getPanes().values()) {
               if (pane.kind !== 'terminal' || !pane.term) continue;

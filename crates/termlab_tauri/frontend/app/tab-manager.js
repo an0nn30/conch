@@ -379,6 +379,14 @@
         } else if (notifyBackend && pane.kind === 'plugin_view' && pane.viewId) {
           notifyPluginViewClosed(pane.viewId);
           deletePluginViewPane(pane.viewId);
+        } else if (pane.kind === 'editor') {
+          // Unconditional, unlike the two branches above: destroying the
+          // CodeMirror view is local cleanup, not a backend notification, so it
+          // must happen even when notifyBackend is false.
+          if (pane.view && global.termlabEditorPane) {
+            global.termlabEditorPane.destroyEditorView(pane.view);
+          }
+          pane.view = null;
         }
         if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
         if (pane.resizeObserver) pane.resizeObserver.disconnect();
@@ -528,6 +536,112 @@
       return tabId;
     }
 
+    // An editor tab. Mirrors createTab's DOM and tab bookkeeping exactly —
+    // same button, same tree-root container, same divider wiring — so editor
+    // tabs participate in splits, drag-and-drop and activation with no
+    // special cases downstream. The only difference is what lives in the pane.
+    function createEditorTab(options) {
+      const opts = options || {};
+      const tabs = getTabs();
+      const panes = getPanes();
+      const tabId = allocateTabId();
+      const paneId = allocatePaneId();
+      const fileName = String(opts.filePath || 'untitled').split('/').pop();
+
+      const button = makeTabButton(fileName, () => closeTab(tabId));
+      button.dataset.tabId = String(tabId);
+      button.classList.add('entering');
+
+      const containerEl = document.createElement('div');
+      containerEl.className = 'tab-tree-root';
+
+      const paneEl = document.createElement('div');
+      paneEl.className = 'terminal-pane';
+      paneEl.dataset.paneId = paneId;
+      containerEl.appendChild(paneEl);
+
+      const hostEl = document.createElement('div');
+      hostEl.className = 'editor-pane-host';
+      paneEl.appendChild(hostEl);
+
+      tabBarEl.appendChild(button);
+      terminalHostEl.appendChild(containerEl);
+
+      const pane = {
+        paneId,
+        tabId,
+        kind: 'editor',
+        type: null,
+        connectionId: null,
+        term: null,
+        fitAddon: null,
+        root: paneEl,
+        spawned: false,
+        lastCols: 0,
+        lastRows: 0,
+        cleanupMouseBridge: null,
+        resizeObserver: null,
+        debounceTimer: null,
+        filePath: opts.filePath || null,
+        view: null,
+        dirty: false,
+        remote: opts.remote || null,
+      };
+      panes.set(paneId, pane);
+
+      const tab = {
+        id: tabId,
+        label: fileName,
+        type: 'editor',
+        hasCustomTitle: true,
+        button,
+        containerEl,
+        treeRoot: makeLeaf(paneId),
+        focusedPaneId: paneId,
+      };
+      tabs.set(tabId, tab);
+      setupDividerDrag(
+        containerEl,
+        () => tab.treeRoot,
+        (newTree) => { tab.treeRoot = newTree; },
+      );
+      updateTabBarVisibility();
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => button.classList.remove('entering'));
+      });
+
+      button.addEventListener('click', () => activateTab(tabId));
+      paneEl.addEventListener('mousedown', () => setFocusedPane(paneId));
+
+      // The modified marker is its own element, inserted between the tab's
+      // label span and its close affordance. Do NOT write button.textContent —
+      // makeTabButton builds child elements (icon, label span, close span) and
+      // assigning textContent destroys all of them.
+      const dirtyMarker = document.createElement('span');
+      dirtyMarker.className = 'tab-dirty-marker';
+      dirtyMarker.textContent = '•';
+      dirtyMarker.hidden = true;
+      if (button._labelSpan && button._labelSpan.parentNode === button) {
+        button.insertBefore(dirtyMarker, button._labelSpan.nextSibling);
+      } else {
+        button.appendChild(dirtyMarker);
+      }
+
+      pane.view = global.termlabEditorPane.createEditorView(hostEl, {
+        doc: typeof opts.contents === 'string' ? opts.contents : '',
+        filename: pane.filePath || '',
+        onDirtyChange: (dirty) => {
+          pane.dirty = dirty;
+          dirtyMarker.hidden = !dirty;
+        },
+      });
+
+      activateTab(tabId);
+      setFocusedPane(paneId);
+      return tabId;
+    }
+
     async function createSshTab(opts) {
       const tabs = getTabs();
       const panes = getPanes();
@@ -649,6 +763,7 @@
       activateTab,
       closeTab,
       createTab,
+      createEditorTab,
       createSshTab,
       makeTabButton,
       setTabLabel,

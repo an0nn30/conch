@@ -6,7 +6,18 @@
 
     function writeTextToCurrentPane(text) {
       const pane = getCurrentPane();
-      if (!pane || pane.kind !== 'terminal' || !pane.spawned || typeof text !== 'string' || text.length === 0) return false;
+      if (!pane || typeof text !== 'string' || text.length === 0) return false;
+      // An editor pane has no PTY to write to. Note that when the CodeMirror
+      // view actually holds focus, CodeMirror's own paste handling runs first
+      // (isTextInputTarget is true for its contenteditable, so the shortcut and
+      // document-level paste handlers below both bail out); this arm covers the
+      // case where the editor pane is current but focus sits elsewhere.
+      if (pane.kind === 'editor' && pane.view) {
+        pane.view.dispatch(pane.view.state.replaceSelection(text));
+        pane.view.focus();
+        return true;
+      }
+      if (pane.kind !== 'terminal' || !pane.spawned) return false;
       const cmd = pane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
       invoke(cmd, { paneId: pane.paneId, data: text }).catch((event) => {
         console.error('paste write error:', event);

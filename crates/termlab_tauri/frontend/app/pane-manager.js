@@ -83,6 +83,9 @@
         if (pane.kind === 'terminal' && pane.term) {
           pane.term.focus();
         }
+        if (pane.kind === 'editor' && pane.view) {
+          pane.view.focus();
+        }
         const tab = tabs.get(pane.tabId);
         if (tab) tab.focusedPaneId = paneId;
         if (pane.kind === 'terminal' && typeof onTerminalFocused === 'function') {
@@ -217,6 +220,12 @@
       } else if (pane.kind === 'plugin_view' && pane.viewId) {
         notifyPluginViewClosed(pane.viewId);
         deletePluginViewPane(pane.viewId);
+      } else if (pane.kind === 'editor' && pane.view) {
+        // The single-leaf case above hands off to closeTab, which destroys the
+        // view; this is the split case, where the pane goes away on its own and
+        // nothing else would ever call destroy().
+        if (global.termlabEditorPane) global.termlabEditorPane.destroyEditorView(pane.view);
+        pane.view = null;
       }
 
       if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
