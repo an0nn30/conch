@@ -2291,7 +2291,7 @@ After all eight tasks, these must all hold:
 
 - `cargo test --workspace` and `cargo clippy --all-targets` pass.
 - `node scripts/tests/test_language_map.mjs` and `test_scratch_naming.mjs` pass.
-- `./scripts/check_frontend_boundaries.sh .` passes.
+- `./scripts/check_frontend_boundaries.sh .` introduces **no new** violations. It does not pass today and did not before this branch: it fails on `app/ui/tl-dialog.js:334`, the dialog focus trap's capture-phase document keydown listener, verified on the base commit. Fixing a shared invariant from a feature branch about editors is the wrong place for it, so that failure is tracked separately; the gate here is that the violation list gains no new entries.
 - The eleven manual checks in the spec's Testing section have been run, each recorded pass or fail.
 - The recorded CodeMirror bundle size is in the final report.
 - No app module imports another app module — the build step covers third-party dependencies only.
