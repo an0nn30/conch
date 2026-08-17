@@ -19,15 +19,29 @@ use termlab_vault::model::VaultAccount;
 
 use crate::bundle::{BundledKey, ShareBundle};
 
+// No serde/ts-rs derives: termlab_share is a pure domain crate with neither
+// dependency, and the Tauri layer maps this to a string for the frontend
+// (ImportPreviewRow::status in Task 3). Keep it that way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictStatus {
+    New,
+    SameId,
+    LabelCollision,
+    ReferenceBroken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemAction {
     Add,
     Replace,
+    Skip,
+    Rename(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct PlannedItem<T> {
     pub item: T,
+    pub status: ConflictStatus,
     pub action: ItemAction,
 }
 
@@ -72,12 +86,13 @@ pub struct ImportPlan {
 ///
 /// A tunnel whose `server_entry_id` names a host that is neither being
 /// imported (as part of this same bundle) nor already known locally cannot
-/// resolve on this machine, so it is left out of `plan.tunnels` and a
-/// message explaining why is appended to `plan.skipped` instead. A tunnel
-/// with no `server_entry_id` (only a legacy `session_key`) has nothing to
-/// validate here and is always kept.
+/// resolve on this machine — it is kept in `plan.tunnels` with status
+/// `ConflictStatus::ReferenceBroken` and action `ItemAction::Skip`, rather
+/// than being dropped, so the row still shows up for the user instead of
+/// silently disappearing. A tunnel with no `server_entry_id` (only a legacy
+/// `session_key`) has nothing to validate here and is always kept.
 pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uuid]) -> ImportPlan {
-    let mut skipped = Vec::new();
+    let skipped = Vec::new();
 
     // Existence (and therefore Add-vs-Replace) for any server id — whether
     // the bundle carries it ungrouped or nested in a folder — is decided
@@ -99,8 +114,16 @@ pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uu
                 .entries
                 .into_iter()
                 .map(|item| {
-                    let action = action_for(config.find_server(&item.id).is_some());
-                    PlannedItem { item, action }
+                    let id_exists = config.find_server(&item.id).is_some();
+                    let label_collides = config
+                        .all_servers()
+                        .any(|s| s.label == item.label && s.id != item.id);
+                    let (status, action) = classify(id_exists, label_collides);
+                    PlannedItem {
+                        item,
+                        status,
+                        action,
+                    }
                 })
                 .collect();
             PlannedFolder {
@@ -117,8 +140,16 @@ pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uu
         .iter()
         .cloned()
         .map(|item| {
-            let action = action_for(config.find_server(&item.id).is_some());
-            PlannedItem { item, action }
+            let id_exists = config.find_server(&item.id).is_some();
+            let label_collides = config
+                .all_servers()
+                .any(|s| s.label == item.label && s.id != item.id);
+            let (status, action) = classify(id_exists, label_collides);
+            PlannedItem {
+                item,
+                status,
+                action,
+            }
         })
         .collect();
 
@@ -141,20 +172,24 @@ pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uu
 
     let mut tunnels = Vec::new();
     for item in &bundle.tunnels {
-        if let Some(host_id) = &item.server_entry_id {
-            let resolvable =
-                bundle_host_ids.contains(host_id.as_str()) || config.find_server(host_id).is_some();
-            if !resolvable {
-                skipped.push(format!(
-                    "Tunnel \"{}\" references a host that is not included in this bundle or your local configuration",
-                    item.label
-                ));
-                continue;
-            }
-        }
-        let action = action_for(config.tunnels.iter().any(|existing| existing.id == item.id));
+        let unresolvable = matches!(&item.server_entry_id, Some(host_id)
+            if !bundle_host_ids.contains(host_id.as_str())
+                && config.find_server(host_id).is_none());
+        let (status, action) = if unresolvable {
+            (ConflictStatus::ReferenceBroken, ItemAction::Skip)
+        } else {
+            let label_collides = config
+                .tunnels
+                .iter()
+                .any(|t| t.label == item.label && t.id != item.id);
+            classify(
+                config.tunnels.iter().any(|t| t.id == item.id),
+                label_collides,
+            )
+        };
         tunnels.push(PlannedItem {
             item: item.clone(),
+            status,
             action,
         });
     }
@@ -165,8 +200,12 @@ pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uu
         .iter()
         .cloned()
         .map(|item| {
-            let action = action_for(existing_account_ids.contains(&item.id));
-            PlannedItem { item, action }
+            let (status, action) = classify(existing_account_ids.contains(&item.id), false);
+            PlannedItem {
+                item,
+                status,
+                action,
+            }
         })
         .collect();
 
@@ -180,11 +219,18 @@ pub fn plan(bundle: &ShareBundle, config: &SshConfig, existing_account_ids: &[Uu
     }
 }
 
-fn action_for(exists_locally: bool) -> ItemAction {
-    if exists_locally {
-        ItemAction::Replace
+/// Status and default action for an item, given whether its id already exists
+/// locally and whether its label collides with a *different* local item.
+///
+/// An id match outranks a label collision: the item IS the local one, whatever
+/// it is currently called.
+fn classify(id_exists: bool, label_collides: bool) -> (ConflictStatus, ItemAction) {
+    if id_exists {
+        (ConflictStatus::SameId, ItemAction::Replace)
+    } else if label_collides {
+        (ConflictStatus::LabelCollision, ItemAction::Add)
     } else {
-        ItemAction::Add
+        (ConflictStatus::New, ItemAction::Add)
     }
 }
 
@@ -192,6 +238,8 @@ fn action_for(exists_locally: bool) -> ItemAction {
 mod tests {
     use super::*;
     use crate::bundle::{BundleMetadata, BundledVault};
+    use termlab_remote::config::ServerFolder;
+    use termlab_vault::model::AuthMethod;
 
     fn sample_metadata() -> BundleMetadata {
         BundleMetadata {
@@ -284,6 +332,115 @@ mod tests {
         (bundle, config)
     }
 
+    /// A server whose id is not present anywhere in `config` — the plain
+    /// "New" case.
+    fn fixture_new_server() -> (ShareBundle, SshConfig) {
+        let mut bundle = empty_bundle();
+        bundle.servers = vec![make_server("new-host", "fresh.example.com")];
+        let config = SshConfig::default();
+        (bundle, config)
+    }
+
+    /// A server whose id already exists in `config.ungrouped`.
+    fn fixture_server_id_exists_ungrouped() -> (ShareBundle, SshConfig) {
+        let mut bundle = empty_bundle();
+        bundle.servers = vec![make_server("existing", "overlap.example.com")];
+
+        let mut config = SshConfig::default();
+        config.add_server(make_server("existing", "overlap.example.com"));
+
+        (bundle, config)
+    }
+
+    /// A server whose id already exists, but nested inside a local folder
+    /// rather than in `ungrouped` — existence must be decided with
+    /// `config.find_server`, which scans folders too (the I2 trap).
+    fn fixture_server_id_exists_in_folder() -> (ShareBundle, SshConfig) {
+        let mut bundle = empty_bundle();
+        bundle.servers = vec![make_server("existing", "overlap.example.com")];
+
+        let mut config = SshConfig::default();
+        config.folders.push(ServerFolder {
+            id: "folder-1".into(),
+            name: "Folder".into(),
+            expanded: true,
+            entries: vec![make_server("existing", "overlap.example.com")],
+        });
+
+        (bundle, config)
+    }
+
+    /// A bundle server with a fresh id whose label collides with a
+    /// *different* local server's label.
+    fn fixture_label_collides_different_id() -> (ShareBundle, SshConfig) {
+        let mut bundle = empty_bundle();
+        let mut incoming = make_server("bundle-id", "bundle.example.com");
+        incoming.label = "prod".into();
+        bundle.servers = vec![incoming];
+
+        let mut config = SshConfig::default();
+        let mut local = make_server("local-id", "local.example.com");
+        local.label = "prod".into();
+        config.add_server(local);
+
+        (bundle, config)
+    }
+
+    /// A bundle server whose id matches a local server AND whose label
+    /// matches a *different* local server's label. The id match must win.
+    fn fixture_id_match_and_label_collision() -> (ShareBundle, SshConfig) {
+        let mut bundle = empty_bundle();
+        let mut incoming = make_server("shared-id", "bundle.example.com");
+        incoming.label = "renamed-label".into();
+        bundle.servers = vec![incoming];
+
+        let mut config = SshConfig::default();
+        let mut same_id = make_server("shared-id", "old.example.com");
+        same_id.label = "old-name".into();
+        config.add_server(same_id);
+        let mut different_id_same_label = make_server("other-id", "other.example.com");
+        different_id_same_label.label = "renamed-label".into();
+        config.add_server(different_id_same_label);
+
+        (bundle, config)
+    }
+
+    /// A tunnel whose `server_entry_id` names a host carried in this same
+    /// bundle (not yet in local config) — it resolves once the host is
+    /// imported alongside it.
+    fn fixture_tunnel_host_in_bundle() -> (ShareBundle, SshConfig) {
+        let mut bundle = empty_bundle();
+        bundle.servers = vec![make_server("bundle-host", "bundlehost.example.com")];
+        bundle.tunnels = vec![SavedTunnel {
+            id: Uuid::new_v4(),
+            label: "to-bundle-host".into(),
+            session_key: "u@bundlehost.example.com:22".into(),
+            server_entry_id: Some("bundle-host".into()),
+            local_port: 5432,
+            remote_host: "db.internal".into(),
+            remote_port: 5432,
+            auto_start: false,
+        }];
+        let config = SshConfig::default();
+        (bundle, config)
+    }
+
+    /// A bundled vault account whose id already exists locally.
+    fn fixture_account_exists() -> (ShareBundle, SshConfig, Uuid) {
+        let account_id = Uuid::new_v4();
+        let mut bundle = empty_bundle();
+        bundle.vault.accounts = vec![VaultAccount {
+            id: account_id,
+            display_name: "Prod DB".into(),
+            username: "svc".into(),
+            auth: AuthMethod::Password("x".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+        let config = SshConfig::default();
+        (bundle, config, account_id)
+    }
+
     #[test]
     fn new_uuid_adds_and_existing_uuid_replaces() {
         let (bundle, config) = fixture_with_one_overlapping_server();
@@ -292,18 +449,92 @@ mod tests {
         assert!(matches!(p.servers[1].action, ItemAction::Add));
     }
 
-    #[test]
-    fn tunnel_with_unresolvable_host_is_skipped() {
-        let (bundle, config) = fixture_tunnel_pointing_nowhere();
-        let p = plan(&bundle, &config, &[]);
-        assert!(p.tunnels.is_empty());
-        assert!(p.skipped.iter().any(|s| s.contains("references a host")));
-    }
+    // This module used to have `tunnel_with_unresolvable_host_is_skipped`
+    // here, asserting the tunnel vanished into `p.tunnels.is_empty()` and a
+    // message landed in `p.skipped`. That's the exact behaviour this task
+    // retires: the row now survives in `p.tunnels` as `ReferenceBroken`/
+    // `Skip` instead of being dropped. It has been removed rather than
+    // merely updated because its replacement assertions would have been a
+    // verbatim duplicate of `an_unresolvable_tunnel_is_kept_as_a_reference_broken_row`
+    // below (also exercising `fixture_tunnel_pointing_nowhere`), which
+    // already provides the coverage.
 
     #[test]
     fn tunnel_resolving_to_an_existing_local_host_is_kept() {
         let (bundle, config) = fixture_tunnel_pointing_at_existing_local_host();
         let p = plan(&bundle, &config, &[]);
         assert_eq!(p.tunnels.len(), 1);
+    }
+
+    #[test]
+    fn a_brand_new_server_is_new_and_defaults_to_add() {
+        let (bundle, config) = fixture_new_server();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.servers[0].status, ConflictStatus::New);
+        assert_eq!(p.servers[0].action, ItemAction::Add);
+    }
+
+    #[test]
+    fn an_existing_id_is_same_id_and_defaults_to_replace() {
+        let (bundle, config) = fixture_server_id_exists_ungrouped();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.servers[0].status, ConflictStatus::SameId);
+        assert_eq!(p.servers[0].action, ItemAction::Replace);
+    }
+
+    #[test]
+    fn an_existing_folder_nested_id_is_also_same_id() {
+        // The pre-existing I2 trap: existence must be decided with
+        // config.find_server, which scans folders, not just `ungrouped`.
+        let (bundle, config) = fixture_server_id_exists_in_folder();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.servers[0].status, ConflictStatus::SameId);
+    }
+
+    #[test]
+    fn a_colliding_label_with_a_different_id_is_label_collision_and_defaults_to_add() {
+        let (bundle, config) = fixture_label_collides_different_id();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.servers[0].status, ConflictStatus::LabelCollision);
+        assert_eq!(p.servers[0].action, ItemAction::Add);
+    }
+
+    #[test]
+    fn an_id_match_outranks_a_label_collision() {
+        // Same id as a local host AND the same label as a different local
+        // host: it is the local item, so SameId wins.
+        let (bundle, config) = fixture_id_match_and_label_collision();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.servers[0].status, ConflictStatus::SameId);
+        assert_eq!(p.servers[0].action, ItemAction::Replace);
+    }
+
+    #[test]
+    fn an_unresolvable_tunnel_is_kept_as_a_reference_broken_row() {
+        // It used to be dropped into ImportPlan::skipped. A dropped row is how
+        // a user ends up wondering where a tunnel went, so it now survives with
+        // status ReferenceBroken and action Skip.
+        let (bundle, config) = fixture_tunnel_pointing_nowhere();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.tunnels.len(), 1, "the row must survive, not be dropped");
+        assert_eq!(p.tunnels[0].status, ConflictStatus::ReferenceBroken);
+        assert_eq!(p.tunnels[0].action, ItemAction::Skip);
+        assert!(p.skipped.is_empty(), "no longer reported via `skipped`");
+    }
+
+    #[test]
+    fn a_tunnel_whose_host_is_in_the_bundle_resolves() {
+        let (bundle, config) = fixture_tunnel_host_in_bundle();
+        let p = plan(&bundle, &config, &[]);
+        assert_eq!(p.tunnels[0].status, ConflictStatus::New);
+        assert_eq!(p.tunnels[0].action, ItemAction::Add);
+    }
+
+    #[test]
+    fn an_existing_account_id_is_same_id() {
+        let (bundle, config, account_id) = fixture_account_exists();
+        let p = plan(&bundle, &config, &[account_id]);
+        assert_eq!(p.accounts[0].status, ConflictStatus::SameId);
+        assert_eq!(p.accounts[0].action, ItemAction::Replace);
     }
 }

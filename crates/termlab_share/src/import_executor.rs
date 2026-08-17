@@ -292,6 +292,16 @@ fn apply_folder(config: &mut SshConfig, planned: PlannedFolder) {
                     config.folders[folder_idx].entries.push(planned_entry.item);
                 }
             }
+            // `Skip`/`Rename` are not produced by the planner for folder
+            // entries yet (Task 1 only adds them as available actions; the
+            // per-row override that lets a caller choose one is a later
+            // task). Match them exhaustively now rather than leaving a
+            // wildcard arm that would silently swallow real handling once
+            // that task lands.
+            ItemAction::Skip => {}
+            ItemAction::Rename(_) => {
+                config.folders[folder_idx].entries.push(planned_entry.item);
+            }
         }
     }
 }
@@ -304,6 +314,10 @@ fn apply_server(config: &mut SshConfig, planned: PlannedItem<ServerEntry>) {
                 config.ungrouped.push(planned.item);
             }
         }
+        // See the comment in `apply_folder`: not reachable from the planner
+        // yet, matched exhaustively in anticipation of the per-row override.
+        ItemAction::Skip => {}
+        ItemAction::Rename(_) => config.ungrouped.push(planned.item),
     }
 }
 
@@ -341,6 +355,13 @@ fn apply_tunnel(config: &mut SshConfig, planned: PlannedItem<SavedTunnel>) {
             Some(existing) => *existing = planned.item,
             None => config.tunnels.push(planned.item),
         },
+        // A `ReferenceBroken` tunnel (its host resolves nowhere) is planned
+        // with action `Skip` by `import_planner::plan` precisely so it must
+        // NOT be applied here — this is the load-bearing case, not a
+        // leftover default. `Rename` is not reachable from the planner yet;
+        // matched exhaustively in anticipation of the per-row override.
+        ItemAction::Skip => {}
+        ItemAction::Rename(_) => config.tunnels.push(planned.item),
     }
 }
 
