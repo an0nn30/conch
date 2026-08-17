@@ -595,7 +595,7 @@ fn action_str(action: &ItemAction) -> &'static str {
     }
 }
 
-#[derive(Serialize, TS)]
+#[derive(Serialize, TS, Default)]
 #[ts(export)]
 pub(crate) struct ShareImportSummary {
     pub servers: usize,
@@ -607,6 +607,14 @@ pub(crate) struct ShareImportSummary {
     /// still imported). Always `false` for a `legacy_json` import — that
     /// format never carries vault credentials.
     pub credentials_held_back: bool,
+    /// How many of the caller's `decisions` named an action `apply_decisions`
+    /// judged no longer valid for the row's freshly re-planned status (e.g.
+    /// a stale `"add"` echoed back for a row the re-plan now classifies as
+    /// `SameId`) and silently fell back to the planner's fresh default for
+    /// instead of honouring verbatim — see `apply_decisions`'s doc comment
+    /// (2026-08-17 review finding C1). Always `0` for a `legacy_json`
+    /// import, which has no decisions to reconcile.
+    pub reconciled: usize,
 }
 
 impl From<ImportOutcome> for ShareImportSummary {
@@ -617,6 +625,7 @@ impl From<ImportOutcome> for ShareImportSummary {
             credentials: outcome.credentials,
             skipped: outcome.skipped,
             credentials_held_back: outcome.credentials_held_back,
+            reconciled: 0,
         }
     }
 }
@@ -661,6 +670,24 @@ fn decision_for<'a>(
     decisions.iter().find(|d| d.kind == kind && d.id == id)
 }
 
+/// Whether `action` is one of the actions the import-preview frontend's own
+/// `ACTIONS_BY_STATUS` table (`import-preview.js`) would ever have offered
+/// for a row currently at `status`. Mirrored here (rather than imported —
+/// `termlab_share` stays free of any frontend-shaped concept) so
+/// `apply_decisions` can independently judge whether a caller-supplied
+/// decision is still consistent with the row it's being applied to, instead
+/// of trusting it blindly (2026-08-17 review finding C1).
+fn action_allowed_for_status(status: ConflictStatus, action: &ItemAction) -> bool {
+    match status {
+        ConflictStatus::New => matches!(action, ItemAction::Add | ItemAction::Skip),
+        ConflictStatus::SameId => matches!(action, ItemAction::Replace | ItemAction::Skip),
+        ConflictStatus::LabelCollision => {
+            matches!(action, ItemAction::Add | ItemAction::Rename(_) | ItemAction::Skip)
+        }
+        ConflictStatus::ReferenceBroken => matches!(action, ItemAction::Skip),
+    }
+}
+
 /// Overlay the frontend's per-row `decisions` onto a freshly re-planned
 /// `plan`, matched by `(kind, id)` rather than position — see
 /// `share_import_apply`'s doc comment for why the plan is rebuilt from
@@ -670,32 +697,72 @@ fn decision_for<'a>(
 /// new since the preview was shown"); a decision whose `(kind, id)` matches
 /// nothing in `plan` is silently unused (covers "this row existed in the
 /// preview but is gone now").
-fn apply_decisions(plan: &mut ImportPlan, decisions: &[ImportDecision]) -> Result<(), String> {
+///
+/// A decision that *does* match a row, but whose action is no longer valid
+/// for that row's freshly re-planned status (`action_allowed_for_status`
+/// says no), is also silently dropped rather than applied verbatim — the
+/// row keeps whatever default action `import_planner::plan` just gave it.
+/// This is C1's second layer of defense (2026-08-17 review): the frontend
+/// always echoes every row's current action as an explicit decision,
+/// including untouched rows sitting at the planner's default, so a decision
+/// going stale between preview and apply (a retried apply after the first
+/// one already landed, two windows racing on the same bundle) is the
+/// ordinary case, not a rare one, and must not be allowed to hand the
+/// executor an action that no longer makes sense for what the row actually
+/// is now — `import_executor`'s `Add` arm being made idempotent for the
+/// same finding is the first layer, this is the second, independent one.
+/// Deliberately does not fail the batch: rejecting it outright would turn
+/// the ordinary "the plan moved a little between preview and apply" case
+/// into a dead end instead of the transparent fallback it is today.
+/// Returns how many decisions were reconciled this way, so the caller can
+/// report it in [`ShareImportSummary::reconciled`].
+fn apply_decisions(plan: &mut ImportPlan, decisions: &[ImportDecision]) -> Result<usize, String> {
+    let mut reconciled = 0usize;
     for folder in &mut plan.folders {
         for entry in &mut folder.entries {
             if let Some(d) = decision_for(decisions, "host", &entry.item.id) {
-                entry.action = action_from_decision(d)?;
+                let action = action_from_decision(d)?;
+                if action_allowed_for_status(entry.status, &action) {
+                    entry.action = action;
+                } else {
+                    reconciled += 1;
+                }
             }
         }
     }
     for entry in &mut plan.servers {
         if let Some(d) = decision_for(decisions, "host", &entry.item.id) {
-            entry.action = action_from_decision(d)?;
+            let action = action_from_decision(d)?;
+            if action_allowed_for_status(entry.status, &action) {
+                entry.action = action;
+            } else {
+                reconciled += 1;
+            }
         }
     }
     for entry in &mut plan.tunnels {
         let id = entry.item.id.to_string();
         if let Some(d) = decision_for(decisions, "tunnel", &id) {
-            entry.action = action_from_decision(d)?;
+            let action = action_from_decision(d)?;
+            if action_allowed_for_status(entry.status, &action) {
+                entry.action = action;
+            } else {
+                reconciled += 1;
+            }
         }
     }
     for entry in &mut plan.accounts {
         let id = entry.item.id.to_string();
         if let Some(d) = decision_for(decisions, "credential", &id) {
-            entry.action = action_from_decision(d)?;
+            let action = action_from_decision(d)?;
+            if action_allowed_for_status(entry.status, &action) {
+                entry.action = action;
+            } else {
+                reconciled += 1;
+            }
         }
     }
-    Ok(())
+    Ok(reconciled)
 }
 
 /// Apply step of the import flow (see [`ImportPreview`]): the frontend calls
@@ -757,6 +824,7 @@ fn do_import_apply(
             credentials: 0,
             skipped: Vec::new(),
             credentials_held_back: false,
+            reconciled: 0,
         });
     }
 
@@ -781,7 +849,7 @@ fn do_import_apply(
 
     let mut import_plan =
         termlab_share::import_planner::plan(&bundle, &state.config, &existing_account_ids);
-    apply_decisions(&mut import_plan, &decisions)?;
+    let reconciled = apply_decisions(&mut import_plan, &decisions)?;
 
     let key_dir = state.paths.config_dir.join("imported-keys");
     std::fs::create_dir_all(&key_dir).map_err(|e| format!("Failed to prepare key storage: {e}"))?;
@@ -820,9 +888,157 @@ fn do_import_apply(
     // told "Imported N host(s)..." for hosts that vanish on next launch
     // (2026-08-16 review finding I5). `save_config`'s fire-and-forget
     // signature can't surface that, so this uses `try_save_config` instead.
-    termlab_remote::config::try_save_config(&state.paths.config_dir, &state.config)
-        .map_err(|e| format!("Import succeeded but saving the configuration failed: {e}"))?;
+    //
+    // I3 (2026-08-17 review): `state.config` above has already been mutated
+    // in memory by `execute` regardless of whether this save succeeds, and
+    // nothing here rolls that back on failure — a later, unrelated save
+    // would silently persist the import the user was just told had failed.
+    // The full fix (apply to a clone of `state.config`, swap it in only
+    // after a successful save) is a follow-up; this message is honest about
+    // the interim risk in the meantime, rather than implying only the save
+    // itself needs retrying.
+    termlab_remote::config::try_save_config(&state.paths.config_dir, &state.config).map_err(
+        |e| {
+            format!(
+                "Import succeeded in memory but was not saved to disk ({e}). This change is not \
+                 yet persisted — restart TermLab before making any further changes, or they may \
+                 be lost along with this import."
+            )
+        },
+    )?;
     let _ = app.emit(crate::remote::server_commands::SSH_CONFIG_CHANGED_EVENT, ());
 
-    Ok(outcome.into())
+    let mut summary: ShareImportSummary = outcome.into();
+    summary.reconciled = reconciled;
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_server(id: &str) -> ServerEntry {
+        ServerEntry {
+            id: id.into(),
+            label: "prod".into(),
+            host: "prod.example.com".into(),
+            port: 22,
+            user: Some("u".into()),
+            auth_method: None,
+            key_path: None,
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        }
+    }
+
+    /// C1 regression: a decision echoing a stale `"add"` for a row that
+    /// re-planning now classifies as `SameId` (the shape of a retried apply
+    /// after the first one already landed, or two windows racing on the
+    /// same bundle — see `apply_decisions`'s doc comment) must not be
+    /// honoured verbatim: `action_allowed_for_status` rejects `Add` for
+    /// `SameId`, so `apply_decisions` must fall back to the planner's fresh
+    /// default (`Replace`) and count the row as reconciled, rather than
+    /// handing `import_executor::apply_server` an action it would (before
+    /// its own idempotency fix) have pushed unconditionally.
+    #[test]
+    fn stale_add_decision_on_a_now_same_id_row_is_reconciled_to_the_fresh_default() {
+        let mut plan = ImportPlan {
+            folders: Vec::new(),
+            servers: vec![PlannedItem {
+                item: sample_server("s1"),
+                status: ConflictStatus::SameId,
+                action: ItemAction::Replace,
+            }],
+            tunnels: Vec::new(),
+            accounts: Vec::new(),
+            keys: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let decisions = vec![ImportDecision {
+            kind: "host".into(),
+            id: "s1".into(),
+            action: "add".into(),
+            label: None,
+        }];
+
+        let reconciled = apply_decisions(&mut plan, &decisions).unwrap();
+
+        assert_eq!(reconciled, 1);
+        assert_eq!(
+            plan.servers[0].action,
+            ItemAction::Replace,
+            "must fall back to the fresh planner default, not the stale 'add'"
+        );
+    }
+
+    /// The counterpart: a decision that is still valid for the row's
+    /// current status must be applied normally and not counted as
+    /// reconciled.
+    #[test]
+    fn a_decision_still_valid_for_the_current_status_is_applied_and_not_reconciled() {
+        let mut plan = ImportPlan {
+            folders: Vec::new(),
+            servers: vec![PlannedItem {
+                item: sample_server("s1"),
+                status: ConflictStatus::New,
+                action: ItemAction::Add,
+            }],
+            tunnels: Vec::new(),
+            accounts: Vec::new(),
+            keys: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let decisions = vec![ImportDecision {
+            kind: "host".into(),
+            id: "s1".into(),
+            action: "skip".into(),
+            label: None,
+        }];
+
+        let reconciled = apply_decisions(&mut plan, &decisions).unwrap();
+
+        assert_eq!(reconciled, 0);
+        assert_eq!(plan.servers[0].action, ItemAction::Skip);
+    }
+
+    /// A stale `Rename` (only ever valid for `LabelCollision`) surviving
+    /// into a row the re-plan now says is `ReferenceBroken` (only `Skip` is
+    /// ever valid there) must also be reconciled, not just the `Add`/
+    /// `SameId` shape the bug was originally reproduced with.
+    #[test]
+    fn a_decision_invalid_for_reference_broken_is_reconciled_to_skip() {
+        let mut plan = ImportPlan {
+            folders: Vec::new(),
+            servers: Vec::new(),
+            tunnels: vec![PlannedItem {
+                item: SavedTunnel {
+                    id: uuid::Uuid::nil(),
+                    label: "dangling".into(),
+                    session_key: "u@ghost.example.com:22".into(),
+                    server_entry_id: Some("ghost".into()),
+                    local_port: 5432,
+                    remote_host: "db.internal".into(),
+                    remote_port: 5432,
+                    auto_start: false,
+                },
+                status: ConflictStatus::ReferenceBroken,
+                action: ItemAction::Skip,
+            }],
+            accounts: Vec::new(),
+            keys: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let decisions = vec![ImportDecision {
+            kind: "tunnel".into(),
+            id: uuid::Uuid::nil().to_string(),
+            action: "rename".into(),
+            label: Some("renamed".into()),
+        }];
+
+        let reconciled = apply_decisions(&mut plan, &decisions).unwrap();
+
+        assert_eq!(reconciled, 1);
+        assert_eq!(plan.tunnels[0].action, ItemAction::Skip);
+    }
 }

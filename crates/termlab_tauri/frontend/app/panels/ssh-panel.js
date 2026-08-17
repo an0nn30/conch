@@ -1104,10 +1104,41 @@
       return;
     }
     if (p.vault_state === 'locked') {
-      showImportVaultUnlockDialog(path, password, p);
+      showImportVaultUnlockDialog(path, password);
       return;
     }
-    showImportVaultCreateDialog(path, password, p);
+    showImportVaultCreateDialog(path, password);
+  }
+
+  /** I2 (2026-08-17 review): re-run share_import_plan now that the vault's
+   * state has just changed (unlocked or created), rather than carrying the
+   * preview captured while it was locked/absent through unchanged.
+   *
+   * `share_import_plan` classifies a bundled credential against
+   * `existing_account_ids`, which share_commands.rs's `do_import_plan`
+   * only populates `if !vault_mgr.is_locked()` — so the preview shown
+   * *before* this vault step ran had an empty id list and classified every
+   * bundled credential as New/Add regardless of what the vault actually
+   * already held. Threading that stale preview through unchanged (the
+   * pre-fix behaviour) let a user approve a credential row labelled "New"
+   * that apply time — once the vault really is unlocked and re-plans
+   * against it — correctly calls SameId/Replace, silently overwriting an
+   * existing credential the user was never shown the chance to Skip.
+   *
+   * Returns the fresh preview, or null if the re-plan itself failed (a
+   * toast is already shown in that case — the caller only needs to check
+   * for null and stop). */
+  async function replanAfterVaultChange(path, password) {
+    try {
+      if (!sshDataService || typeof sshDataService.planImport !== 'function') {
+        throw new Error('SSH data service unavailable: planImport');
+      }
+      return await sshDataService.planImport(invoke, path, password);
+    } catch (e) {
+      console.error('Re-plan after vault change failed:', e);
+      if (window.toast) window.toast.error('Import Failed', String(e));
+      return null;
+    }
   }
 
   /** task-4, vault_state "locked": one password field + Unlock button,
@@ -1115,11 +1146,12 @@
    * not a new command. On failure (e.g. "Incorrect master password") the
    * SAME dialog re-shows with an inline error, matching
    * showImportPasswordDialog's precedent above. Cancelling aborts the
-   * import: share_import_apply is never called. `preview` is threaded
-   * through unchanged from share_import_plan (task-5 does not re-run the
-   * planner after the vault unlocks) and handed to showImportPreviewDialog
-   * on success. */
-  function showImportVaultUnlockDialog(path, password, preview) {
+   * import: share_import_apply is never called. On success, the import is
+   * re-planned from scratch (see replanAfterVaultChange's doc comment —
+   * fix round 2, I2) rather than reusing the preview captured while the
+   * vault was still locked — so no `preview` parameter is threaded in
+   * here any more. */
+  function showImportVaultUnlockDialog(path, password) {
     let handle = null;
     let closed = false;
     const closeDialog = () => {
@@ -1171,7 +1203,9 @@
       }
 
       closeDialog();
-      showImportPreviewDialog(path, password, preview);
+      const freshPreview = await replanAfterVaultChange(path, password);
+      if (!freshPreview) return;
+      showImportPreviewDialog(path, password, freshPreview);
     };
 
     handle = window.tlDialog.open({
@@ -1190,20 +1224,24 @@
 
   /** task-4, vault_state "absent": master password + confirm, submitted
    * through the existing `vault_create` command (vault_commands.rs:122).
-   * Whatever password rule VaultManager::create enforces is the only rule
-   * enforced here — this dialog adds none of its own (no minimum-length
-   * check, unlike vault/dialogs.js's showSetupDialog). The Create Vault
-   * button's enabled state is driven off the live `disabled` DOM property
-   * on the 'input' events below, not the `disabled` value passed to
-   * `buttons[]` at open time — tl-dialog's footer click gate reads the
-   * live property (see buildFooterButton in ui/tl-dialog.js; this exact
-   * bug — gating on the stale build-time value — was found and fixed
-   * earlier in this project). Cancelling aborts the import:
-   * share_import_apply is never called. `preview` is threaded through
-   * unchanged from share_import_plan and handed to showImportPreviewDialog
-   * on success (see showImportVaultUnlockDialog's note on the same
-   * pattern). */
-  function showImportVaultCreateDialog(path, password, preview) {
+   * Whatever password rule `VaultManager::create` enforces is the only rule
+   * enforced here — this dialog only checks presence and that the two
+   * fields match, and surfaces the backend's rejection (e.g. "master
+   * password must be at least 8 characters") via `errorMsg` below rather
+   * than pre-checking length itself (fix round 2, I4 — this is now also
+   * true of `vault/dialogs.js`'s showSetupDialog, which used to enforce its
+   * own, different minimum). The Create Vault button's enabled state is
+   * driven off the live `disabled` DOM property on the 'input' events
+   * below, not the `disabled` value passed to `buttons[]` at open time —
+   * tl-dialog's footer click gate reads the live property (see
+   * buildFooterButton in ui/tl-dialog.js; this exact bug — gating on the
+   * stale build-time value — was found and fixed earlier in this project).
+   * Cancelling aborts the import: share_import_apply is never called. On
+   * success, the import is re-planned from scratch (see
+   * replanAfterVaultChange's doc comment — fix round 2, I2) rather than
+   * reusing the preview captured before the vault existed — so no
+   * `preview` parameter is threaded in here any more. */
+  function showImportVaultCreateDialog(path, password) {
     let handle = null;
     let closed = false;
     const closeDialog = () => {
@@ -1277,7 +1315,9 @@
       }
 
       closeDialog();
-      showImportPreviewDialog(path, password, preview);
+      const freshPreview = await replanAfterVaultChange(path, password);
+      if (!freshPreview) return;
+      showImportPreviewDialog(path, password, freshPreview);
     };
 
     handle = window.tlDialog.open({
@@ -1298,14 +1338,23 @@
    * credential(s). S skipped." (task-6 brief) — as a toast when there is
    * nothing more to say, or a dialog listing skipped entries and, when
    * credentials were held back for lack of an unlocked vault, the line
-   * telling the user how to get them next time. */
+   * telling the user how to get them next time.
+   *
+   * Fix round 2, C1: also mentions when `summary.reconciled` is nonzero —
+   * `share_commands.rs`'s `apply_decisions` silently fell back to a fresh
+   * planner default for that many rows because the decision this dialog's
+   * caller sent no longer matched what the row actually was by apply time
+   * (a retried import, or another window that got there first). The import
+   * still completed; this just tells the user something moved under them
+   * rather than staying silent about it. */
   function showImportSummary(summary) {
     const s = summary || {};
     const skipped = Array.isArray(s.skipped) ? s.skipped : [];
     const heldBack = !!s.credentials_held_back;
+    const reconciled = Number(s.reconciled) || 0;
     const headline = `Imported ${s.servers || 0} host(s), ${s.tunnels || 0} tunnel(s), ${s.credentials || 0} credential(s). ${skipped.length} skipped.`;
 
-    if (!skipped.length && !heldBack) {
+    if (!skipped.length && !heldBack && !reconciled) {
       if (window.toast) window.toast.info('Import complete', headline);
       return;
     }
@@ -1325,6 +1374,7 @@
         bodyEl.innerHTML = `
           <div>${esc(headline)}</div>
           ${heldBack ? '<div class="ssh-export-note">Credentials were not imported because this machine has no unlocked vault. Create or unlock your vault and import again.</div>' : ''}
+          ${reconciled ? `<div class="ssh-export-note">${reconciled} item(s) changed since you reviewed them, so they were applied with their current default action instead of the one you picked.</div>` : ''}
           ${skipped.length ? '<div class="ssh-export-section">Skipped</div><ul>' + skipped.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>' : ''}
         `;
       },

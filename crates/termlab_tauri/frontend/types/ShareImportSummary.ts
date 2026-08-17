@@ -7,4 +7,14 @@ export type ShareImportSummary = { servers: number, tunnels: number, credentials
  * still imported). Always `false` for a `legacy_json` import — that
  * format never carries vault credentials.
  */
-credentials_held_back: boolean, };
+credentials_held_back: boolean, 
+/**
+ * How many of the caller's `decisions` named an action `apply_decisions`
+ * judged no longer valid for the row's freshly re-planned status (e.g.
+ * a stale `"add"` echoed back for a row the re-plan now classifies as
+ * `SameId`) and silently fell back to the planner's fresh default for
+ * instead of honouring verbatim — see `apply_decisions`'s doc comment
+ * (2026-08-17 review finding C1). Always `0` for a `legacy_json`
+ * import, which has no decisions to reconcile.
+ */
+reconciled: number, };
