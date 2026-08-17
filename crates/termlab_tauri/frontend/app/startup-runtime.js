@@ -116,6 +116,9 @@
       let borderlessMode = false;
       try {
         const appCfg = await invoke('get_app_config');
+        // Published for the post-fit window sizing in main-runtime.js, which
+        // runs long after this and needs the configured columns/lines.
+        window.__termlabAppConfig = appCfg;
         if (typeof configService.applyUiConfig === 'function') {
           const uiResult = configService.applyUiConfig(appCfg) || {};
           borderlessMode = uiResult.borderlessMode === true;

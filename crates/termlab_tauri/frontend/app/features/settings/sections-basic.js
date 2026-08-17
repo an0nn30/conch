@@ -35,29 +35,6 @@
 
     addDivider(container);
 
-    addSectionLabel(container, 'Window Defaults');
-    const windowDefaultsAnchor = document.createElement('div');
-    windowDefaultsAnchor.dataset.settingId = 'advanced:window-size';
-    container.appendChild(windowDefaultsAnchor);
-
-    const colsInput = makeInput('number', pendingSettings.window.dimensions.columns);
-    colsInput.addEventListener('input', () => {
-      const value = parseInt(colsInput.value, 10);
-      if (!isNaN(value)) pendingSettings.window.dimensions.columns = value;
-    });
-    addRow(container, 'Columns', 'Width in character cells (0 = system default)', colsInput);
-    global.tlSpinner.attach(colsInput);
-
-    const linesInput = makeInput('number', pendingSettings.window.dimensions.lines);
-    linesInput.addEventListener('input', () => {
-      const value = parseInt(linesInput.value, 10);
-      if (!isNaN(value)) pendingSettings.window.dimensions.lines = value;
-    });
-    addRow(container, 'Lines', 'Height in character cells (0 = system default)', linesInput);
-    global.tlSpinner.attach(linesInput);
-
-    addDivider(container);
-
     addSectionLabel(container, 'Interface Density');
     const densityAnchor = document.createElement('div');
     densityAnchor.dataset.settingId = 'advanced:ui-chrome-font-sizes';

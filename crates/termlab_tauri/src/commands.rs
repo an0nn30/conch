@@ -30,6 +30,10 @@ pub(crate) fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json:
         "zen_mode_shortcut": cfg.termlab.keyboard.zen_mode,
         "decorations": dec,
         "new_window_zen_mode": cfg.window.new_window_zen_mode,
+        // Default window size in terminal cells. Rust opens the window at an
+        // estimate; the frontend corrects it once it can measure a real cell.
+        "window_columns": cfg.window.dimensions.columns,
+        "window_lines": cfg.window.dimensions.lines,
         "platform": std::env::consts::OS,
         "debug_build": cfg!(debug_assertions),
         "notification_position": cfg.termlab.ui.notification_position,

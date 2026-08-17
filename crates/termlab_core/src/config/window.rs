@@ -28,6 +28,13 @@ impl<'de> Deserialize<'de> for WindowDecorations {
     }
 }
 
+/// Default window size in terminal cells, as other terminals express it.
+///
+/// The Rust side can only estimate the pixel size for these (cell metrics
+/// depend on the font, which lives in the webview), so it opens the window at
+/// an approximation and the frontend corrects it to the exact cell count once
+/// the terminal has measured itself. `0` means "leave the window as the OS
+/// sized it" and suppresses that correction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowDimensions {
@@ -38,8 +45,8 @@ pub struct WindowDimensions {
 impl Default for WindowDimensions {
     fn default() -> Self {
         Self {
-            columns: 150,
-            lines: 50,
+            columns: 102,
+            lines: 46,
         }
     }
 }
@@ -143,8 +150,18 @@ mod tests {
     #[test]
     fn dimensions_default() {
         let d = WindowDimensions::default();
-        assert_eq!(d.columns, 150);
-        assert_eq!(d.lines, 50);
+        assert_eq!(d.columns, 102);
+        assert_eq!(d.lines, 46);
+    }
+
+    #[test]
+    fn dimensions_zero_is_preserved_as_the_leave_it_alone_escape_hatch() {
+        // 0 means "let the OS size the window"; the frontend skips its
+        // correction on it, so it must survive a round trip rather than being
+        // normalised away by the Default impl.
+        let parsed: WindowDimensions = toml::from_str("columns = 0\nlines = 0").unwrap();
+        assert_eq!(parsed.columns, 0);
+        assert_eq!(parsed.lines, 0);
     }
 
     #[test]

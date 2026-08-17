@@ -390,6 +390,47 @@
         showStatus('Failed to show window: ' + String(e));
       }
 
+      // Resize to the configured columns x lines. Rust opened the window at a
+      // rough guess (it cannot know the font's cell size), so this is the step
+      // that makes the setting mean what it says. Runs after the first fit, so
+      // the terminal has real measurements, and after zen mode has settled, so
+      // the delta accounts for whatever chrome is actually on screen.
+      try {
+        const sizer = window.termlabWindowSize;
+        const appCfg = window.__termlabAppConfig || {};
+        const pane = getCurrentPane && getCurrentPane();
+        const host = document.getElementById('terminal-host');
+        if (sizer && pane && pane.term && host) {
+          const delta = sizer.sizeDelta(
+            {
+              cols: pane.term.cols,
+              rows: pane.term.rows,
+              width: host.clientWidth,
+              height: host.clientHeight,
+            },
+            { cols: appCfg.window_columns, rows: appCfg.window_lines },
+          );
+          if (delta && (delta.dw !== 0 || delta.dh !== 0)) {
+            const win = window.__TAURI__ && window.__TAURI__.window
+              ? window.__TAURI__.window.getCurrentWindow()
+              : null;
+            if (win) {
+              const size = await win.innerSize();
+              const factor = await win.scaleFactor();
+              const { LogicalSize } = window.__TAURI__.window;
+              await win.setSize(new LogicalSize(
+                Math.round(size.width / factor) + delta.dw,
+                Math.round(size.height / factor) + delta.dh,
+              ));
+              debouncedFitAndResize();
+            }
+          }
+        }
+      } catch (_) {
+        // A denied window API or a pane that vanished must never stop startup;
+        // the window simply keeps the size Rust gave it.
+      }
+
       // Tell the user why this window has no panels — otherwise a window that
       // opens bare looks broken rather than deliberate. Only for windows that
       // got zen from the setting, never for one that inherited it from the

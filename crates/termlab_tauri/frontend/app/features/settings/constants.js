@@ -3,9 +3,10 @@
 
   const SECTION_DEFS = [
     { group: 'Workspace', items: [
-      { id: 'appearance', label: 'Appearance', description: 'Theme, skin, notifications, window chrome, UI fonts', keywords: 'theme colors skin interface notifications window menu bar fonts typography appearance' },
+      { id: 'appearance', label: 'Appearance', description: 'Theme, skin, notifications, UI fonts', keywords: 'theme colors skin interface notifications fonts typography appearance' },
       { id: 'keyboard', label: 'Keymap', description: 'Core shortcuts, tool window shortcuts, plugin shortcuts', keywords: 'keyboard shortcuts keymap bindings hotkeys commands tool windows plugins' },
       { id: 'files', label: 'Files', description: 'File explorer behavior and path following', keywords: 'files explorer path follow cwd directory' },
+      { id: 'window', label: 'Window', description: 'Default size in columns and lines, title bar style, zen mode for new windows', keywords: 'window size columns lines rows dimensions title bar decorations chrome zen menu bar' },
     ]},
     { group: 'Terminal', items: [
       { id: 'terminal', label: 'Terminal', description: 'Font rendering and scrolling', keywords: 'terminal font size offset scrolling display rendering' },
@@ -16,7 +17,7 @@
       { id: 'plugins', label: 'Plugins', description: 'Plugin system, plugin types, search paths, installed plugins', keywords: 'plugins extensions lua java search paths installed permissions' },
     ]},
     { group: 'System', items: [
-      { id: 'advanced', label: 'Advanced', description: 'Startup behavior, window defaults, UI density', keywords: 'advanced startup updates default window size ui density font sizes' },
+      { id: 'advanced', label: 'Advanced', description: 'Startup behavior and UI density', keywords: 'advanced startup updates ui density font sizes' },
     ]},
   ];
 
@@ -27,7 +28,9 @@
     { section: 'appearance', label: 'Notification Position', keywords: 'toast notifications top bottom', targetId: 'appearance:notification-position' },
     { section: 'appearance', label: 'Native Notifications', keywords: 'system notifications os notifications', targetId: 'appearance:native-notifications' },
     { section: 'appearance', label: 'Animations', keywords: 'animations motion transitions effects performance enable disable reduce motion', targetId: 'appearance:animations' },
-    { section: 'appearance', label: 'Window Decorations', keywords: 'titlebar transparent buttonless none full window chrome', targetId: 'appearance:window-decorations' },
+    { section: 'window', label: 'Window Decorations', keywords: 'titlebar transparent buttonless none full window chrome', targetId: 'window:decorations' },
+    { section: 'window', label: 'Default Window Size', keywords: 'columns lines rows window size dimensions 102 46 startup launch new window', targetId: 'window:columns' },
+    { section: 'window', label: 'New Windows In Zen Mode', keywords: 'zen mode new window panels hidden distraction free', targetId: 'window:new-window-zen-mode' },
     { section: 'appearance', label: 'Native Menu Bar', keywords: 'menu bar macos native menu', targetId: 'appearance:native-menu-bar' },
     { section: 'appearance', label: 'UI Font Family', keywords: 'ui font family interface typography', targetId: 'appearance:ui-font-family' },
     { section: 'appearance', label: 'UI Font Size', keywords: 'ui font size interface typography', targetId: 'appearance:ui-font-size' },
