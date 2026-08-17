@@ -523,7 +523,10 @@
     handle = window.tlDialog.open({
       title: 'Export Connections',
       ariaLabel: 'Export connections',
-      size: 'md',
+      // lg (720px): the picker rows carry a label plus user@host:port, which
+      // truncates at the 520px md width once a host has a long user or an IPv6
+      // literal.
+      size: 'lg',
       body: (bodyEl) => {
         bodyEl.innerHTML = `
           <div data-role="picker"></div>

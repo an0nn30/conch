@@ -44,7 +44,7 @@
 /* The bounded box. max-height rather than height so a short list stays short
    instead of leaving dead space below it. */
 .tl-picker__box {
-  max-height: 220px;
+  max-height: 260px;
   overflow-y: auto;
   border: 1px solid var(--tl-border);
   border-radius: var(--tl-radius);
