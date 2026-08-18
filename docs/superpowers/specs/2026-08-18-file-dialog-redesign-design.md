@@ -36,7 +36,7 @@ Two-region dialog body (`tl-dialog` size stays as shipped or one step wider if c
 ## Constraints
 
 - Tokens only in CSS; the boundary script enforces it.
-- The DOM class names the existing tests select on are a contract: `test_file_dialog.mjs` (31), `test_editor_chooser_teardown.mjs` (6), `test_editor_save_as.mjs`'s dialog harness, and `test_editor_untitled.mjs` all drive the real DOM. Renames/moves must update those tests deliberately WITHOUT weakening any behavioral assertion — diff discipline: assertion changes are review targets.
+- The DOM class names the existing tests select on are a contract: `test_file_dialog.mjs`, `test_editor_chooser_teardown.mjs` (6), `test_editor_save_as.mjs`'s dialog harness, and `test_editor_untitled.mjs` all drive the real DOM. Renames/moves must update those tests deliberately WITHOUT weakening any behavioral assertion — diff discipline: assertion changes are review targets.
 - Keyboard behavior byte-for-byte: arrows/Enter/Escape, type-ahead filter, path-field Enter, tl-dialog focus trap.
 - `git` workflow per CLAUDE.md: this work lives on `feat/file-dialog-redesign`; no commits to main; no Co-Authored-By trailers.
 
