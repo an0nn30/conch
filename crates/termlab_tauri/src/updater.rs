@@ -120,12 +120,21 @@ pub(crate) async fn install_update<R: Runtime>(app: AppHandle<R>) -> Result<(), 
     Ok(())
 }
 
-/// Restart the application. Uses `AppHandle::request_restart` which is made
-/// reliable by `tauri-plugin-process`.
+/// Restart the application, once every window has been asked about unsaved
+/// editors.
+///
+/// Not `app.request_restart()` directly: that sends `Message::RequestExit`,
+/// which the wry runtime turns straight into `RunEvent::ExitRequested`, and
+/// the builder registers no RunEvent callback — so nothing prevents it and no
+/// window ever receives `CloseRequested`. A user with a modified scratch who
+/// answered "apply the update?" would lose it without ever being asked the
+/// question they would actually have wanted. `close_guard::request_restart`
+/// polls each window first and only then restarts; guarding here rather than
+/// at the update toast covers every caller of this command.
 #[tauri::command]
 pub(crate) fn restart_app<R: Runtime>(app: AppHandle<R>) {
-    log::info!("Restarting application for update...");
-    app.request_restart();
+    log::info!("Restart requested for update; checking for unsaved editors");
+    crate::close_guard::request_restart(&app);
 }
 
 // ---------------------------------------------------------------------------

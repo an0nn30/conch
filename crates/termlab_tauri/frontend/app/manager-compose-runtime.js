@@ -157,6 +157,23 @@
             pluginViewPaneById.delete(viewId);
           },
           showStatus: (message) => showStatus(message),
+          // PRECONDITION: only call this when every editor in this window is
+          // already gone.
+          //
+          // destroy() sends a raw WindowMessage::Destroy, which
+          // tauri-runtime-wry routes to on_window_close WITHOUT emitting
+          // CloseRequested — so the unsaved-changes guard in
+          // crates/termlab_tauri/src/close_guard.rs never runs and never can.
+          // This is the one window-teardown path the guard is structurally
+          // blind to.
+          //
+          // It is safe today because of its single caller: tab-manager.js's
+          // closeTab, under `if (tabs.size === 0 && closeWindowWhenLast)`.
+          // That branch is reached only after a closeTab that already asked
+          // about the closing tab's editors emptied the last tab, so by
+          // construction there is nothing left to lose. Calling this from
+          // anywhere else silently discards unsaved work; use
+          // `win.close()` instead, which does raise CloseRequested.
           destroyCurrentWindow: async () => {
             const windowApi = tauri.window;
             if (windowApi && typeof windowApi.getCurrentWindow === 'function') {
