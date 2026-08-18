@@ -393,6 +393,30 @@
       if (!tab) return;
       let closedSshPane = false;
 
+      // Ask before discarding edits. Skipped when the caller is a close that
+      // already asked (the window-close and quit handshakes), which passes
+      // skipDirtyCheck. Everything below this point destroys CodeMirror views
+      // and deletes panes, so the question has to be settled first.
+      if (!options.skipDirtyCheck) {
+        const dirtyPanes = allPanesInTab(tabId)
+          .map((pid) => panes.get(pid))
+          .filter((p) => p && p.kind === 'editor' && p.dirty);
+        if (dirtyPanes.length > 0) {
+          const service = global.termlabEditorService;
+          if (!service || typeof service.confirmDirtyPanes !== 'function') {
+            // A dirty editor exists but the service that knows how to ask
+            // about it does not. Keep the tab.
+            showStatus('Cannot confirm unsaved changes; tab not closed.');
+            return;
+          }
+          const ok = await service.confirmDirtyPanes(dirtyPanes);
+          if (!ok) return;
+          // Awaiting the prompt yielded to the event loop; the tab may have
+          // been closed underneath us in the meantime.
+          if (!tabs.has(tabId)) return;
+        }
+      }
+
       const paneIds = allPanesInTab(tabId);
       for (const pid of paneIds) {
         const pane = panes.get(pid);

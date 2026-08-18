@@ -252,6 +252,34 @@ pub(crate) fn editor_scratch_list() -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
+    /// A save into a read-only directory has to fail loudly. The close guards
+    /// treat a rejected write as "do not close this tab", so a write that
+    /// swallowed the error would hand them consent to discard the file.
+    #[cfg(unix)]
+    #[test]
+    fn write_into_a_read_only_directory_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("termlab-ro-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let file = dir.join("scratch-1.txt");
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).expect("chmod 500");
+        let result = editor_write_file(file.to_string_lossy().into_owned(), "unsaved text".into());
+        // Restore before asserting so a failure still leaves a removable dir.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod 700");
+
+        let error = result.expect_err("a write into a 0500 directory must fail");
+        assert!(
+            error.starts_with("Could not write "),
+            "the message names the file that could not be written: {error}"
+        );
+        assert!(!file.exists(), "and nothing was left behind");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn size_cap_is_five_megabytes() {
         assert!(guard_openable("a.txt", MAX_EDIT_BYTES).is_ok());
@@ -380,4 +408,5 @@ mod tests {
         let _ = std::fs::remove_dir_all(&escape_dir);
     }
 }
+
 
