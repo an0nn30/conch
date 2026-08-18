@@ -540,7 +540,6 @@
     // Captured BEFORE anything is written: after the rebind, `pane.remote` is
     // the new binding and this file would be unreachable.
     const oldTemp = pane.remote && pane.filePath ? pane.filePath : null;
-    const oldWhere = describeBinding(pane);
 
     let nextFilePath;
     let nextRemote;
@@ -587,14 +586,22 @@
     // ----- the rebind: one synchronous block, no awaits -----
     pane.filePath = nextFilePath;
     pane.remote = nextRemote;
-    refreshTabLabel(pane);
-    setPaneLanguage(pane.view, displayName);
     // Same rule as writeOnce: only claim the buffer is saved if it still
     // matches the bytes that were written. A keystroke during the upload
-    // leaves the rebound pane honestly dirty.
+    // leaves the rebound pane honestly dirty. This runs before the cosmetic
+    // steps below so the dirty flag reflects the bytes that actually landed,
+    // regardless of whether relabelling succeeds.
     if (pane.view && pane.view.state.doc.toString() === contents) {
       pane.view.termlabResetDirty();
     }
+    // The write (and upload, if any) already succeeded once execution
+    // reaches here — announce that now, not after the cosmetic steps below.
+    // Moved out of the region that can still throw, so a bad tab label or
+    // language guess can never turn a real "Saved" into a false
+    // "Save As Failed" for the caller.
+    if (nextRemote) toastSuccess('Saved', `${nextRemote.hostLabel}:${nextRemote.remotePath}`);
+    refreshTabLabel(pane);
+    setPaneLanguage(pane.view, displayName);
     // ----- end of the rebind -----
 
     // Only now, and only a temp file this pane owned. Before the rebind this
@@ -602,9 +609,6 @@
     if (oldTemp && oldTemp !== nextFilePath) {
       invoke('editor_temp_cleanup', { path: oldTemp }).catch(() => {});
     }
-
-    if (nextRemote) toastSuccess('Saved', `${nextRemote.hostLabel}:${nextRemote.remotePath}`);
-    return { from: oldWhere, to: describeBinding(pane) };
   }
 
   /**
@@ -620,6 +624,14 @@
     if (!target || (target.scope !== 'local' && target.scope !== 'remote')) {
       throw new Error(`Save As: unknown target scope ${target && target.scope}`);
     }
+
+    // Captured before writeElsewhere runs at all, and used verbatim in the
+    // failure toast below. A live `describeBinding(pane)` read from inside
+    // the catch happens AFTER the promise has settled — by then a rebind
+    // that got far enough to mutate the pane before failing would already
+    // have overwritten `pane.filePath`/`pane.remote`, so that read would
+    // name the tab's NEW location while claiming nothing was rebound.
+    const where = describeBinding(pane);
 
     // The existing guard, not a second queue: a pane never has more than one
     // write outstanding, so Save As waits for a save already running rather
@@ -649,7 +661,7 @@
       toastError(
         'Save As Failed',
         `${String(error)} — nothing was rebound: this tab still points at `
-        + `${describeBinding(pane)} and still has unsaved changes.`,
+        + `${where} and still has unsaved changes.`,
       );
       throw error;
     }

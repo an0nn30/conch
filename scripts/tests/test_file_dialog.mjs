@@ -629,6 +629,47 @@ await checkAsync('a scope-entry realpath failure errors inline without closing',
   assert.strictEqual(doc.body.children.length, 1);
 });
 
+await checkAsync('a failed scope click can be retried by clicking the same scope again', async () => {
+  // `enterScope` marks the clicked scope active BEFORE its `resolveScopeStart`
+  // settles. If a click handler guard skips re-entering "the scope that is
+  // already active" without checking whether that entry actually succeeded,
+  // a scope whose first click failed is stuck forever — this is exactly that
+  // scenario: the realpath call rejects once, then succeeds.
+  let attempt = 0;
+  const { sandbox, doc, calls } = makeHarness({
+    sessions: [{ key: 'main:9', host: 'h9', user: 'u', port: 22 }],
+    listLocal: () => Promise.resolve([]),
+    listRemote: () => Promise.resolve([{ name: 'ok.txt', is_dir: false, size: 3, modified: null }]),
+    realpath: () => {
+      attempt += 1;
+      return attempt === 1
+        ? Promise.reject(new Error('sftp channel closed'))
+        : Promise.resolve('/home/remote');
+    },
+  });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  parts(doc).scopes[1].fire('click');
+  await settle();
+  let p = parts(doc);
+  assert.strictEqual(p.error.hidden, false, 'the first attempt failed and shows the error');
+  assert.match(p.error.textContent, /sftp channel closed/);
+  assert.strictEqual(p.rows.length, 0, 'nothing listed yet');
+
+  // Click the SAME (now-active) scope button again. Before the fix this
+  // guard returned immediately because candidate.id === scope.id, and the
+  // button never issued a second resolveScopeStart call.
+  parts(doc).scopes[1].fire('click');
+  await settle();
+
+  assert.strictEqual(attempt, 2, 'resolveScopeStart was retried, not skipped');
+  assert.deepStrictEqual(calls.realpath, [[9, '.'], [9, '.']], 'a second realpath call for the same pane');
+  p = parts(doc);
+  assert.strictEqual(p.error.hidden, true, 'the error clears once the retry succeeds');
+  assert.deepStrictEqual(p.rows.map(rowName), ['ok.txt'], 'the listing loads on retry');
+});
+
 // ---------------------------------------------------------------------------
 // 5. Cancel paths come from tl-dialog (verified, not re-implemented)
 // ---------------------------------------------------------------------------

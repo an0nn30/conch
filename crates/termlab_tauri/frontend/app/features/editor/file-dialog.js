@@ -517,7 +517,13 @@
         btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
         if (candidate.kind === 'remote') btn.title = candidate.hostLabel;
         btn.addEventListener('click', () => {
-          if (scope && candidate.id === scope.id) return;
+          // `enterScope` sets `scope = candidate` BEFORE `resolveScopeStart`
+          // runs, so a scope whose start failed to resolve is left "active"
+          // with `start` still null. Guarding on id alone would make that
+          // button permanently dead — the same-scope click that should retry
+          // it would instead no-op forever. Only skip re-entering a scope
+          // that is both active AND already has a resolved start.
+          if (scope && candidate.id === scope.id && candidate.start != null) return;
           enterScope(candidate);
         });
         scopeBar.appendChild(btn);
@@ -728,8 +734,15 @@
         try {
           existing = await statScopePath(scope, path);
         } catch (_) {
-          // Does not exist — which is the ordinary case for a Save As, and
-          // the reason this is a rejection rather than an error to report.
+          // Every stat rejection is read as "does not exist" — the ordinary
+          // case for a Save As, and the reason this is a caught rejection
+          // rather than an error to report. That is a real trade, not a free
+          // simplification: `local_stat`/`sftp_stat` both return a bare
+          // `Result<FileEntry, String>` (sftp_commands.rs), so a permission
+          // error or a dropped SSH connection looks identical here to a
+          // missing file, and silently skips the overwrite prompt instead of
+          // surfacing the real problem. Telling them apart needs typed errors
+          // from both backends, not a JS-side fix.
           existing = null;
         }
         if (existing && existing.is_dir) {

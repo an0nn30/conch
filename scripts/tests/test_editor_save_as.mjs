@@ -491,6 +491,48 @@ await checkAsync('(d) a local Save As whose write fails leaves the pane where it
   assert.strictEqual(h.labelCalls.length, 0);
 });
 
+await checkAsync(
+  '(d) MUTATION PROOF: a throw after the rebind still reports the OLD binding, not the live (already-new) one',
+  async () => {
+    const h = makeHarness({ pane: remotePane() });
+    h.pane.view.type('!');
+    // Force a throw from inside the rebind's cosmetic tail (language
+    // re-derivation), which runs AFTER pane.filePath/pane.remote have already
+    // been reassigned to NEW. Only a `where` captured BEFORE writeElsewhere
+    // ever ran can survive this and still name the binding the operation
+    // actually started from; a live `describeBinding(pane)` read from inside
+    // the catch would see the pane already sitting on NEW.
+    h.sandbox.termlabEditorPane.setLanguage = () => { throw new Error('setLanguage boom'); };
+
+    const saving = h.service.saveAs(h.pane, { scope: 'remote', ...NEW });
+    await settle();
+    h.emit(progress(h.started[0].id, 'completed'));
+
+    await assert.rejects(() => settles(saving, 'a Save As whose tail throws'), /setLanguage boom/);
+
+    // The rebind DID commit — filePath/remote genuinely moved to NEW — despite
+    // the throw. This is what makes the proof meaningful: OLD and NEW here are
+    // both live, distinguishable values (different host, pane id, directory
+    // and basename), so a toast naming the wrong one is caught, not papered
+    // over by two strings that happen to look alike.
+    assert.strictEqual(h.pane.filePath, tempPathFor(NEW.hostLabel, NEW.remotePath), 'the rebind committed anyway');
+    assert.deepEqual(h.pane.remote, { paneId: NEW.paneId, remotePath: NEW.remotePath, hostLabel: NEW.hostLabel });
+
+    const failures = h.toasts.filter((t) => t.kind === 'error');
+    assert.strictEqual(failures.length, 1, 'the user is told once');
+    assert.match(
+      failures[0].body,
+      /ada@alpha:\/srv\/legacy\/alpha\.conf/,
+      'names the OLD binding — where the operation STARTED — not the pane’s current (new) one',
+    );
+    assert.doesNotMatch(
+      failures[0].body,
+      /bob@beta:\/opt\/fresh\/beta\.py/,
+      'never the NEW binding: this failure toast must not describe the location a live post-hoc read would see',
+    );
+  },
+);
+
 // ---------------------------------------------------------------------------
 // (e) The in-flight guard — the existing one, not a new queue
 // ---------------------------------------------------------------------------

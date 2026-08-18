@@ -17,9 +17,9 @@ export { tags } from '@lezer/highlight';
 
 // Optional vim keybindings ([editor] vim_mode). `vim()` returns the extension,
 // `Vim` is the engine object that owns defineEx (how :w/:q are bound to this
-// app's own save and close paths), and `getCM` maps an EditorView back to the
-// CM5-style adapter the ex handlers are handed.
-export { vim, Vim, getCM } from '@replit/codemirror-vim';
+// app's own save and close paths). `getCM` (an EditorView -> CM5-style
+// adapter) has no consumer here and is deliberately not re-exported.
+export { vim, Vim } from '@replit/codemirror-vim';
 
 export { javascript } from '@codemirror/lang-javascript';
 export { json } from '@codemirror/lang-json';
