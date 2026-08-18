@@ -71,4 +71,46 @@ assert.strictEqual(sizeDelta(null, { cols: 102, rows: 46 }), null);
 assert.strictEqual(sizeDelta(current, null), null);
 assert.strictEqual(sizeDelta({}, {}), null);
 
+// --- metricsFor: the measurement persisted for the next launch ---
+
+const { metricsFor } = sandbox.termlabWindowSize;
+
+// 80x24 in an 800x480 host inside a 840x560 window: 10x20 cells, 40x80 chrome.
+{
+  const m = metricsFor(
+    { cols: 80, rows: 24, width: 800, height: 480 },
+    { width: 840, height: 560 },
+  );
+  assert.ok(m, 'expected metrics');
+  assert.strictEqual(m.cellWidth, 10, 'cellWidth');
+  assert.strictEqual(m.cellHeight, 20, 'cellHeight');
+  assert.strictEqual(m.chromeWidth, 40, 'chromeWidth');
+  assert.strictEqual(m.chromeHeight, 80, 'chromeHeight');
+}
+
+// Fractional cells survive rather than rounding to a lie.
+{
+  const m = metricsFor(
+    { cols: 90, rows: 30, width: 864, height: 570 },
+    { width: 900, height: 640 },
+  );
+  assert.ok(Math.abs(m.cellWidth - 9.6) < 1e-9, 'fractional cellWidth');
+  assert.ok(Math.abs(m.cellHeight - 19) < 1e-9, 'fractional cellHeight');
+}
+
+// An unfitted terminal (0 cols) must yield null, never Infinity — persisting
+// Infinity would make every future launch open at a garbage size.
+assert.strictEqual(metricsFor({ cols: 0, rows: 24, width: 800, height: 480 }, { width: 840, height: 560 }), null);
+assert.strictEqual(metricsFor({ cols: 80, rows: 0, width: 800, height: 480 }, { width: 840, height: 560 }), null);
+assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 0, height: 480 }, { width: 840, height: 560 }), null);
+assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 800, height: 480 }, { width: 0, height: 560 }), null);
+
+// A terminal reported larger than its window is a mid-layout read, not a
+// measurement.
+assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 900, height: 480 }, { width: 840, height: 560 }), null);
+
+// Garbage in does not throw.
+assert.strictEqual(metricsFor(null, { width: 840, height: 560 }), null);
+assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 800, height: 480 }, null), null);
+
 console.log('window size arithmetic: all assertions passed');

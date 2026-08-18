@@ -57,5 +57,33 @@
     };
   }
 
-  exports.termlabWindowSize = { sizeDelta };
+  /**
+   * The persisted geometry that lets the NEXT launch skip the correction:
+   * logical pixels per cell, and how much window is not terminal. Returns
+   * null unless every input was actually measured — a cell size divided out
+   * of zero columns is Infinity, and persisting that would make every future
+   * launch open at a garbage size.
+   */
+  function metricsFor(current, innerLogical) {
+    const c = current || {};
+    const cols = Number(c.cols) || 0;
+    const rows = Number(c.rows) || 0;
+    const width = Number(c.width) || 0;
+    const height = Number(c.height) || 0;
+    const winW = Number(innerLogical && innerLogical.width) || 0;
+    const winH = Number(innerLogical && innerLogical.height) || 0;
+    if (cols <= 0 || rows <= 0 || width <= 0 || height <= 0) return null;
+    if (winW <= 0 || winH <= 0) return null;
+
+    const cellWidth = width / cols;
+    const cellHeight = height / rows;
+    const chromeWidth = winW - width;
+    const chromeHeight = winH - height;
+    // A terminal reported as larger than its window is a mid-layout read,
+    // not a measurement.
+    if (chromeWidth < 0 || chromeHeight < 0) return null;
+    return { cellWidth, cellHeight, chromeWidth, chromeHeight };
+  }
+
+  exports.termlabWindowSize = { sizeDelta, metricsFor };
 })(window);

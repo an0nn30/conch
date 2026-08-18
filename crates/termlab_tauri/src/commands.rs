@@ -319,6 +319,35 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
 // Zoom
 // ---------------------------------------------------------------------------
 
+/// Persist the measured cell size and window chrome, so the NEXT launch can
+/// open at the exact pixels for the configured columns x lines instead of an
+/// estimate. Called by the frontend whenever its size correction converges;
+/// rejected values are dropped rather than saved, because a garbage
+/// measurement here means every future launch opens at a garbage size.
+#[tauri::command]
+pub(crate) fn save_window_metrics(
+    cell_width: f64,
+    cell_height: f64,
+    chrome_width: f64,
+    chrome_height: f64,
+) {
+    let metrics = termlab_core::config::WindowMetrics {
+        cell_width: cell_width as f32,
+        cell_height: cell_height as f32,
+        chrome_width: chrome_width as f32,
+        chrome_height: chrome_height as f32,
+    };
+    if !metrics.is_usable() {
+        return;
+    }
+    let mut state = config::load_persistent_state().unwrap_or_default();
+    if state.window_metrics == metrics {
+        return; // steady state — no write on every launch
+    }
+    state.window_metrics = metrics;
+    let _ = config::save_persistent_state(&state);
+}
+
 #[tauri::command]
 pub(crate) fn set_zoom_level(
     window: tauri::WebviewWindow,

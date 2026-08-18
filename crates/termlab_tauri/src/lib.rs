@@ -63,14 +63,12 @@ const WINDOW_SHOW_FALLBACK_SECS: u64 = 5;
 
 /// Show a window even if the frontend never asks us to.
 ///
-/// Windows are created hidden and shown by `app_ready`, which the frontend
-/// calls only after it has corrected the window to the configured column and
-/// line count — otherwise the user watches the window resize itself a moment
-/// after launch. The cost of that deferral is that a frontend which dies
-/// before reaching that call would leave a window that never appears, and an
-/// app that looks like it failed to start is far worse than a resize. So the
-/// timer below shows the window regardless, and does nothing when the normal
-/// path already ran.
+/// Secondary windows (⌘⇧N) are created hidden and shown by `app_ready` once
+/// the frontend is up. A frontend that dies before that call would leave a
+/// window that never appears, and an app that looks like it failed to start
+/// is worse than any cosmetic flaw — so this timer shows the window
+/// regardless, and does nothing when the normal path already ran. The main
+/// window is visible from creation and never needs it.
 pub(crate) fn arm_window_show_fallback<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) {
     let handle = app.clone();
     let label = label.to_string();
@@ -105,6 +103,76 @@ pub(crate) fn estimate_window_px(dims: &termlab_core::config::WindowDimensions) 
     (w.max(600.0), h.max(400.0))
 }
 
+/// The size a new window should open at, in logical pixels.
+///
+/// Every launch after the first knows the real cell size and chrome, measured
+/// by the webview last time and persisted — so the window opens at exactly
+/// `columns x lines` and the frontend's correction finds nothing to do. Only
+/// a fresh install (or a wiped state file) falls back to the rough estimate,
+/// and that single first launch is the only time a visible correction can
+/// happen: the standard remember-your-geometry pattern, not a correction loop.
+pub(crate) fn initial_window_px(
+    dims: &termlab_core::config::WindowDimensions,
+    metrics: &termlab_core::config::WindowMetrics,
+) -> (f64, f64) {
+    if dims.columns == 0 || dims.lines == 0 || !metrics.is_usable() {
+        return estimate_window_px(dims);
+    }
+    let w = (dims.columns as f64) * (metrics.cell_width as f64) + metrics.chrome_width as f64;
+    let h = (dims.lines as f64) * (metrics.cell_height as f64) + metrics.chrome_height as f64;
+    (w.max(600.0), h.max(400.0))
+}
+
+#[cfg(test)]
+mod window_px_tests {
+    use super::*;
+    use termlab_core::config::{WindowDimensions, WindowMetrics};
+
+    #[test]
+    fn measured_metrics_beat_the_estimate() {
+        let dims = WindowDimensions {
+            columns: 102,
+            lines: 46,
+        };
+        let metrics = WindowMetrics {
+            cell_width: 9.6,
+            cell_height: 20.0,
+            chrome_width: 16.0,
+            chrome_height: 64.0,
+        };
+        let (w, h) = initial_window_px(&dims, &metrics);
+        assert!((w - (102.0 * 9.6 + 16.0)).abs() < 0.001);
+        assert!((h - (46.0 * 20.0 + 64.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn unmeasured_metrics_fall_back_to_the_estimate() {
+        let dims = WindowDimensions {
+            columns: 102,
+            lines: 46,
+        };
+        assert_eq!(
+            initial_window_px(&dims, &WindowMetrics::default()),
+            estimate_window_px(&dims)
+        );
+    }
+
+    #[test]
+    fn zero_dims_leave_it_to_the_system_regardless_of_metrics() {
+        let dims = WindowDimensions {
+            columns: 0,
+            lines: 0,
+        };
+        let metrics = WindowMetrics {
+            cell_width: 9.6,
+            cell_height: 20.0,
+            chrome_width: 16.0,
+            chrome_height: 64.0,
+        };
+        assert_eq!(initial_window_px(&dims, &metrics), (1200.0, 800.0));
+    }
+}
+
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
     // Use the user's home directory as a stable "workspace" label rather than
     // the process's actual cwd (current_dir() titled the window after the
@@ -129,13 +197,13 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     // Window size comes from the configured columns x lines, never from the
     // last session's pixels. Restoring the saved size made the setting inert
     // after first run, and meant a window spawned from a full-screen one opened
-    // full-screen. This is only a first approximation — real cell metrics live
-    // in the webview, so the frontend corrects it to the exact cell count once
-    // the terminal has measured itself (app/core/window-size.js).
-    let cfg_dims = &config.window.dimensions;
-    let (initial_width, initial_height) = estimate_window_px(cfg_dims);
-    // Still needed for zoom, which is genuinely a restored preference.
+    // full-screen. What IS restored is the measured cell size and chrome from
+    // the last run, so columns x lines converts to exact pixels here and the
+    // window opens right the first frame (app/core/window-size.js keeps the
+    // measurement fresh and corrects the one launch that has none).
     let persisted = config::load_persistent_state().unwrap_or_default();
+    let cfg_dims = &config.window.dimensions;
+    let (initial_width, initial_height) = initial_window_px(cfg_dims, &persisted.window_metrics);
     let user_wants_decorations = !matches!(
         config.window.decorations,
         termlab_core::config::WindowDecorations::None
@@ -551,6 +619,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::app_ready,
             commands::open_devtools,
             commands::set_zoom_level,
+            commands::save_window_metrics,
             commands::get_zoom_level,
             pty::spawn_shell,
             pty::spawn_default_shell,

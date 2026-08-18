@@ -9,6 +9,10 @@ pub struct PersistentState {
     pub layout: LayoutConfig,
     /// Names of plugins that were loaded when the app last exited.
     pub loaded_plugins: Vec<String>,
+    /// Measured window geometry from the last run, so the next launch can
+    /// open at the exact size for the configured columns x lines instead of
+    /// opening at a guess and visibly correcting itself.
+    pub window_metrics: WindowMetrics,
 }
 
 impl Default for PersistentState {
@@ -16,7 +20,38 @@ impl Default for PersistentState {
         Self {
             layout: LayoutConfig::default(),
             loaded_plugins: Vec::new(),
+            window_metrics: WindowMetrics::default(),
         }
+    }
+}
+
+/// The two numbers that turn "columns x lines" into window pixels: how big a
+/// terminal cell really is (depends on the font, which only the webview can
+/// measure), and how much of the window is not terminal (titlebar, tab bar,
+/// status bar, panels at their startup state). Written by the frontend the
+/// first time its size correction converges; zeros mean "never measured".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WindowMetrics {
+    /// Logical pixels per terminal column.
+    pub cell_width: f32,
+    /// Logical pixels per terminal row.
+    pub cell_height: f32,
+    /// Window logical width minus (columns x cell_width).
+    pub chrome_width: f32,
+    /// Window logical height minus (lines x cell_height).
+    pub chrome_height: f32,
+}
+
+impl WindowMetrics {
+    /// Usable means every component was actually measured. Chrome may
+    /// legitimately be small but never negative-large garbage; cells must be
+    /// positive or the multiplication is meaningless.
+    pub fn is_usable(&self) -> bool {
+        self.cell_width > 0.0
+            && self.cell_height > 0.0
+            && self.chrome_width >= 0.0
+            && self.chrome_height >= 0.0
     }
 }
 

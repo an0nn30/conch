@@ -384,26 +384,34 @@
         showStatus('Failed to initialize first tab: ' + String(e));
       });
       await firstTabPromise;
-      // NOTE: app_ready (which shows the window) is deliberately NOT called
-      // here. It runs after applyConfiguredWindowSize below, so the window is
-      // never on screen at the rough size Rust guessed. Showing it here made
-      // the correction visible as a resize a quarter-second after launch.
+      // Show the window (secondary windows are created hidden). This runs as
+      // early as possible: the window already opened at the exact size for the
+      // configured columns x lines, computed in Rust from the cell metrics
+      // persisted by the last run — so there is nothing to wait for. Do NOT
+      // move this behind requestAnimationFrame or the sizing pass below:
+      // WKWebView does not fire rAF while the window is hidden, so a show
+      // scheduled there deadlocks until Rust's rescue timer fires.
+      try {
+        await invoke('app_ready');
+      } catch (e) {
+        showStatus('Failed to show window: ' + String(e));
+      }
 
-      // Resize to the configured columns x lines.
+      // Verify the window is at the configured columns x lines, and keep the
+      // persisted measurement fresh.
       //
-      // This has to run last and verify itself. Rust opened the window at a
-      // rough guess because cell metrics live here, not there — but a single
-      // correction is not enough, because two things change the cell size or
-      // the available space *after* this point: the configured terminal font
-      // is applied by startupTermConfigPromise below (a different font means a
-      // different cell size entirely), and the restored bottom-zone height and
-      // sidebar widths take space from the terminal.
+      // On a normal launch this is a NO-OP: Rust already opened the window at
+      // the exact pixels, computed from the cell metrics this function saved
+      // last time. The window has been visible since app_ready above, so any
+      // resize issued here is on screen — which is exactly why the steady
+      // state must be "measure, confirm, save, return" with no resize at all.
       //
-      // So it measures, corrects, re-fits, and measures again, stopping as soon
-      // as the terminal reports the requested cell count. The first pass uses
-      // an approximate cell size and lands close; the second uses the now-real
-      // one and lands exactly. The cap keeps a font that cannot hit the target
-      // exactly (fractional cell sizes) from looping forever.
+      // The correction below only fires when the measurement is missing or
+      // stale: the very first launch, or a changed font/zoom/panel layout. It
+      // measures, corrects, re-fits, and measures again until the terminal
+      // reports the requested cell count, then saves the new metrics so the
+      // NEXT launch opens right. The cap keeps a font that cannot hit the
+      // target exactly (fractional cell sizes) from looping forever.
       async function applyConfiguredWindowSize() {
         const sizer = window.termlabWindowSize;
         const appCfg = window.__termlabAppConfig || {};
@@ -429,7 +437,30 @@
             target,
           );
           if (!delta) return;                       // 0 = leave it to the system
-          if (delta.dw === 0 && delta.dh === 0) return; // already exact
+          if (delta.dw === 0 && delta.dh === 0) {
+            // Converged — persist the measurement so the NEXT launch opens at
+            // these exact pixels and this whole function finds nothing to do.
+            const inner = await tauriWin.innerSize();
+            const scale = await tauriWin.scaleFactor();
+            const metrics = sizer.metricsFor(
+              {
+                cols: pane.term.cols,
+                rows: pane.term.rows,
+                width: host.clientWidth,
+                height: host.clientHeight,
+              },
+              { width: inner.width / scale, height: inner.height / scale },
+            );
+            if (metrics) {
+              invoke('save_window_metrics', {
+                cellWidth: metrics.cellWidth,
+                cellHeight: metrics.cellHeight,
+                chromeWidth: metrics.chromeWidth,
+                chromeHeight: metrics.chromeHeight,
+              }).catch(() => {});
+            }
+            return;
+          }
 
           const size = await tauriWin.innerSize();
           const factor = await tauriWin.scaleFactor();
@@ -466,26 +497,13 @@
           // Only now are the font, the bottom-zone height and the sidebar
           // widths all applied, so this is the first moment the terminal's
           // measurements reflect what the user will actually see.
-          applyConfiguredWindowSize()
-            .catch((err) => {
-              // Deliberately not silent: an earlier version referenced an
-              // identifier that does not exist in this scope, and a bare catch
-              // hid the ReferenceError so the resize simply never happened while
-              // appearing to work.
-              console.error('Failed to apply configured window size:', err);
-            })
-            // The window is created hidden and shown only here, so the user
-            // never sees it at Rust's rough estimate. This MUST run even when
-            // the sizing above fails — hence finally, not then. A window that
-            // stays hidden is an app that looks like it never launched, which
-            // is far worse than the resize this ordering exists to remove.
-            // Rust also arms a fallback timer in case this line is never
-            // reached at all (see window_show_fallback in lib.rs).
-            .finally(() => {
-              invoke('app_ready').catch((e) => {
-                showStatus('Failed to show window: ' + String(e));
-              });
-            });
+          applyConfiguredWindowSize().catch((err) => {
+            // Deliberately not silent: an earlier version referenced an
+            // identifier that does not exist in this scope, and a bare catch
+            // hid the ReferenceError so the resize simply never happened while
+            // appearing to work.
+            console.error('Failed to apply configured window size:', err);
+          });
         }, 250);
       });
 
