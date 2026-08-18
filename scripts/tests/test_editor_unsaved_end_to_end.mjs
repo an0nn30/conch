@@ -294,10 +294,10 @@ function makeApp() {
     activateTab: (id) => tabManager.activateTab(id),
   };
 
-  // Open a scratch and type into it, as the user would.
-  function openScratchAndType(fileName, text) {
+  // Open a titled file and type into it, as the user would.
+  function openTitledFileAndType(fileName, text) {
     const id = nextId++;
-    const filePath = `/home/u/.config/termlab/scratches/${fileName}`;
+    const filePath = `/home/u/docs/${fileName}`;
     disk.set(filePath, '');
     const button = makeElement('button', document);
     const containerEl = makeElement('div', document);
@@ -354,7 +354,7 @@ function makeApp() {
 
   return {
     sandbox, tabs, panes, disk, toasts, statuses, destroyedViews, invocations, listeners,
-    tabManager, paneManager, wiring, openScratchAndType, splitBesideEditor, findButton,
+    tabManager, paneManager, wiring, openTitledFileAndType, splitBesideEditor, findButton,
     focusPane: (id) => paneManager.setFocusedPane(id),
     dialogCount: () => sandbox.tlDialog.count(),
     denyWrites: (on) => { denyWrites = on; },
@@ -370,7 +370,7 @@ const check = (name, fn) => results.push({ name, fn });
 // === Step 7 check 1: close the tab ========================================
 check('1a. tab close prompts, and Cancel leaves the tab open and still dirty', async () => {
   const app = makeApp();
-  const { tabId, pane, filePath, button, containerEl } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, pane, filePath, button, containerEl } = app.openTitledFileAndType('file-1.txt', 'hello');
 
   const closing = app.tabManager.closeTab(tabId);
   await tick();
@@ -391,7 +391,7 @@ check('1a. tab close prompts, and Cancel leaves the tab open and still dirty', a
 
 check("1b. Don't Save closes the tab and leaves the file unchanged on disk", async () => {
   const app = makeApp();
-  const { tabId, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, filePath } = app.openTitledFileAndType('file-1.txt', 'hello');
 
   const closing = app.tabManager.closeTab(tabId);
   await tick();
@@ -405,7 +405,7 @@ check("1b. Don't Save closes the tab and leaves the file unchanged on disk", asy
 
 check('1c. Save closes the tab and the file has the text', async () => {
   const app = makeApp();
-  const { tabId, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, filePath } = app.openTitledFileAndType('file-1.txt', 'hello');
 
   const closing = app.tabManager.closeTab(tabId);
   await tick();
@@ -418,10 +418,10 @@ check('1c. Save closes the tab and the file has the text', async () => {
 });
 
 // === Step 7 check 2: close the window =====================================
-check('2. two dirty scratches prompt in sequence on window close; Cancel on the second keeps the window', async () => {
+check('2. two dirty files prompt in sequence on window close; Cancel on the second keeps the window', async () => {
   const app = makeApp();
-  const a = app.openScratchAndType('scratch-1.txt', 'first');
-  const b = app.openScratchAndType('scratch-2.txt', 'second');
+  const a = app.openTitledFileAndType('file-1.txt', 'first');
+  const b = app.openTitledFileAndType('file-2.txt', 'second');
   await app.wiring.init();
 
   // Rust prevented the close and asked.
@@ -445,8 +445,8 @@ check('2. two dirty scratches prompt in sequence on window close; Cancel on the 
 
 check('2b. answering every prompt lets the window close', async () => {
   const app = makeApp();
-  app.openScratchAndType('scratch-1.txt', 'first');
-  const b = app.openScratchAndType('scratch-2.txt', 'second');
+  app.openTitledFileAndType('file-1.txt', 'first');
+  const b = app.openTitledFileAndType('file-2.txt', 'second');
   await app.wiring.init();
 
   app.listeners.get('window-close-requested')({});
@@ -465,7 +465,7 @@ check('2b. answering every prompt lets the window close', async () => {
 // === Step 7 check 3: quit =================================================
 check('3. quit prompts, and Cancel keeps the app running', async () => {
   const app = makeApp();
-  const { pane } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { pane } = app.openTitledFileAndType('file-1.txt', 'hello');
   await app.wiring.init();
 
   app.listeners.get('app-quit-requested')({});
@@ -483,7 +483,7 @@ check('3. quit prompts, and Cancel keeps the app running', async () => {
 
 check('3b. quit proceeds once the prompt is answered', async () => {
   const app = makeApp();
-  const { filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { filePath } = app.openTitledFileAndType('file-1.txt', 'hello');
   await app.wiring.init();
 
   app.listeners.get('app-quit-requested')({});
@@ -499,8 +499,8 @@ check('3b. quit proceeds once the prompt is answered', async () => {
 // === Step 7 check 4: the save itself fails ================================
 check('4. a save that fails raises a toast and does NOT close the tab', async () => {
   const app = makeApp();
-  const { tabId, pane, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
-  app.denyWrites(true);   // stands in for chmod 500 on the scratch directory
+  const { tabId, pane, filePath } = app.openTitledFileAndType('file-1.txt', 'hello');
+  app.denyWrites(true);   // stands in for chmod 500 on the containing directory
 
   const closing = app.tabManager.closeTab(tabId);
   await tick();
@@ -519,7 +519,7 @@ check('4. a save that fails raises a toast and does NOT close the tab', async ()
 
 check('4b. the same failure aborts a window close', async () => {
   const app = makeApp();
-  app.openScratchAndType('scratch-1.txt', 'hello');
+  app.openTitledFileAndType('file-1.txt', 'hello');
   await app.wiring.init();
   app.denyWrites(true);
 
@@ -536,7 +536,7 @@ check('4b. the same failure aborts a window close', async () => {
 // === Step 7 check 5: nothing dirty ========================================
 check('5. a tab with no dirty editor closes with no prompt at all', async () => {
   const app = makeApp();
-  const { tabId } = app.openScratchAndType('scratch-1.txt', '');   // opened, never typed in
+  const { tabId } = app.openTitledFileAndType('file-1.txt', '');   // opened, never typed in
   await app.tabManager.closeTab(tabId);
 
   assert.strictEqual(app.dialogCount(), 0, 'no dialog was ever opened');
@@ -545,7 +545,7 @@ check('5. a tab with no dirty editor closes with no prompt at all', async () => 
 
 check('5b. a saved-then-untouched editor closes with no prompt', async () => {
   const app = makeApp();
-  const { tabId, pane } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, pane } = app.openTitledFileAndType('file-1.txt', 'hello');
   await app.sandbox.termlabEditorService.savePane(pane);
   assert.strictEqual(pane.dirty, false, 'precondition: saving cleaned the pane');
 
@@ -556,7 +556,7 @@ check('5b. a saved-then-untouched editor closes with no prompt', async () => {
 
 check('5c. a window with nothing dirty closes without a prompt', async () => {
   const app = makeApp();
-  app.openScratchAndType('scratch-1.txt', '');
+  app.openTitledFileAndType('file-1.txt', '');
   await app.wiring.init();
 
   app.listeners.get('window-close-requested')({});
@@ -567,14 +567,14 @@ check('5c. a window with nothing dirty closes without a prompt', async () => {
 });
 
 // === closePane: the split-pane route to the same destruction ==============
-// Reachable on default bindings: open a scratch, cmd+d (splitPane has no kind
+// Reachable on default bindings: open a file, cmd+d (splitPane has no kind
 // guard, so a terminal appears beside the editor), click back into the
 // editor, type, cmd+shift+w. That lands in closePane's split branch, which
 // destroys the CodeMirror view directly instead of delegating to the guarded
 // closeTab — so without a guard of its own the buffer goes silently.
 check('C1. closing a split editor pane prompts; Cancel keeps the pane and its text', async () => {
   const app = makeApp();
-  const { tabId, pane, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, pane, filePath } = app.openTitledFileAndType('file-1.txt', 'hello');
   app.splitBesideEditor(tabId);
   app.focusPane(pane.paneId);
   assert.strictEqual(app.sandbox.splitTree.leafCount(app.tabs.get(tabId).treeRoot), 2);
@@ -599,7 +599,7 @@ check('C1. closing a split editor pane prompts; Cancel keeps the pane and its te
 
 check('C1b. Save on a split editor pane writes the text, then closes the pane', async () => {
   const app = makeApp();
-  const { tabId, pane, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, pane, filePath } = app.openTitledFileAndType('file-1.txt', 'hello');
   app.splitBesideEditor(tabId);
   app.focusPane(pane.paneId);
 
@@ -615,7 +615,7 @@ check('C1b. Save on a split editor pane writes the text, then closes the pane', 
 
 check("C1c. Don't Save on a split editor pane closes it without writing", async () => {
   const app = makeApp();
-  const { tabId, pane, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, pane, filePath } = app.openTitledFileAndType('file-1.txt', 'hello');
   app.splitBesideEditor(tabId);
   app.focusPane(pane.paneId);
 
@@ -630,7 +630,7 @@ check("C1c. Don't Save on a split editor pane closes it without writing", async 
 
 check('C1d. a failed save keeps the split editor pane', async () => {
   const app = makeApp();
-  const { tabId, pane } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, pane } = app.openTitledFileAndType('file-1.txt', 'hello');
   app.splitBesideEditor(tabId);
   app.focusPane(pane.paneId);
   app.denyWrites(true);
@@ -648,7 +648,7 @@ check('C1d. a failed save keeps the split editor pane', async () => {
 
 check('C1e. a clean split editor pane closes with no prompt', async () => {
   const app = makeApp();
-  const { tabId, pane } = app.openScratchAndType('scratch-1.txt', '');
+  const { tabId, pane } = app.openTitledFileAndType('file-1.txt', '');
   app.splitBesideEditor(tabId);
   app.focusPane(pane.paneId);
 
@@ -661,7 +661,7 @@ check('C1f. the last-leaf case still asks exactly once, via closeTab', async () 
   // closePane delegates to closeTab here; asking in both places would prompt
   // twice for one keystroke.
   const app = makeApp();
-  const { tabId, pane } = app.openScratchAndType('scratch-1.txt', 'hello');
+  const { tabId, pane } = app.openTitledFileAndType('file-1.txt', 'hello');
   app.focusPane(pane.paneId);
   assert.strictEqual(app.sandbox.splitTree.leafCount(app.tabs.get(tabId).treeRoot), 1);
 

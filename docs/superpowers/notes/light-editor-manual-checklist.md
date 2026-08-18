@@ -16,7 +16,8 @@ Special checks first — the two things no harness could see:
 - [ ] **The bundle loads in the real WKWebView**: open a scratch (⌘N) and
   confirm highlighting renders. Separately, a `cargo run` build (no
   beforeBuildCommand) should show the "editor bundle missing" toast rather
-  than doing nothing.
+  than doing nothing. `[superseded — see section G: ⌘N now opens an untitled
+  buffer, not a scratch file; the highlighting check still applies]`
 
 ## A. Local pane (no SSH host needed)
 
@@ -83,6 +84,8 @@ Special checks first — the two things no harness could see:
     the editor tab to reorder.
 27. Modify a scratch, then: close tab / close window / ⌘Q — each prompts
     Save / Don't Save / Cancel; Cancel aborts and the pane stays dirty.
+    `[superseded — see section G: this is now an untitled buffer; the
+    prompt/Cancel behaviour described is unchanged]`
 28. ⌘S in a plain terminal pane → nothing is consumed; the shell receives it.
 
 ## F. Editor polish branch — terminal font, host labels, the file dialog, vim
@@ -97,7 +100,8 @@ build. Run in order within each block; stop and report at the first mismatch.
 
 29. Settings → Terminal: note the terminal font family and size. Open a
     scratch (⌘N) → the editor text is that same monospace family at that
-    size, not the UI font.
+    size, not the UI font. `[superseded — see section G: ⌘N opens an
+    untitled buffer now, not a scratch file]`
 30. With the editor still open, change the terminal font family in Settings
     and Apply → the OPEN editor pane re-renders in the new family live (no
     reopen). Change the size → same.
@@ -165,14 +169,18 @@ build. Run in order within each block; stop and report at the first mismatch.
     likewise inert with a terminal focused.
 52. Scratch → ⌘⇧S → the chooser opens in save mode: title "Save File As", a
     filename field pre-filled with the current basename, a New Folder button,
-    and a primary button reading Save.
+    and a primary button reading Save. `[superseded — see section G: there
+    is no pre-existing "Scratch" pane any more; substitute an untitled
+    buffer, prefilled from its Untitled tab label]`
 53. Save the scratch to a new LOCAL path → the tab renames to the new
     basename, the tooltip becomes the new absolute path, the dirty dot
     clears, and the file exists on disk with the right bytes. Syntax
     highlighting switches to the new extension (save a scratch as `x.py` and
     watch Python highlighting appear).
 54. ⌘S afterwards → writes the NEW file. The original scratch is still on
-    disk, unchanged since its last save.
+    disk, unchanged since its last save. `[superseded — see section G: an
+    untitled buffer has nothing on disk before this first save, so "the
+    original scratch is still on disk" no longer applies]`
 55. Save As onto an EXISTING file → the "Overwrite File?" prompt appears
     stacked over the chooser. Cancel → nothing is written, nothing rebinds,
     and the chooser is still open at the same directory with the same typed
@@ -185,6 +193,8 @@ build. Run in order within each block; stop and report at the first mismatch.
     path that does NOT exist yet, creating it with New Folder first → Save.
     Expect: the file appears on the host, the tab becomes
     `name — user@host`, and the tooltip is the remote path.
+    `[superseded — see section G: substitute an untitled buffer for
+    "a scratch"]`
 58. [SSH] After that rebind, ⌘S (and `:w` with vim on) uploads to the NEW
     host and path — verify on the host, and verify the OLD location is not
     written again.
@@ -203,4 +213,55 @@ build. Run in order within each block; stop and report at the first mismatch.
     with a message naming the file; nothing is written over it.
 63. Settings → Keymap → Editor lists New Scratch, Open File, Save File and
     Save File As. Rebind Save File As, Apply, and confirm the new combo works
-    and the old one does not.
+    and the old one does not. `[superseded — see section G: the list now
+    reads "New File", not "New Scratch"]`
+
+## G. Untitled files (replaces scratches)
+
+Added by the untitled-files plan: New File opens an in-memory `Untitled`
+buffer instead of a real file under `<config_dir>/scratches/`; every first
+save — whatever triggers it — routes through the Save As chooser. Nothing
+below was run in a GUI by the implementer; every step is a human pass.
+**Steps marked [SSH] need a real SSH host**; the rest need only a local
+build. Run in order; stop and report at the first mismatch.
+
+64. **New File from all three entry points** — ⌘N, File → New File, and the
+    command palette — each opens a tab labelled `Untitled`. `pane.filePath`
+    is null, nothing exists on disk, and the tab is not dirty.
+65. Type into it, then ⌘S → the Save As chooser opens (not a plain write).
+    Save to a LOCAL path → the tab renames to the new basename, the tooltip
+    becomes the absolute path, the dirty dot clears, and the bytes are on
+    disk.
+66. [SSH] Repeat 65 but save straight to a CONNECTED host from the chooser's
+    scope bar → the tab becomes `name — user@host`, the tooltip is the
+    remote path, and the host has the bytes.
+67. `:w` (vim keybindings on) on an untitled pane → the same Save As chooser
+    opens; it is not a silent write. Completing it rebinds the pane exactly
+    as ⌘S does.
+68. `:wq` on an untitled pane, CANCELLED at the dialog → the tab stays open
+    and still dirty; no error toast; nothing closes.
+69. Type into a new untitled pane, then close its tab (or the window, or
+    ⌘Q) → the Save/Don't Save/Cancel prompt appears; choosing Save opens the
+    Save As chooser; cancelling THAT chooser aborts the close — the tab
+    stays open, still untitled, still dirty, and no error toast appears.
+70. New File, type nothing, close the tab immediately → it closes silently,
+    no prompt at all (an untouched untitled behaves like an untouched titled
+    file).
+71. Open New File three times in the same window → tabs read `Untitled`,
+    `Untitled-2`, `Untitled-3` in creation order.
+72. Add `new_scratch = "cmd+shift+u"` to the keymap config (the pre-rename
+    field name) → Apply/restart and confirm the combo still binds New File
+    (the `#[serde(alias = "new_scratch")]` back-compat path), and Settings →
+    Keymap → Editor shows it against "New File", not "New Scratch".
+73. Open an untitled pane, type, press ⌘S, and WHILE the chooser is still on
+    screen press ⌘S again → only one chooser is visible (the second
+    keystroke joins the first in flight rather than opening a second
+    dialog), and completing it produces exactly one write and one rebind.
+74. Open TWO untitled panes (A and B). Trigger A's Save As chooser (⌘S) and,
+    while it is still open, switch to B and press ⌘S → B's save is silently
+    refused (no dialog, no toast, no write) rather than sharing A's chooser
+    or queuing behind it. Answer A's chooser → A saves normally. Then press
+    ⌘S on B by itself → B's own chooser opens and B saves fine. **Note:**
+    this refusal is silent by design (see Task 2's fix-round notes); a
+    follow-up to surface some feedback for pane B is logged separately, not
+    part of this plan.
