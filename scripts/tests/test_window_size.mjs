@@ -113,4 +113,70 @@ assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 900, height: 480 }, {
 assert.strictEqual(metricsFor(null, { width: 840, height: 560 }), null);
 assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 800, height: 480 }, null), null);
 
+// --- waitForSizeChange: the condition the correction loop synchronises on ---
+//
+// The loop used to sleep a flat 60ms after setSize and then re-measure. When
+// the OS resize landed later than that, the pass read the NEW host width with
+// the OLD column count, computed a garbage cell size from the pair, and issued
+// an overshooting second resize that a later pass walked back — the visible
+// grow-then-shrink on every launch. The wait must be on the CONDITION (the
+// size actually changed), not on a guess about how long that takes.
+
+const { waitForSizeChange } = sandbox.termlabWindowSize;
+const fakeRaf = (cb) => cb(); // every "frame" is immediate in the test
+
+{
+  // Size changes on the third frame: resolves true, and consumed the extra
+  // settle frame afterwards (5 raf calls total: 3 polls + 1 detect... counted
+  // via wrapper below).
+  let frames = 0;
+  const countingRaf = (cb) => { frames += 1; cb(); };
+  const sizes = [
+    { width: 800, height: 480 }, // frame 1: unchanged
+    { width: 800, height: 480 }, // frame 2: unchanged
+    { width: 900, height: 480 }, // frame 3: landed
+    { width: 900, height: 480 }, // settle frame
+  ];
+  let i = 0;
+  const measure = () => sizes[Math.min(i++, sizes.length - 1)];
+  const changed = await waitForSizeChange(measure, { width: 800, height: 480 }, countingRaf, 10);
+  assert.strictEqual(changed, true, 'resolves true when the size lands');
+  assert.strictEqual(frames, 4, 'polls until the change, then one settle frame');
+}
+
+{
+  // Height-only change counts — a correction can be vertical only.
+  let i = 0;
+  const measure = () => (i++ < 1 ? { width: 800, height: 480 } : { width: 800, height: 520 });
+  assert.strictEqual(
+    await waitForSizeChange(measure, { width: 800, height: 480 }, fakeRaf, 10),
+    true,
+    'height-only change is a change',
+  );
+}
+
+{
+  // Never changes: returns false after maxFrames rather than hanging — a
+  // resize the OS swallowed must stop the loop, not wedge it.
+  let frames = 0;
+  const countingRaf = (cb) => { frames += 1; cb(); };
+  const changed = await waitForSizeChange(
+    () => ({ width: 800, height: 480 }),
+    { width: 800, height: 480 },
+    countingRaf,
+    7,
+  );
+  assert.strictEqual(changed, false, 'times out instead of hanging');
+  assert.strictEqual(frames, 7, 'gives up after exactly maxFrames');
+}
+
+{
+  // A measure that returns null (host torn down mid-wait) is a timeout, not a
+  // throw.
+  assert.strictEqual(
+    await waitForSizeChange(() => null, { width: 800, height: 480 }, fakeRaf, 3),
+    false,
+  );
+}
+
 console.log('window size arithmetic: all assertions passed');

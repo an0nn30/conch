@@ -457,11 +457,17 @@
                 cellHeight: metrics.cellHeight,
                 chromeWidth: metrics.chromeWidth,
                 chromeHeight: metrics.chromeHeight,
-              }).catch(() => {});
+              }).catch((err) => {
+                // Loud on purpose: a silently-failed save means every future
+                // launch opens at the estimate and visibly corrects itself,
+                // with nothing anywhere saying why.
+                console.error('Failed to persist window metrics:', err);
+              });
             }
             return;
           }
 
+          const before = { width: host.clientWidth, height: host.clientHeight };
           const size = await tauriWin.innerSize();
           const factor = await tauriWin.scaleFactor();
           const { LogicalSize } = window.__TAURI__.window;
@@ -470,10 +476,31 @@
             Math.round(size.height / factor) + delta.dh,
           ));
 
-          // Let the resize land and the terminal re-fit before measuring again.
+          // Wait for the resize to actually land, never for a guessed number
+          // of milliseconds. A flat sleep here read the NEW host width against
+          // the OLD column count whenever the OS was slower than the guess,
+          // derived a garbage cell size from the pair, and oscillated — the
+          // grow-then-shrink visible on every launch.
+          const landed = await sizer.waitForSizeChange(
+            () => ({ width: host.clientWidth, height: host.clientHeight }),
+            before,
+            (cb) => requestAnimationFrame(cb),
+            60,
+          );
+          if (!landed) {
+            console.error('Window resize never landed; leaving the window as is.');
+            return;
+          }
+          // The refit is rAF-coalesced; request it and give it its frame, so
+          // the next pass measures a consistent (width, cols) pair.
           debouncedFitAndResize();
-          await new Promise((resolve) => setTimeout(resolve, 60));
+          await new Promise((resolve) => requestAnimationFrame(resolve));
         }
+        // Falling out here means the metrics were NOT saved, so the next
+        // launch will run this correction again, visibly. Say so — a silent
+        // non-convergence looks identical to working until someone counts
+        // launches.
+        console.warn('Window size correction did not converge; metrics not saved.');
       }
 
       // Tell the user why this window has no panels — otherwise a window that

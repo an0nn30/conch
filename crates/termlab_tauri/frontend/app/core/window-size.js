@@ -85,5 +85,37 @@
     return { cellWidth, cellHeight, chromeWidth, chromeHeight };
   }
 
-  exports.termlabWindowSize = { sizeDelta, metricsFor };
+  /**
+   * Resolve once `measure()` reports a size different from `before`, plus one
+   * extra frame so the rAF-coalesced terminal refit can consume the new size.
+   *
+   * This is the condition the correction loop must synchronise on. It used to
+   * sleep a flat 60ms after setSize; whenever the OS resize landed later than
+   * that, the next pass read the NEW host width against the OLD column count,
+   * derived a garbage cell size from the mismatched pair, and issued an
+   * overshooting second resize that a later pass walked back — the visible
+   * grow-then-shrink on every launch, and a loop that exhausted its pass
+   * budget without ever converging (so the metrics were never persisted and
+   * the next launch repeated the whole dance).
+   *
+   * Returns false after `maxFrames` without a change, so a resize the OS
+   * swallowed stops the loop instead of wedging it.
+   */
+  async function waitForSizeChange(measure, before, raf, maxFrames) {
+    const b = before || {};
+    for (let i = 0; i < maxFrames; i++) {
+      await new Promise((resolve) => raf(resolve));
+      const now = typeof measure === 'function' ? measure() : null;
+      if (now && (now.width !== b.width || now.height !== b.height)) {
+        // One more frame: the refit is coalesced to the next animation frame,
+        // so measuring immediately would repeat the exact stale-pair bug this
+        // function exists to prevent.
+        await new Promise((resolve) => raf(resolve));
+        return true;
+      }
+    }
+    return false;
+  }
+
+  exports.termlabWindowSize = { sizeDelta, metricsFor, waitForSizeChange };
 })(window);
