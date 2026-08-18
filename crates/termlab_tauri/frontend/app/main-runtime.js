@@ -384,11 +384,10 @@
         showStatus('Failed to initialize first tab: ' + String(e));
       });
       await firstTabPromise;
-      try {
-        await invoke('app_ready');
-      } catch (e) {
-        showStatus('Failed to show window: ' + String(e));
-      }
+      // NOTE: app_ready (which shows the window) is deliberately NOT called
+      // here. It runs after applyConfiguredWindowSize below, so the window is
+      // never on screen at the rough size Rust guessed. Showing it here made
+      // the correction visible as a resize a quarter-second after launch.
 
       // Resize to the configured columns x lines.
       //
@@ -467,13 +466,26 @@
           // Only now are the font, the bottom-zone height and the sidebar
           // widths all applied, so this is the first moment the terminal's
           // measurements reflect what the user will actually see.
-          applyConfiguredWindowSize().catch((err) => {
-            // Deliberately not silent: an earlier version referenced an
-            // identifier that does not exist in this scope, and a bare catch
-            // hid the ReferenceError so the resize simply never happened while
-            // appearing to work.
-            console.error('Failed to apply configured window size:', err);
-          });
+          applyConfiguredWindowSize()
+            .catch((err) => {
+              // Deliberately not silent: an earlier version referenced an
+              // identifier that does not exist in this scope, and a bare catch
+              // hid the ReferenceError so the resize simply never happened while
+              // appearing to work.
+              console.error('Failed to apply configured window size:', err);
+            })
+            // The window is created hidden and shown only here, so the user
+            // never sees it at Rust's rough estimate. This MUST run even when
+            // the sizing above fails — hence finally, not then. A window that
+            // stays hidden is an app that looks like it never launched, which
+            // is far worse than the resize this ordering exists to remove.
+            // Rust also arms a fallback timer in case this line is never
+            // reached at all (see window_show_fallback in lib.rs).
+            .finally(() => {
+              invoke('app_ready').catch((e) => {
+                showStatus('Failed to show window: ' + String(e));
+              });
+            });
         }, 250);
       });
 

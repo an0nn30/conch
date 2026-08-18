@@ -55,6 +55,43 @@ pub(crate) struct TauriState {
 ///
 /// 0 columns/lines means "leave it to the system", which here means falling
 /// back to a sensible default window rather than collapsing to nothing.
+/// How long a window may stay hidden waiting for the frontend to size itself.
+///
+/// Generous on purpose: it exists to rescue a broken launch, not to race a
+/// slow one. Firing early would reintroduce the visible resize it prevents.
+const WINDOW_SHOW_FALLBACK_SECS: u64 = 5;
+
+/// Show a window even if the frontend never asks us to.
+///
+/// Windows are created hidden and shown by `app_ready`, which the frontend
+/// calls only after it has corrected the window to the configured column and
+/// line count — otherwise the user watches the window resize itself a moment
+/// after launch. The cost of that deferral is that a frontend which dies
+/// before reaching that call would leave a window that never appears, and an
+/// app that looks like it failed to start is far worse than a resize. So the
+/// timer below shows the window regardless, and does nothing when the normal
+/// path already ran.
+pub(crate) fn arm_window_show_fallback<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) {
+    let handle = app.clone();
+    let label = label.to_string();
+    std::thread::Builder::new()
+        .name(format!("window-show-fallback-{label}"))
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(WINDOW_SHOW_FALLBACK_SECS));
+            let Some(win) = handle.get_webview_window(&label) else {
+                return; // window already closed — nothing to rescue
+            };
+            if matches!(win.is_visible(), Ok(false)) {
+                log::warn!(
+                    "window '{label}' was still hidden after {WINDOW_SHOW_FALLBACK_SECS}s; \
+                     showing it without the configured size correction"
+                );
+                let _ = win.show();
+            }
+        })
+        .ok();
+}
+
 pub(crate) fn estimate_window_px(dims: &termlab_core::config::WindowDimensions) -> (f64, f64) {
     const APPROX_CELL_W: f64 = 8.0;
     const APPROX_CELL_H: f64 = 16.0;
@@ -162,6 +199,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                     let _ = win.set_zoom(zoom as f64);
                 }
             }
+
+            arm_window_show_fallback(app.handle(), "main");
 
             // Initialize plugin system and restore previously enabled plugins.
             if plugins_config.enabled {

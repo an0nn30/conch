@@ -134,6 +134,10 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         .theme(theme)
         .visible(false)
         .build()?;
+    // Same deal as the main window: this one is built hidden and shown by
+    // app_ready once the frontend has sized it, so it needs the same rescue
+    // timer for a frontend that never gets that far.
+    crate::arm_window_show_fallback(app, new_win.label());
     let zoom = persisted.layout.zoom_factor;
     if zoom > 0.0 && (zoom - 1.0).abs() > f32::EPSILON {
         let _ = new_win.set_zoom(zoom as f64);
