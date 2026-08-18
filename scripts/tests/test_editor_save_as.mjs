@@ -1011,7 +1011,11 @@ await checkAsync('(b) a remote target routes the CLEAN host label and the pane i
 
   const overlay = h.doc.body.children[0];
   const scopes = overlay.querySelectorAll('.tl-filedlg__scope');
-  assert.deepStrictEqual(scopes.map((b) => b.textContent),
+  // The caption moved into a label span when the scope pills became sidebar
+  // rows (a row is icon + label + status dot). Same rows, same order, same
+  // expected captions — only where the text is read has changed.
+  const scopeName = (b) => b.querySelectorAll('.tl-filedlg__scope-label')[0].textContent;
+  assert.deepStrictEqual(scopes.map(scopeName),
     ['This Mac', 'bob@beta:2222 (pane 1)', 'bob@beta:2222 (pane 2)'],
     'precondition: neither remote button caption is the bare host label');
   scopes[2].fire('click');

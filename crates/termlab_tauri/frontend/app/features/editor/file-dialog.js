@@ -58,17 +58,10 @@
     return String(error);
   }
 
-  function formatSize(bytes) {
-    const utils = global.utils;
-    if (utils && typeof utils.formatSize === 'function') return utils.formatSize(bytes);
-    return bytes == null ? '' : String(bytes);
-  }
-
-  function formatDate(epoch) {
-    const utils = global.utils;
-    if (utils && typeof utils.formatDate === 'function') return utils.formatDate(epoch);
-    return '';
-  }
+  // Size and date formatting live in file-dialog-model.js (pure, injected
+  // `now`), not in window.utils: the listing's column rules — '—' for a
+  // directory, 'Today'/'Yesterday', no leading zero on the day — are this
+  // dialog's, and utils.formatDate has its own callers to answer to.
 
   // ---------------------------------------------------------------------------
   // Session -> scope derivation (pure; exported for tests)
@@ -252,6 +245,25 @@
   function clearChildren(node) {
     if (!node) return;
     while (node.lastChild) node.removeChild(node.lastChild);
+  }
+
+  // Decoration, never content: `tlIcon` is a separate script (app/ui/tl-icon.js)
+  // and its dark-variant lookup reads document.documentElement, so a build (or
+  // a test harness) without it must lose the glyph and nothing else. Same
+  // guard shape as ui/tl-combo.js:57 and ui/tl-spinner.js:29.
+  function appendIcon(parent, name, extraClass) {
+    const icons = global.tlIcon;
+    if (!parent || !icons || typeof icons.create !== 'function') return null;
+    let img = null;
+    try {
+      img = icons.create(name, { size: 16, alt: '' });
+    } catch (_) {
+      return null;
+    }
+    if (!img) return null;
+    if (extraClass) img.className = `${img.className} ${extraClass}`;
+    parent.appendChild(img);
+    return img;
   }
 
   function findFooterButton(panel, label) {
@@ -447,55 +459,80 @@
     let selectedIndex = -1;
     let showHidden = false;
     let filterQuery = '';
+    // Sort lives beside the filter because it is applied in the same place the
+    // filter is (renderRows), and it is deliberately per-dialog-open: every
+    // chooser starts at name/ascending rather than restoring a previous
+    // choice (spec, "Known limitations").
+    let sortKey = 'name';
+    let sortDir = 'asc';
     // Bumped by every navigation. A listing whose token is stale when it
     // lands is dropped: the user has already gone somewhere else, and
     // painting it would put the wrong rows under the current breadcrumb.
     let navToken = 0;
 
     // ----- elements -----
+    //
+    // Two regions: a fixed sidebar of places (This Mac + every connected
+    // host) and the main column (path bar, listing, inline error). The
+    // footer's left slot carries the Hidden toggle and, in save mode, the
+    // filename controls — see footerCtl below.
     const root = el('div', 'tl-filedlg');
 
-    const scopeBar = el('div', 'tl-filedlg__scopes');
-    scopeBar.setAttribute('role', 'group');
-    scopeBar.setAttribute('aria-label', 'Location');
-    root.appendChild(scopeBar);
+    const sidebar = el('div', 'tl-filedlg__sidebar');
+    sidebar.setAttribute('role', 'group');
+    sidebar.setAttribute('aria-label', 'Location');
+    root.appendChild(sidebar);
 
-    const navRow = el('div', 'tl-filedlg__nav');
+    const mainCol = el('div', 'tl-filedlg__main');
+    root.appendChild(mainCol);
+
+    const pathBar = el('div', 'tl-filedlg__pathbar');
     const upBtn = el('button', 'tl-filedlg__up', '↑');
     upBtn.type = 'button';
     upBtn.setAttribute('aria-label', 'Parent directory');
     upBtn.title = 'Parent directory';
-    navRow.appendChild(upBtn);
+    pathBar.appendChild(upBtn);
     const crumbBar = el('div', 'tl-filedlg__crumbs');
     crumbBar.setAttribute('aria-label', 'Breadcrumbs');
-    navRow.appendChild(crumbBar);
-    root.appendChild(navRow);
-
-    const controls = el('div', 'tl-filedlg__controls');
+    pathBar.appendChild(crumbBar);
     const pathInput = el('input', 'tl-input tl-filedlg__path');
     pathInput.type = 'text';
     pathInput.spellcheck = false;
     pathInput.setAttribute('aria-label', 'Path');
     pathInput.setAttribute('placeholder', '/path/to/directory');
-    controls.appendChild(pathInput);
+    pathBar.appendChild(pathInput);
+    const filterBox = el('div', 'tl-filedlg__filterbox');
+    appendIcon(filterBox, 'search', 'tl-filedlg__filtericon');
     const filterInput = el('input', 'tl-input tl-filedlg__filter');
     filterInput.type = 'search';
     filterInput.setAttribute('aria-label', 'Filter by name');
     filterInput.setAttribute('placeholder', 'Filter…');
-    controls.appendChild(filterInput);
-    const hiddenLabel = el('label', 'tl-check tl-filedlg__hidden');
-    const hiddenBox = el('input');
-    hiddenBox.type = 'checkbox';
-    hiddenLabel.appendChild(hiddenBox);
-    hiddenLabel.appendChild(el('span', null, 'Hidden'));
-    controls.appendChild(hiddenLabel);
-    root.appendChild(controls);
+    filterBox.appendChild(filterInput);
+    pathBar.appendChild(filterBox);
+    mainCol.appendChild(pathBar);
 
     const box = el('div', 'tl-picker__box tl-scroll tl-filedlg__box');
     const head = el('div', 'tl-filedlg__head');
-    head.appendChild(el('span', 'tl-filedlg__col tl-filedlg__col--name', 'Name'));
-    head.appendChild(el('span', 'tl-filedlg__col tl-filedlg__col--size', 'Size'));
-    head.appendChild(el('span', 'tl-filedlg__col tl-filedlg__col--time', 'Modified'));
+    head.setAttribute('role', 'row');
+    // key -> { btn, arrow, variant }. The header cells are buttons so the
+    // sort is reachable by keyboard and announced as pressable; `role` is
+    // overridden to columnheader so `aria-sort` is on the element ARIA
+    // expects to find it on.
+    const headCells = {};
+    function buildHeadCell(key, variant, label) {
+      const btn = el('button', `tl-filedlg__col tl-filedlg__col--${variant}`);
+      btn.type = 'button';
+      btn.setAttribute('role', 'columnheader');
+      btn.appendChild(el('span', 'tl-filedlg__col-label', label));
+      const arrow = el('span', 'tl-filedlg__sort');
+      btn.appendChild(arrow);
+      btn.addEventListener('click', () => sortBy(key));
+      head.appendChild(btn);
+      headCells[key] = { btn, arrow, variant };
+    }
+    buildHeadCell('name', 'name', 'Name');
+    buildHeadCell('size', 'size', 'Size');
+    buildHeadCell('modified', 'time', 'Modified');
     box.appendChild(head);
     const list = el('div', 'tl-filedlg__list');
     list.setAttribute('role', 'listbox');
@@ -505,29 +542,7 @@
     const emptyEl = el('div', 'tl-filedlg__empty', 'No matches');
     emptyEl.hidden = true;
     box.appendChild(emptyEl);
-    root.appendChild(box);
-
-    // Save mode only: the name to write, plus the one directory-creating
-    // affordance a save dialog needs. Built (and appended) only in save mode
-    // so the open chooser is byte-for-byte the dialog Task 5 shipped.
-    let nameInput = null;
-    let newFolderBtn = null;
-    if (saveMode) {
-      const saveRow = el('div', 'tl-filedlg__save');
-      const nameLabel = el('label', 'tl-filedlg__namelabel', 'Save As:');
-      saveRow.appendChild(nameLabel);
-      nameInput = el('input', 'tl-input tl-filedlg__name');
-      nameInput.type = 'text';
-      nameInput.spellcheck = false;
-      nameInput.setAttribute('aria-label', 'File name');
-      nameInput.setAttribute('placeholder', 'File name');
-      nameInput.value = String(opts.filename || '');
-      saveRow.appendChild(nameInput);
-      newFolderBtn = el('button', 'tl-btn tl-filedlg__newfolder', 'New Folder');
-      newFolderBtn.type = 'button';
-      saveRow.appendChild(newFolderBtn);
-      root.appendChild(saveRow);
-    }
+    mainCol.appendChild(box);
 
     // Inline, in the body, next to the list it describes — deliberately NOT a
     // toast. A toast for "cannot list /root" would fly away over the terminal
@@ -535,34 +550,117 @@
     const errorEl = el('div', 'tl-filedlg__error');
     errorEl.setAttribute('role', 'alert');
     errorEl.hidden = true;
-    root.appendChild(errorEl);
+    mainCol.appendChild(errorEl);
+
+    // The footer's left slot: options about the whole dialog rather than
+    // about the directory on screen. Built here but appended in onOpen —
+    // tl-dialog builds its footer inside open(), and its `footerStart`
+    // option takes button SPECS, not arbitrary nodes (ui/tl-dialog.js:262).
+    const footerCtl = el('div', 'tl-filedlg__footctl');
+    const hiddenLabel = el('label', 'tl-check tl-filedlg__hidden');
+    const hiddenBox = el('input');
+    hiddenBox.type = 'checkbox';
+    hiddenLabel.appendChild(hiddenBox);
+    hiddenLabel.appendChild(el('span', null, 'Hidden'));
+    footerCtl.appendChild(hiddenLabel);
+
+    // Save mode only: the name to write, plus the one directory-creating
+    // affordance a save dialog needs. Built only in save mode so the open
+    // chooser offers neither.
+    let nameInput = null;
+    let newFolderBtn = null;
+    if (saveMode) {
+      footerCtl.appendChild(el('label', 'tl-filedlg__namelabel', 'Save As:'));
+      nameInput = el('input', 'tl-input tl-filedlg__name');
+      nameInput.type = 'text';
+      nameInput.spellcheck = false;
+      nameInput.setAttribute('aria-label', 'File name');
+      nameInput.setAttribute('placeholder', 'File name');
+      nameInput.value = String(opts.filename || '');
+      footerCtl.appendChild(nameInput);
+      newFolderBtn = el('button', 'tl-btn tl-filedlg__newfolder', 'New Folder');
+      newFolderBtn.type = 'button';
+      footerCtl.appendChild(newFolderBtn);
+    }
 
     // "Open" or "Save", depending on the mode.
     let primaryButton = null;
 
     // ----- rendering -----
 
-    function renderScopeBar() {
-      clearChildren(scopeBar);
-      for (const candidate of scopes) {
-        const btn = el('button', 'tl-filedlg__scope', candidate.label);
-        btn.type = 'button';
-        const isActive = scope && candidate.id === scope.id;
-        if (isActive) btn.className = 'tl-filedlg__scope is-active';
-        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-        if (candidate.kind === 'remote') btn.title = candidate.hostLabel;
-        btn.addEventListener('click', () => {
-          // `enterScope` sets `scope = candidate` BEFORE `resolveScopeStart`
-          // runs, so a scope whose start failed to resolve is left "active"
-          // with `start` still null. Guarding on id alone would make that
-          // button permanently dead — the same-scope click that should retry
-          // it would instead no-op forever. Only skip re-entering a scope
-          // that is both active AND already has a resolved start.
-          if (scope && candidate.id === scope.id && candidate.start != null) return;
-          enterScope(candidate);
-        });
-        scopeBar.appendChild(btn);
+    // One row per scope, in the order buildScopes produced (local first, then
+    // hosts), split into the two labelled sections the sidebar shows. The
+    // button, its class and its click handler are unchanged from the pill bar
+    // this replaced — only the wrapper and the label span are new.
+    function buildScopeRow(candidate) {
+      const btn = el('button', 'tl-filedlg__scope');
+      btn.type = 'button';
+      const isActive = !!(scope && candidate.id === scope.id);
+      if (isActive) btn.className = 'tl-filedlg__scope is-active';
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      // 'sftp' is the glyph the SFTP tool window already uses for a remote
+      // host (tool-window-runtime.js:238); no new asset is added for this.
+      appendIcon(btn, candidate.kind === 'remote' ? 'sftp' : 'folder', 'tl-filedlg__scope-icon');
+      btn.appendChild(el('span', 'tl-filedlg__scope-label', candidate.label));
+      if (candidate.kind === 'remote') {
+        btn.title = candidate.hostLabel;
+        // Affordance, not state machinery: every host in this list is
+        // connected by construction — buildScopes only ever sees sessions
+        // that are already up.
+        btn.appendChild(el('span', 'tl-filedlg__scope-dot'));
       }
+      btn.addEventListener('click', () => {
+        // `enterScope` sets `scope = candidate` BEFORE `resolveScopeStart`
+        // runs, so a scope whose start failed to resolve is left "active"
+        // with `start` still null. Guarding on id alone would make that
+        // button permanently dead — the same-scope click that should retry
+        // it would instead no-op forever. Only skip re-entering a scope
+        // that is both active AND already has a resolved start.
+        if (scope && candidate.id === scope.id && candidate.start != null) return;
+        enterScope(candidate);
+      });
+      return btn;
+    }
+
+    function appendScopeSection(label, members) {
+      if (!members.length) return;
+      const section = el('div', 'tl-filedlg__section');
+      section.appendChild(el('div', 'tl-filedlg__section-label', label));
+      for (const candidate of members) section.appendChild(buildScopeRow(candidate));
+      sidebar.appendChild(section);
+    }
+
+    function renderSidebar() {
+      clearChildren(sidebar);
+      // A "Hosts" heading over nothing would read as a broken feature rather
+      // than an empty one, so the section only exists when a session does.
+      appendScopeSection('Places', scopes.filter((s) => s.kind !== 'remote'));
+      appendScopeSection('Hosts', scopes.filter((s) => s.kind === 'remote'));
+    }
+
+    // The sort indicator, on the one column that owns the order.
+    function renderHead() {
+      for (const key of Object.keys(headCells)) {
+        const cellDef = headCells[key];
+        const isActive = key === sortKey;
+        cellDef.btn.className = `tl-filedlg__col tl-filedlg__col--${cellDef.variant}`
+          + (isActive ? ' is-active' : '');
+        cellDef.btn.setAttribute('aria-sort',
+          isActive ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none');
+        cellDef.arrow.textContent = isActive ? (sortDir === 'asc' ? '▲' : '▼') : '';
+      }
+    }
+
+    // A header click: a new column starts ascending, the current column
+    // flips. The selection follows the ENTRY, not its row number — the file
+    // the user picked must not become a different file because the order
+    // changed under it.
+    function sortBy(key) {
+      if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+      else { sortKey = key; sortDir = 'asc'; }
+      const held = selectedEntry();
+      renderHead();
+      renderRows(held ? held.name : null);
     }
 
     function renderCrumbs() {
@@ -596,20 +694,40 @@
       setDisabled(primaryButton, !entry || !!entry.is_dir);
     }
 
-    function renderRows() {
+    // `preserveName` re-finds the selection by entry name in the NEW order
+    // (used by the sort headers); it drops the selection when that entry is
+    // no longer visible. Omitted, the selected index is left where it is —
+    // which is what every other caller wants, including the navigations that
+    // deliberately cleared it a moment earlier.
+    function renderRows(preserveName) {
       clearChildren(list);
-      visible = model.sortEntries(model.filterEntries(entries, filterQuery, showHidden));
+      visible = model.sortEntries(
+        model.filterEntries(entries, filterQuery, showHidden), sortKey, sortDir,
+      );
+      if (preserveName != null) {
+        selectedIndex = visible.findIndex((entry) => entry && entry.name === preserveName);
+      }
       if (selectedIndex >= visible.length) selectedIndex = -1;
+      // Read once per render, not once per row, so every row in one painting
+      // dates itself against the same instant.
+      const nowSeconds = Math.floor(Date.now() / 1000);
       visible.forEach((entry, index) => {
         const row = el('div', 'tl-filedlg__row' + (index === selectedIndex ? ' is-selected' : ''));
         row.setAttribute('role', 'option');
         row.setAttribute('aria-selected', index === selectedIndex ? 'true' : 'false');
         row.tabIndex = -1;
+        appendIcon(row, entry.is_dir ? 'folder' : 'file', 'tl-filedlg__rowicon');
         const name = el('span', 'tl-filedlg__cell tl-filedlg__cell--name', entry.name);
         if (entry.is_dir) name.className = 'tl-filedlg__cell tl-filedlg__cell--name is-dir';
         row.appendChild(name);
-        row.appendChild(el('span', 'tl-filedlg__cell tl-filedlg__cell--size', entry.is_dir ? '' : formatSize(entry.size)));
-        row.appendChild(el('span', 'tl-filedlg__cell tl-filedlg__cell--time', formatDate(entry.modified)));
+        // A directory's `size` is its inode's, which means nothing to the
+        // person reading the column — hence '—' here rather than a number.
+        // The formatter never produces '—' itself; that call is this
+        // renderer's.
+        row.appendChild(el('span', 'tl-filedlg__cell tl-filedlg__cell--size',
+          entry.is_dir ? '—' : model.formatSize(entry.size)));
+        row.appendChild(el('span', 'tl-filedlg__cell tl-filedlg__cell--time',
+          model.formatModified(entry.modified, nowSeconds)));
         row.addEventListener('click', () => select(index));
         row.addEventListener('dblclick', () => { select(index); activate(); });
         list.appendChild(row);
@@ -701,7 +819,7 @@
       clearError();
       clearChildren(list);
       syncPrimaryButton();
-      renderScopeBar();
+      renderSidebar();
       renderCrumbs();
 
       // Resolved once per scope and cached on it, so switching back and forth
@@ -945,6 +1063,10 @@
       if (handle) handle.close(result ? 'open' : 'cancel');
     }
 
+    // The header carries the sort indicator from the first paint, before the
+    // listing it labels has even been requested.
+    renderHead();
+
     const primaryLabel = saveMode ? 'Save' : 'Open';
     handle = global.tlDialog.open({
       title: saveMode ? 'Save File As' : 'Open File',
@@ -961,6 +1083,14 @@
         },
       ],
       onOpen: (panel) => {
+        // The footer exists only now. Its left slot is where the Hidden
+        // toggle and the save controls live; if this build's tl-dialog has no
+        // such slot they go back under the listing rather than disappearing,
+        // because a save chooser with no filename field is unusable.
+        const footerStart = panel && typeof panel.querySelector === 'function'
+          ? panel.querySelector('.tl-dialog__footer-start')
+          : null;
+        (footerStart || root).appendChild(footerCtl);
         primaryButton = findFooterButton(panel, primaryLabel);
         // Save starts enabled when the pane's current name was pre-filled,
         // so ⌘⇧S → Return saves under the same name in a new place.
@@ -971,12 +1101,12 @@
     });
 
     // Scope discovery is async, so the dialog is already on screen when it
-    // lands — an empty scope bar for a few ms beats a ⌘O that appears to do
+    // lands — an empty sidebar for a few ms beats a ⌘O that appears to do
     // nothing while sessions are enumerated.
     loadScopes().then((built) => {
       if (done) return;
       scopes = built;
-      renderScopeBar();
+      renderSidebar();
       return enterScope(scopes[0]);
     }).catch((error) => {
       if (done) return;

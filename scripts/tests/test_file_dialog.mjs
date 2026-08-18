@@ -162,6 +162,11 @@ function makeDocument() {
   doc.createElement = (tag) => makeElement(tag, doc);
   doc.body = makeElement('body', doc);
   doc.body.isConnected = true;
+  // app/ui/tl-icon.js reads the appearance attribute off documentElement to
+  // pick a _dark variant. Stubbed (rather than tlIcon itself) so the REAL
+  // icon helper runs here and the rows are checked against the paths it
+  // actually emits.
+  doc.documentElement = makeElement('html', doc);
   return doc;
 }
 
@@ -231,6 +236,9 @@ function makeHarness(options) {
   };
 
   load(sandbox, 'ui/tl-dialog.js');
+  // The real icon helper: the dialog's rows and sidebar decorate themselves
+  // through it, and stubbing it would let a wrong icon name pass.
+  load(sandbox, 'ui/tl-icon.js');
   load(sandbox, 'features/editor/file-dialog-model.js');
   load(sandbox, 'features/editor/file-dialog.js');
 
@@ -245,7 +253,13 @@ function parts(doc) {
   return {
     overlay,
     panel: overlay.children[0],
+    // The sidebar rows: same `.tl-filedlg__scope` button, and still in
+    // scope-array order (This Mac, then hosts) — it is the section wrapper
+    // and the label span that are new, not the button or its handler.
     scopes: find('tl-filedlg__scope'),
+    sectionLabels: find('tl-filedlg__section-label'),
+    sections: find('tl-filedlg__section'),
+    heads: find('tl-filedlg__col'),
     crumbs: find('tl-filedlg__crumb'),
     rows: find('tl-filedlg__row'),
     error: find('tl-filedlg__error')[0] || null,
@@ -254,11 +268,23 @@ function parts(doc) {
     pathInput: find('tl-filedlg__path')[0] || null,
     filterInput: find('tl-filedlg__filter')[0] || null,
     hiddenBox: (find('tl-filedlg__hidden')[0] || { children: [] }).children[0] || null,
+    footerStart: overlay.querySelectorAll('.tl-dialog__footer-start')[0] || null,
     buttons: overlay.querySelectorAll('.tl-dialog__footer .tl-btn'),
   };
 }
 
-const rowName = (row) => row.children[0].textContent;
+// The cell selectors below are WHERE these tests read a row/scope caption, not
+// WHAT they assert: a row now leads with a decorative icon element, so the
+// caption is the labelled cell rather than the first child.
+const cell = (row, variant) => row.querySelectorAll(`.tl-filedlg__cell--${variant}`)[0] || null;
+const rowName = (row) => cell(row, 'name').textContent;
+const rowSize = (row) => cell(row, 'size').textContent;
+const rowTime = (row) => cell(row, 'time').textContent;
+const rowIcon = (row) => (row.querySelectorAll('.tl-icon')[0] || {}).src || null;
+const scopeName = (btn) => btn.querySelectorAll('.tl-filedlg__scope-label')[0].textContent;
+const colVariant = (h) => classesOf(h).find((c) => c.startsWith('tl-filedlg__col--')).replace('tl-filedlg__col--', '');
+const headFor = (p, variant) => p.heads.find((h) => colVariant(h) === variant);
+const sortState = (p) => p.heads.map((h) => `${colVariant(h)}:${h.getAttribute('aria-sort')}`);
 
 // ---------------------------------------------------------------------------
 // 1. Pure derivations from remote_get_sessions' real shape
@@ -379,7 +405,7 @@ await checkAsync('renders scopes and sorted rows; Open gates on a file', async (
   await settle();
 
   const p = parts(doc);
-  assert.deepStrictEqual(p.scopes.map((b) => b.textContent), ['This Mac', 'ubuntu@h1']);
+  assert.deepStrictEqual(p.scopes.map(scopeName), ['This Mac', 'ubuntu@h1']);
   assert.strictEqual(p.scopes[0].getAttribute('aria-pressed'), 'true');
   assert.deepStrictEqual(p.rows.map(rowName), ['sub', 'aa.txt', 'zz.txt'], 'dirs first, then name; dotfile hidden');
   assert.strictEqual(p.pathInput.value, '/home/u');
@@ -759,7 +785,7 @@ await checkAsync('a remote pick routes the CLEAN hostLabel, not the disambiguate
 
   // Precondition: the two buttons are distinguishable, and neither reads as
   // the bare host label — so a routed button caption cannot pass by accident.
-  const scopeText = parts(doc).scopes.map((b) => b.textContent);
+  const scopeText = parts(doc).scopes.map(scopeName);
   assert.deepStrictEqual(scopeText,
     ['This Mac', 'ubuntu@h1:2222 (pane 1)', 'ubuntu@h1:2222 (pane 2)']);
 
@@ -975,6 +1001,238 @@ await checkAsync('⌘⇧S while an OPEN chooser is up is refused too, with no se
   const choice = await opening;
   assert.strictEqual(choice.path, '/home/u/notes.md');
   assert.deepStrictEqual(calls.openLocal, ['/home/u/notes.md']);
+});
+
+// ---------------------------------------------------------------------------
+// 8. The redesign: places sidebar, detail columns, click-to-sort
+// ---------------------------------------------------------------------------
+//
+// Presentation only — every check below is about WHERE things are rendered and
+// in what order. The behaviour checks above (scope click + retry, the race,
+// routing, cancel) are unchanged and are what pin the semantics.
+
+console.log('file dialog: sidebar, columns, sorting');
+
+await checkAsync('the sidebar groups scopes under Places and Hosts, and marks the active one', async () => {
+  const { sandbox, doc, calls } = makeHarness({
+    sessions: [
+      { key: 'main:2', host: 'zeta', user: 'u', port: 22 },
+      { key: 'main:1', host: 'alpha', user: 'u', port: 22 },
+    ],
+    listLocal: () => Promise.resolve([]),
+    listRemote: () => Promise.resolve([]),
+  });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  let p = parts(doc);
+  assert.deepStrictEqual(p.sectionLabels.map((s) => s.textContent), ['Places', 'Hosts']);
+  assert.deepStrictEqual(p.scopes.map(scopeName), ['This Mac', 'u@alpha', 'u@zeta'],
+    'one row per scope, still in buildScopes order');
+  // Each row sits in the section it belongs to, not merely somewhere in the
+  // sidebar: Places holds exactly This Mac, Hosts holds exactly the sessions.
+  const rowsOf = (section) => section.querySelectorAll('.tl-filedlg__scope').map(scopeName);
+  assert.deepStrictEqual(rowsOf(p.sections[0]), ['This Mac']);
+  assert.deepStrictEqual(rowsOf(p.sections[1]), ['u@alpha', 'u@zeta']);
+
+  assert.ok(classesOf(p.scopes[0]).includes('is-active'), 'the local scope starts active');
+  assert.strictEqual(p.scopes[0].getAttribute('aria-pressed'), 'true');
+  assert.strictEqual(p.scopes[1].getAttribute('aria-pressed'), 'false');
+  assert.strictEqual(p.scopes[1].title, 'u@alpha', 'a host row keeps the clean label as its tooltip');
+
+  // The click handler is the same one: switching moves the active marker AND
+  // actually enters the scope (the realpath call proves it is not decoration).
+  p.scopes[1].fire('click');
+  await settle();
+  p = parts(doc);
+  assert.deepStrictEqual(calls.realpath, [[1, '.']], 'the sidebar row entered the scope');
+  assert.ok(classesOf(p.scopes[1]).includes('is-active'), 'the clicked host row is now active');
+  assert.ok(!classesOf(p.scopes[0]).includes('is-active'), 'and This Mac is not');
+});
+
+await checkAsync('with no connected sessions the sidebar has Places only', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: () => Promise.resolve([]) });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+  const p = parts(doc);
+  assert.deepStrictEqual(p.sectionLabels.map((s) => s.textContent), ['Places'],
+    'no Hosts heading over an empty list');
+  assert.deepStrictEqual(p.scopes.map(scopeName), ['This Mac']);
+});
+
+// A date far enough in the past that its rendering is the YYYY-MM-DD branch
+// whatever year the suite runs in; noon UTC so no time zone can move its year.
+const JUNE_2020 = Math.floor(Date.UTC(2020, 5, 15, 12, 0, 0) / 1000);
+
+await checkAsync('rows carry an icon, a size (— for directories) and a modified date', async () => {
+  const { sandbox, doc } = makeHarness({
+    listLocal: () => Promise.resolve([
+      { name: 'sub', is_dir: true, size: 4096, modified: JUNE_2020 },
+      { name: 'big.bin', is_dir: false, size: 1536, modified: JUNE_2020 },
+      { name: 'nodate.txt', is_dir: false, size: 0, modified: null },
+    ]),
+  });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  const p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['sub', 'big.bin', 'nodate.txt']);
+
+  // The directory's size is '—' — NOT its 4096-byte inode size, and not the
+  // empty string the pre-redesign dialog left there.
+  assert.strictEqual(rowSize(p.rows[0]), '—', 'a directory has no meaningful size');
+  assert.strictEqual(rowSize(p.rows[1]), '1.5 KB', 'a file is formatted by the model');
+  assert.strictEqual(rowSize(p.rows[2]), '0 B');
+
+  assert.match(rowTime(p.rows[1]), /^2020-06-1[45]$/, 'an old date renders YYYY-MM-DD');
+  assert.strictEqual(rowTime(p.rows[2]), '—', 'a null modified time renders as —');
+
+  assert.match(rowIcon(p.rows[0]), /folder\.svg$/, 'directories get the folder glyph');
+  assert.match(rowIcon(p.rows[1]), /file\.svg$/, 'files get the file glyph');
+});
+
+// A DISCRIMINATING fixture: name-asc, size-asc and modified-asc each produce a
+// different order, so a header that silently did nothing (or sorted by the
+// wrong key) cannot pass any of the three assertions below. The directory is
+// here to prove the dirs-first partition survives every key and direction.
+const SORT_FIXTURE = () => Promise.resolve([
+  { name: 'a.txt', is_dir: false, size: 300, modified: 3000 },
+  { name: 'b.txt', is_dir: false, size: 100, modified: 5000 },
+  { name: 'c.txt', is_dir: false, size: 200, modified: 1000 },
+  { name: 'zdir', is_dir: true, size: 0, modified: 9999 },
+]);
+
+await checkAsync('clicking a column header sorts the listing and reflects it in aria-sort', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: SORT_FIXTURE });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  let p = parts(doc);
+  assert.deepStrictEqual(p.heads.map(colVariant), ['name', 'size', 'time'],
+    'three headers: Name, Size, Modified');
+  assert.deepStrictEqual(p.rows.map(rowName), ['zdir', 'a.txt', 'b.txt', 'c.txt'],
+    'default: name ascending, directories first');
+  assert.deepStrictEqual(sortState(p), ['name:ascending', 'size:none', 'time:none']);
+
+  headFor(p, 'size').fire('click');
+  p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['zdir', 'b.txt', 'c.txt', 'a.txt'],
+    'size ascending — an order neither name nor modified produces');
+  assert.deepStrictEqual(sortState(p), ['name:none', 'size:ascending', 'time:none']);
+
+  headFor(p, 'size').fire('click');
+  p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['zdir', 'a.txt', 'c.txt', 'b.txt'],
+    'a second click on the same header flips the direction');
+  assert.deepStrictEqual(sortState(p), ['name:none', 'size:descending', 'time:none']);
+
+  headFor(p, 'time').fire('click');
+  p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['zdir', 'c.txt', 'a.txt', 'b.txt'],
+    'modified ascending — a third distinct order; a new key starts ascending');
+  assert.deepStrictEqual(sortState(p), ['name:none', 'size:none', 'time:ascending']);
+
+  headFor(p, 'name').fire('click');
+  p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['zdir', 'a.txt', 'b.txt', 'c.txt']);
+  assert.deepStrictEqual(sortState(p), ['name:ascending', 'size:none', 'time:none']);
+});
+
+await checkAsync('sort state is per dialog open — a new chooser starts at name ascending', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: SORT_FIXTURE });
+  const first = sandbox.termlabFileDialog._chooseFile();
+  await settle();
+  headFor(parts(doc), 'size').fire('click');
+  assert.deepStrictEqual(parts(doc).rows.map(rowName), ['zdir', 'b.txt', 'c.txt', 'a.txt']);
+  parts(doc).buttons.find((b) => b.textContent === 'Cancel').fire('click');
+  await first;
+  await settle();
+
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+  const p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['zdir', 'a.txt', 'b.txt', 'c.txt'],
+    'the second open is back to name ascending');
+  assert.deepStrictEqual(sortState(p), ['name:ascending', 'size:none', 'time:none']);
+});
+
+await checkAsync('re-sorting keeps the selected ENTRY selected, not the selected index', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: SORT_FIXTURE });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  let p = parts(doc);
+  p.rows[1].fire('click');                       // a.txt, at index 1 under name-asc
+  const openBtn = p.buttons.find((b) => b.textContent === 'Open');
+  assert.strictEqual(openBtn.disabled, false, 'precondition: a file is selected');
+
+  headFor(p, 'size').fire('click');              // a.txt moves to the last row
+  p = parts(doc);
+  const selected = p.rows.filter((r) => classesOf(r).includes('is-selected'));
+  assert.strictEqual(selected.length, 1, 'exactly one row is selected after the re-sort');
+  assert.strictEqual(rowName(selected[0]), 'a.txt', 'the same entry, at its new position');
+  assert.strictEqual(selected[0].getAttribute('aria-selected'), 'true');
+  assert.strictEqual(openBtn.disabled, false, 'and Open is still live for it');
+});
+
+await checkAsync('a re-sort that drops the selected entry leaves nothing selected', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: SORT_FIXTURE });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  let p = parts(doc);
+  p.rows[1].fire('click');
+  const openBtn = p.buttons.find((b) => b.textContent === 'Open');
+  p.filterInput.value = 'b.txt';
+  p.filterInput.fire('input');
+  p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['b.txt']);
+  assert.strictEqual(p.rows.filter((r) => classesOf(r).includes('is-selected')).length, 0);
+  assert.strictEqual(openBtn.disabled, true, 'Open gates off again with the selection gone');
+});
+
+await checkAsync('the hidden toggle lives in the dialog footer and still filters', async () => {
+  const { sandbox, doc } = makeHarness({
+    listLocal: () => Promise.resolve([
+      { name: '.bashrc', is_dir: false, size: 1, modified: null },
+      { name: 'notes.txt', is_dir: false, size: 1, modified: null },
+    ]),
+  });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  let p = parts(doc);
+  assert.ok(p.footerStart, 'the dialog has a footer start slot');
+  assert.strictEqual(p.footerStart.querySelectorAll('.tl-filedlg__hidden').length, 1,
+    'the Hidden toggle sits in the footer, not above the listing');
+  p.hiddenBox.checked = true;
+  p.hiddenBox.fire('change');
+  p = parts(doc);
+  assert.deepStrictEqual(p.rows.map(rowName), ['.bashrc', 'notes.txt'], 'and still works from there');
+});
+
+await checkAsync('save mode puts the name field and New Folder in the footer too', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: () => Promise.resolve([]) });
+  sandbox.termlabFileDialog._chooseFile({ mode: 'save', filename: 'draft.md' });
+  await settle();
+
+  const p = parts(doc);
+  assert.strictEqual(p.footerStart.querySelectorAll('.tl-filedlg__name').length, 1,
+    'the filename field is in the footer');
+  assert.strictEqual(p.footerStart.querySelectorAll('.tl-filedlg__newfolder').length, 1,
+    'so is New Folder');
+  assert.strictEqual(p.footerStart.querySelectorAll('.tl-filedlg__name')[0].value, 'draft.md',
+    'still prefilled');
+  assert.ok(p.buttons.find((b) => b.textContent === 'Save'), 'and the primary button is untouched');
+});
+
+await checkAsync('open mode has no save controls anywhere in the dialog', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: () => Promise.resolve([]) });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+  const p = parts(doc);
+  assert.strictEqual(p.overlay.querySelectorAll('.tl-filedlg__name').length, 0);
+  assert.strictEqual(p.overlay.querySelectorAll('.tl-filedlg__newfolder').length, 0);
 });
 
 // ---------------------------------------------------------------------------
