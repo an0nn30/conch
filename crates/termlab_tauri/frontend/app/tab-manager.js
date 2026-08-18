@@ -393,11 +393,16 @@
       if (!tab) return;
       let closedSshPane = false;
 
-      // Ask before discarding edits. Skipped when the caller is a close that
-      // already asked (the window-close and quit handshakes), which passes
-      // skipDirtyCheck. Everything below this point destroys CodeMirror views
-      // and deletes panes, so the question has to be settled first.
-      if (!options.skipDirtyCheck) {
+      // Ask before discarding edits. Unconditional, and deliberately so: this
+      // is the only tab-level dirty check, and an opt-out parameter would be a
+      // second door past it. The window-close and quit handshakes do not need
+      // one — they never call closeTab. The frontend answers
+      // `confirm_window_close` / `quit_vote` and Rust destroys the window
+      // itself, so no tab is ever closed twice over one question.
+      //
+      // Everything below this point destroys CodeMirror views and deletes
+      // panes, so the question has to be settled first.
+      {
         const dirtyPanes = allPanesInTab(tabId)
           .map((pid) => panes.get(pid))
           .filter((p) => p && p.kind === 'editor' && p.dirty);

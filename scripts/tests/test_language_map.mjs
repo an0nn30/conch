@@ -31,6 +31,11 @@ const cases = [
   ['Cargo.toml', 'toml'], ['s.lua', 'lua'], ['s.rb', 'ruby'], ['s.pl', 'perl'],
   ['s.ps1', 'powerShell'], ['a.diff', 'diff'], ['a.patch', 'diff'],
   ['app.properties', 'properties'],
+  // Multi-dot basenames: only the characters after the *final* dot decide, so
+  // an inner dot must not be mistaken for the extension boundary.
+  ['archive.tar.gz', null],
+  ['app.min.js', 'javascript'],
+  ['config.local.yml', 'yaml'],
 ];
 
 for (const [name, expected] of cases) {

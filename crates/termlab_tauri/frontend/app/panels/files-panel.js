@@ -343,7 +343,18 @@
           ? filesDataService.getHomeDir(invoke)
           : Promise.reject(new Error('Files data service unavailable: getHomeDir'))
       ),
-      onOpenFile: (pane, entry, path) => { openInEditor(pane, entry, path); },
+      // openInEditor is async and nothing awaits it, so without this a rejection
+      // after its first `await` — or a throw from the toast it uses to report
+      // one — would be an unhandled rejection and the double-click would look
+      // like it did nothing at all.
+      onOpenFile: (pane, entry, path) => {
+        Promise.resolve(openInEditor(pane, entry, path)).catch((error) => {
+          console.error('files-panel: could not open in editor', error);
+          if (window.toast && typeof window.toast.error === 'function') {
+            window.toast.error('Could Not Open File', String(error && error.message ? error.message : error));
+          }
+        });
+      },
     };
   }
 

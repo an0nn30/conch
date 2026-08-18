@@ -192,12 +192,19 @@ check('a clean editor tab closes with no prompt at all', async () => {
   assert.strictEqual(h.destroyed.length, 1, 'its editor view was disposed');
 });
 
-check('skipDirtyCheck suppresses the prompt for a caller that already asked', async () => {
-  const h = makeHarness();
-  h.addEditorTab(1, '/s/a.txt', true);
-  await h.manager.closeTab(1, { skipDirtyCheck: true });
-  assert.strictEqual(h.asked.length, 0, 'no second prompt');
-  assert.strictEqual(h.tabs.size, 0);
+// The dirty check used to take a `skipDirtyCheck` option that no production
+// caller passed. An opt-out is a second door past the only tab-level guard, so
+// there must not be one: no option — including the one that used to work —
+// gets a dirty tab closed without an answer.
+check('no option bypasses the dirty prompt', async () => {
+  for (const options of [{ skipDirtyCheck: true }, { force: true }, {}]) {
+    const h = makeHarness();
+    h.addEditorTab(1, '/s/a.txt', true);
+    h.setAnswer(false);
+    await h.manager.closeTab(1, options);
+    assert.strictEqual(h.asked.length, 1, `${JSON.stringify(options)} must still ask`);
+    assert.strictEqual(h.tabs.size, 1, `${JSON.stringify(options)} must not close on a refusal`);
+  }
 });
 
 check('only the closing tab is asked about', async () => {

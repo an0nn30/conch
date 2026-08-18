@@ -18,7 +18,9 @@ globalThis.window = globalThis;
 // stays local and globalThis.CM6 is never set.
 (0, eval)(fs.readFileSync(path.join(here, 'vendor', 'codemirror', 'codemirror.js'), 'utf8'));
 
-const missing = expected.filter((name) => globalThis.CM6[name] === undefined);
+// Order matters: dereferencing CM6 before checking it exists turns a missing
+// global into a TypeError instead of the message that names the cause.
 if (!globalThis.CM6) throw new Error('CM6 global not defined — check globalName');
+const missing = expected.filter((name) => globalThis.CM6[name] === undefined);
 if (missing.length) throw new Error(`missing from bundle: ${missing.join(', ')}`);
 console.log(`vendor check: ${expected.length} exports present`);

@@ -269,12 +269,23 @@
       } else if (pane.kind === 'plugin_view' && pane.viewId) {
         notifyPluginViewClosed(pane.viewId);
         deletePluginViewPane(pane.viewId);
-      } else if (pane.kind === 'editor' && pane.view) {
+      } else if (pane.kind === 'editor') {
         // The single-leaf case above hands off to closeTab, which destroys the
-        // view; this is the split case, where the pane goes away on its own and
-        // nothing else would ever call destroy().
-        if (global.termlabEditorPane) global.termlabEditorPane.destroyEditorView(pane.view);
+        // view and discards the temp file; this is the split case, where the
+        // pane goes away on its own and nothing else would ever do either.
+        if (pane.view && global.termlabEditorPane) {
+          global.termlabEditorPane.destroyEditorView(pane.view);
+        }
         pane.view = null;
+        // A remote editor's file is a download in a temp directory, so closing
+        // the pane is the end of its life. Same discard closeTab does — leaving
+        // it out here is how a split-close leaked the temp file and its
+        // directories. The service owns the path rules; it refuses anything
+        // that is not one of its own temp files.
+        if (pane.remote && global.termlabEditorService
+            && typeof global.termlabEditorService.discardRemoteTemp === 'function') {
+          global.termlabEditorService.discardRemoteTemp(pane);
+        }
       }
 
       if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();

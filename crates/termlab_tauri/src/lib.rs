@@ -664,7 +664,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             editor_fs::editor_scratch_list,
             editor_fs::editor_temp_path,
             editor_fs::editor_temp_cleanup,
-            editor_fs::editor_temp_sweep,
+            // editor_temp_sweep is deliberately NOT registered: it deletes the
+            // entire remote-edit temp root, which would destroy the backing
+            // file of every open remote editor. Its only callers are Rust —
+            // startup (above) and finish_exit — where no editor is live.
             close_guard::window_close_guard_arm,
             close_guard::confirm_window_close,
             close_guard::quit_vote,

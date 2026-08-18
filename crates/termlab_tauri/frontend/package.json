@@ -4,7 +4,7 @@
   "private": true,
   "description": "Bundles third-party frontend dependencies. The app's own modules are plain IIFE scripts and are NOT built.",
   "scripts": {
-    "build:vendor": "node build-vendor.mjs"
+    "build:vendor": "node build-vendor.mjs && node check-vendor.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.24.0",

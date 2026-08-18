@@ -197,15 +197,28 @@
       const keyboardRouter = global.termlabKeyboardRouter;
       const runShortcutFallbacks = (event) => {
         const combo = normalizeShortcutEventForPluginFallback(event);
-        const coreHit = combo ? coreShortcutFallbacks.find((s) => s.combo === combo) : null;
+        let coreHit = combo ? coreShortcutFallbacks.find((s) => s.combo === combo) : null;
         // Returning true consumes the keystroke. cmd+s is a save only inside an
-        // editor pane; in a terminal it must reach the shell unchanged, so bail
-        // out before the generic core branch claims it. getCurrentPane() is the
-        // composed paneManager.currentPane() (via managerDelegates) — the only
-        // accessor that actually resolves the focused pane.
+        // editor pane; in a terminal it must reach the shell unchanged, so the
+        // core `save-file` binding is dropped while a non-editor pane is
+        // focused. getCurrentPane() is the composed paneManager.currentPane()
+        // (via managerDelegates) — the only accessor that actually resolves the
+        // focused pane.
+        //
+        // Dropped rather than returned: the user may have bound the same combo
+        // to a tool window or a plugin action, and those tables are consulted
+        // further down. Returning here would swallow the keystroke for them too.
+        // It has to be dropped from the function-key table as well, because
+        // refreshKeyboardShortcutFallbacks pushes *every* core binding there,
+        // function key or not — so a bare `coreHit = null` would only move the
+        // save one table down.
+        let saveFileSuppressed = false;
         if (coreHit && coreHit.action === 'save-file') {
           const pane = getCurrentPane();
-          if (!pane || pane.kind !== 'editor') return false;
+          if (!pane || pane.kind !== 'editor') {
+            saveFileSuppressed = true;
+            coreHit = null;
+          }
         }
         if (coreHit) {
           if (coreHit.action === 'navigate-pane-up') navigatePane('up');
@@ -218,7 +231,8 @@
 
         if (isTextInputTarget(event.target)) return false;
         if (!combo) return false;
-        const fKeyHit = functionKeyShortcutFallbacks.find((s) => s.combo === combo);
+        const fKeyHit = functionKeyShortcutFallbacks.find((s) => s.combo === combo
+          && !(saveFileSuppressed && s.kind === 'core' && s.action === 'save-file'));
         if (fKeyHit) {
           if (fKeyHit.kind === 'core') {
             handleMenuAction(fKeyHit.action);
