@@ -39,9 +39,10 @@
       '.cm-scroller': {
         // The terminal's stack, not the UI font — an editor beside a terminal
         // shares its typeface. main-runtime keeps this global current; the
-        // literal fallback matches its declaration for the pre-init window.
+        // literal fallback below is only for the pre-init window and must
+        // stay in step with FONT_FALLBACKS in main-runtime.js:58-59.
         fontFamily: global.__termlabTermFontFamily
-          || '"JetBrains Mono", "Fira Code", "Cascadia Code", "Menlo", monospace',
+          || '"JetBrains Mono", "Fira Code", "Cascadia Code", "Symbols Nerd Font Mono", "Symbols Nerd Font", "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace',
       },
     }, { dark: isDarkTheme() });
 

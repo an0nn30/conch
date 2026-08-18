@@ -70,6 +70,12 @@
             }
             if (pane.kind === 'editor' && pane.view && global.termlabEditorPane) {
               global.termlabEditorPane.setFontSize(pane.view, newTermSize);
+              // setTermFontFamily (above) has already updated
+              // window.__termlabTermFontFamily, so rebuilding the theme here
+              // picks up the new font family. setFontSize only reconfigures
+              // the size compartment — it does not touch the theme
+              // compartment that holds fontFamily.
+              global.termlabEditorPane.refreshTheme(pane.view);
             }
           }
           // The rAF pass below is a re-fit/re-paint for xterm only: CodeMirror
