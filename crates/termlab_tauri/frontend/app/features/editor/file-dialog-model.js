@@ -1,7 +1,7 @@
 // File dialog model: sorting, filtering, breadcrumbs, and path arithmetic
 // for the unified local/remote file-open and save-as dialog. Pure — no DOM,
 // no invokes — so it is testable without a running app. `file-dialog.js`
-// (a later task) is the only thing that renders this.
+// is the only thing that renders this.
 //
 // Entries are the Rust `FileEntry` shape, verbatim:
 //   { name: string, is_dir: bool, size: number, modified: number|null,

@@ -46,7 +46,7 @@ One `tl-dialog`-based chooser, two modes, one new module `app/features/editor/fi
 ### Layout
 
 - **Scope bar:** `This Mac` plus one entry per connected SFTP session (label `user@host[:port]`, same derivation `files-panel.js` uses). Disconnecting mid-browse surfaces the listing error in the dialog body; the dialog does not chase session state.
-- **Path bar:** clickable breadcrumbs plus an editable text field (paste a path, Enter to jump). `~` expands via `sftp_realpath` remotely and via the home dir `get_host_identity` already returns locally.
+- **Path bar:** clickable breadcrumbs plus an editable text field (paste a path, Enter to jump — the typed value is passed to the listing call verbatim; see Known Limitations). Each scope's START directory, not the typed field, is what resolves `~`: it is looked up once at scope entry, locally via `get_home_dir` (wrapped by `features/files/data-service.js`'s `getHomeDir`), remotely via `sftp_realpath(paneId, '.')`.
 - **Listing:** directories first then files, both sorted, type-ahead filter box (reusing the `.tl-picker__filter` pattern), double-click or Enter to descend/choose, hidden files toggle (off by default).
 - **Save As adds:** filename field (pre-filled from the pane), **New Folder** button, primary button reads `Save`.
 - Keyboard: arrows + Enter + Escape per `tl-dialog` conventions; the dialog registers at the standard dialog router priority (225).
@@ -66,32 +66,36 @@ Target resolution, then:
 
 Save As is registered as keymap field `save_file_as` (default `cmd+shift+s`), menu File → Save As…, palette entry; ⌘O as `open_file`, File → Open…, palette. Both follow the `save_file` precedent: active only when relevant (Open always; Save As only with a focused editor), pass through otherwise, listed in Settings → Keyboard's Editor group.
 
+The two menu items are not symmetric: File → Open… carries a native accelerator (⌘O), but File → Save As… deliberately ships with none. A native menu accelerator is consumed by AppKit before the webview sees the key — the same reason `save_file` has never had a menu item — so binding ⌘⇧S natively would steal the combo from every terminal pane instead of respecting Save As's editor-focused scoping, which lives entirely in `shortcut-runtime.js`'s fallback guard. The keystroke is still handled there, Settings → Keyboard still lists it, and the menu item (with no accelerator shown) is the discoverable, always-safe route; `menu-actions.js` re-checks the focused pane before acting either way.
+
 ## 4. Vim Mode
 
-- `@replit/codemirror-vim` (pinned) joins `package.json`; `vendor-entry.mjs` exports `{ vim, Vim, getCM }`; `check-vendor.mjs` covers them automatically. Bundle grows ~150 KB — measure and record.
+- `@replit/codemirror-vim` (pinned) joins `package.json`; `vendor-entry.mjs` exports `{ vim, Vim }` (`getCM` has no consumer in this app and is deliberately not re-exported); `check-vendor.mjs` covers them automatically. Measured bundle delta: +123,571 bytes (+11.71%), from 1,055,575 to 1,179,146 bytes.
 - **Settings → Editor** (new section, `sections-editor.js`, following `sections-window.js`'s shape): checkbox "Vim keybindings", persisted in `UserConfig` as `editor.vim_mode: bool` (new tiny `[editor]` config table, default false).
-- `editor-pane.js` gains a vim compartment, first in the extension list so vim's keymap outranks the default keymap. The Settings toggle reconfigures every open editor live via `eachEditorPane`, same pattern as `refreshTheme`.
+- `editor-pane.js` gains a vim compartment, first in the extension list so vim's keymap outranks the default keymap. The Settings toggle reconfigures every open editor live from `config-runtime.js`'s `config-changed` handler, which loops `getPanes().values()` directly (not `editor-service.js`'s `eachEditorPane`) — the same shape as the two sibling live-apply arms already in that function.
 - `:w` maps to the app's save for that pane (`savePane`), including remote upload; `:wq` saves then closes through `closeTab`'s guarded path; `:q` on a dirty pane routes to the same Save/Don't Save/Cancel prompt rather than vim's own error. ⌘S, ⌘W and every close guard behave identically with vim on.
 - Escape handling: with vim enabled, Escape belongs to mode switching inside a focused editor; the keyboard router only sees it when the editor is not focused. This matches how xterm panes already swallow keys.
 
 ## Testing
 
-Rust: none needed (no Rust changes beyond the `editor.vim_mode` config field default test).
+Rust: `open_file`/`save_file_as` are real keymap fields on `KeyboardConfig` (`termlab_core/src/config/termlab.rs`, defaults `cmd+o` / `cmd+shift+s`), each covered by two tests (`{open_file,save_file_as}_fills_in_for_a_config_written_before_it_existed`, `{open_file,save_file_as}_round_trips_when_overridden`) plus the existing default-value assertion. `settings.rs` adds `changed_vim_mode_no_restart`, asserting `editor.vim_mode` is hot-reloadable. `menu.rs` adds two `MenuItem`s (`MENU_OPEN_FILE_ID`, `MENU_SAVE_FILE_AS_ID`); `lib.rs` adds their two dispatch arms.
 
 Frontend (`node scripts/tests/…`, existing conventions — vm sandbox, field-by-field asserts):
 - `test_editor_tab_label.mjs` — `editorTabLabel`: local basename, remote `name — user@host`, tooltip composition, dirty marker untouched, rebind cases (local→remote, remote→local, remote→other-host).
 - `test_file_dialog_model.mjs` — the dialog's pure model: sort (dirs first), type-ahead filter, breadcrumb split/join for local and remote paths, target-path composition (dir + filename field), hidden-file filtering.
+- `test_file_dialog.mjs` — the dialog UI layer, against the real `tl-dialog.js` and `file-dialog-model.js` with a minimal DOM stub: session→scope derivation (including the `{window_label}:{pane_id}` key parse and the shared host-label formula), listing/filter/hidden-toggle/Open-button gating, Enter/double-click descend vs. open with the double-Enter race closed, inline listing and scope-entry (`sftp_realpath`) failures — including retrying a scope whose entry failed by clicking it again — Escape/backdrop cancel via `tl-dialog`'s own router, routing into `termlabEditorService`, and the save-mode path field / `openForSave` stub (31 checks).
 - `test_editor_save_as.mjs` — rebind logic against stubbed invokes returning real command shapes: success rebinds fully; remote upload failure leaves the OLD binding and dirty=true; overwrite prompt fires on existing stat; `savesInFlight` respected. Failure-injection stubs must return what the real commands return.
-- Vim: mode toggle reconfigures live panes (compartment call observed); `:w` invokes `savePane` for the right pane.
+- `test_editor_vim_glue.mjs` — Vim: mode toggle reconfigures live panes (compartment call observed); `:w` invokes `savePane` for the right pane.
 
 Manual (append to `docs/superpowers/notes/light-editor-manual-checklist.md`): editor font visibly monospace and tracks the terminal font setting; remote tab shows host; ⌘O both scopes; Save As local→remote with a nonexistent remote path creates it; overwrite prompt; upload-failure Save As leaves the old file intact and the tab dirty; vim toggle live-applies, `:w` uploads, `:q` prompts when dirty; with vim off nothing changed.
 
 ## Known Limitations
 
 1. The dialog lists only connected hosts; no in-dialog connect.
-2. No recents/favorites; the dialog opens at the pane's current directory (or `~`).
+2. No recents/favorites; the dialog does not open at the pane's current directory — each scope has a fixed start, resolved once at scope entry: local seeds at the home directory (`get_home_dir`), remote at `sftp_realpath(paneId, '.')`.
 3. Vim is on/off only — no vimrc, no custom mappings.
 4. Save As to remote inherits the editor's existing cross-window temp-path limitation.
+5. The typed path field does no `~` expansion of its own — pasting `~/foo` and pressing Enter is passed to the listing call verbatim and fails to list. Only the scope's start directory (Known Limitation 2) resolves `~`.
 
 ## Risks
 
