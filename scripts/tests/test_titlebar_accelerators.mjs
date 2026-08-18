@@ -155,6 +155,152 @@ check('KeyboardShortcuts exposes new_file, and the command fills it from config'
     'and the checked-in ts-rs export is not stale');
 });
 
+console.log('titlebar accelerators: new-tab, new-window, close-tab, settings read config too');
+
+// The same bug as new-file, four more times: each of these ids has had a
+// configurable KeyboardConfig field all along, but the menu entry carried a
+// literal — so the default stayed hard-bound at priority 115 after a rebind.
+const REBOUND_KEYS = [
+  {
+    id: 'new-tab', field: 'new_tab',
+    rebound: 'cmd+shift+g', reboundEvent: keyEvent({ ctrlKey: true, shiftKey: true, key: 'g', code: 'KeyG' }),
+    defaultEvent: keyEvent({ ctrlKey: true, key: 't', code: 'KeyT' }),
+  },
+  {
+    id: 'new-window', field: 'new_window',
+    rebound: 'cmd+alt+n', reboundEvent: keyEvent({ ctrlKey: true, altKey: true, key: 'n', code: 'KeyN' }),
+    defaultEvent: keyEvent({ ctrlKey: true, shiftKey: true, key: 'n', code: 'KeyN' }),
+  },
+  {
+    id: 'close-tab', field: 'close_tab',
+    rebound: 'cmd+shift+x', reboundEvent: keyEvent({ ctrlKey: true, shiftKey: true, key: 'x', code: 'KeyX' }),
+    defaultEvent: keyEvent({ ctrlKey: true, key: 'w', code: 'KeyW' }),
+  },
+  {
+    id: 'settings', field: 'settings',
+    rebound: 'cmd+alt+,', reboundEvent: keyEvent({ ctrlKey: true, altKey: true, key: ',', code: 'Comma' }),
+    defaultEvent: keyEvent({ ctrlKey: true, key: ',', code: 'Comma' }),
+  },
+];
+
+for (const { id, field, rebound, reboundEvent, defaultEvent } of REBOUND_KEYS) {
+  check(`a rebound ${field} is what gets bound for ${id} — and the default is NOT`, () => {
+    const titlebar = loadTitlebar('Win32');
+    const binding = bindingFor(titlebar, { [field]: rebound }, id);
+    assert.ok(binding, `${id} is still bound`);
+    assert.strictEqual(titlebar._matchesEvent(binding.combo, reboundEvent), true,
+      'the rebound combo is the one the titlebar consumes');
+    assert.strictEqual(titlebar._matchesEvent(binding.combo, defaultEvent), false,
+      'and the old default is left free for the configurable table at priority 75/80');
+  });
+
+  check(`no OTHER entry hard-binds the old default once ${field} is rebound`, () => {
+    const titlebar = loadTitlebar('Win32');
+    const def = titlebar._buildMenuDef({ [field]: rebound }, false, []);
+    const claimants = [];
+    for (const b of titlebar._acceleratorBindings(def)) {
+      if (titlebar._matchesEvent(b.combo, defaultEvent)) claimants.push(b.id);
+    }
+    assert.strictEqual(claimants.length, 0,
+      `nothing in the titlebar menu may claim ${id}'s old default, but these do: ${claimants.join(', ')}`);
+  });
+
+  check(`an absent ${field} still falls back to the platform default for ${id}`, () => {
+    const titlebar = loadTitlebar('Win32');
+    const binding = bindingFor(titlebar, {}, id);
+    assert.ok(binding, `${id} is bound with an empty payload`);
+    assert.strictEqual(titlebar._matchesEvent(binding.combo, defaultEvent), true,
+      'with no payload the menu still binds the default combo');
+  });
+}
+
+console.log('titlebar accelerators: id ↔ KeyboardConfig convention holds for every row');
+
+// Every titlebar row id maps to its KeyboardConfig field by swapping dashes for
+// underscores ('new-tab' ↔ 'new_tab'). This check derives the field list from
+// the KeyboardConfig struct itself, so the NEXT menu item added with a literal
+// while a config field exists fails here without anyone updating a list.
+function keyboardConfigFields() {
+  const source = fs.readFileSync(path.resolve(
+    import.meta.dirname, '../../crates/termlab_core/src/config/termlab.rs'), 'utf8');
+  const block = source.match(/pub struct KeyboardConfig \{([\s\S]*?)\n\}/);
+  assert.ok(block, 'KeyboardConfig struct found in termlab.rs');
+  const fields = [];
+  for (const m of block[1].matchAll(/pub (\w+): String,/g)) fields.push(m[1]);
+  assert.ok(fields.length >= 20, `parsed a plausible field list, got ${fields.length}`);
+  return fields;
+}
+
+function flattenRows(menuDef) {
+  const rows = [];
+  function walk(items) {
+    for (const item of items || []) {
+      if (item.type === 'separator') continue;
+      if (item.submenu) { walk(item.submenu); continue; }
+      rows.push(item);
+    }
+  }
+  for (const menu of menuDef) walk(menu.items);
+  return rows;
+}
+
+check('every titlebar row with a configurable keymap field reads from shortcuts', () => {
+  const titlebar = loadTitlebar('Win32');
+  const fields = keyboardConfigFields();
+  // Sentinel strings, not real combos: rows carry the raw config string, and
+  // acceleratorBindings parses the binding from that same string — so string
+  // equality pins display AND live binding in one assertion.
+  const sentinels = {};
+  for (const field of fields) sentinels[field] = `sentinel+${field}`;
+  const rows = flattenRows(titlebar._buildMenuDef(sentinels, true, []));
+  const offenders = [];
+  const matched = [];
+  for (const row of rows) {
+    if (typeof row.id !== 'string') continue;
+    const field = row.id.replace(/-/g, '_');
+    if (!fields.includes(field)) continue;
+    matched.push(row.id);
+    if (row.shortcut !== sentinels[field]) offenders.push(`${row.id} shows "${row.shortcut}"`);
+  }
+  assert.strictEqual(offenders.length, 0,
+    `these rows ignore their config field: ${offenders.join('; ')}`);
+  // Guard the convention itself: if row ids drift away from field names the
+  // loop above matches nothing and passes vacuously.
+  for (const id of ['new-tab', 'new-window', 'close-tab', 'settings', 'new-file', 'open-file']) {
+    assert.ok(matched.includes(id), `row ${id} is covered by the convention check`);
+  }
+});
+
+check('every such field travels in the KeyboardShortcuts payload', () => {
+  // The frontend can only read what Rust sends: a field the titlebar consumes
+  // but commands.rs never fills leaves `shortcuts.<field>` undefined and the
+  // `||` fallback silently reinstates the hardcoded default.
+  const titlebar = loadTitlebar('Win32');
+  const fields = keyboardConfigFields();
+  const rowIds = new Set(flattenRows(titlebar._buildMenuDef({}, true, []))
+    .map((r) => r.id).filter((id) => typeof id === 'string'));
+  const commands = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/commands.rs'), 'utf8');
+  const generated = fs.readFileSync(path.join(ROOT, 'types/KeyboardShortcuts.ts'), 'utf8');
+  const missing = [];
+  for (const field of fields) {
+    if (!rowIds.has(field.replace(/_/g, '-'))) continue;
+    // zen_mode reaches the titlebar via get_app_config's zen_mode_shortcut,
+    // merged into shortcutsState in init() — not via KeyboardShortcuts.
+    if (field === 'zen_mode') continue;
+    if (!new RegExp(`struct KeyboardShortcuts \\{[\\s\\S]*?\\n    ${field}: String,`).test(commands)) {
+      missing.push(`${field} not declared in KeyboardShortcuts`);
+    }
+    if (!commands.includes(`${field}: kb.${field}.clone(),`)) {
+      missing.push(`${field} not filled from the keyboard config`);
+    }
+    if (!generated.includes(`${field}: string`)) {
+      missing.push(`${field} missing from the checked-in ts-rs export`);
+    }
+  }
+  assert.strictEqual(missing.length, 0, missing.join('; '));
+});
+
 if (failures) {
   console.error(`titlebar accelerators: ${failures} of ${ran} check(s) FAILED`);
   process.exit(1);
