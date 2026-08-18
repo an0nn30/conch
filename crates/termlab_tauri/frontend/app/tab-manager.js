@@ -610,11 +610,6 @@
       const panes = getPanes();
       const tabId = allocateTabId();
       const paneId = allocatePaneId();
-      const fileName = String(opts.filePath || 'untitled').split('/').pop();
-
-      const button = makeTabButton(fileName, () => closeTab(tabId));
-      button.dataset.tabId = String(tabId);
-      button.classList.add('entering');
 
       const containerEl = document.createElement('div');
       containerEl.className = 'tab-tree-root';
@@ -627,9 +622,6 @@
       const hostEl = document.createElement('div');
       hostEl.className = 'editor-pane-host';
       paneEl.appendChild(hostEl);
-
-      tabBarEl.appendChild(button);
-      terminalHostEl.appendChild(containerEl);
 
       const pane = {
         paneId,
@@ -651,11 +643,26 @@
         dirty: false,
         remote: opts.remote || null,
       };
+
+      // The pane literal is fully built above (filePath, remote) before the
+      // button exists, so the label — and, for a remote file, the host it
+      // came from — can be computed once and used for both the tab button
+      // and its tooltip, rather than re-deriving the basename separately.
+      const { label, tooltip } = global.termlabEditorTabLabel.editorTabLabel(pane);
+
+      const button = makeTabButton(label, () => closeTab(tabId));
+      button.title = tooltip;
+      button.dataset.tabId = String(tabId);
+      button.classList.add('entering');
+
+      tabBarEl.appendChild(button);
+      terminalHostEl.appendChild(containerEl);
+
       panes.set(paneId, pane);
 
       const tab = {
         id: tabId,
-        label: fileName,
+        label,
         type: 'editor',
         hasCustomTitle: true,
         button,
