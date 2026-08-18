@@ -17,4 +17,10 @@ export type KeyboardShortcuts = { new_plain_shell_tab: string, toggle_right_pane
  * configurable binding at 75/80, so a user who rebinds the action keeps a
  * hard-bound default they cannot free.
  */
-new_file: string, open_file: string, save_file_as: string, };
+new_file: string, open_file: string, save_file_as: string, 
+/**
+ * Same display-AND-accelerator contract as `new_file` above: these four
+ * are configurable in `[termlab.keyboard]` and live titlebar bindings,
+ * so the frontend must read them from this payload.
+ */
+new_tab: string, new_window: string, close_tab: string, settings: string, };
