@@ -58,6 +58,7 @@
           { id: 'new-tab', label: 'New Tab', shortcut: `${ctrl}+T` },
           { id: 'new-plain-shell-tab', label: 'New Plain Shell Tab', shortcut: shortcuts.new_plain_shell_tab || `${ctrl}+Shift+T` },
           { id: 'new-window', label: 'New Window', shortcut: `${ctrl}+Shift+N` },
+          { id: 'new-file', label: 'New File', shortcut: `${ctrl}+N` },
           { id: 'open-file', label: 'Open File…', shortcut: shortcuts.open_file || `${ctrl}+O` },
           // noAccel: the shortcut is DISPLAYED but not registered here —
           // Save As is scoped to a focused editor pane, and that scoping

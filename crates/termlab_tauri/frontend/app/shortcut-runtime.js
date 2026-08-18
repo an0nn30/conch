@@ -46,7 +46,7 @@
       navigate_pane_left: 'navigate-pane-left',
       navigate_pane_right: 'navigate-pane-right',
       settings: 'settings',
-      new_scratch: 'new-scratch',
+      new_file: 'new-file',
       save_file: 'save-file',
       // Scoped exactly like save_file (see the guard in runShortcutFallbacks):
       // in a terminal, cmd+shift+s must reach the shell.

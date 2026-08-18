@@ -24,7 +24,7 @@
     navigate_pane_down: 'Navigate Pane Down',
     navigate_pane_left: 'Navigate Pane Left',
     navigate_pane_right: 'Navigate Pane Right',
-    new_scratch: 'New Scratch',
+    new_file: 'New File',
     save_file: 'Save File',
     save_file_as: 'Save File As',
     open_file: 'Open File',
@@ -37,7 +37,7 @@
     },
     {
       label: 'Editor',
-      keys: ['new_scratch', 'open_file', 'save_file', 'save_file_as'],
+      keys: ['new_file', 'open_file', 'save_file', 'save_file_as'],
     },
     {
       label: 'Tools',

@@ -71,7 +71,10 @@
         createTab().catch((error) => showStatus('Failed to create tab: ' + String(error)));
         return;
       }
-      if (action === 'new-scratch') {
+      if (action === 'new-file') {
+        // Action string renamed new-scratch -> new-file; the target function
+        // is still openScratch here on purpose — Task 2 renames it alongside
+        // the untitled-buffer rework so each task lands independently green.
         const service = global.termlabEditorService;
         if (service) service.openScratch();
         return;

@@ -39,6 +39,7 @@ pub(crate) const MENU_SPLIT_HORIZONTAL_ID: &str = "view.split_horizontal";
 pub(crate) const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
+pub(crate) const MENU_NEW_FILE_ID: &str = "file.new_file";
 pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
 pub(crate) const MENU_SAVE_FILE_AS_ID: &str = "file.save_file_as";
 /// Quit is a custom item, not `PredefinedMenuItem::quit`. The predefined one
@@ -75,6 +76,7 @@ pub(crate) const MENU_ACTION_SPLIT_VERTICAL: &str = "split-vertical";
 pub(crate) const MENU_ACTION_SPLIT_HORIZONTAL: &str = "split-horizontal";
 pub(crate) const MENU_ACTION_CLOSE_PANE: &str = "close-pane";
 pub(crate) const MENU_ACTION_RENAME_TAB: &str = "rename-tab";
+pub(crate) const MENU_ACTION_NEW_FILE: &str = "new-file";
 pub(crate) const MENU_ACTION_OPEN_FILE: &str = "open-file";
 pub(crate) const MENU_ACTION_SAVE_FILE_AS: &str = "save-file-as";
 pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
@@ -173,6 +175,14 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         Some(&primary_accelerator("Shift+N")),
     )?;
+    let new_file_accel = config_key_to_accelerator(&keyboard.new_file);
+    let new_file = MenuItem::with_id(
+        app,
+        MENU_NEW_FILE_ID,
+        "New File",
+        true,
+        Some(&new_file_accel),
+    )?;
     let open_file_accel = config_key_to_accelerator(&keyboard.open_file);
     let open_file = MenuItem::with_id(
         app,
@@ -181,7 +191,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         Some(&open_file_accel),
     )?;
-    // Deliberately NO accelerator, unlike Open File… above. A native menu
+    // Deliberately NO accelerator, unlike New File/Open File… above. A native menu
     // accelerator is consumed by AppKit before the webview sees the key, which
     // is exactly why `save_file` has never had a menu item: Save As is scoped
     // to a focused editor pane, and that scoping lives in
@@ -233,6 +243,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             &new_tab,
             &new_plain_shell_tab,
             &new_window,
+            &new_file,
             &open_file,
             &save_file_as,
             &separator,
@@ -694,6 +705,14 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             true,
             Some(&rename_tab_accel),
         )?;
+        let new_file_accel = config_key_to_accelerator(&keyboard.new_file);
+        let new_file = MenuItem::with_id(
+            app,
+            MENU_NEW_FILE_ID,
+            "New File",
+            true,
+            Some(&new_file_accel),
+        )?;
         let open_file_accel = config_key_to_accelerator(&keyboard.open_file);
         let open_file = MenuItem::with_id(
             app,
@@ -739,6 +758,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 &new_tab,
                 &new_plain_shell_tab,
                 &new_window,
+                &new_file,
                 &open_file,
                 &save_file_as,
                 &separator,

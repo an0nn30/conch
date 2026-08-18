@@ -523,6 +523,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             menu::MENU_RENAME_TAB_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_RENAME_TAB)
             }
+            menu::MENU_NEW_FILE_ID => {
+                menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_NEW_FILE)
+            }
             menu::MENU_OPEN_FILE_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_OPEN_FILE)
             }
@@ -844,8 +847,6 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             editor_fs::editor_can_open,
             editor_fs::editor_read_file,
             editor_fs::editor_write_file,
-            editor_fs::editor_scratch_dir,
-            editor_fs::editor_scratch_list,
             editor_fs::editor_temp_path,
             editor_fs::editor_temp_cleanup,
             // editor_temp_sweep is deliberately absent, and is no longer a

@@ -114,7 +114,7 @@
 
       add('core:new-tab', 'New Tab', 'Terminal', 'tab terminal create', () => handleMenuAction('new-tab'));
       add('core:new-plain-shell-tab', 'New Plain Shell Tab', 'Terminal', 'tab terminal shell plain default login local pty', () => handleMenuAction('new-plain-shell-tab'));
-      add('core:new-scratch', 'New Scratch File', 'Editor', 'scratch file editor new note', () => handleMenuAction('new-scratch'));
+      add('core:new-file', 'New File', 'Editor', 'new file editor untitled note', () => handleMenuAction('new-file'));
       add('core:open-file', 'Open File…', 'Editor', 'open file editor browse local remote sftp host chooser', () => handleMenuAction('open-file'));
       // Editor-only, like the keybinding: handleMenuAction('save-file-as')
       // returns without acting when the focused pane is not an editor.

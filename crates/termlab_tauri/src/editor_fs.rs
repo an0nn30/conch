@@ -171,22 +171,6 @@ pub(crate) fn editor_write_file(path: String, contents: String) -> Result<(), St
     write_text_file(&path, &contents)
 }
 
-/// Where scratch files live. One definition, because two would be a silent
-/// overwrite: `editor_scratch_list` feeds `nextScratchName`, so if the listing
-/// read a different directory than the one a scratch is written into, the name
-/// it picked as "free" would already exist and `editor_write_file` would
-/// truncate it.
-fn scratch_dir() -> PathBuf {
-    termlab_core::config::config_dir().join("scratches")
-}
-
-#[tauri::command]
-pub(crate) fn editor_scratch_dir() -> Result<String, String> {
-    let dir = scratch_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("Could not create scratch directory: {e}"))?;
-    Ok(dir.to_string_lossy().into_owned())
-}
-
 #[tauri::command]
 pub(crate) fn editor_temp_path(host_label: String, remote_path: String) -> Result<String, String> {
     let (host_dir, path_dir, basename) = temp_path_parts(&host_label, &remote_path);
@@ -251,23 +235,6 @@ pub(crate) fn editor_temp_sweep() -> Result<(), String> {
     Ok(())
 }
 
-/// The file names already in the scratch directory, so the frontend can pick
-/// a free scratch name without a round trip per candidate.
-#[tauri::command]
-pub(crate) fn editor_scratch_list() -> Result<Vec<String>, String> {
-    let dir = scratch_dir();
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let entries =
-        fs::read_dir(&dir).map_err(|e| format!("Could not read scratch directory: {e}"))?;
-    Ok(entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,34 +265,6 @@ mod tests {
         assert!(!file.exists(), "and nothing was left behind");
 
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// `nextScratchName` asks `editor_scratch_list` which names are taken and
-    /// then writes into `editor_scratch_dir`. If those two ever resolved to
-    /// different directories the listing would report a name as free that
-    /// already exists where the write lands, and `editor_write_file` would
-    /// truncate someone's scratch — the only silent-overwrite path in the
-    /// feature. So this checks them end to end rather than comparing the shared
-    /// helper to itself.
-    #[test]
-    fn the_scratch_directory_a_scratch_is_written_into_is_the_one_that_gets_listed() {
-        let dir = PathBuf::from(editor_scratch_dir().expect("scratch dir"));
-        let marker = format!("termlab-scratch-dir-test-{}.txt", std::process::id());
-        let path = dir.join(&marker);
-        let _ = fs::remove_file(&path);
-
-        editor_write_file(path.to_string_lossy().into_owned(), "marker".into())
-            .expect("write into the scratch directory");
-        let listed = editor_scratch_list().expect("list scratches");
-        let _ = fs::remove_file(&path);
-
-        assert!(
-            listed.contains(&marker),
-            "a file written into editor_scratch_dir() must appear in \
-             editor_scratch_list(); the two resolved to different directories. \
-             wrote {}, listing returned {listed:?}",
-            path.display(),
-        );
     }
 
     #[test]

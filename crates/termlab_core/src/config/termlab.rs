@@ -117,7 +117,8 @@ pub struct KeyboardConfig {
     pub navigate_pane_right: String,
     pub rename_tab: String,
     pub settings: String,
-    pub new_scratch: String,
+    #[serde(alias = "new_scratch")]
+    pub new_file: String,
     pub save_file: String,
     pub save_file_as: String,
     pub open_file: String,
@@ -148,7 +149,7 @@ impl Default for KeyboardConfig {
             navigate_pane_right: "cmd+alt+right".into(),
             rename_tab: "F2".into(),
             settings: "cmd+,".into(),
-            new_scratch: "cmd+n".into(),
+            new_file: "cmd+n".into(),
             save_file: "cmd+s".into(),
             save_file_as: "cmd+shift+s".into(),
             open_file: "cmd+o".into(),
@@ -223,7 +224,7 @@ mod tests {
     #[test]
     fn editor_shortcuts_have_the_documented_defaults() {
         let k = KeyboardConfig::default();
-        assert_eq!(k.new_scratch, "cmd+n");
+        assert_eq!(k.new_file, "cmd+n");
         assert_eq!(k.save_file, "cmd+s");
         // Scoped exactly like save_file: only a focused editor pane consumes
         // it, so cmd+shift+s still reaches the shell in a terminal.
@@ -348,6 +349,19 @@ mod tests {
     fn open_file_round_trips_when_overridden() {
         let k: KeyboardConfig = toml::from_str(r#"open_file = "cmd+shift+o""#).unwrap();
         assert_eq!(k.open_file, "cmd+shift+o");
+    }
+
+    /// The keymap field was renamed `new_scratch` -> `new_file`;
+    /// `#[serde(alias = "new_scratch")]` keeps existing rebindings working
+    /// after an upgrade. The bound key here (cmd+shift+u) is deliberately
+    /// NOT the default (cmd+n) — if the alias were broken and this fell
+    /// through to `Default::default()`, the assertion would still pass by
+    /// accident on a default-collapse bug. A non-default binding makes that
+    /// failure mode impossible to miss.
+    #[test]
+    fn new_scratch_alias_still_binds_new_file() {
+        let k: KeyboardConfig = toml::from_str(r#"new_scratch = "cmd+shift+u""#).unwrap();
+        assert_eq!(k.new_file, "cmd+shift+u");
     }
 
     #[test]
