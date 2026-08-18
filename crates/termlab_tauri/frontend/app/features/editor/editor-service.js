@@ -21,6 +21,12 @@
     console.error(`${title}: ${body}`);
   }
 
+  function toastSuccess(title, body) {
+    if (global.toast && typeof global.toast.success === 'function') {
+      global.toast.success(title, body);
+    }
+  }
+
   // beforeBuildCommand only fires under `cargo tauri build`/`dev`, so a plain
   // `cargo run` yields an index.html pointing at a bundle that was never
   // generated. Say so instead of failing as an editor that does nothing.
@@ -90,6 +96,168 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Remote files
+  // ---------------------------------------------------------------------------
+
+  // No event at all for this long, for a transfer we started, and we give up.
+  // A download reports at least every 100ms while bytes move, but a connection
+  // that dies mid-SFTP-handshake reports nothing ever — russh just waits — and
+  // "nothing ever" is exactly the case that must not hang.
+  const TRANSFER_STALL_MS = 60000;
+
+  // Run one transfer to a terminal status. `start` is called to kick it off and
+  // must resolve with the transfer_id.
+  //
+  // transfer_download/transfer_upload are fire-and-forget: they mint an id,
+  // spawn a task and return, and all news arrives on the shared
+  // 'transfer-progress' event. Two ordering hazards follow, and both are
+  // handled here rather than by the callers:
+  //
+  //  - The listener is registered BEFORE `start` runs. The id is minted in
+  //    Rust before the task is spawned and the event travels on a different
+  //    channel from the command's reply, so a small file really can finish
+  //    before the invoke resolves. Terminal events for ids we do not know yet
+  //    are held in `early` and re-examined once the id arrives.
+  //  - Every exit settles the promise. Failure, cancellation and silence all
+  //    reject with something a user can read.
+  function runTransfer(start) {
+    const client = global.termlabServices && global.termlabServices.tauriClient;
+    if (!client || typeof client.invoke !== 'function' || typeof client.listen !== 'function') {
+      return Promise.reject(new Error('tauri client unavailable'));
+    }
+
+    return new Promise((resolve, reject) => {
+      let unlisten = null;
+      let settled = false;
+      let transferId = null;
+      let stallTimer = null;
+      const early = new Map();
+
+      const finish = (fn, arg) => {
+        if (settled) return;
+        settled = true;
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = null;
+        if (typeof unlisten === 'function') unlisten();
+        fn(arg);
+      };
+
+      const armStall = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+          // Stop the backend task too, so it cannot keep writing to a temp
+          // file this caller has already given up on.
+          if (transferId) client.invoke('transfer_cancel', { transferId }).catch(() => {});
+          finish(reject, new Error('Transfer stalled: no progress reported'));
+        }, TRANSFER_STALL_MS);
+      };
+
+      // The only place statuses are interpreted. They are the serde
+      // `snake_case` renderings of `termlab_remote::transfer::TransferStatus`
+      // (crates/termlab_remote/src/transfer.rs):
+      //
+      //     Pending | InProgress | Completed | Failed | Cancelled
+      //       -> 'pending' 'in_progress' 'completed' 'failed' 'cancelled'
+      //
+      // The three terminal ones are the same three files-panel's progress bars
+      // discriminate on (features/files/transfers.js). Getting them wrong is
+      // invisible in review and catastrophic at runtime: this promise would
+      // simply never settle and opening a remote file would hang with no error.
+      //
+      // Returns true when `progress` was terminal and the promise is settled.
+      const settleFrom = (progress) => {
+        if (progress.status === 'completed') {
+          finish(resolve);
+          return true;
+        }
+        if (progress.status === 'failed' || progress.status === 'cancelled') {
+          finish(reject, new Error(progress.error || `Transfer ${progress.status}`));
+          return true;
+        }
+        return false;
+      };
+
+      const onProgress = (event) => {
+        const progress = event && event.payload;
+        if (!progress || !progress.transfer_id) return;
+        if (transferId === null) {
+          // The id is not known yet, so there is no way to tell whose event
+          // this is. Hold the latest per id and judge it below.
+          early.set(progress.transfer_id, progress);
+          return;
+        }
+        if (progress.transfer_id !== transferId) return;
+        if (!settleFrom(progress)) armStall();
+      };
+
+      armStall();
+
+      client.listen('transfer-progress', onProgress).then((fn) => {
+        unlisten = fn;
+        if (settled) {
+          if (typeof fn === 'function') fn();
+          return null;
+        }
+        return Promise.resolve(start()).then((id) => {
+          transferId = String(id);
+          const seen = early.get(transferId);
+          early.clear();
+          if (seen) settleFrom(seen);
+        });
+      }).catch((error) => finish(reject, error instanceof Error ? error : new Error(String(error))));
+    });
+  }
+
+  // Open a file that lives on an SSH host: download it to a temp path, edit it
+  // there, and upload it back on save.
+  async function openRemoteFile(descriptor) {
+    if (bundleMissing()) return;
+    const { paneId, remotePath, hostLabel, size } = descriptor || {};
+    const name = String(remotePath || '').split('/').pop();
+    let localPath = null;
+    try {
+      // Before a byte moves. A mis-click on a 2 GB file or a .jar has to cost
+      // nothing, which is the whole reason editor_can_open takes a name and a
+      // size instead of a path — the cap and the blocklist stay in Rust.
+      await invoke('editor_can_open', { name, size: Number(size) || 0 });
+
+      // Deterministic per (host, remote path), so this is also how "the same
+      // remote file twice" resolves to one tab, and how the same filename on
+      // two different hosts resolves to two.
+      localPath = await invoke('editor_temp_path', { hostLabel, remotePath });
+      if (focusExistingEditor(localPath)) return;
+
+      await runTransfer(() => invoke('transfer_download', { paneId, remotePath, localPath }));
+
+      // The guards run a second time here, against the bytes rather than the
+      // directory listing: a stale size and binary contents are both only
+      // knowable now.
+      const contents = await invoke('editor_read_file', { path: localPath });
+      createEditorTab({
+        filePath: localPath,
+        contents,
+        remote: { paneId, remotePath, hostLabel },
+      });
+    } catch (error) {
+      // Nothing reached an editor, so whatever landed on disk is litter rather
+      // than content — unlike an upload failure, where the temp file is the
+      // only copy of the user's edit and must stay. Safe to delete: localPath
+      // came from editor_temp_path, and editor_temp_cleanup refuses anything
+      // outside the temp root regardless of what it is handed.
+      if (localPath) invoke('editor_temp_cleanup', { path: localPath }).catch(() => {});
+      toastError('Cannot Open File', String(error));
+    }
+  }
+
+  // Drop the temp file behind a closed remote editor tab, plus any parent
+  // directories it leaves empty. Called by tab-manager's close path, which has
+  // already settled the unsaved-changes question.
+  function discardRemoteTemp(pane) {
+    if (!pane || !pane.remote || !pane.filePath) return;
+    invoke('editor_temp_cleanup', { path: pane.filePath }).catch(() => {});
+  }
+
   async function openScratch() {
     if (bundleMissing()) return;
     try {
@@ -112,6 +280,13 @@
   async function writeOnce(pane) {
     const contents = pane.view.state.doc.toString();
     await invoke('editor_write_file', { path: pane.filePath, contents });
+    // For a remote file the local write is a staging step, not the save: what
+    // "saved" means is that the bytes reached the host. Uploading BEFORE the
+    // dirty reset is what makes a failed upload leave the pane dirty, so the
+    // close guards still refuse to discard the tab and the temp file is not
+    // deleted out from under an edit that never got off this machine. A local
+    // pane has no remote and so is unaffected.
+    if (pane.remote) await uploadRemote(pane);
     // `dirty` is a plain boolean, not a diff against the document, and the
     // update listener stops firing once it is set. So a keystroke that lands
     // between the snapshot above and this line is on screen but not in the
@@ -121,7 +296,6 @@
     if (pane.view && pane.view.state.doc.toString() === contents) {
       pane.view.termlabResetDirty();
     }
-    if (pane.remote) await uploadRemote(pane);
   }
 
   // The write currently in flight for a pane, if any. Two overlapping writes
@@ -217,18 +391,42 @@
     return confirmDirtyPanes(dirty);
   }
 
-  // Replaced with the real implementation in Task 8; a local-only save has
-  // nothing to upload.
-  async function uploadRemote(_pane) {}
+  // Push a saved remote file back to its host. Called by writeOnce for panes
+  // that have a `remote`, and rejects on failure so the save it belongs to
+  // fails too.
+  async function uploadRemote(pane) {
+    const remote = pane && pane.remote;
+    if (!remote) return;
+    const { paneId, remotePath, hostLabel } = remote;
+    try {
+      await runTransfer(() => invoke('transfer_upload', {
+        paneId,
+        localPath: pane.filePath,
+        remotePath,
+      }));
+      toastSuccess('Uploaded', `${hostLabel}:${remotePath}`);
+    } catch (error) {
+      // The temp file stays exactly where it is, and the pane stays dirty.
+      // Losing an edit to a dropped connection is the wrong side to be wrong
+      // on: the bytes are on disk and another save retries the upload.
+      toastError(
+        'Upload Failed',
+        `${String(error)} — your edit is saved locally at ${pane.filePath}; save again to retry.`,
+      );
+      throw error;
+    }
+  }
 
   global.termlabEditorService = {
     openLocalFile,
+    openRemoteFile,
     openScratch,
     saveActiveEditor,
     savePane,
     confirmDirtyPanes,
     confirmAllDirty,
     eachEditorPane,
+    discardRemoteTemp,
     uploadRemote,
   };
 })(window);

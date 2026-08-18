@@ -437,6 +437,15 @@
             global.termlabEditorPane.destroyEditorView(pane.view);
           }
           pane.view = null;
+          // A remote editor's file is a download in a temp directory, so
+          // closing the tab is the end of its life. The dirty prompt above has
+          // already run, so reaching here means the edit was either uploaded
+          // or deliberately discarded. The service owns the path rules; it
+          // refuses anything that is not one of its own temp files.
+          if (pane.remote && global.termlabEditorService
+              && typeof global.termlabEditorService.discardRemoteTemp === 'function') {
+            global.termlabEditorService.discardRemoteTemp(pane);
+          }
         }
         if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
         if (pane.resizeObserver) pane.resizeObserver.disconnect();

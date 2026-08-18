@@ -343,7 +343,78 @@
           ? filesDataService.getHomeDir(invoke)
           : Promise.reject(new Error('Files data service unavailable: getHomeDir'))
       ),
+      onOpenFile: (pane, entry, path) => { openInEditor(pane, entry, path); },
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Open in editor (double-click / Enter on a file row)
+  // ---------------------------------------------------------------------------
+
+  // The window label never changes for the life of the window, so one lookup
+  // is enough. A failure here is not fatal — it only costs the host's name.
+  let windowLabelPromise = null;
+  function currentWindowLabel() {
+    if (!windowLabelPromise) {
+      windowLabelPromise = (
+        filesDataService && typeof filesDataService.getCurrentWindowLabel === 'function'
+          ? filesDataService.getCurrentWindowLabel(invoke)
+          : Promise.resolve(null)
+      ).catch(() => null);
+    }
+    return windowLabelPromise;
+  }
+
+  // A stable, human-readable name for the host a remote pane is connected to.
+  // The editor hashes it into the temp path, so it is what keeps the same
+  // filename on two different hosts in two different tabs. Pane objects carry
+  // no host identity of their own; remote_get_sessions keys its entries by
+  // "{window_label}:{pane_id}", which is why both halves are needed.
+  //
+  // The fallback is per-pane rather than constant: two hosts must never
+  // collapse onto one label even when this lookup fails.
+  async function remoteHostLabel(paneId) {
+    const fallback = `pane-${paneId}`;
+    if (!filesDataService || typeof filesDataService.getSessions !== 'function') return fallback;
+    try {
+      const [label, sessions] = await Promise.all([
+        currentWindowLabel(),
+        filesDataService.getSessions(invoke),
+      ]);
+      if (!label) return fallback;
+      const key = `${label}:${paneId}`;
+      const session = (sessions || []).find((s) => s && s.key === key);
+      if (!session || !session.host) return fallback;
+      const port = Number(session.port);
+      const host = port && port !== 22 ? `${session.host}:${port}` : String(session.host);
+      return session.user ? `${session.user}@${host}` : host;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  async function openInEditor(pane, entry, path) {
+    const editor = window.termlabEditorService;
+    if (!editor) {
+      window.toast.error('Editor Unavailable', 'The editor service is not loaded.');
+      return;
+    }
+    if (pane.isLocal) {
+      editor.openLocalFile(path);
+      return;
+    }
+    if (!activeRemotePaneId) return;
+    // Read the pane id once: the user can switch tabs while the host label is
+    // being resolved, and the download has to go to the session this row was
+    // actually listed from.
+    const paneId = activeRemotePaneId;
+    const hostLabel = await remoteHostLabel(paneId);
+    editor.openRemoteFile({
+      paneId,
+      remotePath: path,
+      hostLabel,
+      size: entry.size,
+    });
   }
 
   function navigate(pane, path) {
