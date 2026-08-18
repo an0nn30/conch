@@ -364,6 +364,32 @@ mod tests {
         assert_eq!(k.new_file, "cmd+shift+u");
     }
 
+    /// The trap the alias sets, and the reason config.example.toml carries a
+    /// warning beside `new_file`: an alias is a second SPELLING of one field,
+    /// not a second field, so a config that keeps the old line while adding the
+    /// new one does not merely pick a winner — it fails to parse outright. Every
+    /// `load_user_config` caller in termlab_tauri then takes
+    /// `unwrap_or_default()`, so a stray `new_scratch` line silently reverts the
+    /// user's ENTIRE config, not just this binding.
+    ///
+    /// Pinned so the documented message stays true: if serde ever started
+    /// tolerating the duplicate, the warning would be misleading rather than
+    /// merely unnecessary.
+    #[test]
+    fn new_scratch_and_new_file_together_fail_to_parse() {
+        let result: Result<KeyboardConfig, _> = toml::from_str(
+            r#"
+            new_scratch = "cmd+shift+u"
+            new_file = "cmd+n"
+        "#,
+        );
+        let error = result.expect_err("both spellings of one field must be rejected");
+        assert!(
+            error.to_string().contains("duplicate field `new_file`"),
+            "the message config.example.toml quotes must be the one users see, got: {error}"
+        );
+    }
+
     #[test]
     fn keyboard_config_includes_manage_tunnels_default() {
         let cfg = KeyboardConfig::default();

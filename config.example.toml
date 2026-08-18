@@ -153,6 +153,11 @@ navigate_pane_up = "cmd+alt+up"
 navigate_pane_down = "cmd+alt+down"
 navigate_pane_left = "cmd+alt+left"
 navigate_pane_right = "cmd+alt+right"
+# Upgrading: this key used to be called `new_scratch`. The old name still works
+# as an alias, but a config carrying BOTH lines fails to parse ("duplicate
+# field `new_file`") and the whole file is silently discarded — every setting,
+# not just this one, reverts to its default. If you have an old `new_scratch`
+# line, delete it.
 new_file = "cmd+n"
 save_file = "cmd+s"
 # Save As — the chooser again, in save mode (filename field, New Folder,
