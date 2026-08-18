@@ -5,8 +5,16 @@
  */
 export type KeyboardShortcuts = { new_plain_shell_tab: string, toggle_right_panel: string, toggle_left_panel: string, toggle_bottom_panel: string, split_vertical: string, split_horizontal: string, close_pane: string, rename_tab: string, manage_tunnels: string, vault_open: string, 
 /**
- * Editor bindings. Display only, for the custom titlebar's menu: both
- * are dispatched by shortcut-runtime.js's guarded fallback table, not by
- * an accelerator registered from this payload.
+ * Editor bindings, for the custom titlebar's File menu.
+ *
+ * `save_file_as` is display only — it carries `noAccel`, because it is
+ * scoped to a focused editor pane and that scoping lives in
+ * shortcut-runtime.js's guarded fallback table.
+ *
+ * `new_file` and `open_file` are display AND accelerator: the titlebar
+ * registers them at router priority 115. They must therefore be READ from
+ * here rather than hardcoded — a hardcoded default outranks the
+ * configurable binding at 75/80, so a user who rebinds the action keeps a
+ * hard-bound default they cannot free.
  */
-open_file: string, save_file_as: string, };
+new_file: string, open_file: string, save_file_as: string, };

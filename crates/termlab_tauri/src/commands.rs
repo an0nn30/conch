@@ -164,9 +164,18 @@ pub(crate) struct KeyboardShortcuts {
     rename_tab: String,
     manage_tunnels: String,
     vault_open: String,
-    /// Editor bindings. Display only, for the custom titlebar's menu: both
-    /// are dispatched by shortcut-runtime.js's guarded fallback table, not by
-    /// an accelerator registered from this payload.
+    /// Editor bindings, for the custom titlebar's File menu.
+    ///
+    /// `save_file_as` is display only — it carries `noAccel`, because it is
+    /// scoped to a focused editor pane and that scoping lives in
+    /// shortcut-runtime.js's guarded fallback table.
+    ///
+    /// `new_file` and `open_file` are display AND accelerator: the titlebar
+    /// registers them at router priority 115. They must therefore be READ from
+    /// here rather than hardcoded — a hardcoded default outranks the
+    /// configurable binding at 75/80, so a user who rebinds the action keeps a
+    /// hard-bound default they cannot free.
+    new_file: String,
     open_file: String,
     save_file_as: String,
 }
@@ -186,6 +195,7 @@ pub(crate) fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> Key
         rename_tab: kb.rename_tab.clone(),
         manage_tunnels: kb.manage_tunnels.clone(),
         vault_open: kb.vault_open.clone(),
+        new_file: kb.new_file.clone(),
         open_file: kb.open_file.clone(),
         save_file_as: kb.save_file_as.clone(),
     }

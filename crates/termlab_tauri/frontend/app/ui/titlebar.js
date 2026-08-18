@@ -58,7 +58,14 @@
           { id: 'new-tab', label: 'New Tab', shortcut: `${ctrl}+T` },
           { id: 'new-plain-shell-tab', label: 'New Plain Shell Tab', shortcut: shortcuts.new_plain_shell_tab || `${ctrl}+Shift+T` },
           { id: 'new-window', label: 'New Window', shortcut: `${ctrl}+Shift+N` },
-          { id: 'new-file', label: 'New File', shortcut: `${ctrl}+N` },
+          // Read from the config payload, not hardcoded. registerAccelerators
+          // below binds every non-noAccel entry here at router priority 115,
+          // which outranks the configurable shortcut table at 75/80 — so a
+          // literal `${ctrl}+N` is a LIVE binding, not a caption. On
+          // Windows/Linux, where the native menu is hidden and this table is
+          // the only accelerator source, that left a user who rebound new_file
+          // with a Ctrl+N they could not free.
+          { id: 'new-file', label: 'New File', shortcut: shortcuts.new_file || `${ctrl}+N` },
           { id: 'open-file', label: 'Open File…', shortcut: shortcuts.open_file || `${ctrl}+O` },
           // noAccel: the shortcut is DISPLAYED but not registered here —
           // Save As is scoped to a focused editor pane, and that scoping
@@ -483,8 +490,12 @@
     return eKey === cKey;
   }
 
-  function registerAccelerators(menuDef) {
-    // Collect all shortcut->action bindings from the menu definition.
+  // Which entries of a menu definition become LIVE key bindings. Split out of
+  // registerAccelerators so it can be tested without a titlebar on screen:
+  // every `shortcut` string that survives this filter is registered at router
+  // priority 115 and outranks the configurable shortcut table at 75/80, so
+  // whether an entry is here decides whether its combo can be rebound at all.
+  function acceleratorBindings(menuDef) {
     const bindings = [];
     function collect(items) {
       for (const item of items || []) {
@@ -503,7 +514,12 @@
         }
       }
     }
-    for (const menu of menuDef) collect(menu.items);
+    for (const menu of menuDef || []) collect(menu.items);
+    return bindings;
+  }
+
+  function registerAccelerators(menuDef) {
+    const bindings = acceleratorBindings(menuDef);
 
     if (typeof acceleratorUnregister === 'function') {
       acceleratorUnregister();
@@ -533,5 +549,14 @@
     }
   }
 
-  exports.titlebar = { init, refresh };
+  exports.titlebar = {
+    init,
+    refresh,
+    // Exposed for scripts/tests/test_titlebar_accelerators.mjs — the pure
+    // derivations that decide which combos this module hard-binds, with no
+    // titlebar on screen (same convention as file-dialog.js's `_` hooks).
+    _buildMenuDef: buildMenuDef,
+    _acceleratorBindings: acceleratorBindings,
+    _matchesEvent: matchesEvent,
+  };
 })(window);
