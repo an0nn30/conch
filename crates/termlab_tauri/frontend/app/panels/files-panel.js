@@ -382,15 +382,17 @@
   // no host identity of their own; remote_get_sessions keys its entries by
   // "{window_label}:{pane_id}", which is why both halves are needed.
   //
-  // The fallback is per-pane rather than constant, which keeps two panes in
-  // *this* window apart when the lookup fails. It is not a guarantee across
-  // windows: pane ids are allocated per window, so window A's pane 3 on host X
-  // and window B's pane 3 on host Y both fall back to "pane-3" and hash to the
-  // same temp path. That is the failure the real lookup exists to avoid; the
-  // fallback only narrows it, and only a lookup that succeeds removes it.
+  // The formula itself is `filesDataService.sessionHostLabel` — shared with
+  // features/editor/file-dialog.js's ⌘O chooser, which must produce the
+  // byte-identical label for the same session or the same remote file opens
+  // in two tabs depending on which surface it was opened from. This function
+  // owns only the lookup (window label + session by key); it must not
+  // re-implement the formula.
   async function remoteHostLabel(paneId) {
     const fallback = `pane-${paneId}`;
-    if (!filesDataService || typeof filesDataService.getSessions !== 'function') return fallback;
+    if (!filesDataService
+      || typeof filesDataService.getSessions !== 'function'
+      || typeof filesDataService.sessionHostLabel !== 'function') return fallback;
     try {
       const [label, sessions] = await Promise.all([
         currentWindowLabel(),
@@ -399,10 +401,7 @@
       if (!label) return fallback;
       const key = `${label}:${paneId}`;
       const session = (sessions || []).find((s) => s && s.key === key);
-      if (!session || !session.host) return fallback;
-      const port = Number(session.port);
-      const host = port && port !== 22 ? `${session.host}:${port}` : String(session.host);
-      return session.user ? `${session.user}@${host}` : host;
+      return filesDataService.sessionHostLabel(session, paneId);
     } catch (_) {
       return fallback;
     }

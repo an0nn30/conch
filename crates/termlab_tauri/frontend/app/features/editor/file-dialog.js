@@ -79,18 +79,22 @@
   // field and no label field: `key` is `"{window_label}:{pane_id}"`, and the
   // label is composed from user/host/port.
   //
-  // This is byte-for-byte the formula in files-panel.js's remoteHostLabel(),
-  // and it MUST stay that way. The label is hashed into the temp path by
-  // `editor_temp_path`, so a different spelling here would give the same
-  // remote file two different temp paths — and therefore two editor tabs on
-  // the same bytes — depending on whether it was opened from the files panel
-  // or from this dialog.
-  function sessionHostLabel(session, paneId) {
-    const fallback = `pane-${paneId}`;
-    if (!session || !session.host) return fallback;
-    const port = Number(session.port);
-    const host = port && port !== 22 ? `${session.host}:${port}` : String(session.host);
-    return session.user ? `${session.user}@${host}` : host;
+  // The label is NOT composed here. It is hashed into the temp path by
+  // `editor_temp_path`, which makes it the editor's identity for a remote
+  // file, so it has to be the byte-identical string files-panel.js produces
+  // for the same session — otherwise the same file opens in two tabs
+  // depending on which surface opened it. The single formula lives in
+  // features/files/data-service.js as `sessionHostLabel`; this is only the
+  // lookup of it.
+  //
+  // Returns null when the shared helper is unavailable. There is deliberately
+  // no local fallback formula: a second copy is exactly the failure this
+  // indirection exists to prevent, so a build that cannot reach the helper
+  // offers no remote scopes rather than inventing labels for them.
+  function hostLabelFor(session, paneId) {
+    const data = filesData();
+    if (!data || typeof data.sessionHostLabel !== 'function') return null;
+    return data.sessionHostLabel(session, paneId);
   }
 
   // Sessions are global to the app, but `sftp_list_dir` resolves its handle
@@ -129,7 +133,8 @@
     for (const session of (Array.isArray(sessions) ? sessions : [])) {
       const paneId = paneIdFromSessionKey(session && session.key, windowLabel);
       if (paneId == null) continue;
-      const hostLabel = sessionHostLabel(session, paneId);
+      const hostLabel = hostLabelFor(session, paneId);
+      if (hostLabel == null) continue;
       remote.push({
         id: `remote:${paneId}`,
         kind: 'remote',
@@ -706,8 +711,10 @@
     openForOpen,
     openForSave,
     // Exposed for scripts/tests/test_file_dialog.mjs — pure derivations that
-    // need no DOM (matches tl-dialog.js's _zIndexForDepth precedent).
-    _sessionHostLabel: sessionHostLabel,
+    // need no DOM (matches tl-dialog.js's _zIndexForDepth precedent). The host
+    // label formula is deliberately NOT among them: it belongs to
+    // features/files/data-service.js and is pinned by a test there, so that
+    // one test covers both this module and files-panel.js.
     _paneIdFromSessionKey: paneIdFromSessionKey,
     _buildScopes: buildScopes,
     _chooseFile: chooseFile,

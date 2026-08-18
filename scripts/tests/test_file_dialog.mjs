@@ -25,7 +25,11 @@ import vm from 'node:vm';
 const APP = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend/app');
 
 let failures = 0;
+// Counted, never hand-tallied: a report that states a check count should be
+// quoting this runner, not counting call sites by eye.
+let ran = 0;
 function check(name, fn) {
+  ran++;
   try {
     fn();
     return true;
@@ -36,6 +40,7 @@ function check(name, fn) {
   }
 }
 async function checkAsync(name, fn) {
+  ran++;
   try {
     await fn();
   } catch (error) {
@@ -197,7 +202,16 @@ function makeHarness(options) {
   const listLocal = opts.listLocal || (() => Promise.resolve([]));
   const listRemote = opts.listRemote || (() => Promise.resolve([]));
 
-  sandbox.termlabFilesFeatureDataService = {
+  // The REAL data-service module, with only its invoke-backed IO stubbed out.
+  // `sessionHostLabel` is left real on purpose: it is the shared host-identity
+  // formula that files-panel.js also calls, and stubbing it would let the
+  // dialog pass with a label this project's other surface would never emit.
+  load(sandbox, 'features/files/data-service.js');
+  const realFilesData = sandbox.termlabFilesFeatureDataService;
+  assert.strictEqual(typeof realFilesData.sessionHostLabel, 'function',
+    'data-service exports the shared sessionHostLabel');
+
+  sandbox.termlabFilesFeatureDataService = Object.assign({}, realFilesData, {
     getHomeDir: () => Promise.resolve(opts.home || '/home/u'),
     getCurrentWindowLabel: () => Promise.resolve(
       Object.prototype.hasOwnProperty.call(opts, 'windowLabel') ? opts.windowLabel : 'main',
@@ -209,7 +223,7 @@ function makeHarness(options) {
       calls.realpath.push([paneId, p]);
       return opts.realpath ? opts.realpath(paneId, p) : Promise.resolve('/home/remote');
     },
-  };
+  });
 
   sandbox.termlabEditorService = {
     openLocalFile: (p) => { calls.openLocal.push(p); return Promise.resolve(); },
@@ -254,6 +268,7 @@ console.log('file dialog: session -> scope derivation');
 {
   const { sandbox } = makeHarness({});
   const fd = sandbox.termlabFileDialog;
+  const sessionHostLabel = sandbox.termlabFilesFeatureDataService.sessionHostLabel;
 
   check('key "{window_label}:{pane_id}" yields the pane id', () => {
     assert.strictEqual(fd._paneIdFromSessionKey('main:3', 'main'), 3);
@@ -268,11 +283,46 @@ console.log('file dialog: session -> scope derivation');
     assert.strictEqual(fd._paneIdFromSessionKey(null, 'main'), null);
   });
 
-  check('host label matches files-panel: user@host, port dropped when 22', () => {
-    assert.strictEqual(fd._sessionHostLabel({ host: 'h1', user: 'ubuntu', port: 22 }, 3), 'ubuntu@h1');
-    assert.strictEqual(fd._sessionHostLabel({ host: 'h1', user: 'ubuntu', port: 2222 }, 3), 'ubuntu@h1:2222');
-    assert.strictEqual(fd._sessionHostLabel({ host: 'h1', user: '', port: 22 }, 3), 'h1');
-    assert.strictEqual(fd._sessionHostLabel({ host: '', user: 'u', port: 22 }, 3), 'pane-3');
+  // THE host-identity formula, pinned at its single definition site. This is
+  // the string editor_temp_path hashes into a remote file's temp path, so it
+  // is the editor's identity for that file. Both surfaces that can open a
+  // remote file — panels/files-panel.js's remoteHostLabel and this dialog's
+  // buildScopes — call THIS function; when they each held a private copy,
+  // editing one would have split every remote file across two tabs with the
+  // whole suite green. Changing any expectation below is a data-loss change,
+  // not a cosmetic one.
+  check('sessionHostLabel: host + user + non-default port', () => {
+    assert.strictEqual(sessionHostLabel({ host: 'h1', user: 'ubuntu', port: 2222 }, 3), 'ubuntu@h1:2222');
+  });
+  check('sessionHostLabel: the default port 22 is elided', () => {
+    assert.strictEqual(sessionHostLabel({ host: 'h1', user: 'ubuntu', port: 22 }, 3), 'ubuntu@h1');
+  });
+  check('sessionHostLabel: a missing user drops the "@" entirely', () => {
+    assert.strictEqual(sessionHostLabel({ host: 'h1', user: '', port: 22 }, 3), 'h1');
+    assert.strictEqual(sessionHostLabel({ host: 'h1', user: '', port: 2222 }, 3), 'h1:2222');
+  });
+  check('sessionHostLabel: no host (or no session) falls back per pane', () => {
+    assert.strictEqual(sessionHostLabel({ host: '', user: 'u', port: 22 }, 3), 'pane-3');
+    assert.strictEqual(sessionHostLabel(null, 7), 'pane-7');
+  });
+  check('the dialog does NOT export a second copy of the formula', () => {
+    assert.strictEqual(fd._sessionHostLabel, undefined,
+      'the formula belongs to features/files/data-service.js alone');
+  });
+
+  // A canary, not a proof: the pin above only guards the one definition, so
+  // it cannot notice a *new* private copy growing back in a caller — which is
+  // exactly how the two copies came to exist. `!== 22` is the port-elision
+  // tell that no other line in either caller has any reason to contain.
+  check('neither caller re-grows a private copy of the formula', () => {
+    for (const rel of ['panels/files-panel.js', 'features/editor/file-dialog.js']) {
+      const src = fs.readFileSync(path.join(APP, rel), 'utf8');
+      assert.ok(!src.includes('!== 22'),
+        `${rel} looks like it re-implements the host label; call `
+        + 'filesDataService.sessionHostLabel instead');
+    }
+    const shared = fs.readFileSync(path.join(APP, 'features/files/data-service.js'), 'utf8');
+    assert.ok(shared.includes('!== 22'), 'the shared formula is still where it belongs');
   });
 
   check('scopes: local first, only this window, sorted, hostLabel kept clean', () => {
@@ -646,7 +696,49 @@ await checkAsync('a local pick goes to openLocalFile(path)', async () => {
   assert.strictEqual(calls.openRemote.length, 0);
 });
 
-await checkAsync('a remote pick goes to openRemoteFile with paneId/hostLabel/size', async () => {
+// TWO panes on ONE host, deliberately. With a single session the display
+// label and the identity label are the same string, so routing the display
+// label instead of the identity label would be invisible — the scope bar's
+// " (pane N)" suffix only exists when a host is duplicated. This fixture is
+// the only thing that can tell `scope.hostLabel` from `scope.label`, and
+// getting it wrong means the same remote file lands in a different temp path
+// (and so a second editor tab) than the files panel would give it.
+await checkAsync('a remote pick routes the CLEAN hostLabel, not the disambiguated button text', async () => {
+  const { sandbox, doc, calls } = makeHarness({
+    sessions: [
+      { key: 'main:1', host: 'h1', user: 'ubuntu', port: 2222 },
+      { key: 'main:2', host: 'h1', user: 'ubuntu', port: 2222 },
+    ],
+    listLocal: () => Promise.resolve([]),
+    listRemote: () => Promise.resolve([{ name: 'app.log', is_dir: false, size: 4242, modified: null }]),
+    realpath: () => Promise.resolve('/home/ubuntu'),
+  });
+  const done = sandbox.termlabFileDialog.openForOpen();
+  await settle();
+
+  // Precondition: the two buttons are distinguishable, and neither reads as
+  // the bare host label — so a routed button caption cannot pass by accident.
+  const scopeText = parts(doc).scopes.map((b) => b.textContent);
+  assert.deepStrictEqual(scopeText,
+    ['This Mac', 'ubuntu@h1:2222 (pane 1)', 'ubuntu@h1:2222 (pane 2)']);
+
+  parts(doc).scopes[2].fire('click'); // the SECOND pane on that host
+  await settle();
+  parts(doc).rows[0].fire('dblclick');
+  await done;
+
+  assert.strictEqual(calls.openLocal.length, 0);
+  assert.strictEqual(calls.openRemote.length, 1);
+  const d = calls.openRemote[0];
+  assert.strictEqual(d.paneId, 2, 'the pane id of the scope actually browsed');
+  assert.strictEqual(d.remotePath, '/home/ubuntu/app.log');
+  assert.strictEqual(d.size, 4242);
+  assert.strictEqual(d.hostLabel, 'ubuntu@h1:2222',
+    'openRemoteFile gets the identity label — no " (pane N)" suffix');
+  assert.ok(!/pane/.test(d.hostLabel), 'the display suffix never reaches editor_temp_path');
+});
+
+await checkAsync('a single-session remote pick still routes paneId/hostLabel/size', async () => {
   const { sandbox, doc, calls } = makeHarness({
     sessions: [{ key: 'main:4', host: 'h1', user: 'ubuntu', port: 2222 }],
     listLocal: () => Promise.resolve([]),
@@ -660,7 +752,6 @@ await checkAsync('a remote pick goes to openRemoteFile with paneId/hostLabel/siz
   parts(doc).rows[0].fire('dblclick');
   await done;
   assert.strictEqual(calls.openLocal.length, 0);
-  assert.strictEqual(calls.openRemote.length, 1);
   const d = calls.openRemote[0];
   assert.strictEqual(d.paneId, 4);
   assert.strictEqual(d.remotePath, '/home/ubuntu/app.log');
@@ -723,7 +814,7 @@ check('the public surface is exactly openForOpen + openForSave (plus test hooks)
 // ---------------------------------------------------------------------------
 
 if (failures) {
-  console.error(`file dialog: ${failures} check(s) FAILED`);
+  console.error(`file dialog: ${failures} of ${ran} check(s) FAILED`);
   process.exit(1);
 }
-console.log('file dialog: all checks passed');
+console.log(`file dialog: all ${ran} checks passed`);

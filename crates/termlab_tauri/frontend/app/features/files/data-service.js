@@ -77,6 +77,37 @@
     return Array.isArray(sessions) ? sessions : [];
   }
 
+  // THE identity of a remote host, for editing purposes. Pure — no invoke.
+  //
+  // This lives here, in the layer both callers already go through, because it
+  // is not a display string: `editor_temp_path(host_label, remote_path)`
+  // (crates/termlab_tauri/src/editor_fs.rs) hashes it into the temp path that
+  // the editor then treats as the file's identity — that path is what
+  // `focusExistingEditor` matches on to decide "this file is already open".
+  // Two spellings of the same host therefore mean two temp paths, two editor
+  // tabs on the same bytes, and a last-save-wins data loss.
+  //
+  // Its two callers are `remoteHostLabel` in panels/files-panel.js (open from
+  // the files tree) and `buildScopes` in features/editor/file-dialog.js (open
+  // from the ⌘O chooser). They used to hold byte-identical private copies;
+  // nothing connected them, so editing one would have silently split every
+  // remote file across two tabs. Callers that want a disambiguated *display*
+  // string (e.g. two panes on one host in the chooser's scope bar) must
+  // decorate the value this returns — never change what it returns.
+  //
+  // `paneId` supplies the fallback: it keeps two panes in *this* window apart
+  // when the session lookup fails. It is not a guarantee across windows —
+  // pane ids are allocated per window, so window A's pane 3 and window B's
+  // pane 3 both fall back to "pane-3". Only a lookup that succeeds removes
+  // that; the fallback narrows it.
+  function sessionHostLabel(session, paneId) {
+    const fallback = `pane-${paneId}`;
+    if (!session || !session.host) return fallback;
+    const port = Number(session.port);
+    const host = port && port !== 22 ? `${session.host}:${port}` : String(session.host);
+    return session.user ? `${session.user}@${host}` : host;
+  }
+
   async function getCurrentWindowLabel(invoke) {
     return invoke('current_window_label');
   }
@@ -100,6 +131,7 @@
     remoteRemove,
     clipboardWriteText,
     getSessions,
+    sessionHostLabel,
     getCurrentWindowLabel,
   };
 })(window);
