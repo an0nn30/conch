@@ -14,7 +14,7 @@
 
 ## Mechanism
 
-- **`savePane` is the single choke point.** Its first line: a pane with no `filePath` diverts to `termlabFileDialog.openForSave(pane)`. All four save paths (⌘S via `saveActiveEditor`'s delegation, `:w`, `:wq`, close-guard Save) inherit the diversion with no per-caller logic. `openForSave` resolving null (cancelled) makes `savePane` reject with a sentinel (`error.name === 'SaveCancelled'`); every `savePane` catch-site suppresses the toast for that name and treats it as not-saved, so `:wq` does not close, close guards abort, and nothing red flashes for a deliberate cancel.
+- **`savePane` is the single choke point.** *(Amended post-implementation, see below for the guard that shipped.)* Its first line: a pane with no `filePath` diverts to `termlabFileDialog.openForSave(pane)`. All four save paths (⌘S via `saveActiveEditor`'s delegation, `:w`, `:wq`, close-guard Save) inherit the diversion with no per-caller logic. `openForSave` resolving null (cancelled) makes `savePane` reject with a sentinel (`error.name === 'SaveCancelled'`); every `savePane` catch-site suppresses the toast for that name and treats it as not-saved, so `:wq` does not close, close guards abort, and nothing red flashes for a deliberate cancel.
 - **Untitled labels** come from `editorTabLabel` (already returns a fallback for null `filePath`); it gains the per-session `Untitled-N` from a counter passed at creation (`pane.untitledSeq`). Tooltip: `Unsaved`.
 - **`focusExistingEditor(path)` must skip untitled panes** — two nulls are not the same file. Same guard in `pathHeldByAnotherPane`.
 - **Save As prefill** for untitled panes: the filename field seeds from the tab label (`Untitled`), selected so typing replaces it.
@@ -25,6 +25,12 @@
 `test_editor_untitled.mjs` (vm harness over the real editor-service/tab-label modules, invoke-IO stubbed): untitled naming counter across several creates; `savePane` diversion — untitled pane calls `openForSave`, titled pane does not (discriminating fixture: assert the dialog stub was or was not called, both directions); dialog-cancel → `savePane` rejects with `SaveCancelled`, no error toast recorded, pane still untitled and dirty; dialog-success → rebind fields set (reusing the Save As harness's real-shape stubs); `focusExistingEditor(null)` matches nothing with two untitled panes open; close-guard Save on untitled cancelled at the dialog → close aborted, pane intact. Existing suites must pass unmodified except those that named scratches, which are removed or updated deliberately (list them in the report).
 
 Manual (checklist section G): New File from all three entry points; type, ⌘S → dialog → save local and remote; `:w` on untitled → dialog; `:wq` cancelled at dialog → tab stays; close prompts and both cancel layers abort; empty untitled closes silently; `Untitled-2` naming; a config with `new_scratch = "cmd+shift+u"` still binds New File (alias).
+
+### Amendments from implementation (2026-08-18)
+
+- **The chooser window is guarded by a separate `choosersInFlight` map, not a `savesInFlight` placeholder.** The originally prescribed placeholder deadlocks: `saveAs` drains `savesInFlight` before writing, and the chooser invokes `saveAs` from inside the very await the placeholder would span — the save would wait forever on the dialog answering it. The diversion joins `choosersInFlight.get(pane) || savesInFlight.get(pane)`, covering both the chooser window and the write window with one join.
+- **Cross-pane refusal is silent.** While pane A's Save As chooser is open, a save on pane B is refused via the `SaveCancelled` path — no second dialog, no toast, B stays untitled and dirty and saves normally afterwards. Silent-by-design as a stopgap (the alternatives — a stacked modal, or inheriting A's answer — are worse); flashing A's dialog on refusal is a logged UX follow-up.
+- **The `SaveCancelled` sentinel is also raised when the chooser's `saveAs` FAILS** (which has already toasted its own failure), so one failure is reported exactly once. The name is therefore slightly broader than "cancelled"; the throw site carries a comment saying so.
 
 ## Known limitations
 
