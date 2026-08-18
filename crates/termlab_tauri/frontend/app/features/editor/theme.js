@@ -58,12 +58,15 @@
     return [theme, CM.syntaxHighlighting(highlight)];
   }
 
-  // The token pipeline emits a data-theme attribute; fall back to the
-  // background's perceived lightness when it is absent.
+  // Whether the current skin is dark, inferred from the perceived lightness of
+  // --tl-bg. There is no declared light/dark flag to read: the token pipeline
+  // emits colour values only, and nothing in the app sets a theme attribute or
+  // class on the document element. So the background colour itself is the
+  // signal, and inference is the mechanism rather than a fallback for one.
+  //
+  // Unresolvable (--tl-bg unset, or not an rgb() value) is treated as dark,
+  // which is the default skin.
   function isDarkTheme() {
-    const attr = document.documentElement.getAttribute('data-theme');
-    if (attr === 'dark') return true;
-    if (attr === 'light') return false;
     const bg = token('--tl-bg');
     const m = /rgb[a]?\((\d+),\s*(\d+),\s*(\d+)/.exec(bg);
     if (!m) return true;

@@ -220,6 +220,14 @@
   // directories it empties, while editor_write_file does not recreate them. So
   // the surviving tab's next save fails with "No such file or directory" and
   // the edit has nowhere to go.
+  //
+  // Scope: this closes the race **within one window only**. Every window runs
+  // its own JS context and so its own `opensInFlight` (and its own
+  // `focusExistingEditor`), while `editor_temp_path` is a pure function of
+  // (host, path). Two windows opening the same remote file therefore still land
+  // on one temp file and still reach the state described above. That is a known
+  // limitation of the feature, not something this map covers; closing it needs
+  // the registry to live in Rust, where the path is computed.
   const opensInFlight = new Map();
 
   async function downloadAndOpen(paneId, remotePath, hostLabel, localPath) {

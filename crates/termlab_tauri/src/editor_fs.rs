@@ -232,9 +232,20 @@ pub(crate) fn editor_temp_cleanup(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Delete everything under the temp root. Called at startup to clear orphans
-/// left by a crash, and at shutdown.
-#[tauri::command]
+/// Delete everything under the temp root.
+///
+/// Two callers, both in Rust — this is deliberately not a `#[tauri::command]`,
+/// because handing the frontend "delete every remote edit in flight" is not a
+/// capability it needs:
+///
+/// * app setup (`lib.rs`), which clears orphans left by a previous crash;
+/// * `close_guard::finish_exit`, which runs only on a completed Quit or
+///   Restart poll.
+///
+/// So "at shutdown" means those two exits and nothing else. Closing the last
+/// window does not sweep, and neither does macOS's Dock → Quit, which bypasses
+/// `finish_exit` entirely (see Known Limitation 9 in the design spec). Both
+/// leave the temp tree behind until the next launch clears it.
 pub(crate) fn editor_temp_sweep() -> Result<(), String> {
     let _ = fs::remove_dir_all(temp_root());
     Ok(())

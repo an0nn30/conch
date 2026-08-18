@@ -18,9 +18,15 @@
 //!    returns `Ok` whether or not anything matched.
 //!
 //! 2. **Permission is consumed.** A confirmation authorises exactly one
-//!    close. The second `CloseRequested` (the one raised by the frontend's own
-//!    `window.close()`) spends it and passes through, so the prompt cannot
-//!    loop; anything after that asks again.
+//!    close. [`confirm_window_close`] records the permission and then calls
+//!    `window.close()` *from Rust*, which raises a second `CloseRequested` for
+//!    the same window; that one spends the permission and passes through, so
+//!    the prompt cannot loop. Anything after that asks again.
+//!
+//!    The frontend's only part in this is answering the event. It never closes
+//!    the window in response to the prompt — the close it *can* start (the
+//!    titlebar button's `win.close()`) is what raises the *first*
+//!    `CloseRequested`, the one that gets prevented.
 //!
 //! 3. **Quit is a poll, not a broadcast.** Quit asks one window at a time and
 //!    only exits once every armed window has consented, so a second window's
@@ -145,10 +151,20 @@ impl CloseGuard {
         self.0.lock().quit_asking = Some(label.to_string());
     }
 
-    /// The action to take now that every window has consented — and the only
-    /// way to get one. `None` while any window still owes an answer, and
-    /// `None` when no poll is running at all, so neither a cancelled poll nor
-    /// a half-finished one can reach an exit.
+    /// The action to take now that the queue has drained — and the only way to
+    /// get one. `None` when no poll is running at all, so a cancelled poll
+    /// cannot reach an exit: [`cancel_quit`](Self::cancel_quit) clears the
+    /// queue rather than emptying it.
+    ///
+    /// "Drained" is not the same as "everyone has answered", and this method
+    /// cannot tell the difference: [`next_to_ask`](Self::next_to_ask) pops a
+    /// label *before* that window is asked, so between the pop and the vote the
+    /// queue is already empty while an answer is still outstanding. What keeps
+    /// the last window's unsaved buffers safe is the call site, not this check:
+    /// `advance_quit` returns immediately after `emit_to`, so nothing calls
+    /// this again until a `quit_vote` (or a `Destroyed` for the window being
+    /// asked) drives another round. A future caller that polls this method
+    /// while a window is outstanding would get an exit it has not earned.
     fn take_finished_exit(&self) -> Option<ExitKind> {
         let mut state = self.0.lock();
         let drained = state.quit_queue.as_ref().is_some_and(|q| q.is_empty());

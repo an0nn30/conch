@@ -382,8 +382,12 @@
   // no host identity of their own; remote_get_sessions keys its entries by
   // "{window_label}:{pane_id}", which is why both halves are needed.
   //
-  // The fallback is per-pane rather than constant: two hosts must never
-  // collapse onto one label even when this lookup fails.
+  // The fallback is per-pane rather than constant, which keeps two panes in
+  // *this* window apart when the lookup fails. It is not a guarantee across
+  // windows: pane ids are allocated per window, so window A's pane 3 on host X
+  // and window B's pane 3 on host Y both fall back to "pane-3" and hash to the
+  // same temp path. That is the failure the real lookup exists to avoid; the
+  // fallback only narrows it, and only a lookup that succeeds removes it.
   async function remoteHostLabel(paneId) {
     const fallback = `pane-${paneId}`;
     if (!filesDataService || typeof filesDataService.getSessions !== 'function') return fallback;
