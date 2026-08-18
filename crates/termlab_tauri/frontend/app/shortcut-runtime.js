@@ -48,6 +48,11 @@
       settings: 'settings',
       new_scratch: 'new-scratch',
       save_file: 'save-file',
+      // Unlike save_file below, open_file is NOT dropped when a terminal pane
+      // is focused: the chooser is how you get an editor in the first place,
+      // so gating it on already having one would make it unreachable from a
+      // fresh window. The cost is that cmd+o no longer reaches the shell.
+      open_file: 'open-file',
     };
 
     function navigatePane(direction) {

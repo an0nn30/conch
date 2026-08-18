@@ -523,6 +523,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             menu::MENU_RENAME_TAB_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_RENAME_TAB)
             }
+            menu::MENU_OPEN_FILE_ID => {
+                menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_OPEN_FILE)
+            }
             menu::MENU_TOGGLE_LEFT_PANEL_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_LEFT_PANEL)
             }

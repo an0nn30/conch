@@ -119,6 +119,7 @@ pub struct KeyboardConfig {
     pub settings: String,
     pub new_scratch: String,
     pub save_file: String,
+    pub open_file: String,
     pub tool_window_shortcuts: HashMap<String, String>,
     pub plugin_shortcuts: HashMap<String, String>,
 }
@@ -148,6 +149,7 @@ impl Default for KeyboardConfig {
             settings: "cmd+,".into(),
             new_scratch: "cmd+n".into(),
             save_file: "cmd+s".into(),
+            open_file: "cmd+o".into(),
             tool_window_shortcuts: HashMap::new(),
             plugin_shortcuts: HashMap::new(),
         }
@@ -221,6 +223,10 @@ mod tests {
         let k = KeyboardConfig::default();
         assert_eq!(k.new_scratch, "cmd+n");
         assert_eq!(k.save_file, "cmd+s");
+        // Unlike save_file, open_file is *not* scoped to a focused editor: it
+        // opens the file chooser from anywhere, so it consumes cmd+o in a
+        // terminal too. Deliberate — see shortcut-runtime.js.
+        assert_eq!(k.open_file, "cmd+o");
     }
 
     #[test]
@@ -292,6 +298,29 @@ mod tests {
         assert!(cfg.native);
         assert!(cfg.lua);
         assert!(cfg.java);
+    }
+
+    /// `open_file` is new, so every config already on disk has a
+    /// `[termlab.keyboard]` table without it. The container-level
+    /// `#[serde(default)]` has to fill it from `Default::default()` — if it
+    /// filled an empty string instead, `normalizeShortcutString` would drop
+    /// the binding and cmd+O would silently do nothing for every existing
+    /// user while still being listed in Settings.
+    #[test]
+    fn open_file_fills_in_for_a_config_written_before_it_existed() {
+        let toml = r#"
+            new_tab = "cmd+t"
+            save_file = "cmd+s"
+        "#;
+        let k: KeyboardConfig = toml::from_str(toml).unwrap();
+        assert_eq!(k.open_file, "cmd+o");
+        assert_eq!(k.save_file, "cmd+s");
+    }
+
+    #[test]
+    fn open_file_round_trips_when_overridden() {
+        let k: KeyboardConfig = toml::from_str(r#"open_file = "cmd+shift+o""#).unwrap();
+        assert_eq!(k.open_file, "cmd+shift+o");
     }
 
     #[test]

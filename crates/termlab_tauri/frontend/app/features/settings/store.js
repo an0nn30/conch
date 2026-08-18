@@ -26,6 +26,7 @@
     navigate_pane_right: 'Navigate Pane Right',
     new_scratch: 'New Scratch',
     save_file: 'Save File',
+    open_file: 'Open File',
   };
 
   const KEYBOARD_CORE_GROUPS = [
@@ -35,7 +36,7 @@
     },
     {
       label: 'Editor',
-      keys: ['new_scratch', 'save_file'],
+      keys: ['new_scratch', 'open_file', 'save_file'],
     },
     {
       label: 'Tools',

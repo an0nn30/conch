@@ -84,6 +84,20 @@
         if (service) service.saveActiveEditor();
         return;
       }
+      if (action === 'open-file') {
+        // Unscoped on purpose (see shortcut-runtime.js): the chooser opens
+        // from a terminal too. Routing and error reporting live in the
+        // dialog; a rejection here only means it could not even be shown.
+        const dialog = global.termlabFileDialog;
+        if (!dialog) {
+          showStatus('File dialog unavailable');
+          return;
+        }
+        Promise.resolve(dialog.openForOpen()).catch((error) => {
+          showStatus('Failed to open file: ' + String(error));
+        });
+        return;
+      }
       if (action === 'new-plain-shell-tab') {
         createPlainShellTab().catch((error) => showStatus('Failed to create plain shell tab: ' + String(error)));
         return;

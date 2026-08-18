@@ -39,6 +39,7 @@ pub(crate) const MENU_SPLIT_HORIZONTAL_ID: &str = "view.split_horizontal";
 pub(crate) const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
+pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
 /// Quit is a custom item, not `PredefinedMenuItem::quit`. The predefined one
 /// sends `[NSApp terminate:]`, which tao does not intercept
 /// (`applicationShouldTerminate:` is unimplemented) and which raises neither
@@ -73,6 +74,7 @@ pub(crate) const MENU_ACTION_SPLIT_VERTICAL: &str = "split-vertical";
 pub(crate) const MENU_ACTION_SPLIT_HORIZONTAL: &str = "split-horizontal";
 pub(crate) const MENU_ACTION_CLOSE_PANE: &str = "close-pane";
 pub(crate) const MENU_ACTION_RENAME_TAB: &str = "rename-tab";
+pub(crate) const MENU_ACTION_OPEN_FILE: &str = "open-file";
 pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
 pub(crate) const MENU_ACTION_CHECK_UPDATES: &str = "check-for-updates";
 pub(crate) const MENU_ACTION_ABOUT: &str = "about";
@@ -169,6 +171,14 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         Some(&primary_accelerator("Shift+N")),
     )?;
+    let open_file_accel = config_key_to_accelerator(&keyboard.open_file);
+    let open_file = MenuItem::with_id(
+        app,
+        MENU_OPEN_FILE_ID,
+        "Open File\u{2026}",
+        true,
+        Some(&open_file_accel),
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let close_window = PredefinedMenuItem::close_window(app, None)?;
 
@@ -205,6 +215,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             &new_tab,
             &new_plain_shell_tab,
             &new_window,
+            &open_file,
             &separator,
             &ssh_manager_menu,
             &separator2,
@@ -664,6 +675,14 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             true,
             Some(&rename_tab_accel),
         )?;
+        let open_file_accel = config_key_to_accelerator(&keyboard.open_file);
+        let open_file = MenuItem::with_id(
+            app,
+            MENU_OPEN_FILE_ID,
+            "Open File\u{2026}",
+            true,
+            Some(&open_file_accel),
+        )?;
         let new_window = MenuItem::with_id(
             app,
             MENU_NEW_WINDOW_ID,
@@ -693,6 +712,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 &new_tab,
                 &new_plain_shell_tab,
                 &new_window,
+                &open_file,
                 &separator,
                 &ssh_manager_menu,
                 &separator2,

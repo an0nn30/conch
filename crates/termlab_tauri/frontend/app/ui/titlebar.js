@@ -58,6 +58,7 @@
           { id: 'new-tab', label: 'New Tab', shortcut: `${ctrl}+T` },
           { id: 'new-plain-shell-tab', label: 'New Plain Shell Tab', shortcut: shortcuts.new_plain_shell_tab || `${ctrl}+Shift+T` },
           { id: 'new-window', label: 'New Window', shortcut: `${ctrl}+Shift+N` },
+          { id: 'open-file', label: 'Open File…', shortcut: shortcuts.open_file || `${ctrl}+O` },
           { type: 'separator' },
           { label: 'SSH Manager', submenu: [
             { id: 'ssh-export', label: 'Export' },

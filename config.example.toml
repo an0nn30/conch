@@ -155,6 +155,10 @@ navigate_pane_left = "cmd+alt+left"
 navigate_pane_right = "cmd+alt+right"
 new_scratch = "cmd+n"
 save_file = "cmd+s"
+# Opens the file chooser (This Mac + every connected SSH host). Unlike
+# save_file this is not scoped to a focused editor, so it also consumes this
+# combo in a terminal pane.
+open_file = "cmd+o"
 
 # Optional per-plugin shortcut overrides.
 # Key format: "<plugin_name>:<action>".

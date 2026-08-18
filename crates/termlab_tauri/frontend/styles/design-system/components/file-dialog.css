@@ -1,0 +1,212 @@
+/* File dialog — the unified local/remote file chooser
+   (app/features/editor/file-dialog.js).
+
+   The listing box reuses .tl-picker__box (components/picker.css) for its
+   border, radius, background and bounded height, so the chooser and the
+   export picker are the same surface; everything below is the columns,
+   the scope bar and the breadcrumbs that picker.css has no notion of.
+
+   Tokens only — raw hex belongs in base.css alone
+   (scripts/check_frontend_boundaries.sh enforces this for this directory). */
+
+.tl-filedlg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-2);
+}
+
+/* ---- scope bar: This Mac + one button per connected host ---------------- */
+
+.tl-filedlg__scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--tl-space-1);
+}
+
+.tl-filedlg__scope {
+  padding: 2px var(--tl-space-2);
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  background: transparent;
+  color: var(--tl-fg-muted);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tl-filedlg__scope:hover { background: var(--tl-row-hover); color: var(--tl-fg); }
+.tl-filedlg__scope:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+.tl-filedlg__scope.is-active {
+  border-color: var(--tl-accent);
+  background: var(--tl-accent);
+  color: var(--tl-primary-fg);
+}
+
+/* ---- breadcrumbs ------------------------------------------------------- */
+
+.tl-filedlg__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  min-width: 0;
+}
+
+.tl-filedlg__up {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  background: transparent;
+  color: var(--tl-fg-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.tl-filedlg__up:hover { background: var(--tl-row-hover); color: var(--tl-fg); }
+.tl-filedlg__up:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+
+/* Long paths scroll rather than wrapping the dialog into a taller box; the
+   tail (where you are) is what matters, so the row scrolls horizontally. */
+.tl-filedlg__crumbs {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.tl-filedlg__crumb {
+  flex-shrink: 0;
+  padding: 0 var(--tl-space-1);
+  border: none;
+  background: none;
+  color: var(--tl-accent);
+  font: inherit;
+  cursor: pointer;
+}
+.tl-filedlg__crumb:hover { text-decoration: underline; }
+.tl-filedlg__crumb:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+.tl-filedlg__crumb.is-current { color: var(--tl-fg); cursor: default; }
+.tl-filedlg__crumb.is-current:hover { text-decoration: none; }
+
+/* A separator between crumbs, drawn rather than emitted as a DOM node so the
+   breadcrumb bar stays a flat list of buttons for the keyboard and for AT. */
+.tl-filedlg__crumb + .tl-filedlg__crumb::before {
+  content: "/";
+  color: var(--tl-fg-muted);
+  margin-right: var(--tl-space-1);
+}
+
+/* ---- path / filter / hidden row ---------------------------------------- */
+
+.tl-filedlg__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+}
+
+/* The path is the wide one: it is the field you paste into. */
+.tl-filedlg__path { flex: 2 1 0; min-width: 0; }
+.tl-filedlg__filter { flex: 1 1 0; min-width: 0; }
+.tl-filedlg__hidden { flex-shrink: 0; white-space: nowrap; }
+
+/* ---- listing ------------------------------------------------------------ */
+
+/* Taller than the export picker's 260px: this is the main surface of the
+   dialog rather than one section of it. padding is dropped (picker.css puts
+   2px 0 on the box) so the sticky header sits flush against the border. */
+.tl-filedlg__box {
+  max-height: 340px;
+  min-height: 200px;
+  padding: 0;
+}
+
+/* Sticky over the rows it labels, exactly like .tl-picker__group-header. */
+.tl-filedlg__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  padding: 3px var(--tl-space-2);
+  background: var(--tl-control-bg);
+  border-bottom: 1px solid var(--tl-border);
+  color: var(--tl-fg-muted);
+  font-weight: 600;
+}
+
+.tl-filedlg__list { outline: none; }
+.tl-filedlg__list:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: -1px; }
+
+.tl-filedlg__row {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  min-width: 0;
+  cursor: default;
+}
+.tl-filedlg__row:hover { background: var(--tl-row-hover); }
+.tl-filedlg__row.is-selected {
+  background: var(--tl-selection-bg);
+  color: var(--tl-selection-fg);
+}
+
+/* One column ruler for the header and the rows, so they line up without a
+   table: name takes the slack, size and time are fixed and right-aligned. */
+.tl-filedlg__col--name,
+.tl-filedlg__cell--name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-filedlg__col--size,
+.tl-filedlg__cell--size {
+  flex: 0 0 80px;
+  text-align: right;
+}
+.tl-filedlg__col--time,
+.tl-filedlg__cell--time {
+  flex: 0 0 120px;
+  text-align: right;
+}
+
+/* Directories lead, and read as such at a glance without an icon font. */
+.tl-filedlg__cell--name.is-dir { font-weight: 600; }
+.tl-filedlg__cell--name.is-dir::after {
+  content: "/";
+  color: var(--tl-fg-muted);
+}
+.tl-filedlg__row.is-selected .tl-filedlg__cell--name.is-dir::after { color: inherit; }
+
+/* Size/time are context, not content; they dim except on the selected row,
+   where the selection foreground has to win for contrast. */
+.tl-filedlg__cell--size,
+.tl-filedlg__cell--time { color: var(--tl-fg-muted); }
+.tl-filedlg__row.is-selected .tl-filedlg__cell--size,
+.tl-filedlg__row.is-selected .tl-filedlg__cell--time { color: inherit; }
+
+.tl-filedlg__empty {
+  padding: var(--tl-space-3) var(--tl-space-2);
+  color: var(--tl-fg-muted);
+  text-align: center;
+}
+.tl-filedlg__empty[hidden] { display: none; }
+
+/* ---- inline error ------------------------------------------------------- */
+
+/* In the body, under the list, not a toast: a listing that failed has to stay
+   on screen next to the scope bar the user needs in order to recover from it
+   (switch host, go up a level, retype the path). */
+.tl-filedlg__error {
+  padding: var(--tl-space-2);
+  border: 1px solid var(--tl-danger);
+  border-radius: var(--tl-radius);
+  color: var(--tl-danger);
+  word-break: break-word;
+}
+.tl-filedlg__error[hidden] { display: none; }
