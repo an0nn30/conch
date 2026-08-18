@@ -1002,6 +1002,20 @@
    */
   async function openForSave(pane) {
     if (!pane || pane.kind !== 'editor') return null;
+
+    // A chooser is already on screen. chooseFile's `activeChoice`
+    // short-circuit would hand this caller THAT dialog's answer — and a path
+    // the user picked for one pane is never where another pane's buffer
+    // belongs: both tabs would rebind to one file and the second write would
+    // bury the first, with nothing on screen to say so. Refuse instead. The
+    // dialog they are looking at is the one they are answering, and savePane
+    // reads a null here as a quiet not-saved (no toast, no close).
+    //
+    // Same-pane re-entry does not reach this: editor-service parks a
+    // per-pane entry for the duration of the await and joins it. This is the
+    // backstop for every other route, including a window-close sweep that
+    // walks a second dirty pane while the first pane's chooser is up.
+    if (activeChoice) return null;
     // The name the USER knows this file by. For a remote pane that is the
     // remote basename — pane.filePath is the local temp file it was
     // downloaded into, which they have never seen.

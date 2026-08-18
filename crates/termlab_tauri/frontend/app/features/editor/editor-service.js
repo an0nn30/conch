@@ -394,6 +394,15 @@
   // text. A pane therefore never has more than one write outstanding.
   const savesInFlight = new WeakMap();
 
+  // The Save As chooser currently open FOR a pane, if any — the window
+  // between "the user pressed ⌘S on an untitled buffer" and "they answered
+  // the dialog", which `savesInFlight` cannot cover because no write has
+  // started yet. Deliberately a SEPARATE map: saveAs drains `savesInFlight`
+  // before it writes, and openForSave calls saveAs from inside this very
+  // await, so parking the placeholder there would make that saveAs wait for
+  // the chooser it is answering — a deadlock, not a guard.
+  const choosersInFlight = new WeakMap();
+
   // Save a specific pane. saveActiveEditor covers the keyboard path; the close
   // guards need to save panes that are not focused.
   async function savePane(pane, options) {
@@ -404,14 +413,34 @@
     // to put it here, once, rather than each of them growing its own
     // untitled-file branch.
     if (!pane.filePath) {
-      const pending = savesInFlight.get(pane);
+      // TWO windows to join, not one.
+      //
+      // `savesInFlight` only fills once the chooser has been ANSWERED and the
+      // Save As it routed has started. The chooser itself sits on screen for
+      // as long as the user takes to read it, and ⌘S still reaches the
+      // shortcut router while it is up — tl-dialog traps Tab and Escape, not
+      // every key, and currentPane() is still this editor. A second save
+      // arriving in THAT window would start its own openForSave, be handed
+      // the first chooser's answer by file-dialog's `activeChoice`
+      // short-circuit, and save the same buffer twice: two writes, and for a
+      // remote first save two uploads and two "Saved" toasts, against this
+      // file's own one-outstanding-write-per-pane invariant.
+      const pending = choosersInFlight.get(pane) || savesInFlight.get(pane);
       if (pending) {
-        // The only write a pathless pane can have outstanding is a Save As
-        // (writeOnce needs a path), so join it instead of stacking a second
-        // chooser on top of the one already on screen. Same shape as the
-        // ordinary join below: it rebinds the pane on success, and anything
-        // typed while it ran is still owed a write.
-        await pending;
+        try {
+          await pending;
+        } catch (error) {
+          // Whatever we joined has already reported itself — saveAs toasts
+          // "Save As Failed", and a cancel says nothing on purpose — and left
+          // the pane pathless. Rethrowing its raw error would make our caller
+          // toast the same failure a second time; the sentinel keeps the
+          // outcome (not saved, quietly) without the duplicate.
+          if (isSaveCancelled(error) || pane.filePath) throw error;
+          throw saveCancelled();
+        }
+        // The Save As rebound the pane, so anything typed while it ran is
+        // still owed an ordinary write — same one-shot retry as the join
+        // below, and guarded on filePath so it can never re-enter this branch.
         if (pane.filePath && pane.dirty && !(options && options.noRetry)) {
           await savePane(pane, { noRetry: true });
         }
@@ -430,11 +459,20 @@
       // write the same bytes a second time.
       //
       // It also resolves null when that saveAs FAILED, having already toasted
-      // "Save As Failed" itself. The sentinel is right for that case too: not
-      // saved (so `:wq` keeps the tab and the close guards abort), and silent
-      // here (so the one failure is reported once, not twice).
-      const chosen = await dialog.openForSave(pane);
-      if (chosen == null) throw saveCancelled();
+      // "Save As Failed" itself, and when a chooser for ANOTHER pane is
+      // already up. The sentinel is right for all three: not saved (so `:wq`
+      // keeps the tab and the close guards abort), and silent here (so one
+      // failure is reported once, not twice, and a cancel not at all).
+      //
+      // .finally is attached before the entry is stored, exactly as the
+      // ordinary save path does, so a joiner can never re-find its own
+      // settled entry.
+      const asking = Promise.resolve()
+        .then(() => dialog.openForSave(pane))
+        .then((chosen) => { if (chosen == null) throw saveCancelled(); })
+        .finally(() => { choosersInFlight.delete(pane); });
+      choosersInFlight.set(pane, asking);
+      await asking;
       return;
     }
 

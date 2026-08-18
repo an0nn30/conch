@@ -135,7 +135,10 @@ function makeHarness(options = {}) {
   const labelCalls = [];
   const panes = new Map();
   const tabs = new Map();
+  const uploads = [];
+  const listeners = [];
   let nextPaneId = 1;
+  let nextTransferId = 1;
 
   if (!options.noBundle) sandbox.CM6 = {};
   sandbox.toast = {
@@ -169,12 +172,23 @@ function makeHarness(options = {}) {
           case 'editor_temp_cleanup':
             cleanups.push(args.path);
             return Promise.resolve(null);
+          case 'editor_temp_path':
+            return Promise.resolve(tempPathFor(args.hostLabel, args.remotePath));
+          case 'transfer_upload': {
+            const id = `transfer-${nextTransferId++}`;
+            uploads.push({ id, args });
+            return Promise.resolve(id);
+          }
+          case 'transfer_cancel':
+            return Promise.resolve(true);
           default:
             return Promise.resolve(null);
         }
       },
       listen(eventName, handler) {
-        return Promise.resolve(() => { void eventName; void handler; });
+        const entry = { eventName, handler, active: true };
+        listeners.push(entry);
+        return Promise.resolve(() => { entry.active = false; });
       },
     },
   };
@@ -280,6 +294,12 @@ function makeHarness(options = {}) {
     calls,
     writes,
     cleanups,
+    uploads,
+    emit: (payload) => {
+      for (const entry of listeners) {
+        if (entry.active && entry.eventName === 'transfer-progress') entry.handler({ payload });
+      }
+    },
     created,
     dialogCalls,
     confirmCalls,
@@ -308,6 +328,38 @@ function savingDialog(service, targetPath) {
 }
 
 const TARGET = '/home/dev/notes/gamma.md';
+
+// Stands in for editor_temp_path's real layout; only the property the service
+// depends on is reproduced — one path per (hostLabel, remotePath).
+function tempPathFor(hostLabel, remotePath) {
+  const base = String(remotePath).split('/').filter(Boolean).pop() || 'untitled';
+  const key = (s) => String(s).replace(/[^a-zA-Z0-9]/g, '_');
+  return `/tmp/termlab-sftp-edits/${key(hostLabel)}/${key(remotePath)}/${base}`;
+}
+
+const HOST = { paneId: 4, hostLabel: 'ada@alpha', remotePath: '/srv/notes/draft.md' };
+const remoteTarget = { scope: 'remote', ...HOST };
+const uploadProgress = (id, status) => ({
+  transfer_id: id,
+  kind: 'upload',
+  status,
+  bytes_transferred: 0,
+  total_bytes: 0,
+  file_name: 'draft.md',
+});
+
+// The user is reading the chooser: openForSave does not resolve until
+// `release()` is called, which is the whole window this guards.
+function parkedChooser(h, save) {
+  let release = null;
+  const answered = new Promise((resolve) => { release = resolve; });
+  h.sandbox.termlabFileDialog.openForSave = async (pane) => {
+    h.dialogCalls.push(pane);
+    await answered;
+    return save(pane);
+  };
+  return () => release();
+}
 
 // ---------------------------------------------------------------------------
 // 1. Naming — the per-window counter
@@ -540,6 +592,158 @@ await checkAsync('a second save while the chooser\'s save is still in flight joi
 
   assert.strictEqual(h.writes.length, 1, 'and it did not write a second copy');
   assert.strictEqual(pane.filePath, TARGET, 'both are satisfied by the one rebind');
+});
+
+// ---------------------------------------------------------------------------
+// 2b. The WIDE window: a second save while the chooser is still on screen
+// ---------------------------------------------------------------------------
+//
+// `savesInFlight` only fills once the chooser has been ANSWERED. The dialog
+// itself is up for as long as the user reads it, and ⌘S still reaches the
+// shortcut router while it is (tl-dialog traps Tab and Escape, not every
+// key). Two presses are enough, and file-dialog's `activeChoice`
+// short-circuit would hand the second caller the FIRST one's answer.
+
+console.log('editor untitled: the chooser window');
+
+await checkAsync('a second ⌘S while the chooser is up joins it — one write', async () => {
+  const h = makeHarness();
+  const answer = parkedChooser(h, async (pane) => {
+    await h.service.saveAs(pane, { scope: 'local', path: TARGET });
+    return choiceFor(TARGET);
+  });
+  h.service.openUntitled();
+  await settle();
+  const [pane] = [...h.panes.values()];
+  pane.view.type('draft');
+
+  const first = h.service.savePane(pane);
+  await settle();
+  assert.strictEqual(h.dialogCalls.length, 1, 'precondition: the chooser is up, unanswered');
+  assert.strictEqual(h.writes.length, 0, 'precondition: nothing written yet');
+
+  const second = h.service.savePane(pane);
+  await settle();
+  assert.strictEqual(h.dialogCalls.length, 1, 'the second ⌘S did not start a second chooser');
+
+  answer();
+  await settles(Promise.all([first, second]), 'both saves');
+
+  assert.strictEqual(h.writes.length, 1, 'ONE write, not one per ⌘S');
+  assert.strictEqual(pane.filePath, TARGET, 'one rebind');
+  assert.strictEqual(pane.dirty, false);
+  assert.strictEqual(h.errorToasts().length, 0);
+});
+
+await checkAsync('a remote first save uploads ONCE and says "Saved" once', async () => {
+  // The reviewer's probe, in the shape that costs the most: for a remote pane
+  // the duplicate is a second upload over the network and a second success
+  // toast for one save.
+  const h = makeHarness();
+  const answer = parkedChooser(h, async (pane) => {
+    await h.service.saveAs(pane, remoteTarget);
+    return choiceFor(HOST.remotePath);
+  });
+  h.service.openUntitled();
+  await settle();
+  const [pane] = [...h.panes.values()];
+  pane.view.type('draft');
+
+  const first = h.service.savePane(pane);
+  await settle();
+  const second = h.service.savePane(pane);
+  await settle();
+  assert.strictEqual(h.dialogCalls.length, 1, 'one chooser');
+
+  answer();
+  await settle();
+  assert.strictEqual(h.uploads.length, 1, 'one upload started');
+  h.emit(uploadProgress(h.uploads[0].id, 'completed'));
+  await settles(Promise.all([first, second]), 'both saves');
+
+  assert.strictEqual(h.uploads.length, 1, 'ONE upload — not one per ⌘S');
+  assert.strictEqual(h.writes.length, 1, 'one staged write');
+  assert.strictEqual(
+    h.toasts.filter((t) => t.kind === 'success' && t.title === 'Saved').length,
+    1,
+    'and the user is told once that it saved',
+  );
+  assert.deepEqual(pane.remote, { ...HOST }, 'bound to the host it was saved to');
+  assert.strictEqual(pane.filePath, tempPathFor(HOST.hostLabel, HOST.remotePath));
+});
+
+await checkAsync('a joined save that FAILS is reported once, not twice', async () => {
+  const h = makeHarness({ failWrite: new Error('disk full') });
+  const answer = parkedChooser(h, async (pane) => {
+    try {
+      await h.service.saveAs(pane, { scope: 'local', path: TARGET });
+    } catch (_) {
+      return null; // exactly what the real openForSave does
+    }
+    return choiceFor(TARGET);
+  });
+  h.service.openUntitled();
+  await settle();
+  const [pane] = [...h.panes.values()];
+  pane.view.type('draft');
+  h.focus(pane);
+
+  const first = h.service.saveActiveEditor();
+  await settle();
+  const second = h.service.saveActiveEditor();
+  await settle();
+  answer();
+  await settles(Promise.all([first, second]), 'both saves');
+
+  const errors = h.errorToasts();
+  assert.strictEqual(errors.length, 1, 'one failure, one report — the joiner must not say it again');
+  assert.strictEqual(errors[0].title, 'Save As Failed');
+  assert.strictEqual(pane.filePath, null, 'and the buffer is still untitled');
+  assert.strictEqual(pane.dirty, true);
+});
+
+await checkAsync('the join is per pane: another buffer gets its own chooser', async () => {
+  // The guard must not be a global latch — a second untitled buffer saving
+  // while the first one's chooser is up is a different question with a
+  // different answer, and it must never inherit the first's path.
+  const h = makeHarness();
+  h.service.openUntitled();
+  h.service.openUntitled();
+  await settle();
+  const [a, b] = [...h.panes.values()];
+  a.view.type('first buffer');
+  b.view.type('second buffer');
+
+  const seen = [];
+  let releaseA = null;
+  const aAnswered = new Promise((resolve) => { releaseA = resolve; });
+  h.sandbox.termlabFileDialog.openForSave = async (pane) => {
+    seen.push(pane);
+    h.dialogCalls.push(pane);
+    if (pane === a) {
+      await aAnswered;
+      await h.service.saveAs(pane, { scope: 'local', path: '/home/dev/a.md' });
+      return choiceFor('/home/dev/a.md');
+    }
+    await h.service.saveAs(pane, { scope: 'local', path: '/home/dev/b.md' });
+    return choiceFor('/home/dev/b.md');
+  };
+
+  const savingA = h.service.savePane(a);
+  await settle();
+  const savingB = h.service.savePane(b);
+  await settle();
+
+  assert.deepStrictEqual(seen, [a, b], 'each pane asked its own question');
+  assert.strictEqual(b.filePath, '/home/dev/b.md', 'the second buffer got its own path');
+  assert.strictEqual(a.filePath, null, 'while the first is still waiting on its chooser');
+
+  releaseA();
+  await settles(Promise.all([savingA, savingB]), 'both saves');
+
+  assert.strictEqual(a.filePath, '/home/dev/a.md', 'and then lands on its own');
+  assert.strictEqual(b.filePath, '/home/dev/b.md', 'without either buffer taking the other\'s path');
+  assert.strictEqual(h.writes.length, 2, 'two buffers, two writes');
 });
 
 // ---------------------------------------------------------------------------

@@ -848,7 +848,7 @@ function makeDialogHarness(options = {}) {
 
   const calls = {
     listLocal: [], listRemote: [], statLocal: [], statRemote: [],
-    mkdirLocal: [], mkdirRemote: [], saveAs: [],
+    mkdirLocal: [], mkdirRemote: [], saveAs: [], saveAsPanes: [],
   };
   const toasts = [];
 
@@ -890,7 +890,13 @@ function makeDialogHarness(options = {}) {
   sandbox.termlabEditorService = {
     openLocalFile: () => Promise.resolve(),
     openRemoteFile: () => Promise.resolve(),
-    saveAs: (pane, target) => { calls.saveAs.push(target); return Promise.resolve(); },
+    saveAs: (pane, target) => {
+      calls.saveAs.push(target);
+      // Recorded alongside, not folded into calls.saveAs: the target
+      // assertions above compare that array whole.
+      calls.saveAsPanes.push(pane);
+      return Promise.resolve();
+    },
   };
 
   load(sandbox, 'ui/tl-dialog.js');
@@ -1089,6 +1095,43 @@ await checkAsync('(b) an untitled pane prefills its TAB LABEL, selected to type 
   assert.strictEqual(h.doc.activeElement, dlg.nameInput, 'the field has focus');
   assert.strictEqual(dlg.nameInput.selectCount, 1, 'with its text selected, so typing replaces it');
   assert.ok(dlg.button('Save'), 'and Save is offered');
+});
+
+await checkAsync('(b) a chooser already up REFUSES a second pane rather than sharing its answer', async () => {
+  // chooseFile's `activeChoice` short-circuit hands a second caller the FIRST
+  // caller's promise. For openForSave that is never right: the path the user
+  // picked for pane A is not where pane B's buffer belongs, and inheriting it
+  // rebinds BOTH tabs to one file — the second write burying the first, with
+  // no prompt (neither pane had rebound when the overwrite check ran) and no
+  // toast. Reachable today: a window-close sweep walks the second dirty pane
+  // while the first pane's chooser is still on screen.
+  const h = makeDialogHarness({ listLocal: () => Promise.resolve([]) });
+  const a = { kind: 'editor', tabId: 1, filePath: null, remote: null, untitledSeq: 1 };
+  const b = { kind: 'editor', tabId: 2, filePath: null, remote: null, untitledSeq: 2 };
+
+  const savingA = h.sandbox.termlabFileDialog.openForSave(a);
+  await dialogSettle();
+  assert.strictEqual(dialogCount(h.doc), 1, 'precondition: A\'s chooser is up');
+
+  // Through `settles`, because the pre-fix failure mode is not a wrong value
+  // but a promise that never settles: B was handed A's promise and sat on it
+  // until A was answered, then acted on A's answer.
+  const refused = await settles(h.sandbox.termlabFileDialog.openForSave(b), 'openForSave for a second pane');
+  await dialogSettle();
+  assert.strictEqual(refused, null, 'B is refused outright');
+  assert.strictEqual(dialogCount(h.doc), 1, 'no second dialog, and A\'s is untouched');
+  assert.strictEqual(h.calls.saveAs.length, 0, 'nothing has been saved yet');
+
+  // Answering A's chooser saves A, and only A.
+  const dlg = topDialog(h.doc);
+  assert.strictEqual(dlg.nameInput.value, 'Untitled', 'the dialog on screen is still A\'s');
+  dlg.nameInput.value = 'a.md';
+  dlg.button('Save').fire('click');
+  await dialogSettle();
+  await settles(savingA, 'A\'s Save As');
+
+  assert.deepEqual(h.calls.saveAs, [{ scope: 'local', path: '/home/u/a.md' }], 'one save');
+  assert.deepStrictEqual(h.calls.saveAsPanes, [a], 'for pane A — pane B was never rebound');
 });
 
 await checkAsync('(b) a titled pane does NOT get its name selected', async () => {
