@@ -354,8 +354,13 @@ build. Run in order; stop and report at the first mismatch.
     text); the sticky column header stays opaque with no seam or bleed-
     through as rows scroll under it; and focus rings are visible on the
     sidebar rows, the column headers, the up button, the crumbs and both
-    fields. **Known:** the light theme inherits several dark token values
-    app-wide (see the spec's Known limitations) — report anything that looks
+    fields. Also check the row glyphs and the filter icon — `file.svg` and
+    `search.svg` — for legibility against the row/selection fill in each
+    appearance: neither has a `_dark` variant in the vendored set, so the
+    same asset is served to both, and these are the first time either glyph
+    has shipped in this app. **Known:** the light theme inherits several
+    dark token values app-wide (see the spec's Known limitations) — report
+    anything that looks
     wrong, but a light-theme border or muted text that reads dark is a
     token-pipeline gap, not a regression from this branch.
 91. **The judgment call:** with a listing of 30+ mixed files and folders on
