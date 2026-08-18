@@ -178,6 +178,13 @@ pub(crate) struct KeyboardShortcuts {
     new_file: String,
     open_file: String,
     save_file_as: String,
+    /// Same display-AND-accelerator contract as `new_file` above: these four
+    /// are configurable in `[termlab.keyboard]` and live titlebar bindings,
+    /// so the frontend must read them from this payload.
+    new_tab: String,
+    new_window: String,
+    close_tab: String,
+    settings: String,
 }
 
 #[tauri::command]
@@ -198,6 +205,10 @@ pub(crate) fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> Key
         new_file: kb.new_file.clone(),
         open_file: kb.open_file.clone(),
         save_file_as: kb.save_file_as.clone(),
+        new_tab: kb.new_tab.clone(),
+        new_window: kb.new_window.clone(),
+        close_tab: kb.close_tab.clone(),
+        settings: kb.settings.clone(),
     }
 }
 

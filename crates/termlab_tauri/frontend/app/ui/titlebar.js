@@ -55,9 +55,9 @@
     const menus = [
       {
         label: 'File', items: [
-          { id: 'new-tab', label: 'New Tab', shortcut: `${ctrl}+T` },
+          { id: 'new-tab', label: 'New Tab', shortcut: shortcuts.new_tab || `${ctrl}+T` },
           { id: 'new-plain-shell-tab', label: 'New Plain Shell Tab', shortcut: shortcuts.new_plain_shell_tab || `${ctrl}+Shift+T` },
-          { id: 'new-window', label: 'New Window', shortcut: `${ctrl}+Shift+N` },
+          { id: 'new-window', label: 'New Window', shortcut: shortcuts.new_window || `${ctrl}+Shift+N` },
           // Read from the config payload, not hardcoded. registerAccelerators
           // below binds every non-noAccel entry here at router priority 115,
           // which outranks the configurable shortcut table at 75/80 — so a
@@ -78,10 +78,10 @@
             { id: 'ssh-import', label: 'Import' },
           ]},
           { type: 'separator' },
-          { id: 'settings', label: 'Settings\u2026', shortcut: `${ctrl}+,` },
+          { id: 'settings', label: 'Settings\u2026', shortcut: shortcuts.settings || `${ctrl}+,` },
           { type: 'separator' },
           { id: 'rename-tab', label: 'Rename Tab', shortcut: shortcuts.rename_tab || 'F2' },
-          { id: 'close-tab', label: 'Close Tab', shortcut: `${ctrl}+W` },
+          { id: 'close-tab', label: 'Close Tab', shortcut: shortcuts.close_tab || `${ctrl}+W` },
           { id: 'close-window', label: 'Close Window' },
         ]
       },
