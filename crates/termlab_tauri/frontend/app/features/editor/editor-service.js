@@ -644,9 +644,17 @@
   }
 
   // What to call the pane's current location in a failure message.
+  //
+  // The untitled case is not a fallback for "we could not work it out" — it is
+  // the whole of an untitled buffer's first save, and by far the most common
+  // way this message is seen. "its previous location" is a lie there: there is
+  // no previous location, and the phrase reads as a reassurance that some
+  // existing file was left alone. Say what actually happened instead — the
+  // buffer is still only in the tab.
   function describeBinding(pane) {
     if (pane.remote) return `${pane.remote.hostLabel}:${pane.remote.remotePath}`;
-    return pane.filePath || 'its previous location';
+    if (pane.filePath) return pane.filePath;
+    return 'nowhere yet (never saved)';
   }
 
   // Recompose the tab's caption and tooltip from the pane's CURRENT identity.

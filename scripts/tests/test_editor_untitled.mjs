@@ -700,6 +700,50 @@ await checkAsync('a joined save that FAILS is reported once, not twice', async (
   assert.strictEqual(errors[0].title, 'Save As Failed');
   assert.strictEqual(pane.filePath, null, 'and the buffer is still untitled');
   assert.strictEqual(pane.dirty, true);
+
+  // And it says WHERE the buffer still is. For an untitled first save the
+  // honest answer is "nowhere": the old wording — "this tab still points at its
+  // previous location" — named a location that has never existed, and read as a
+  // reassurance that some file on disk was left untouched.
+  assert.ok(
+    errors[0].body.includes('nowhere yet (never saved)'),
+    `the failure names the buffer's real (non-)location, got: ${errors[0].body}`,
+  );
+  assert.ok(
+    !errors[0].body.includes('previous location'),
+    'and does not claim a previous location a first save never had',
+  );
+});
+
+await checkAsync('a TITLED pane that fails to Save As still names the file it stayed on', async () => {
+  // The other side of the same branch: a pane with a path has a real previous
+  // location, and naming it is the point of the message. Without this, changing
+  // describeBinding to say "nowhere yet" unconditionally would pass every other
+  // check in this file.
+  const h = makeHarness({ failWrite: new Error('disk full') });
+  h.service.openUntitled();
+  await settle();
+  const [pane] = [...h.panes.values()];
+  pane.filePath = '/home/u/docs/notes.md';   // as a Save As would have left it
+  pane.untitledSeq = null;
+  pane.view.type('edited');
+
+  try {
+    await h.service.saveAs(pane, { scope: 'local', path: TARGET });
+  } catch (_) { /* reported by the toast below */ }
+
+  const errors = h.errorToasts();
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].title, 'Save As Failed');
+  assert.ok(
+    errors[0].body.includes('/home/u/docs/notes.md'),
+    `a titled pane names its actual path, got: ${errors[0].body}`,
+  );
+  assert.ok(
+    !errors[0].body.includes('nowhere yet'),
+    'and is never described as never having been saved',
+  );
+  assert.strictEqual(pane.filePath, '/home/u/docs/notes.md', 'and it really did stay there');
 });
 
 await checkAsync('the join is per pane: another buffer gets its own chooser', async () => {
