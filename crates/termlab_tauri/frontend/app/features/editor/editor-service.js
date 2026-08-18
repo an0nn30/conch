@@ -596,12 +596,19 @@
     }
     // The write (and upload, if any) already succeeded once execution
     // reaches here — announce that now, not after the cosmetic steps below.
-    // Moved out of the region that can still throw, so a bad tab label or
-    // language guess can never turn a real "Saved" into a false
-    // "Save As Failed" for the caller.
     if (nextRemote) toastSuccess('Saved', `${nextRemote.hostLabel}:${nextRemote.remotePath}`);
-    refreshTabLabel(pane);
-    setPaneLanguage(pane.view, displayName);
+    // The bytes landed and the identity above is already committed: nothing
+    // past this point may turn a real save into "Save As Failed". A bad tab
+    // caption or language guess is cosmetic, so it is caught and logged
+    // rather than thrown — otherwise a throw here would reject the whole
+    // operation with a message claiming the rebind never happened, when it
+    // already had.
+    try {
+      refreshTabLabel(pane);
+      setPaneLanguage(pane.view, displayName);
+    } catch (error) {
+      console.error('Save As: relabelling the rebound pane failed', error);
+    }
     // ----- end of the rebind -----
 
     // Only now, and only a temp file this pane owned. Before the rebind this
@@ -625,14 +632,6 @@
       throw new Error(`Save As: unknown target scope ${target && target.scope}`);
     }
 
-    // Captured before writeElsewhere runs at all, and used verbatim in the
-    // failure toast below. A live `describeBinding(pane)` read from inside
-    // the catch happens AFTER the promise has settled — by then a rebind
-    // that got far enough to mutate the pane before failing would already
-    // have overwritten `pane.filePath`/`pane.remote`, so that read would
-    // name the tab's NEW location while claiming nothing was rebound.
-    const where = describeBinding(pane);
-
     // The existing guard, not a second queue: a pane never has more than one
     // write outstanding, so Save As waits for a save already running rather
     // than writing over it. Each turn of this loop waits for a write that is
@@ -646,6 +645,17 @@
       await pending.catch(() => {});
       pending = savesInFlight.get(pane);
     }
+
+    // Captured only now — after any save already in flight has drained, and
+    // still before writeElsewhere runs — and used verbatim in the failure
+    // toast below. A capture taken before the wait loop could go stale: a
+    // concurrent Save As finishing during the wait rebinds the pane, and a
+    // live `describeBinding(pane)` read from inside the catch happens AFTER
+    // the promise has settled, by which point a rebind that got far enough
+    // to mutate the pane before failing would already have overwritten
+    // `pane.filePath`/`pane.remote` — naming the tab's NEW location while
+    // claiming nothing was rebound.
+    const where = describeBinding(pane);
 
     // Registered in the SAME map as an ordinary save, so a ⌘S landing during a
     // Save As joins this operation instead of writing the old file underneath

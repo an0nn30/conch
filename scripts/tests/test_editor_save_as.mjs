@@ -492,43 +492,54 @@ await checkAsync('(d) a local Save As whose write fails leaves the pane where it
 });
 
 await checkAsync(
-  '(d) MUTATION PROOF: a throw after the rebind still reports the OLD binding, not the live (already-new) one',
+  '(d) a cosmetic tail throw after a committed rebind resolves as success — one toast, zero failures',
   async () => {
     const h = makeHarness({ pane: remotePane() });
     h.pane.view.type('!');
     // Force a throw from inside the rebind's cosmetic tail (language
-    // re-derivation), which runs AFTER pane.filePath/pane.remote have already
-    // been reassigned to NEW. Only a `where` captured BEFORE writeElsewhere
-    // ever ran can survive this and still name the binding the operation
-    // actually started from; a live `describeBinding(pane)` read from inside
-    // the catch would see the pane already sitting on NEW.
+    // re-derivation), which runs AFTER pane.filePath/pane.remote have
+    // already been reassigned to NEW and the bytes have already reached the
+    // host. The bytes landed and the identity committed; a bad tab caption
+    // or language guess is cosmetic and must not turn that genuine success
+    // into "Save As Failed".
     h.sandbox.termlabEditorPane.setLanguage = () => { throw new Error('setLanguage boom'); };
+    const errors = [];
+    // Stub only .error, on a fresh object — the harness's sandbox.console is
+    // the real console, and free-variable lookups inside the vm context
+    // resolve `console` from this property at CALL time, so replacing it
+    // after the module has already loaded still takes effect.
+    h.sandbox.console = Object.assign({}, console, { error: (...args) => errors.push(args) });
 
     const saving = h.service.saveAs(h.pane, { scope: 'remote', ...NEW });
     await settle();
     h.emit(progress(h.started[0].id, 'completed'));
 
-    await assert.rejects(() => settles(saving, 'a Save As whose tail throws'), /setLanguage boom/);
+    // Resolves — does not reject — because a cosmetic tail failure is no
+    // longer allowed to reach the caller as a Save As failure.
+    await settles(saving, 'a Save As whose cosmetic tail throws');
 
-    // The rebind DID commit — filePath/remote genuinely moved to NEW — despite
-    // the throw. This is what makes the proof meaningful: OLD and NEW here are
-    // both live, distinguishable values (different host, pane id, directory
-    // and basename), so a toast naming the wrong one is caught, not papered
-    // over by two strings that happen to look alike.
-    assert.strictEqual(h.pane.filePath, tempPathFor(NEW.hostLabel, NEW.remotePath), 'the rebind committed anyway');
+    // The rebind DID commit — filePath/remote genuinely moved to NEW, and
+    // the pane is clean, exactly as a real, unremarkable success would leave
+    // it.
+    assert.strictEqual(h.pane.filePath, tempPathFor(NEW.hostLabel, NEW.remotePath), 'the rebind committed');
     assert.deepEqual(h.pane.remote, { paneId: NEW.paneId, remotePath: NEW.remotePath, hostLabel: NEW.hostLabel });
+    assert.strictEqual(h.pane.dirty, false, 'clean: the bytes really did reach the host');
 
-    const failures = h.toasts.filter((t) => t.kind === 'error');
-    assert.strictEqual(failures.length, 1, 'the user is told once');
-    assert.match(
-      failures[0].body,
-      /ada@alpha:\/srv\/legacy\/alpha\.conf/,
-      'names the OLD binding — where the operation STARTED — not the pane’s current (new) one',
-    );
-    assert.doesNotMatch(
-      failures[0].body,
-      /bob@beta:\/opt\/fresh\/beta\.py/,
-      'never the NEW binding: this failure toast must not describe the location a live post-hoc read would see',
+    // Exactly one toast — the true "Saved" — and never a failure toast
+    // claiming a committed rebind never happened.
+    assert.strictEqual(h.toasts.length, 1, 'exactly one toast total');
+    assert.strictEqual(h.toasts[0].kind, 'success');
+    assert.strictEqual(h.toasts[0].title, 'Saved');
+    assert.strictEqual(h.toasts[0].body, `${NEW.hostLabel}:${NEW.remotePath}`);
+    assert.strictEqual(h.toasts.filter((t) => t.kind === 'error').length, 0, 'zero failure toasts');
+
+    // The cosmetic failure is not silently swallowed — it is logged, so it
+    // is still discoverable without being surfaced to the user as a failure.
+    assert.strictEqual(errors.length, 1, 'the relabel failure is logged exactly once');
+    assert.match(String(errors[0][0]), /relabelling the rebound pane failed/);
+    assert.ok(
+      errors[0][1] instanceof Error && /setLanguage boom/.test(errors[0][1].message),
+      'the original error is logged, not swallowed entirely',
     );
   },
 );
