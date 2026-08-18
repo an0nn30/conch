@@ -265,3 +265,100 @@ build. Run in order; stop and report at the first mismatch.
     this refusal is silent by design (see Task 2's fix-round notes); a
     follow-up to surface some feedback for pane B is logged separately, not
     part of this plan.
+
+## H. File chooser redesign (sidebar + detail columns)
+
+Added by the file-dialog-redesign plan: the scope pill row became a Places /
+Hosts sidebar, the listing grew Name / Size / Modified columns with
+click-to-sort headers and file/folder icons, and the Hidden toggle plus the
+save-mode controls moved into the dialog footer. Task 3 rewrote the
+stylesheet; **no part of the redesign was ever rendered in a GUI by the
+implementer** — every step below is a human pass, and the row-height,
+column-width and sticky-header judgments are explicitly yours to make.
+**Steps marked [SSH] need a real SSH host**; the rest need only a local
+build. Run in order; stop and report at the first mismatch.
+
+75. ⌘O with no SSH session connected → the sidebar shows a `PLACES` caption
+    over a single `This Mac` row, and **no `HOSTS` caption at all** (an empty
+    heading would read as a broken feature). The row is marked active, the
+    listing to its right is your home directory, and the sidebar reads as a
+    recessed panel against the lighter listing box beside it.
+76. [SSH] Connect one host, then ⌘O → a `HOSTS` caption appears under Places
+    with that session's row, a server glyph, and a small round dot at the
+    trailing edge. Disconnect it, reopen the chooser → the row and the whole
+    `HOSTS` section are gone again.
+77. [SSH] Open two panes onto the SAME host, then ⌘O → both rows read
+    `user@host:port (pane N)` with different N, and neither is truncated
+    into unreadability — a label too long for 150px must ellipsize, not push
+    the connected dot out of the row.
+78. [SSH] Click a host row → the listing switches to that host's home
+    directory and the active marking moves; click it again → nothing
+    happens. Now make a host's start FAIL (connect, then drop the connection
+    at the far end before clicking) → the inline error appears, the row
+    stays active, and **clicking that same row again retries** rather than
+    doing nothing.
+79. Click the `Size` header → the arrow moves to that column, it brightens
+    against the other two, and the listing reorders by size. Click it again
+    → the arrow flips and the order reverses. Click `Modified`, then `Name`
+    → same behaviour each time. Directories stay above files in every one of
+    the six states.
+80. With a non-default sort showing (say Size descending), Cancel the dialog
+    and reopen it → the sort is back to **Name ascending**. Sort choice is
+    per-open by design; a chooser that remembered it would be a bug here.
+81. Select a file, then click a header to re-sort → the SAME file is still
+    selected (the highlight follows the entry, not the row number). In save
+    mode, re-sorting must not overwrite a filename you typed after clicking
+    that row.
+82. Read a directory row: size reads `—`, never a byte count. Read a file
+    row saved today → `Today`; yesterday → `Yesterday`; earlier this year →
+    `Jan 5` style, **with no leading zero on the day**; last year →
+    `YYYY-MM-DD`. Scan the Modified column down the listing: the digits
+    should line up in a straight edge (tabular numerals), and the Size
+    column's numbers should be flush right.
+83. Navigate to a directory holding a file with a very long name (e.g.
+    `touch /tmp/h/$(printf 'a%.0s' {1..120}).txt`) → the name truncates with
+    an ellipsis inside its column; the Size and Modified columns do not move
+    and the row does not grow a second line or a horizontal scrollbar.
+84. Toggle **Hidden** in the footer → dotfiles appear and disappear, the
+    selection clears, and the toggle sits on the LEFT of the footer opposite
+    Cancel / Open.
+85. Navigate deep enough that the breadcrumb strip overflows (10+ segments)
+    → the strip scrolls horizontally on its own; the path bar stays ONE row
+    at the `lg` dialog width, the path field is still wide enough to read a
+    real path in, and the filter field still shows its magnifier glyph
+    inside the field. Clicking any crumb navigates to it; the last crumb is
+    plain text, not a link.
+86. Type a directory into the path field and press Enter → it jumps there
+    and the crumbs follow. Type a full FILE path and press Enter → the file
+    opens (in save mode, its name lands in the filename field). Type
+    nonsense → the parent listing plus an inline `No such file or directory`
+    message in the body, not a toast.
+87. Click into the listing and drive it from the keyboard only: ↓ ↑ Home End
+    move the selection and scroll it into view, Enter descends into a
+    directory, Enter on a file opens it, Escape closes. While the listing
+    has focus, the box around it should show a focus ring — and Tab should
+    reach the three column headers and fire a sort with Space/Enter.
+88. ⌘⇧S from an untitled buffer → the footer's left side carries
+    `Save As:`, the filename field (pre-filled and SELECTED), and
+    `New Folder`, with Cancel / Save on the right. The field is wide enough
+    to read a real filename in without the footer wrapping.
+89. `New Folder` in save mode → the nested prompt stacks over the chooser,
+    its single field fills the small dialog, and creating the folder
+    refreshes the listing underneath with the new directory in it. Cancel
+    leaves you exactly where you were.
+90. **Both themes.** Repeat 75, 79, 82, 84 and 88 with the appearance set to
+    light and again set to dark. In each: the sidebar is distinguishable
+    from both the dialog panel and the listing box; the active sidebar row
+    and the selected listing row are legible (foreground against the
+    selection fill, including the connected dot and the dimmed Size/Modified
+    text); the sticky column header stays opaque with no seam or bleed-
+    through as rows scroll under it; and focus rings are visible on the
+    sidebar rows, the column headers, the up button, the crumbs and both
+    fields. **Known:** the light theme inherits several dark token values
+    app-wide (see the spec's Known limitations) — report anything that looks
+    wrong, but a light-theme border or muted text that reads dark is a
+    token-pipeline gap, not a regression from this branch.
+91. **The judgment call:** with a listing of 30+ mixed files and folders on
+    screen, decide whether the 24px row height, the 150px sidebar, the 80px
+    Size column and the 110px Modified column read as comfortable or as
+    cramped, in both themes. Say which, with a number, if any should change.

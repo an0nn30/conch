@@ -1,64 +1,167 @@
 /* File dialog — the unified local/remote file chooser
    (app/features/editor/file-dialog.js).
 
-   The listing box reuses .tl-picker__box (components/picker.css) for its
-   border, radius, background and bounded height, so the chooser and the
-   export picker are the same surface; everything below is the columns,
-   the scope bar and the breadcrumbs that picker.css has no notion of.
+   Two regions, per the redesign spec
+   (docs/superpowers/specs/2026-08-18-file-dialog-redesign-design.md):
+
+     .tl-filedlg
+       .tl-filedlg__sidebar   Places / Hosts, one row per scope (150px, fixed)
+       .tl-filedlg__main      path bar -> listing box -> inline error
+
+   plus .tl-filedlg__footctl, which is built with the body but appended into
+   tl-dialog's .tl-dialog__footer-start in onOpen (file-dialog.js:1093) — so
+   it is styled here as a footer strip, not as a body row, and carries a
+   fallback rule for the build where that slot does not exist.
+
+   The listing box still reuses .tl-picker__box (components/picker.css) for
+   its border, radius, background and bounded height, so the chooser and the
+   export picker remain the same surface; everything below is the sidebar,
+   the columns and the breadcrumbs picker.css has no notion of.
 
    Tokens only — raw hex belongs in base.css alone
    (scripts/check_frontend_boundaries.sh enforces this for this directory). */
 
 .tl-filedlg {
   display: flex;
+  align-items: stretch;
+  /* wrap is for the degraded path only: if a build's tl-dialog has no
+     .tl-dialog__footer-start, file-dialog.js appends .tl-filedlg__footctl to
+     this root instead. Wrapping puts it on its own line under the two
+     regions rather than beside them as a third column. */
+  flex-wrap: wrap;
+  gap: var(--tl-space-3);
+  min-width: 0;
+}
+
+/* ---- sidebar: Places (This Mac) + Hosts (every connected session) -------- */
+
+/* One step below the listing: the box is --tl-control-bg (TextField
+   background — the lighter surface in both token sets), the sidebar is
+   --tl-panel-bg, which is the same recessed fill the tool-window rails use
+   (components/strips.css's .side-strip). The border is what separates it
+   from the dialog's own panel fill, which shares that value. */
+.tl-filedlg__sidebar {
+  flex: 0 0 150px;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--tl-space-2) 0;
+  background: var(--tl-panel-bg);
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+}
+
+.tl-filedlg__section + .tl-filedlg__section { margin-top: var(--tl-space-3); }
+
+/* Same treatment as .tl-picker__section-title (components/picker.css): a
+   quiet uppercase caption, not a heading that competes with the rows. */
+.tl-filedlg__section-label {
+  padding: 0 var(--tl-space-2) var(--tl-space-1);
+  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--tl-fg-muted);
+}
+
+/* A scope row, shaped like the app's other sidebar row (.tl-settings__item,
+   components/settings.css): full width, one --tl-row-h tall, quiet at rest.
+   The active row takes the selection tokens, per the spec — settings' own
+   --tl-settings-selection is that window's measured fill, not a general one. */
+.tl-filedlg__scope {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  width: 100%;
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  border: none;
+  border-radius: var(--tl-radius);
+  background: transparent;
+  color: var(--tl-fg);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  text-align: left;
+  cursor: default;
+}
+.tl-filedlg__scope:hover { background: var(--tl-row-hover); }
+.tl-filedlg__scope:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: -1px; }
+.tl-filedlg__scope.is-active {
+  background: var(--tl-selection-bg);
+  color: var(--tl-selection-fg);
+}
+
+.tl-filedlg__scope-icon { flex-shrink: 0; width: 16px; height: 16px; }
+
+/* The host label is the part that yields: a long user@host:port with a
+   "(pane 2)" suffix must ellipsize rather than push the connected dot out of
+   the row (same reasoning as .tl-picker__row-detail). */
+.tl-filedlg__scope-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Connected marker on a host row. Affordance, not state machinery — every
+   host in the list is connected by construction (buildScopes only ever sees
+   live sessions), so this says "remote, reachable", it does not track
+   anything.
+
+   Accent rather than green: the generated token sets carry exactly one
+   green (--tl-Label-successForeground) and it exists in tokens-dark.css
+   only. Referencing it with a fallback would resolve green in dark and
+   something else in light — precisely the phantom-correct var() reference
+   base.css's own comments warn about twice — and minting a light-theme
+   green is a token decision with no reference measurement behind it, so it
+   belongs to the token pipeline, not to this component. Spec amended to
+   match. */
+.tl-filedlg__scope-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tl-accent);
+}
+/* On the selected row the accent sits on the selection fill and disappears;
+   the selection foreground is the one color guaranteed to read there. */
+.tl-filedlg__scope.is-active .tl-filedlg__scope-dot { background: var(--tl-selection-fg); }
+
+/* ---- main column -------------------------------------------------------- */
+
+.tl-filedlg__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
   gap: var(--tl-space-2);
 }
 
-/* ---- scope bar: This Mac + one button per connected host ---------------- */
+/* ---- path bar: up + breadcrumbs + path field + filter, one row ---------- */
 
-.tl-filedlg__scopes {
+/* Four controls in one row is tight at the lg dialog's 720px. They are kept
+   in one row (the DOM order is a test contract) and de-crowded with flex
+   weights instead: the crumb strip gets the most slack, the path field
+   enough to paste into, the filter the least — and each carries a
+   flex-basis floor, so at any narrower dialog the row wraps to two lines
+   rather than crushing all four. */
+.tl-filedlg__pathbar {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--tl-space-1);
-}
-
-.tl-filedlg__scope {
-  padding: 2px var(--tl-space-2);
-  border: 1px solid var(--tl-border);
-  border-radius: var(--tl-radius);
-  background: transparent;
-  color: var(--tl-fg-muted);
-  font: inherit;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.tl-filedlg__scope:hover { background: var(--tl-row-hover); color: var(--tl-fg); }
-.tl-filedlg__scope:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
-.tl-filedlg__scope.is-active {
-  border-color: var(--tl-accent);
-  background: var(--tl-accent);
-  color: var(--tl-primary-fg);
-}
-
-/* ---- breadcrumbs ------------------------------------------------------- */
-
-.tl-filedlg__nav {
-  display: flex;
   align-items: center;
   gap: var(--tl-space-1);
   min-width: 0;
 }
 
+/* Square, and the same height as the two fields beside it (.tl-input is
+   26px, components/input.css) so the row has one baseline. */
 .tl-filedlg__up {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
   border: 1px solid var(--tl-border);
   border-radius: var(--tl-radius);
   background: transparent;
   color: var(--tl-fg-muted);
-  font: inherit;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
   line-height: 1;
   cursor: pointer;
 }
@@ -66,27 +169,41 @@
 .tl-filedlg__up:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
 
 /* Long paths scroll rather than wrapping the dialog into a taller box; the
-   tail (where you are) is what matters, so the row scrolls horizontally. */
+   tail (where you are) is what matters, so the strip scrolls horizontally. */
 .tl-filedlg__crumbs {
+  flex: 3 1 140px;
   display: flex;
   align-items: center;
   min-width: 0;
+  height: 26px;
   overflow-x: auto;
   white-space: nowrap;
 }
 
+/* A single absurd path segment must not eat the whole strip: each crumb
+   truncates, and the strip scrolls between them. */
 .tl-filedlg__crumb {
   flex-shrink: 0;
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 0 var(--tl-space-1);
   border: none;
   background: none;
   color: var(--tl-accent);
-  font: inherit;
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
   cursor: pointer;
 }
 .tl-filedlg__crumb:hover { text-decoration: underline; }
 .tl-filedlg__crumb:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
-.tl-filedlg__crumb.is-current { color: var(--tl-fg); cursor: default; }
+/* Where you are now reads as text, not as a link — and gets more room than
+   the ancestors it sits after. */
+.tl-filedlg__crumb.is-current {
+  max-width: none;
+  color: var(--tl-fg);
+  cursor: default;
+}
 .tl-filedlg__crumb.is-current:hover { text-decoration: none; }
 
 /* A separator between crumbs, drawn rather than emitted as a DOM node so the
@@ -97,18 +214,36 @@
   margin-right: var(--tl-space-1);
 }
 
-/* ---- path / filter / hidden row ---------------------------------------- */
+/* The field you paste into: second-widest, and it keeps a floor wide enough
+   for a real path to be readable while typing. */
+.tl-filedlg__path { flex: 2 1 180px; min-width: 0; }
 
-.tl-filedlg__controls {
+/* The filter wears its glyph inside the field (search.svg, already vendored)
+   rather than beside it, so the row spends no extra horizontal budget on
+   decoration. */
+.tl-filedlg__filterbox {
+  position: relative;
+  flex: 1 1 120px;
   display: flex;
   align-items: center;
-  gap: var(--tl-space-2);
+  min-width: 0;
 }
-
-/* The path is the wide one: it is the field you paste into. */
-.tl-filedlg__path { flex: 2 1 0; min-width: 0; }
-.tl-filedlg__filter { flex: 1 1 0; min-width: 0; }
-.tl-filedlg__hidden { flex-shrink: 0; white-space: nowrap; }
+.tl-filedlg__filtericon {
+  position: absolute;
+  left: var(--tl-space-2);
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+  opacity: 0.7;
+}
+/* Left padding clears the glyph; the right side keeps .tl-input's own. Class
+   specificity ties with .tl-input, and this file loads after input.css. */
+.tl-filedlg__filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  padding-left: calc(var(--tl-space-2) + 14px + var(--tl-space-1));
+}
 
 /* ---- listing ------------------------------------------------------------ */
 
@@ -120,8 +255,15 @@
   min-height: 200px;
   padding: 0;
 }
+/* The list itself is not focus-ringed (an outline on it would be drawn round
+   the whole scrolled content and slide out of view); the box it lives in
+   takes the accent border instead, which also covers a focused column
+   header. */
+.tl-filedlg__box:focus-within { border-color: var(--tl-accent); }
 
-/* Sticky over the rows it labels, exactly like .tl-picker__group-header. */
+/* Sticky over the rows it labels, exactly like .tl-picker__group-header.
+   Same height, padding and inter-cell gap as a row, so the column ruler
+   below lines the two up without a table. */
 .tl-filedlg__head {
   position: sticky;
   top: 0;
@@ -129,21 +271,58 @@
   display: flex;
   align-items: center;
   gap: var(--tl-space-2);
-  padding: 3px var(--tl-space-2);
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
   background: var(--tl-control-bg);
   border-bottom: 1px solid var(--tl-border);
-  color: var(--tl-fg-muted);
-  font-weight: 600;
 }
 
+/* Header cells are real buttons (role=columnheader, for aria-sort) but must
+   read as a table header, not as controls. */
+.tl-filedlg__col {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--tl-fg-muted);
+  font: 600 var(--tl-font-size-ui) var(--tl-font-ui);
+  text-align: left;
+  cursor: default;
+}
+.tl-filedlg__col:hover { color: var(--tl-fg); }
+.tl-filedlg__col:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: -1px; }
+/* The column that owns the current order. */
+.tl-filedlg__col.is-active { color: var(--tl-fg); }
+
+.tl-filedlg__col-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ▲/▼ at UI size would out-shout the label it marks. The span is always in
+   the DOM and empty on the two inactive columns — :empty keeps it from
+   spending the flex gap as well. */
+.tl-filedlg__sort {
+  flex-shrink: 0;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--tl-accent);
+}
+.tl-filedlg__sort:empty { display: none; }
+
 .tl-filedlg__list { outline: none; }
-.tl-filedlg__list:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: -1px; }
 
 .tl-filedlg__row {
   display: flex;
   align-items: center;
   gap: var(--tl-space-2);
-  min-height: var(--tl-row-h);
+  height: var(--tl-row-h);
   padding: 0 var(--tl-space-2);
   min-width: 0;
   cursor: default;
@@ -154,39 +333,47 @@
   color: var(--tl-selection-fg);
 }
 
-/* One column ruler for the header and the rows, so they line up without a
-   table: name takes the slack, size and time are fixed and right-aligned. */
-.tl-filedlg__col--name,
-.tl-filedlg__cell--name {
-  flex: 1 1 auto;
+.tl-filedlg__rowicon { flex-shrink: 0; width: 16px; height: 16px; }
+
+/* One column ruler for the header and the rows: name takes the slack, size
+   and time are fixed. */
+.tl-filedlg__cell {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tl-filedlg__col--name,
+.tl-filedlg__cell--name { flex: 1 1 auto; min-width: 0; }
+/* Rows lead with a 16px icon the header has none of; the header's Name label
+   is inset by exactly that icon plus the row's gap so the two columns start
+   on the same pixel. */
+.tl-filedlg__col--name { padding-left: calc(16px + var(--tl-space-2)); }
+
 .tl-filedlg__col--size,
-.tl-filedlg__cell--size {
-  flex: 0 0 80px;
-  text-align: right;
-}
+.tl-filedlg__cell--size { flex: 0 0 80px; text-align: right; }
+.tl-filedlg__col--size { justify-content: flex-end; }
+
+/* Left-aligned, unlike Size: the column's values are as often words
+   ("Today", "Yesterday") as dates, and a right-aligned mix of the two reads
+   ragged. Alignment between the dates themselves comes from tabular
+   numerals below, which is also why "Jan 5" needs no leading zero. */
 .tl-filedlg__col--time,
-.tl-filedlg__cell--time {
-  flex: 0 0 120px;
-  text-align: right;
-}
+.tl-filedlg__cell--time { flex: 0 0 110px; }
 
-/* Directories lead, and read as such at a glance without an icon font. */
+/* Directories lead the listing and read as such at a glance. The trailing
+   "/" the pre-redesign rule drew here is gone: the row now carries a folder
+   icon, and saying it twice is noise. */
 .tl-filedlg__cell--name.is-dir { font-weight: 600; }
-.tl-filedlg__cell--name.is-dir::after {
-  content: "/";
-  color: var(--tl-fg-muted);
-}
-.tl-filedlg__row.is-selected .tl-filedlg__cell--name.is-dir::after { color: inherit; }
 
-/* Size/time are context, not content; they dim except on the selected row,
-   where the selection foreground has to win for contrast. */
+/* Size/time are context, not content: they dim, they never reflow when a
+   digit changes width, and on the selected row the selection foreground has
+   to win for contrast. */
 .tl-filedlg__cell--size,
-.tl-filedlg__cell--time { color: var(--tl-fg-muted); }
+.tl-filedlg__cell--time {
+  color: var(--tl-fg-muted);
+  font-variant-numeric: tabular-nums;
+}
 .tl-filedlg__row.is-selected .tl-filedlg__cell--size,
 .tl-filedlg__row.is-selected .tl-filedlg__cell--time { color: inherit; }
 
@@ -197,33 +384,10 @@
 }
 .tl-filedlg__empty[hidden] { display: none; }
 
-/* ---- save mode: the name to write, and New Folder ----------------------- */
-
-/* Below the listing rather than above it: the listing is context for the
-   name, and the name is the last thing you touch before pressing Save. */
-.tl-filedlg__save {
-  display: flex;
-  align-items: center;
-  gap: var(--tl-space-2);
-}
-
-.tl-filedlg__namelabel {
-  flex-shrink: 0;
-  color: var(--tl-fg-muted);
-  white-space: nowrap;
-}
-
-.tl-filedlg__name { flex: 1 1 auto; min-width: 0; }
-.tl-filedlg__newfolder { flex-shrink: 0; white-space: nowrap; }
-
-/* The nested New Folder prompt (a tl-dialog of its own, stacked over the
-   chooser) — one field, full width of the small dialog. */
-.tl-filedlg__prompt-input { width: 100%; }
-
 /* ---- inline error ------------------------------------------------------- */
 
 /* In the body, under the list, not a toast: a listing that failed has to stay
-   on screen next to the scope bar the user needs in order to recover from it
+   on screen next to the sidebar the user needs in order to recover from it
    (switch host, go up a level, retype the path). */
 .tl-filedlg__error {
   padding: var(--tl-space-2);
@@ -233,3 +397,42 @@
   word-break: break-word;
 }
 .tl-filedlg__error[hidden] { display: none; }
+
+/* ---- footer strip: Hidden toggle, and in save mode the name + New Folder - */
+
+/* Lives in .tl-dialog__footer-start, opposite Cancel / Open|Save. These are
+   options about the whole dialog rather than about the directory on screen,
+   which is why they are down here and not in the body. */
+.tl-filedlg__footctl {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-width: 0;
+}
+/* Fallback placement (no footer slot in this build): file-dialog.js appends
+   it to .tl-filedlg instead, where it takes a full line of its own under the
+   sidebar and the main column. */
+.tl-filedlg > .tl-filedlg__footctl { flex: 1 0 100%; }
+
+.tl-filedlg__hidden { flex-shrink: 0; white-space: nowrap; }
+
+.tl-filedlg__namelabel {
+  flex-shrink: 0;
+  color: var(--tl-fg-muted);
+  white-space: nowrap;
+}
+
+/* An explicit width, not just flex-grow: .tl-dialog__footer-start is a
+   shrink-to-fit flex item (components/dialog.css), so the field only gets
+   room it asks for by intrinsic size. */
+.tl-filedlg__name {
+  flex: 1 1 auto;
+  width: 220px;
+  min-width: 120px;
+}
+
+.tl-filedlg__newfolder { flex-shrink: 0; white-space: nowrap; }
+
+/* The nested New Folder prompt (a tl-dialog of its own, stacked over the
+   chooser) — one field, full width of the small dialog. */
+.tl-filedlg__prompt-input { width: 100%; }
