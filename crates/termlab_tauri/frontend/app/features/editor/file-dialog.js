@@ -515,9 +515,12 @@
     const head = el('div', 'tl-filedlg__head');
     head.setAttribute('role', 'row');
     // key -> { btn, arrow, variant }. The header cells are buttons so the
-    // sort is reachable by keyboard and announced as pressable; `role` is
-    // overridden to columnheader so `aria-sort` is on the element ARIA
-    // expects to find it on.
+    // sort is reachable by keyboard and activatable with Space/Enter — both
+    // native button behaviors that survive the role override below, not
+    // role-derived ones. `role` is overridden to columnheader so `aria-sort`
+    // is on the element ARIA expects to find it on; that override REMOVES the
+    // implicit button role, so the cells are no longer announced as
+    // pressable.
     const headCells = {};
     function buildHeadCell(key, variant, label) {
       const btn = el('button', `tl-filedlg__col tl-filedlg__col--${variant}`);
@@ -661,6 +664,12 @@
       const held = selectedEntry();
       renderHead();
       renderRows(held ? held.name : null);
+      // Return focus to the list: the header button that was just clicked is
+      // a SIBLING of `list`, not a descendant, so the keydown handler below
+      // (registered on `list` itself) never sees an event while focus stays
+      // on the button — arrows/Home/End would go dead and Enter would re-fire
+      // the header's own click instead of opening the selection.
+      if (typeof list.focus === 'function') list.focus();
     }
 
     function renderCrumbs() {
@@ -732,6 +741,17 @@
         row.addEventListener('dblclick', () => { select(index); activate(); });
         list.appendChild(row);
       });
+      // A re-sort (the only caller that passes `preserveName`) can carry the
+      // held selection to a new row position that is off-screen. `select()`
+      // is deliberately NOT the fix here — in save mode it writes
+      // `nameInput.value`, which would clobber a filename the user already
+      // typed after clicking that row. Scroll the row directly instead.
+      if (preserveName != null && selectedIndex >= 0) {
+        const selectedRow = list.children[selectedIndex];
+        if (selectedRow && typeof selectedRow.scrollIntoView === 'function') {
+          selectedRow.scrollIntoView({ block: 'nearest' });
+        }
+      }
       emptyEl.hidden = visible.length !== 0 || !errorEl.hidden;
       syncPrimaryButton();
     }

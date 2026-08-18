@@ -145,6 +145,12 @@ function makeElement(tag, doc) {
     },
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
     focus() { if (doc) doc.activeElement = el; },
+    // Test-only spy: records calls so a re-sort's "scroll the held selection
+    // into view" behavior (rather than just its end state) can be asserted.
+    scrollIntoView(opts) {
+      el.scrollIntoViewCalls = (el.scrollIntoViewCalls || 0) + 1;
+      el.scrollIntoViewLastOpts = opts;
+    },
     contains(node) { let n = node; while (n) { if (n === el) return true; n = n.parentNode; } return false; },
     classList: {
       add() {}, remove() {}, contains(c) { return classesOf(el).includes(c); },
@@ -1173,6 +1179,62 @@ await checkAsync('re-sorting keeps the selected ENTRY selected, not the selected
   assert.strictEqual(rowName(selected[0]), 'a.txt', 'the same entry, at its new position');
   assert.strictEqual(selected[0].getAttribute('aria-selected'), 'true');
   assert.strictEqual(openBtn.disabled, false, 'and Open is still live for it');
+});
+
+// F-1: `list`'s keydown handler is registered on `list` itself, and the
+// column header buttons are SIBLINGS of `list` (both children of `.tl-picker
+// __box`), not descendants — so a keydown fired while focus sits on a header
+// button never reaches that handler. A header click must hand focus back.
+await checkAsync('a header click returns focus to the list, not left on the header button (F-1)', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: SORT_FIXTURE });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  let p = parts(doc);
+  headFor(p, 'size').fire('click');
+  p = parts(doc);
+  assert.strictEqual(doc.activeElement, p.list,
+    'focus moves to the list so its keydown handler is reachable again');
+});
+
+// F-2: `sortBy` preserves the selected ENTRY across a re-sort but never
+// scrolled it into view, so a row moved off-screen by the new order looked
+// unselected. The fix must NOT go through `select()` (the trap: `select()`
+// writes `nameInput.value` in save mode and would clobber a filename the
+// user already typed after clicking that row).
+await checkAsync('re-sorting scrolls the preserved selection into view (F-2)', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: SORT_FIXTURE });
+  sandbox.termlabFileDialog._chooseFile();
+  await settle();
+
+  let p = parts(doc);
+  p.rows[1].fire('click');            // a.txt, at index 1 under name-asc
+  headFor(p, 'size').fire('click');   // a.txt moves to the last row
+  p = parts(doc);
+
+  const selected = p.rows.filter((r) => classesOf(r).includes('is-selected'));
+  assert.strictEqual(selected.length, 1, 'precondition: still selected after the re-sort');
+  assert.strictEqual(rowName(selected[0]), 'a.txt');
+  assert.strictEqual(selected[0].scrollIntoViewCalls, 1,
+    'the row carrying the preserved selection is scrolled into view exactly once');
+});
+
+await checkAsync('re-sorting in save mode does not touch a typed filename — the F-2 trap (F-2)', async () => {
+  const { sandbox, doc } = makeHarness({ listLocal: SORT_FIXTURE });
+  sandbox.termlabFileDialog._chooseFile({ mode: 'save' });
+  await settle();
+
+  let p = parts(doc);
+  p.rows[1].fire('click'); // a.txt: selecting a row in save mode fills the name field
+  const nameField = () => p.footerStart.querySelectorAll('.tl-filedlg__name')[0];
+  assert.strictEqual(nameField().value, 'a.txt', 'precondition: the click filled the field');
+
+  nameField().value = 'my-typed-name.txt'; // the user then types over it by hand
+
+  headFor(p, 'size').fire('click'); // a re-sort must not call select() and overwrite that
+  p = parts(doc);
+  assert.strictEqual(nameField().value, 'my-typed-name.txt',
+    'sortBy must not clobber a filename the user typed after selecting a row');
 });
 
 await checkAsync('a re-sort that drops the selected entry leaves nothing selected', async () => {
