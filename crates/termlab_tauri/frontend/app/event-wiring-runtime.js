@@ -141,12 +141,22 @@
 
       // Unsaved-changes handshake. The webview owns the answer to "is anything
       // unsaved?", so Rust stops the close, emits one of these, and waits to
-      // be told. `answering` makes a second close attempt while the prompt is
-      // already up a no-op instead of a second stack of dialogs.
+      // be told.
+      //
+      // One prompt at a time: a request that arrives while another is being
+      // answered is refused rather than allowed to stack a second dialog on
+      // top of the first. Refused, though — not dropped. Dropping it strands
+      // the sender: Rust's quit poll waits on a vote that never comes and,
+      // because request_quit early-returns while a quit is pending, Cmd+Q is
+      // then dead for the rest of the session. A "no" costs at most one extra
+      // keystroke; silence costs the feature.
       {
         let answering = false;
         const answerCloseRequest = async (confirmCommand) => {
-          if (answering) return;
+          if (answering) {
+            invoke(confirmCommand, { allow: false }).catch(() => {});
+            return;
+          }
           answering = true;
           try {
             const service = global.termlabEditorService;

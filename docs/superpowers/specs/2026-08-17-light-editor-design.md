@@ -263,6 +263,17 @@ The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have 
 6. No Save-All; each editor saves independently.
 7. Scratch files accumulate on disk until the user deletes them.
 8. Building the app now requires Node.
+9. **The Dock's Quit and a system shutdown are not guarded on macOS.** Both send
+   `terminate:` straight to `NSApp` without going through the app menu, so
+   neither reaches the Quit menu item that the unsaved-changes poll hangs off,
+   and unsaved editors are torn down without a prompt. This was equally true
+   before the guards existed, but ⌘Q now asks and Dock → Quit still does not,
+   which is a visible inconsistency. It appears unfixable at this layer: `tao`
+   does not implement `applicationShouldTerminate:` (only
+   `applicationWillTerminate:`, which fires after the decision is final), and
+   Tauri raises `RunEvent::ExitRequested` only from `app.exit()` or the last
+   window's destruction — never from `terminate:`. Closing it would mean
+   patching or replacing the app delegate.
 
 ## Risks
 

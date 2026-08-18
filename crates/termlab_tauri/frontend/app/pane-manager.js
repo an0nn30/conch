@@ -155,14 +155,53 @@
       return true;
     }
 
-    function closePane(paneId) {
+    async function closePane(paneId) {
       const panes = getPanes();
       const tabs = getTabs();
       const pane = panes.get(paneId);
       if (!pane) return;
+      const tab = tabs.get(pane.tabId);
+
+      // Ask before this function destroys a modified editor. Reachable on
+      // default bindings: cmd+d beside a focused editor (splitPane has no kind
+      // guard), then cmd+shift+w — which lands in the split branch below
+      // rather than the single-leaf hand-off to closeTab, so nothing else on
+      // the path would ever ask.
+      //
+      // Deliberately NOT asked for the single-leaf case: that delegates to
+      // closeTab, which does its own asking, and asking here as well would
+      // prompt twice for one keystroke. Deliberately before every mutation
+      // below, including unregisterPaneDnd, so a cancel really does leave the
+      // pane exactly as it was.
+      if (
+        tab && global.splitTree &&
+        pane.kind === 'editor' && pane.dirty &&
+        global.splitTree.leafCount(tab.treeRoot) > 1
+      ) {
+        const service = global.termlabEditorService;
+        if (!service || typeof service.confirmDirtyPanes !== 'function') {
+          if (typeof toastError === 'function') {
+            toastError('Cannot confirm unsaved changes; pane not closed.');
+          }
+          return;
+        }
+        let ok = false;
+        try {
+          ok = await service.confirmDirtyPanes([pane]);
+        } catch (error) {
+          if (typeof toastError === 'function') {
+            toastError('Could not check for unsaved changes: ' + String(error));
+          }
+          return;
+        }
+        if (!ok) return;
+        // The prompt yielded to the event loop; the pane or its tab may have
+        // been torn down underneath us in the meantime.
+        if (panes.get(paneId) !== pane || tabs.get(pane.tabId) !== tab) return;
+      }
+
       unregisterPaneDnd(paneId);
 
-      const tab = tabs.get(pane.tabId);
       if (!tab || !global.splitTree) return;
       if (pane.kind === 'plugin_view') rememberPluginViewSize(pane);
 

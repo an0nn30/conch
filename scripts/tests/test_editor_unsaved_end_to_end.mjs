@@ -32,7 +32,9 @@ const MODULES = [
   'app/ui/tl-dialog.js',
   'app/core/dialog-service.js',
   'app/features/editor/editor-service.js',
+  'app/layout/split-tree.js',
   'app/tab-manager.js',
+  'app/pane-manager.js',
   'app/event-wiring-runtime.js',
 ].map((rel) => path.join(ROOT, rel));
 
@@ -133,6 +135,7 @@ function makeView(onDirtyChange) {
   let dirty = false;
   return {
     get state() { return { doc: { toString: () => doc } }; },
+    focus() {},
     termlabResetDirty() { dirty = false; onDirtyChange(false); },
     isDirty: () => dirty,
     type(text) {
@@ -240,6 +243,49 @@ function makeApp() {
     getCurrentWindowLabel: () => 'main',
   });
 
+  let focusedPaneId = null;
+  const paneManager = sandbox.termlabPaneManager.create({
+    getPanes: () => panes,
+    getTabs: () => tabs,
+    getFocusedPaneId: () => focusedPaneId,
+    setFocusedPaneId: (id) => { focusedPaneId = id; },
+    getPaneRatio: () => null,
+    setPluginViewSize: () => {},
+    rebuildTreeDOM: () => {},
+    onTerminalFocused: () => {},
+    unregisterPaneDnd: () => {},
+    notifyTerminalClosed: () => {},
+    refreshSshSessions: () => {},
+    notifyPluginViewClosed: () => {},
+    deletePluginViewPane: () => {},
+    closeTab: (id) => tabManager.closeTab(id),
+    initTerminal: () => ({ term: null, fitAddon: null }),
+    setupTmuxRightClickBridge: () => () => {},
+    createPaneResizeObserver: () => null,
+    fitAndResizePane: () => {},
+    onLocalTerminalData: () => {},
+    spawnShell: async () => {},
+    allocatePaneId: () => nextId++,
+    splitLeaf: (root, src, next, dir) => sandbox.splitTree.splitLeaf(root, src, next, dir),
+    openSshChannel: async () => {},
+    onSplitPaneData: () => {},
+    toastError: (m) => statuses.push(m),
+  });
+
+  // What cmd+d does to a focused editor: splitPane has no `kind` guard, so a
+  // terminal pane is added beside the editor and the tab now has two leaves.
+  function splitBesideEditor(editorTabId) {
+    const tab = tabs.get(editorTabId);
+    const editorPaneId = tab.focusedPaneId;
+    const termPaneId = nextId++;
+    tab.treeRoot = sandbox.splitTree.splitLeaf(tab.treeRoot, editorPaneId, termPaneId, 'vertical');
+    panes.set(termPaneId, {
+      paneId: termPaneId, tabId: editorTabId, kind: 'terminal', type: 'local',
+      spawned: false, root: makeElement('div', document),
+    });
+    return termPaneId;
+  }
+
   // The escape hatch manager-compose-runtime.js publishes for exactly this.
   sandbox.__termlabPaneAccess = {
     currentPane: () => panes.values().next().value || null,
@@ -255,8 +301,14 @@ function makeApp() {
     disk.set(filePath, '');
     const button = makeElement('button', document);
     const containerEl = makeElement('div', document);
-    tabs.set(id, { id, label: fileName, button, containerEl, focusedPaneId: id });
-    const pane = { paneId: id, tabId: id, kind: 'editor', filePath, dirty: false, remote: null };
+    tabs.set(id, {
+      id, label: fileName, button, containerEl, focusedPaneId: id,
+      treeRoot: sandbox.splitTree.makeLeaf(id),
+    });
+    const pane = {
+      paneId: id, tabId: id, kind: 'editor', filePath, dirty: false, remote: null,
+      root: makeElement('div', document),
+    };
     pane.view = makeView((d) => { pane.dirty = d; });
     panes.set(id, pane);
     if (activeTabId === null) activeTabId = id;
@@ -302,7 +354,8 @@ function makeApp() {
 
   return {
     sandbox, tabs, panes, disk, toasts, statuses, destroyedViews, invocations, listeners,
-    tabManager, wiring, openScratchAndType, findButton,
+    tabManager, paneManager, wiring, openScratchAndType, splitBesideEditor, findButton,
+    focusPane: (id) => paneManager.setFocusedPane(id),
     dialogCount: () => sandbox.tlDialog.count(),
     denyWrites: (on) => { denyWrites = on; },
     destroyedWindowCount: () => destroyedWindow,
@@ -511,6 +564,116 @@ check('5c. a window with nothing dirty closes without a prompt', async () => {
   assert.strictEqual(app.dialogCount(), 0);
   const answer = app.invocations.filter((i) => i.command === 'confirm_window_close');
   assert.strictEqual(answer[0].args.allow, true);
+});
+
+// === closePane: the split-pane route to the same destruction ==============
+// Reachable on default bindings: open a scratch, cmd+d (splitPane has no kind
+// guard, so a terminal appears beside the editor), click back into the
+// editor, type, cmd+shift+w. That lands in closePane's split branch, which
+// destroys the CodeMirror view directly instead of delegating to the guarded
+// closeTab — so without a guard of its own the buffer goes silently.
+check('C1. closing a split editor pane prompts; Cancel keeps the pane and its text', async () => {
+  const app = makeApp();
+  const { tabId, pane, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  app.splitBesideEditor(tabId);
+  app.focusPane(pane.paneId);
+  assert.strictEqual(app.sandbox.splitTree.leafCount(app.tabs.get(tabId).treeRoot), 2);
+
+  const closing = app.paneManager.closePane(pane.paneId);
+  await tick();
+  assert.strictEqual(app.dialogCount(), 1, 'the prompt appeared');
+
+  app.findButton('Cancel').click();
+  await closing;
+
+  assert.strictEqual(app.panes.get(pane.paneId), pane, 'the pane survived');
+  assert.ok(pane.view, 'and still holds its editor view');
+  assert.strictEqual(pane.dirty, true, 'and is still dirty');
+  assert.strictEqual(app.destroyedViews.length, 0, 'the view was never destroyed');
+  assert.strictEqual(
+    app.sandbox.splitTree.leafCount(app.tabs.get(tabId).treeRoot), 2,
+    'and the layout is untouched',
+  );
+  assert.strictEqual(app.disk.get(filePath), '', 'nothing was written');
+});
+
+check('C1b. Save on a split editor pane writes the text, then closes the pane', async () => {
+  const app = makeApp();
+  const { tabId, pane, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  app.splitBesideEditor(tabId);
+  app.focusPane(pane.paneId);
+
+  const closing = app.paneManager.closePane(pane.paneId);
+  await tick();
+  app.findButton('Save').click();
+  await closing;
+
+  assert.strictEqual(app.disk.get(filePath), 'hello', 'the text reached the file');
+  assert.strictEqual(app.panes.has(pane.paneId), false, 'and the pane closed');
+  assert.strictEqual(app.destroyedViews.length, 1, 'its view was disposed');
+});
+
+check("C1c. Don't Save on a split editor pane closes it without writing", async () => {
+  const app = makeApp();
+  const { tabId, pane, filePath } = app.openScratchAndType('scratch-1.txt', 'hello');
+  app.splitBesideEditor(tabId);
+  app.focusPane(pane.paneId);
+
+  const closing = app.paneManager.closePane(pane.paneId);
+  await tick();
+  app.findButton("Don't Save").click();
+  await closing;
+
+  assert.strictEqual(app.panes.has(pane.paneId), false, 'the pane closed');
+  assert.strictEqual(app.disk.get(filePath), '', 'the file is unchanged');
+});
+
+check('C1d. a failed save keeps the split editor pane', async () => {
+  const app = makeApp();
+  const { tabId, pane } = app.openScratchAndType('scratch-1.txt', 'hello');
+  app.splitBesideEditor(tabId);
+  app.focusPane(pane.paneId);
+  app.denyWrites(true);
+
+  const closing = app.paneManager.closePane(pane.paneId);
+  await tick();
+  app.findButton('Save').click();
+  await closing;
+
+  assert.strictEqual(app.panes.get(pane.paneId), pane, 'the pane survived');
+  assert.strictEqual(pane.dirty, true);
+  assert.strictEqual(app.destroyedViews.length, 0);
+  assert.strictEqual(app.toasts[0][0], 'Save Failed');
+});
+
+check('C1e. a clean split editor pane closes with no prompt', async () => {
+  const app = makeApp();
+  const { tabId, pane } = app.openScratchAndType('scratch-1.txt', '');
+  app.splitBesideEditor(tabId);
+  app.focusPane(pane.paneId);
+
+  await app.paneManager.closePane(pane.paneId);
+  assert.strictEqual(app.dialogCount(), 0, 'nothing was asked');
+  assert.strictEqual(app.panes.has(pane.paneId), false, 'and the pane closed');
+});
+
+check('C1f. the last-leaf case still asks exactly once, via closeTab', async () => {
+  // closePane delegates to closeTab here; asking in both places would prompt
+  // twice for one keystroke.
+  const app = makeApp();
+  const { tabId, pane } = app.openScratchAndType('scratch-1.txt', 'hello');
+  app.focusPane(pane.paneId);
+  assert.strictEqual(app.sandbox.splitTree.leafCount(app.tabs.get(tabId).treeRoot), 1);
+
+  const closing = app.paneManager.closePane(pane.paneId);
+  await tick();
+  assert.strictEqual(app.dialogCount(), 1, 'one prompt');
+  app.findButton("Don't Save").click();
+  await closing;
+  await tick();
+
+  assert.strictEqual(app.dialogCount(), 0, 'and no second one');
+  assert.strictEqual(app.tabs.has(tabId), false, 'the tab closed');
 });
 
 let failed = 0;

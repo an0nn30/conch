@@ -133,9 +133,10 @@ check('quit is answered on its own channel', async () => {
   );
 });
 
-check('a second close request while the prompt is up is ignored', async () => {
+check('a second close request while the prompt is up opens no second prompt', async () => {
   let resolvePrompt;
-  const h = makeHarness(() => new Promise((r) => { resolvePrompt = r; }));
+  let prompts = 0;
+  const h = makeHarness(() => { prompts += 1; return new Promise((r) => { resolvePrompt = r; }); });
   await h.runtime.init();
 
   h.listeners.get('window-close-requested')({});
@@ -144,10 +145,71 @@ check('a second close request while the prompt is up is ignored', async () => {
   h.listeners.get('window-close-requested')({});
   await tick();
 
+  assert.strictEqual(prompts, 1, 'one prompt, not a stack of dialogs');
+  const early = h.invocations.filter((i) => i.command === 'confirm_window_close');
+  assert.strictEqual(early.length, 2, 'the swallowed requests are refused, not dropped');
+  assert.ok(early.every((i) => i.args.allow === false), 'and refused safely');
+
   resolvePrompt(true);
   await tick();
   const answers = h.invocations.filter((i) => i.command === 'confirm_window_close');
-  assert.strictEqual(answers.length, 1, 'one prompt, one answer — not a stack of dialogs');
+  assert.strictEqual(answers.length, 3);
+  assert.strictEqual(answers[2].args.allow, true, 'the real answer still gets through');
+});
+
+// Regression: one shared latch used to make this drop the quit request
+// entirely. Rust's quit poll then waits forever on a vote that never comes,
+// and request_quit early-returns while a quit is pending — so Cmd+Q is dead
+// for the rest of the session.
+check('a quit request arriving while a close prompt is up is still answered', async () => {
+  let resolvePrompt;
+  let calls = 0;
+  const h = makeHarness(() => {
+    calls += 1;
+    // Only the first prompt is held open; later ones answer straight away, so
+    // the "does Cmd+Q still work afterwards" half of this check is about the
+    // latch and not about a promise the test forgot to resolve.
+    return calls === 1 ? new Promise((r) => { resolvePrompt = r; }) : Promise.resolve(false);
+  });
+  await h.runtime.init();
+
+  h.listeners.get('window-close-requested')({});   // X clicked, prompt opens
+  await tick();
+  h.listeners.get('app-quit-requested')({});       // then cmd+Q
+  await tick();
+
+  const votes = h.invocations.filter((i) => i.command === 'quit_vote');
+  assert.strictEqual(votes.length, 1, 'the quit poll got a reply rather than silence');
+  assert.strictEqual(votes[0].args.allow, false, 'and it is the safe one');
+
+  // The user then cancels the close prompt; the window stays, and a later
+  // quit must still work.
+  resolvePrompt(false);
+  await tick();
+  h.listeners.get('app-quit-requested')({});
+  await tick();
+  assert.strictEqual(
+    h.invocations.filter((i) => i.command === 'quit_vote').length,
+    2,
+    'cmd+Q still works afterwards',
+  );
+});
+
+check('a close request arriving while a quit prompt is up is answered too', async () => {
+  let resolvePrompt;
+  const h = makeHarness(() => new Promise((r) => { resolvePrompt = r; }));
+  await h.runtime.init();
+
+  h.listeners.get('app-quit-requested')({});
+  await tick();
+  h.listeners.get('window-close-requested')({});
+  await tick();
+
+  const answers = h.invocations.filter((i) => i.command === 'confirm_window_close');
+  assert.strictEqual(answers.length, 1, 'answered on its own channel');
+  assert.strictEqual(answers[0].args.allow, false, 'the window stays open');
+  resolvePrompt(true);
+  await tick();
 });
 
 check('a later close request is served after the first finishes', async () => {

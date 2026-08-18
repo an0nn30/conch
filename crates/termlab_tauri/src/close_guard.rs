@@ -12,7 +12,10 @@
 //!    installed. A window that never gets that far — the settings window,
 //!    which loads a different document, or a main window whose scripts failed
 //!    — keeps the ordinary close behaviour instead of becoming unclosable.
-//!    Such a window has no editors, so there is nothing to lose.
+//!    Such a window has no editors, so there is nothing to lose. This is the
+//!    only structural escape from a wedged handshake on the Rust side — there
+//!    is no "did the webview receive it?" check to be had, since `emit_to`
+//!    returns `Ok` whether or not anything matched.
 //!
 //! 2. **Permission is consumed.** A confirmation authorises exactly one
 //!    close. The second `CloseRequested` (the one raised by the frontend's own
@@ -165,10 +168,14 @@ pub(crate) fn on_close_requested<R: tauri::Runtime>(window: &tauri::Window<R>) -
     if guard.take_permission(&label) {
         return false;
     }
-    if app.emit_to(&label, WINDOW_CLOSE_REQUESTED_EVENT, ()).is_err() {
-        // The window cannot be reached, so it can never answer. Let it close
-        // rather than stranding it.
-        return false;
+    // No "did the emit reach anyone?" check here, because there is no honest
+    // one to make: `emit_to` serialises the payload and iterates the currently
+    // registered webviews, so a label with no webview left simply matches
+    // nothing and still returns `Ok`. The window whose event this is plainly
+    // exists anyway. Arming (see the module docs) is what keeps a window that
+    // cannot answer from being stopped in the first place.
+    if let Err(error) = app.emit_to(&label, WINDOW_CLOSE_REQUESTED_EVENT, ()) {
+        log::error!("close guard: could not ask window '{label}' about unsaved changes: {error}");
     }
     true
 }
@@ -226,10 +233,7 @@ fn advance_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             match queue.pop_front() {
                 // Unarmed windows have no frontend to ask and no editors to
                 // lose; skip straight past them.
-                Some(label) if state.armed.contains(&label) => {
-                    state.quit_asking = Some(label.clone());
-                    Some(label)
-                }
+                Some(label) if state.armed.contains(&label) => Some(label),
                 Some(_) => continue,
                 None => None,
             }
@@ -245,11 +249,20 @@ fn advance_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             return;
         };
 
-        if app.emit_to(&label, APP_QUIT_REQUESTED_EVENT, ()).is_ok() {
-            return; // wait for quit_vote
+        // The queue is built once, before any prompting starts, so a window in
+        // it may have been closed while an earlier one was still being asked.
+        // This is the check that actually works: `emit_to` returns `Ok` for a
+        // label whose webview is gone, because its filter simply matches
+        // nothing, so an emit result would never catch this.
+        if app.get_webview_window(&label).is_none() {
+            continue;
         }
-        // The window is gone or unreachable; it cannot be holding an editor
-        // we can still save. Move on.
+
+        if let Some(guard) = app.try_state::<CloseGuard>() {
+            guard.0.lock().quit_asking = Some(label.clone());
+        }
+        let _ = app.emit_to(&label, APP_QUIT_REQUESTED_EVENT, ());
+        return; // wait for quit_vote
     }
 }
 
