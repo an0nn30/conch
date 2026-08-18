@@ -74,9 +74,14 @@
   // second view of the same bytes — two editors on one path would each hold a
   // doc and the last save would silently win.
   function focusExistingEditor(filePath) {
+    // An untitled buffer has `filePath === null`, and two of those are not the
+    // same file — they are two files that do not exist yet. Without this
+    // guard, opening with a falsy path would match the first untitled pane and
+    // hand the user their scratch buffer instead of the file they asked for.
+    if (!filePath) return false;
     let found = null;
     eachEditorPane((pane) => {
-      if (!found && pane.filePath === filePath) found = pane;
+      if (!found && pane.filePath && pane.filePath === filePath) found = pane;
     });
     if (!found) return false;
     const access = paneAccess();
@@ -306,20 +311,55 @@
     invoke('editor_temp_cleanup', { path: pane.filePath }).catch(() => {});
   }
 
-  async function openScratch() {
+  // ---------------------------------------------------------------------------
+  // Untitled buffers
+  // ---------------------------------------------------------------------------
+
+  // Per-window session state. Numbers are never reused after a tab closes —
+  // Notepad's rule: "Untitled" coming back for a third buffer reads as the one
+  // the user just closed having reappeared.
+  let untitledCount = 0;
+
+  // File → New File. No invoke, no file: an untitled buffer exists only in its
+  // pane until a save gives it a home, and savePane's diversion below is what
+  // makes every save path ask where that is.
+  function openUntitled() {
     if (bundleMissing()) return;
+    untitledCount += 1;
     try {
-      const [dir, existing] = await Promise.all([
-        invoke('editor_scratch_dir'),
-        invoke('editor_scratch_list'),
-      ]);
-      const name = global.termlabEditorScratch.nextScratchName(existing);
-      const filePath = `${dir}/${name}`;
-      await invoke('editor_write_file', { path: filePath, contents: '' });
-      createEditorTab({ filePath, contents: '', remote: null });
+      createEditorTab({
+        filePath: null,
+        contents: '',
+        remote: null,
+        untitledSeq: untitledCount,
+      });
     } catch (error) {
-      toastError('Cannot Create Scratch', String(error));
+      toastError('Cannot Create File', String(error));
     }
+  }
+
+  // What to call a pane that has no path. The prompt and the Save As field
+  // have to say the same "Untitled-2" the tab does, so both ask the one
+  // formula rather than composing a second one.
+  function untitledName(pane) {
+    const labels = global.termlabEditorTabLabel;
+    if (!labels || typeof labels.editorTabLabel !== 'function') return 'Untitled';
+    return labels.editorTabLabel(pane).label;
+  }
+
+  // Cancelling the Save As chooser is not a failure — but it is not a save
+  // either, and savePane's contract is that resolving means saved. So it
+  // rejects with this sentinel, which every catch-site treats as "not saved"
+  // while showing nothing: `:wq` does not close, the close guards abort, and
+  // no red toast flashes for a deliberate Escape.
+  function saveCancelled() {
+    const error = new Error('save cancelled');
+    error.name = 'SaveCancelled';
+    return error;
+  }
+
+  function isSaveCancelled(error) {
+    return !!error && error.name === 'SaveCancelled';
   }
 
   // One write. Rejects on failure so callers can decide what a failure means;
@@ -359,6 +399,45 @@
   async function savePane(pane, options) {
     if (!pane || pane.kind !== 'editor' || !pane.view) return;
 
+    // THE CHOKE POINT. A pane with no path cannot be written anywhere, so
+    // every save path — ⌘S, `:w`, `:wq`, the close guards' Save — asks where
+    // to put it here, once, rather than each of them growing its own
+    // untitled-file branch.
+    if (!pane.filePath) {
+      const pending = savesInFlight.get(pane);
+      if (pending) {
+        // The only write a pathless pane can have outstanding is a Save As
+        // (writeOnce needs a path), so join it instead of stacking a second
+        // chooser on top of the one already on screen. Same shape as the
+        // ordinary join below: it rebinds the pane on success, and anything
+        // typed while it ran is still owed a write.
+        await pending;
+        if (pane.filePath && pane.dirty && !(options && options.noRetry)) {
+          await savePane(pane, { noRetry: true });
+        }
+        return;
+      }
+
+      const dialog = global.termlabFileDialog;
+      if (!dialog || typeof dialog.openForSave !== 'function') {
+        // A real failure, not a cancel: the user asked to save and there is no
+        // way to ask them where. Rejecting normally means it gets reported.
+        throw new Error('the Save As dialog is unavailable');
+      }
+      // openForSave resolves null when the chooser was cancelled, and on
+      // success has ALREADY routed the target through saveAs — which wrote the
+      // file and rebound the pane. Falling through to writeOnce here would
+      // write the same bytes a second time.
+      //
+      // It also resolves null when that saveAs FAILED, having already toasted
+      // "Save As Failed" itself. The sentinel is right for that case too: not
+      // saved (so `:wq` keeps the tab and the close guards abort), and silent
+      // here (so the one failure is reported once, not twice).
+      const chosen = await dialog.openForSave(pane);
+      if (chosen == null) throw saveCancelled();
+      return;
+    }
+
     const pending = savesInFlight.get(pane);
     if (pending) {
       // Join the write already running instead of starting a second one. It
@@ -390,6 +469,8 @@
     try {
       await savePane(pane);
     } catch (error) {
+      // A cancelled chooser is the user's own answer, not a failure to report.
+      if (isSaveCancelled(error)) return;
       toastError('Save Failed', String(error));
     }
   }
@@ -412,13 +493,22 @@
     }
 
     for (const pane of dirty) {
-      const name = String(pane.filePath || 'untitled').split('/').pop();
+      const name = pane.filePath
+        ? String(pane.filePath).split('/').pop()
+        : untitledName(pane);
       const choice = await dialogs.confirmSave(name);
       if (choice === 'cancel') return false;
       if (choice !== 'save') continue;
       try {
+        // For an untitled pane this opens the Save As chooser inside the close
+        // flow. One dialog at a time: the prompt above has already resolved
+        // and closed by the time this await starts.
         await savePane(pane);
       } catch (error) {
+        // Cancelling the chooser aborts the close exactly as a failed save
+        // does — the buffer is still unsaved either way — but silently: the
+        // user just told us "not there", which is not news to report back.
+        if (isSaveCancelled(error)) return false;
         toastError('Save Failed', String(error));
         return false; // a failed save must not be treated as consent to lose it
       }
@@ -526,9 +616,12 @@
   // cannot produce it; Save As could, by aiming a pane at a path another tab
   // already holds. Refuse before anything is written.
   function pathHeldByAnotherPane(pane, filePath) {
+    // Same rule as focusExistingEditor: a pathless pane holds no path, and
+    // "nowhere" is not a location two panes can collide on.
+    if (!filePath) return false;
     let held = false;
     eachEditorPane((other) => {
-      if (other !== pane && other.filePath === filePath) held = true;
+      if (other !== pane && other.filePath && other.filePath === filePath) held = true;
     });
     return held;
   }
@@ -680,7 +773,7 @@
   global.termlabEditorService = {
     openLocalFile,
     openRemoteFile,
-    openScratch,
+    openUntitled,
     saveActiveEditor,
     savePane,
     saveAs,

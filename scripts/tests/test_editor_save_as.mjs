@@ -818,6 +818,10 @@ function makeElement(tag, doc) {
     },
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
     focus() { if (doc) doc.activeElement = el; },
+    // Real inputs select their whole value; all this stub needs to record is
+    // that it was asked to, and by whom.
+    selectCount: 0,
+    select() { el.selectCount += 1; if (doc) doc.activeElement = el; },
     contains(node) { let n = node; while (n) { if (n === el) return true; n = n.parentNode; } return false; },
     classList: { add() {}, remove() {}, contains(c) { return classesOf(el).includes(c); } },
   };
@@ -890,6 +894,9 @@ function makeDialogHarness(options = {}) {
   };
 
   load(sandbox, 'ui/tl-dialog.js');
+  // Real module: an untitled pane's prefill IS its tab label, and the point of
+  // asking the one formula is that the two cannot drift.
+  load(sandbox, 'features/editor/tab-label.js');
   load(sandbox, 'features/editor/file-dialog-model.js');
   load(sandbox, 'features/editor/file-dialog.js');
 
@@ -1066,6 +1073,36 @@ await checkAsync('(b) a remote pane prefills the REMOTE basename, not the temp f
   h.sandbox.termlabFileDialog.openForSave(pane);
   await dialogSettle();
   assert.strictEqual(topDialog(h.doc).nameInput.value, 'alpha.conf');
+});
+
+await checkAsync('(b) an untitled pane prefills its TAB LABEL, selected to type over', async () => {
+  const h = makeDialogHarness({ listLocal: () => Promise.resolve([]) });
+  // No filePath and no remote: a buffer that has never been anywhere. The
+  // sequence number is deliberately not 1, so a hardcoded "Untitled" cannot
+  // pass this.
+  const pane = { kind: 'editor', tabId: 1, filePath: null, remote: null, untitledSeq: 3 };
+  h.sandbox.termlabFileDialog.openForSave(pane);
+  await dialogSettle();
+
+  const dlg = topDialog(h.doc);
+  assert.strictEqual(dlg.nameInput.value, 'Untitled-3', 'seeded from the name on the tab');
+  assert.strictEqual(h.doc.activeElement, dlg.nameInput, 'the field has focus');
+  assert.strictEqual(dlg.nameInput.selectCount, 1, 'with its text selected, so typing replaces it');
+  assert.ok(dlg.button('Save'), 'and Save is offered');
+});
+
+await checkAsync('(b) a titled pane does NOT get its name selected', async () => {
+  // The discriminating half: "gamma.md" is a real name the user may want to
+  // edit rather than replace, and select-on-open would destroy it on the first
+  // keystroke.
+  const h = makeDialogHarness({ listLocal: () => Promise.resolve([]) });
+  const pane = { kind: 'editor', tabId: 1, filePath: '/tmp/x/gamma.md', remote: null };
+  h.sandbox.termlabFileDialog.openForSave(pane);
+  await dialogSettle();
+
+  const dlg = topDialog(h.doc);
+  assert.strictEqual(dlg.nameInput.value, 'gamma.md');
+  assert.strictEqual(dlg.nameInput.selectCount, 0, 'nothing was selected');
 });
 
 // ---------------------------------------------------------------------------

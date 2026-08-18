@@ -72,11 +72,10 @@
         return;
       }
       if (action === 'new-file') {
-        // Action string renamed new-scratch -> new-file; the target function
-        // is still openScratch here on purpose — Task 2 renames it alongside
-        // the untitled-buffer rework so each task lands independently green.
+        // An in-memory buffer: nothing is written until the first save, which
+        // routes through the Save As chooser (editor-service's savePane).
         const service = global.termlabEditorService;
-        if (service) service.openScratch();
+        if (service) service.openUntitled();
         return;
       }
       if (action === 'save-file') {

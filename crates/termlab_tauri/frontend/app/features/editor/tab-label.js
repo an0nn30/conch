@@ -28,6 +28,22 @@
       };
     }
 
+    // An untitled buffer has no file on disk to take a basename from, so its
+    // name is a per-window sequence number allocated when the tab was created
+    // (editor-service's openUntitled) and carried on the pane. The first one
+    // is unnumbered — Notepad's naming, and what the Save As chooser prefills.
+    //
+    // Keyed on the sequence number rather than on `!pane.filePath` alone: a
+    // pathless pane WITHOUT one is not an untitled buffer but a defensive
+    // call, and keeps the lowercase fallback below.
+    const seq = Number(pane.untitledSeq);
+    if (!pane.filePath && Number.isInteger(seq) && seq >= 1) {
+      return {
+        label: seq > 1 ? `Untitled-${seq}` : 'Untitled',
+        tooltip: 'Unsaved',
+      };
+    }
+
     const name = basename(pane.filePath) || 'untitled';
     return { label: name, tooltip: pane.filePath || '' };
   }

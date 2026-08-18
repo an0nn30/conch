@@ -643,6 +643,10 @@
         view: null,
         dirty: false,
         remote: opts.remote || null,
+        // Untitled buffers only: the per-window sequence number their tab is
+        // named from (tab-label.js reads it off the pane, so a rebind after
+        // Save As relabels from the new filePath and this stops mattering).
+        untitledSeq: opts.untitledSeq || null,
       };
 
       // The pane literal is fully built above (filePath, remote) before the

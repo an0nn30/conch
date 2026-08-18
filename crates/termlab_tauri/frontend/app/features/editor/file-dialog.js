@@ -377,9 +377,12 @@
    *                              failure to even build the scope list)
    * It never rejects: a cancelled chooser is not an error.
    *
-   * options = { mode: 'open' | 'save', filename }
+   * options = { mode: 'open' | 'save', filename, selectFilename }
    *   'save' adds the filename field (pre-filled with `filename`), the New
    *   Folder button and the existence check; the primary button reads Save.
+   *   `selectFilename` focuses that field with its text selected — for a
+   *   placeholder name (an untitled buffer's "Untitled-2") that is there to be
+   *   typed over rather than edited.
    */
   function chooseFile(options) {
     if (activeChoice) return activeChoice.promise;
@@ -877,6 +880,25 @@
 
     // ----- lifecycle -----
 
+    // Put the caret in the name field with the placeholder selected, so the
+    // first keystroke replaces "Untitled-2" instead of appending to it.
+    //
+    // Scheduled rather than done inline: tl-dialog focuses the first focusable
+    // element in the panel from a requestAnimationFrame callback it queued
+    // BEFORE onOpen runs, so a plain focus() here would be undone one frame
+    // later. rAF callbacks run in registration order, so ours lands after it.
+    // With no rAF (the test sandboxes) that focus already happened
+    // synchronously, and running now is correct.
+    function selectNameField() {
+      const apply = () => {
+        if (!nameInput) return;
+        if (typeof nameInput.focus === 'function') nameInput.focus();
+        if (typeof nameInput.select === 'function') nameInput.select();
+      };
+      if (typeof global.requestAnimationFrame === 'function') global.requestAnimationFrame(apply);
+      else apply();
+    }
+
     // The latch. Escape and the backdrop both reach here through tl-dialog's
     // onClose, and so does the Cancel button and a successful pick; whichever
     // arrives first is the answer, and handle.close()'s own onClose cannot
@@ -911,6 +933,7 @@
         // Save starts enabled when the pane's current name was pre-filled,
         // so ⌘⇧S → Return saves under the same name in a new place.
         syncPrimaryButton();
+        if (saveMode && opts.selectFilename && nameInput) selectNameField();
       },
       onClose: () => finish(null),
     });
@@ -982,11 +1005,26 @@
     // The name the USER knows this file by. For a remote pane that is the
     // remote basename — pane.filePath is the local temp file it was
     // downloaded into, which they have never seen.
-    const currentName = pane.remote
-      ? basename(pane.remote.remotePath)
-      : basename(pane.filePath);
+    // An untitled buffer has no path to take a basename from. Its tab label
+    // ("Untitled-2") is the only name it has, so that is what the field is
+    // seeded with — selected, because it is a placeholder to type over rather
+    // than a name to extend.
+    const untitled = !pane.filePath && !pane.remote;
+    const labels = global.termlabEditorTabLabel;
+    let currentName;
+    if (pane.remote) {
+      currentName = basename(pane.remote.remotePath);
+    } else if (untitled && labels && typeof labels.editorTabLabel === 'function') {
+      currentName = labels.editorTabLabel(pane).label;
+    } else {
+      currentName = basename(pane.filePath);
+    }
 
-    const choice = await chooseFile({ mode: 'save', filename: currentName });
+    const choice = await chooseFile({
+      mode: 'save',
+      filename: currentName,
+      selectFilename: untitled,
+    });
     if (!choice) return null;
 
     const editor = global.termlabEditorService;

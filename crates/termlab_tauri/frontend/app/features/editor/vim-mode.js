@@ -97,6 +97,11 @@
         await d.savePane(pane);
         return true;
       } catch (error) {
+        // `:w` on an untitled buffer opens the Save As chooser (savePane's
+        // diversion). Cancelling it rejects with this sentinel: still false,
+        // so `:wq` keeps the tab rather than closing over unsaved text, but
+        // silent — the user cancelled, they do not need to be told.
+        if (error && error.name === 'SaveCancelled') return false;
         toastError('Save Failed', String(error));
         return false;
       }
