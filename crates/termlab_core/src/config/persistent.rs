@@ -191,9 +191,22 @@ mod tests {
                 right_split_ratio: 0.4,
             },
             loaded_plugins: vec!["ssh-manager".into(), "git-status".into()],
+            window_metrics: WindowMetrics {
+                cell_width: 8.4,
+                cell_height: 20.0,
+                chrome_width: 4.0,
+                chrome_height: 44.0,
+                font_family: "JetBrains Mono".into(),
+                font_size: 14.0,
+                zoom: 1.0,
+            },
         };
         let toml_str = toml::to_string(&original).expect("serialize");
         let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
+
+        assert_eq!(restored.window_metrics, original.window_metrics);
+        assert!(restored.window_metrics.matches("JetBrains Mono", 14.0, 1.0));
+        assert!(!restored.window_metrics.matches("JetBrains Mono", 16.0, 1.0));
 
         assert_eq!(restored.layout.window_width, 1280.0);
         assert_eq!(restored.layout.window_height, 720.0);
