@@ -41,7 +41,7 @@ CodeMirror 6 is ESM-only and expects a bundler. The frontend has never had one: 
 **`crates/termlab_tauri/frontend/package.json`** — new file, declaring `esbuild` and the CodeMirror packages as `devDependencies`, with:
 
 ```json
-"scripts": { "build:vendor": "node build-vendor.mjs" }
+"scripts": { "build:vendor": "node build-vendor.mjs && node check-vendor.mjs" }
 ```
 
 **`crates/termlab_tauri/frontend/build-vendor.mjs`** — new file. Runs esbuild over a generated entry module that re-exports the CodeMirror API, emitting:
@@ -71,11 +71,11 @@ No `@codemirror/autocomplete` — completions are an explicit non-goal, and leav
 - **Release (`release.yml`) does.** Four jobs produce app binaries and each gains `actions/setup-node@v4`:
   - `macos` and `windows` run `cargo tauri build`, so `beforeBuildCommand` fires and only Node itself is needed.
   - `linux-amd64` and `linux-arm64` run `cargo build --release -p termlab_tauri` **without** the Tauri CLI, so `beforeBuildCommand` never fires. Each needs an explicit `npm ci && npm run build:vendor` step before the build, or it ships a binary whose `index.html` points at a bundle that was never generated.
-- `index.html` and `settings.html` gain `<script src="vendor/codemirror/codemirror.js"></script>` alongside the existing xterm tags.
+- `index.html` gains `<script src="vendor/codemirror/codemirror.js"></script>` alongside the existing xterm tags. `settings.html` does **not**: it is a separate document with no panes and no editor, so loading a megabyte of CodeMirror into it would buy nothing.
 
 **Accepted cost:** a fresh clone can no longer build without Node installed. This is the price of a build step over a committed blob, and it is deliberate — CodeMirror upgrades become a version bump instead of a manual re-vendor, and future npm dependencies follow the same path.
 
-**Boundary check:** `scripts/check_frontend_boundaries.sh` must be updated to skip `vendor/codemirror/` the way it skips the other vendor directories, or it will flag the generated bundle.
+**Export check:** `crates/termlab_tauri/frontend/check-vendor.mjs` asserts that every name `vendor-entry.mjs` claims to export actually resolves on the built `CM6` global. A name that does not is otherwise silent — the language simply never highlights. `build:vendor` runs it after the build, so every path that produces a bundle (`beforeBuildCommand`, `beforeDevCommand`, and both Linux release jobs) fails loudly on a bad export instead of shipping one.
 
 ### 2. The Editor Pane Kind
 
@@ -135,11 +135,14 @@ pub fn looks_binary(head: &[u8]) -> bool
 | `editor_can_open` | `(name: String, size: f64) -> Result<(), String>` | Pre-transfer check. No I/O. |
 | `editor_read_file` | `(path: String) -> Result<String, String>` | Applies `guard_openable` against the on-disk size, then `looks_binary` on the head, then reads as UTF-8 lossy. |
 | `editor_write_file` | `(path: String, contents: String) -> Result<(), String>` | Writes to `<path>.termlab-tmp` then renames, so a failed write never truncates the original. |
-| `editor_scratch_dir` | `() -> Result<String, String>` | `termlab_core::config::config_dir().join("scratches")`, created if absent. |
+| `editor_scratch_dir` | `() -> Result<String, String>` | The scratch directory, created if absent. |
+| `editor_scratch_list` | `() -> Result<Vec<String>, String>` | The file names already in the scratch directory, so `nextScratchName` can pick a free name without a round trip per candidate. Resolves the directory through the same helper as `editor_scratch_dir`: a divergence there would report a taken name as free and `editor_write_file` would truncate a scratch. |
 | `editor_temp_path` | `(host_label: String, remote_path: String) -> Result<String, String>` | Resolves the remote-edit temp path (below) and creates its parent directories. |
-| `editor_temp_cleanup` | `(path: String) -> Result<(), String>` | Deletes a temp file and any parent directories it leaves empty. |
+| `editor_temp_cleanup` | `(path: String) -> Result<(), String>` | Deletes a temp file and any parent directories it leaves empty, refusing any path outside the temp root. |
 
-Temp-path resolution lives in Rust rather than the frontend because it needs SHA-1 — sync and trivial there, but async Web Crypto in the browser, which would make an otherwise pure function untestable without a harness.
+`editor_fs.rs` also exposes `editor_temp_sweep()`, which deletes the whole temp root. It is **not** a Tauri command: its callers are app setup and `close_guard::finish_exit`, and handing the frontend "delete every remote edit in flight" is not a capability it needs.
+
+Temp-path resolution lives in Rust rather than the frontend because that is where the guards live. The hash itself is no argument for it — it is a 6-line FNV-1a (below), equally trivial in JS. The argument is that the temp path, the size cap, the blocklist, and the cleanup's refusal to delete outside the temp root are one set of rules about one directory, and splitting them across the boundary would mean the frontend could compute a path the cleanup would then reject. One owner, one place to test.
 
 Encoding is UTF-8. Files that are not valid UTF-8 but pass the binary sniff are read lossily; this is documented as a limitation rather than a silent corruption risk, because saving such a file rewrites the replacement characters.
 
@@ -147,29 +150,36 @@ Encoding is UTF-8. Files that are not valid UTF-8 but pass the binary sniff are 
 
 `frontend/app/features/files/pane-view.js:76` already binds `dblclick` on file rows. Today it navigates directories and does nothing for files. The file branch becomes:
 
-**Local pane:** call `editor_can_open(name, size)` using the size from the listing; on success open an editor pane on the path directly.
+**Local pane:** open an editor pane on the path directly. There is no separate `editor_can_open` call — a local open goes straight to `editor_read_file`, which applies the same guards against the real file rather than against the listing's idea of it. That is strictly better here: no transfer is at stake, so there is nothing to save by rejecting early, and no window in which the listing can be stale. `editor_can_open` exists for the remote path, where the point is to reject *before* pulling bytes over SFTP.
 
 **Remote pane:** call `editor_can_open(name, size)`; on success call `editor_temp_path(hostLabel, remotePath)`, then the existing `transfer_download(pane_id, remote_path, local_path)`, and await completion by listening to the existing `transfer-progress` event for the returned `transfer_id` — the payload carries `status` and `error`, and `files-panel.js:128` already demonstrates the listener pattern. On completion, open an editor pane on the temp path with `remote` populated.
 
 **Temp path layout**, carried over from the JVM spec:
 
 ```
-<editor_temp_dir>/<sha1(hostLabel)[..8]>/<sha1(remoteAbsolutePath)[..8]>/<basename>
+<editor_temp_dir>/<fnv1a(hostLabel)[..8]>/<fnv1a(remoteAbsolutePath)[..8]>/<basename>
 ```
 
-The basename is preserved so the language mapping picks the right mode. The hash prefixes keep same-named files on different hosts and paths apart. Opening the same remote file twice resolves to the same temp path, so the second double-click focuses the existing tab rather than opening a duplicate.
+The hash is FNV-1a, 64-bit, rendered as its first 8 hex characters. It disambiguates directory names on disk and is not security, so a cryptographic hash would be a dependency bought for nothing.
 
-**Save on a remote-bound editor:** write the temp file via `editor_write_file`, then `transfer_upload(paneId, localPath, remotePath)`. Success shows a notification naming the host and path. Failure shows an error notification with a Retry action that re-runs the upload from the still-present temp file. **The tab stays dirty-free but the temp file is not cleaned up until an upload succeeds or the tab is closed** — losing a user's edit to a dropped connection is the wrong side to be wrong on.
+The basename is preserved so the language mapping picks the right mode. The hash prefixes keep same-named files on different hosts and paths apart. Opening the same remote file twice resolves to the same temp path, so the second double-click focuses the existing tab rather than opening a duplicate — within one window. See Known Limitations for what happens across two.
 
-**Cleanup**, carried over: on tab close, delete the temp file and any now-empty parent directories; on app shutdown, delete the temp root; on startup, sweep the temp root for orphans left by a crash. Startup sweep runs off the main thread.
+**Save on a remote-bound editor:** write the temp file via `editor_write_file`, then `transfer_upload(paneId, localPath, remotePath)`. Success shows a notification naming the host and path.
+
+Failure shows an error notification naming the temp path and telling the user to save again — ⌘S *is* the retry, so there is no Retry button. That is the simpler design and it is the one the close guards already exercise: the upload happens **before** the dirty flag is cleared, so **a failed upload leaves the pane dirty**, every close guard refuses to discard the tab, and the temp file survives. Losing a user's edit to a dropped connection is the wrong side to be wrong on.
+
+**Cleanup**, carried over: on tab close — and on closing a split editor pane — delete the temp file and any now-empty parent directories; on startup, sweep the temp root for orphans left by a crash, off the main thread. The temp root is also swept on a completed Quit or Restart poll, but not on every exit: see Known Limitation 9.
 
 ### 5. Dirty State and Close Guards
 
-This is where the defects will be. Three paths currently ask nothing and all three must:
+This is where the defects will be. Four paths tear down unsaved editors and all four must ask:
 
-1. **Tab close** — `tab-manager.js`'s `closeTab`, already `async`, so it can await the dialog.
+1. **Tab close** — `tab-manager.js`'s `closeTab`, already `async`, so it can await the dialog. Unconditional: there is no opt-out parameter, because an opt-out is a second door past the only tab-level guard. (Closing a *split* editor pane is guarded separately in `pane-manager.js`, which is the one close that does not route through `closeTab`.)
 2. **Window close** — `lib.rs`'s `on_window_event` handles only `Focused` and `Destroyed` today; a `WindowEvent::CloseRequested` arm is new work. It calls `api.prevent_close()`, emits an event to that window, and closes only when the frontend answers that nothing is dirty or the user chose to discard.
-3. **App quit** — the quit menu item and `cmd+q`, which route through `handleMenuAction` and must run the same check before proceeding.
+3. **App quit** — one window at a time, not a broadcast, so a second window's unsaved buffer is not destroyed by a quit started in the first.
+4. **The updater's "Restart Now"** — a restart destroys unsaved buffers exactly as thoroughly as a quit, and the user answered "apply the update?", not "discard your work?". It runs the same poll. Guarding it inside `close_guard::request_restart` rather than at the updater's toast covers every caller of `restart_app`, not just that button.
+
+**Quit is a custom `MenuItem`, not `PredefinedMenuItem::quit`** — a user-visible change to the macOS app menu. The predefined item sends `[NSApp terminate:]`, which `tao` does not intercept (`applicationShouldTerminate:` is unimplemented) and which raises neither `WindowEvent::CloseRequested` nor `RunEvent::ExitRequested`, so there is no point at which unsaved editors could be checked. Routing quit through a menu id lets the poll run first. Known Limitation 9 is what remains of this problem.
 
 Each shows a Save / Discard / Cancel dialog naming the file. Cancel aborts the close entirely. With several dirty editors, the dialog is per-file, in tab order, and Cancel on any one aborts the whole operation.
 
@@ -218,7 +228,7 @@ Note the deviation from the app's `cmd+shift+*` convention: `cmd+s` for save is 
 | Blocklisted extension | Notification: "Cannot edit binary file: {name}" | No transfer, no tab |
 | Null byte in first 8 KB | Notification: "Binary file detected: {name}" | Temp file deleted, no tab |
 | Download fails | Notification carrying the transfer error | No tab, temp file deleted |
-| Upload fails | Error notification with Retry action | Temp file preserved; retry re-uploads it |
+| Upload fails | Error notification naming the temp path: "…save again to retry." | Pane stays dirty and the temp file is preserved; ⌘S retries the upload |
 | Write fails (disk full, permissions) | Error notification | Original file intact — the write goes through a temp file and rename |
 | Temp dir unwritable | Notification: "Cannot create temp file for editing" | No tab |
 | File deleted between listing and open | Notification naming the path | No tab |
@@ -244,7 +254,7 @@ The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have 
 1. `cmd+n` → type → `cmd+s` → close the tab → reopen the file from the SFTP local pane → the contents are there.
 2. Double-click a local file in the SFTP local pane → edit → save → verify on disk.
 3. Double-click a remote file → edit → save → verify on the remote from a terminal.
-4. Kill the SSH connection, then save a remote-bound editor → error notification with Retry → reconnect → Retry succeeds.
+4. Kill the SSH connection, then save a remote-bound editor → error notification, and the tab stays marked dirty → reconnect → ⌘S again succeeds.
 5. Double-click a 10 MB file → clean rejection, no transfer.
 6. Double-click a `.jar` → blocklist rejection.
 7. Double-click a file with a text extension but binary contents → rejection after download, temp file gone.
@@ -275,11 +285,46 @@ The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have 
    window's destruction — never from `terminate:`. Closing it would mean
    patching or replacing the app delegate.
 
+   The unsaved prompt is not the only casualty. `close_guard::finish_exit` is
+   also where the remote-edit temp root is swept, so a Dock quit leaks the whole
+   `termlab-sftp-edits` tree until the next launch's startup sweep clears it.
+   Both losses come from the same bypass, and fixing the bypass fixes both.
+
+10. **The same remote file opened in two windows shares one temp file, and
+    closing either window breaks the other.** Both in-flight guards —
+    `opensInFlight` and `focusExistingEditor` — are window-scoped, because each
+    window is a separate JS context with its own copy of `editor-service.js`.
+    `editor_temp_path` is a pure function of (host, path), so both windows
+    resolve to the same file and both download onto it. Closing either runs
+    `editor_temp_cleanup`, which deletes the file *and* climbs deleting the
+    parent directories it empties, while `editor_write_file` does not recreate
+    them — so the survivor's next save fails with "No such file or directory".
+    Closing it needs the open-temp registry to live in Rust, where the path is
+    computed: either a set of currently-open temp paths, or refcounting in
+    `editor_temp_cleanup`.
+
+11. **Editor transfers reuse the file explorer's progress bar and toasts.**
+    Opening a remote file therefore raises a second "Transfer Complete" toast
+    and briefly marks a same-named row in the local pane, as though the user had
+    downloaded the file there.
+
+12. **A dead host makes close and quit appear frozen** for up to 60 s per dirty
+    remote pane: the guard cannot refuse until each pane's upload has timed out.
+
+13. **The 5 MB pre-check trusts the directory listing's size.** A stale or lying
+    listing gets the whole file downloaded before `editor_read_file` rejects it
+    against the real bytes. The guard is not bypassed — only the saving of the
+    transfer is.
+
+14. **Scratch creation is not atomic.** There is no exclusive create, so a
+    simultaneous ⌘N in two windows can have both pick the same free name and one
+    truncate the other's scratch.
+
 ## Risks
 
 - **Bundle size.** The full language set is roughly 1 MB minified. Measure after the first build; drop language packages if it is worse than expected.
 - **The eight `kind === 'terminal'` guards.** The table above is from a grep, and a guard that needs an editor arm but does not get one fails silently rather than loudly — a font change that skips editor panes looks like nothing happened. Each needs a deliberate answer, not a pattern-matched one.
-- **Close guards across three paths.** Window close and app quit go through Tauri, not the tab manager. An unguarded path silently discards a user's work, which is the worst failure this feature can have.
+- **Close guards across four paths.** Window close, app quit, and the updater's restart go through Tauri, not the tab manager. An unguarded path silently discards a user's work, which is the worst failure this feature can have — and the restart path proved it, having shipped unguarded until it was caught.
 - **A missing bundle fails silently.** `beforeBuildCommand` only fires under `cargo tauri build` / `cargo tauri dev`. Any path that builds with plain `cargo` — the two Linux release jobs, and a developer running `cargo run` — produces an app whose `index.html` references a bundle that does not exist, and the failure surfaces as an editor that quietly does nothing. `editor-service.js` must check for `window.CM6` at first use and show an explicit "editor bundle missing — run npm run build:vendor" notification rather than throwing into the void. The Makefile's DMG targets go through Tauri and are covered, but that needs confirming rather than assuming.
 
 ## Follow-ups
