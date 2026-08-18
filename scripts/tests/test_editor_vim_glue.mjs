@@ -397,20 +397,66 @@ check('the font, theme and language compartments still work alongside it', () =>
 // while it is open, so it has to be reconfigurable — through a compartment
 // rather than a fresh EditorState, which would throw away the document, the
 // selection and the undo history.
-check('setLanguage re-derives highlighting on a live view, via its own compartment', () => {
-  const h = makePaneHarness({ doc: 'x', filename: 'notes.txt' });
-  // The app's REAL filename -> language table, so this is the derivation the
-  // editor actually performs rather than a restatement of it.
-  vm.runInContext(fs.readFileSync(LANGUAGE_MAP, 'utf8'), h.sandbox, { filename: LANGUAGE_MAP });
-  h.cm.CM.python = () => ({ ext: 'python' });
+// Builds the pane with the app's REAL filename -> language table already
+// loaded and a language export present on CM6, so the compartment's INITIAL
+// contents are the ones the app would really compute. (makePaneHarness cannot
+// do this: it loads the map after the view exists, by which time the initial
+// derivation has already run against no map at all.)
+function makeLanguagePaneHarness(filename) {
+  const { sandbox, cm } = loadModules([VIM_MODE, LANGUAGE_MAP, EDITOR_PANE]);
+  // languageKeyFor('deploy.py') -> 'python', which editor-pane resolves as an
+  // export name on window.CM6 — the @codemirror/lang-* FUNCTION shape.
+  cm.CM.python = () => ({ ext: 'python' });
+  const host = sandbox.document.createElement('div');
+  const view = sandbox.termlabEditorPane.createEditorView(host, { doc: 'x', filename });
+  return { sandbox, cm, view, extensions: view.state.spec.extensions };
+}
 
-  // Located structurally: the compartment that follows the default keymap is
-  // the language one (vim is ahead of the keymap; theme and font follow it).
-  const keymapAt = indexOfKeymap(h.extensions);
-  const languageAt = h.extensions.findIndex(
+// Located structurally: the compartment that follows the default keymap is the
+// language one (vim is ahead of the keymap; theme and font follow it).
+function languageCompartmentAt(extensions) {
+  const keymapAt = indexOfKeymap(extensions);
+  const at = extensions.findIndex(
     (e, i) => i > keymapAt && e && typeof e.compartment === 'number',
   );
-  assert.ok(languageAt > keymapAt, 'the language extension is carried by a compartment');
+  assert.ok(at > keymapAt, 'the language extension is carried by a compartment');
+  return at;
+}
+
+// Moving the language into a compartment created a regression that costs
+// nothing to make and is invisible everywhere else: `languageComp.of([])`
+// instead of `languageComp.of(languageExtension(opts.filename))`. Every file
+// would then open with NO highlighting while every suite stayed green — the
+// compartment slot is still there, setLanguage still works, and only a file
+// opened and never renamed shows the damage. So the compartment's INITIAL
+// contents are pinned, not just its existence.
+check('a pane opens with the language its filename derives, in the compartment', () => {
+  const h = makeLanguagePaneHarness('deploy.py');
+  const at = languageCompartmentAt(h.extensions);
+  const initial = h.extensions[at].contents;
+  assert.ok(Array.isArray(initial), 'the compartment holds an extension array');
+  assert.strictEqual(
+    initial.length,
+    1,
+    'a .py file opens WITH highlighting — an empty compartment here means every '
+    + 'freshly opened file loses its language until it is renamed',
+  );
+  assert.strictEqual(initial[0].ext, 'python', 'and it is the one languageKeyFor names');
+});
+
+check('a pane whose filename has no known language opens with an empty compartment', () => {
+  const h = makeLanguagePaneHarness('notes.unknownext');
+  const at = languageCompartmentAt(h.extensions);
+  assert.strictEqual(h.extensions[at].contents.length, 0, 'nothing, rather than a wrong mode');
+  // The converse of the check above: it is the FILENAME that decides, so the
+  // non-empty case cannot be passing for some reason other than the derivation.
+  const py = makeLanguagePaneHarness('deploy.py');
+  assert.strictEqual(py.extensions[languageCompartmentAt(py.extensions)].contents.length, 1);
+});
+
+check('setLanguage re-derives highlighting on a live view, via its own compartment', () => {
+  const h = makeLanguagePaneHarness('notes.txt');
+  const languageAt = languageCompartmentAt(h.extensions);
   const languageId = h.extensions[languageAt].compartment;
   assert.notStrictEqual(languageId, h.extensions[0].compartment, 'not the vim one');
 

@@ -636,6 +636,53 @@ await checkAsync('Save As onto a path another editor already holds is refused', 
 });
 
 // ---------------------------------------------------------------------------
+// The rebind block itself — a SOURCE-TEXT CANARY
+// ---------------------------------------------------------------------------
+//
+// A canary, not a proof — the same standing as the host-formula canary in
+// test_file_dialog.mjs. Every behavioural check above probes the ordering
+// BETWEEN the steps (write, then upload, then rebind, then cleanup). None of
+// them can see an await inserted INSIDE the rebind, because at every await
+// point the checks reach, the pane is already fully rebound.
+//
+// That gap matters: `await Promise.resolve();` between `pane.filePath =` and
+// `pane.remote =` leaves the whole suite green while a savePane joiner waking
+// in that window sees filePath = NEW and remote = OLD — and writes the new
+// local file, then uploads it to the OLD host. So the block is read as text
+// and required to contain no await at all.
+//
+// What it cannot catch: a synchronous helper called from the block that
+// awaits internally, or a rename of the anchor comments into something this
+// no longer finds (which fails loudly rather than silently — see the first
+// assertion).
+check('SOURCE CANARY: the rebind block contains no await', () => {
+  const src = fs.readFileSync(SERVICE_PATH, 'utf8');
+  const START = '----- the rebind: one synchronous block, no awaits -----';
+  const END = '----- end of the rebind -----';
+  const start = src.indexOf(START);
+  const end = src.indexOf(END);
+  assert.ok(
+    start > 0 && end > start,
+    'the rebind block is no longer delimited by its anchor comments — this canary '
+    + 'cannot see the block it exists to guard; re-anchor it rather than deleting it',
+  );
+  const block = src.slice(start + START.length, end);
+
+  // Guard the guard: an empty or gutted block must not pass by having nothing
+  // in it to fail on.
+  assert.ok(/pane\.filePath\s*=/.test(block), 'the block still assigns filePath');
+  assert.ok(/pane\.remote\s*=/.test(block), 'the block still assigns remote');
+  assert.ok(/termlabResetDirty/.test(block), 'the block still resets dirty');
+
+  assert.ok(
+    !/\bawait\b/.test(block),
+    'the rebind must be one synchronous block: an await between the identity '
+    + 'assignments lets a joining save wake on a half-rebound pane (new filePath, '
+    + 'old remote) and upload the new file to the old host',
+  );
+});
+
+// ---------------------------------------------------------------------------
 // (b) The dialog half — existence check, overwrite prompt, New Folder
 // ---------------------------------------------------------------------------
 //
