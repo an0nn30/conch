@@ -7,6 +7,7 @@
       { id: 'keyboard', label: 'Keymap', description: 'Core shortcuts, tool window shortcuts, plugin shortcuts', keywords: 'keyboard shortcuts keymap bindings hotkeys commands tool windows plugins' },
       { id: 'files', label: 'Files', description: 'File explorer behavior and path following', keywords: 'files explorer path follow cwd directory' },
       { id: 'window', label: 'Window', description: 'Default size in columns and lines, title bar style, zen mode for new windows', keywords: 'window size columns lines rows dimensions title bar decorations chrome zen menu bar' },
+      { id: 'editor', label: 'Editor', description: 'Editor keybindings', keywords: 'editor vim keybindings modal keys code text' },
     ]},
     { group: 'Terminal', items: [
       { id: 'terminal', label: 'Terminal', description: 'Font rendering and scrolling', keywords: 'terminal font size offset scrolling display rendering' },
@@ -32,6 +33,7 @@
     { section: 'window', label: 'Default Window Size', keywords: 'columns lines rows window size dimensions 102 46 startup launch new window', targetId: 'window:columns' },
     { section: 'window', label: 'New Windows In Zen Mode', keywords: 'zen mode new window panels hidden distraction free', targetId: 'window:new-window-zen-mode' },
     { section: 'appearance', label: 'Native Menu Bar', keywords: 'menu bar macos native menu', targetId: 'appearance:native-menu-bar' },
+    { section: 'editor', label: 'Vim Keybindings', keywords: 'editor vim modal keys keybindings vi normal insert mode :w :q', targetId: 'editor:vim-mode' },
     { section: 'appearance', label: 'UI Font Family', keywords: 'ui font family interface typography', targetId: 'appearance:ui-font-family' },
     { section: 'appearance', label: 'UI Font Size', keywords: 'ui font size interface typography', targetId: 'appearance:ui-font-size' },
     { section: 'keyboard', label: 'Keyboard Shortcuts', keywords: 'keyboard shortcuts keymap bindings' },

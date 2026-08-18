@@ -114,8 +114,13 @@
 
     async function applyAppConfig(invoke) {
       let borderlessMode = false;
+      // The editor's vim keymap, returned so main-runtime can seed the flag it
+      // hands to newly created editor panes. Off on the failure path: a config
+      // that could not be read must not turn modal editing on.
+      let vimMode = false;
       try {
         const appCfg = await invoke('get_app_config');
+        vimMode = appCfg && appCfg.editor_vim_mode === true;
         // Published for the post-fit window sizing in main-runtime.js, which
         // runs long after this and needs the configured columns/lines.
         window.__termlabAppConfig = appCfg;
@@ -172,7 +177,7 @@
         } catch (_) {}
 
       } catch (_) {}
-      return { borderlessMode };
+      return { borderlessMode, vimMode };
     }
 
     return {

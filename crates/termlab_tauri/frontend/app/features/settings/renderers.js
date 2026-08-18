@@ -841,6 +841,22 @@
       moduleUnavailable('Window');
     }
 
+    function renderEditor(c) {
+      const settingsSectionsEditor = global.termlabSettingsSectionsEditor || {};
+      if (typeof settingsSectionsEditor.renderEditor === 'function') {
+        const handled = settingsSectionsEditor.renderEditor(c, {
+          pendingSettings: store.getPendingSettings(),
+          addSectionLabel,
+          addRow,
+          setRowTarget,
+          addDivider,
+          makeCheckbox,
+        });
+        if (handled) return;
+      }
+      moduleUnavailable('Editor');
+    }
+
     function renderKeyboard(c) {
       const settingsSectionsKeyboard = global.termlabSettingsSectionsKeyboard || {};
       if (settingsSectionsKeyboard && typeof settingsSectionsKeyboard.renderKeyboard === 'function') {
@@ -1066,6 +1082,7 @@
         case 'keyboard': renderKeyboard(content); break;
         case 'files': renderFiles(content); break;
         case 'window': renderWindow(content); break;
+        case 'editor': renderEditor(content); break;
         case 'terminal': renderTerminal(content); break;
         case 'shell': renderShell(content); break;
         case 'cursor': renderCursor(content); break;

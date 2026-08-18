@@ -5,6 +5,7 @@
 //! - `state.toml` — ephemeral UI state (not user-edited)
 
 mod colors;
+mod editor;
 mod termlab;
 mod font;
 mod persistent;
@@ -12,6 +13,7 @@ mod terminal;
 mod window;
 
 pub use colors::*;
+pub use editor::*;
 pub use termlab::*;
 pub use font::*;
 pub use persistent::*;
@@ -71,6 +73,7 @@ pub struct UserConfig {
     pub font: FontConfig,
     pub colors: ColorsConfig,
     pub terminal: TerminalConfig,
+    pub editor: EditorConfig,
     /// Accepts the legacy `[conch.*]` section name from pre-rebrand configs.
     #[serde(alias = "conch")]
     pub termlab: TermLabConfig,
@@ -96,6 +99,7 @@ impl Default for UserConfig {
             font: FontConfig::default(),
             colors: ColorsConfig::default(),
             terminal: TerminalConfig::default(),
+            editor: EditorConfig::default(),
             termlab: TermLabConfig::default(),
         }
     }
@@ -411,6 +415,20 @@ mod tests {
         atomic_write(&path, b"").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn editor_vim_mode_reads_from_the_editor_table() {
+        let cfg: UserConfig = toml::from_str("[editor]\nvim_mode = true").unwrap();
+        assert!(cfg.editor.vim_mode);
+    }
+
+    #[test]
+    fn editor_defaults_off_when_the_section_is_absent() {
+        // Every config.toml written before this section existed.
+        let cfg: UserConfig = toml::from_str("").unwrap();
+        assert!(!cfg.editor.vim_mode);
+        assert!(!UserConfig::default().editor.vim_mode);
     }
 
     #[test]

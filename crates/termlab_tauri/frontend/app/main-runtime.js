@@ -63,6 +63,11 @@
       let termCursorStyle = 'block';
       let termCursorBlink = true;
       let termScrollSensitivity = 1;
+      // Vim keybindings for the editor ([editor] vim_mode). Owned here for the
+      // same reason termFontSize is: two consumers need it at different times
+      // — tab-manager reads it when an editor pane is created, config-runtime
+      // rewrites it when the setting changes — and neither can see the other.
+      let editorVimMode = false;
       const startupTermConfigPromise = startupRuntime && startupRuntime.loadTerminalConfig
         ? startupRuntime.loadTerminalConfig(invoke, FONT_FALLBACKS)
         : Promise.resolve({
@@ -77,7 +82,14 @@
         : Promise.resolve(fallbackTheme);
       const startupAppConfigPromise = startupRuntime && startupRuntime.applyAppConfig
         ? startupRuntime.applyAppConfig(invoke)
-        : Promise.resolve({ borderlessMode: false });
+        : Promise.resolve({ borderlessMode: false, vimMode: false });
+      // A second consumer of the same promise: the block further down awaits
+      // it for layout, this one only needs the flag. Editor tabs are opened by
+      // the user, long after startup, so getEditorVimMode() below never reads
+      // the seed value.
+      startupAppConfigPromise.then((appResult) => {
+        editorVimMode = !!(appResult && appResult.vimMode);
+      }).catch(() => {});
 
       // Track webview zoom level for menu-driven zoom in/out.
       let currentZoom = 1.0;
@@ -192,6 +204,7 @@
             shortcutDebugEnabled,
             currentWindowLabel,
             getTermFontSize: () => termFontSize,
+            getEditorVimMode: () => editorVimMode,
             getActiveTabId: () => activeTabId,
             setActiveTabId: (tabId) => { activeTabId = tabId; },
             setNextTabLabel: (value) => { nextTabLabel = value; },
@@ -319,6 +332,7 @@
               termFontSize = partial.fontSize;
             }
           },
+          setEditorVimMode: (value) => { editorVimMode = value === true; },
           fontFallbacks: FONT_FALLBACKS,
           activateTab: (tabId) => activateTab(tabId),
         });

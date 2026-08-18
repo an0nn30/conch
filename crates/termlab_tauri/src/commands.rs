@@ -42,6 +42,11 @@ pub(crate) fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json:
         "ui_skin": cfg.termlab.ui.skin,
         "ui_font_family": cfg.termlab.ui.font_family,
         "ui_font_size": cfg.termlab.ui.font_size,
+        // The editor's vim keymap. Carried here rather than on
+        // get_terminal_config because it is not a terminal setting, and this
+        // payload is already re-fetched on every `config-changed` — which is
+        // what lets the toggle reach open editor panes without a restart.
+        "editor_vim_mode": cfg.editor.vim_mode,
         "ui_font_small": cfg.termlab.ui.font.small,
         "ui_font_list": cfg.termlab.ui.font.list,
         "ui_font_normal": cfg.termlab.ui.font.normal,

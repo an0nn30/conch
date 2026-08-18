@@ -37,6 +37,7 @@
     const setThemeState = deps.setThemeState;
     const getTermConfigState = deps.getTermConfigState;
     const setTermConfigState = deps.setTermConfigState;
+    const setEditorVimMode = deps.setEditorVimMode;
     const fontFallbacks = deps.fontFallbacks;
 
     async function init() {
@@ -239,6 +240,9 @@
           getFontFallbacks: () => fontFallbacks,
           setTermFontFamily: (value) => setTermConfigState({ fontFamily: value }),
           setTermFontSize: (value) => setTermConfigState({ fontSize: value }),
+          setEditorVimMode: (value) => {
+            if (typeof setEditorVimMode === 'function') setEditorVimMode(value);
+          },
         });
         configRuntime.init();
       }

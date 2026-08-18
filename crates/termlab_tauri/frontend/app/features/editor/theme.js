@@ -26,6 +26,13 @@
     const selection = token('--tl-selection-bg', '--tl-accent');
     const rowHover = token('--tl-row-hover');
 
+    // The terminal's stack, not the UI font — an editor beside a terminal
+    // shares its typeface. main-runtime keeps this global current; the literal
+    // fallback is only for the pre-init window and must stay in step with
+    // FONT_FALLBACKS in main-runtime.js:58.
+    const fontStack = global.__termlabTermFontFamily
+      || '"JetBrains Mono", "Fira Code", "Cascadia Code", "Symbols Nerd Font Mono", "Symbols Nerd Font", "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace';
+
     const theme = CM.EditorView.theme({
       '&': { backgroundColor: bg, color: fg, height: '100%' },
       '.cm-content': { caretColor: fg },
@@ -36,14 +43,17 @@
       '.cm-activeLine': { backgroundColor: rowHover },
       '.cm-activeLineGutter': { backgroundColor: rowHover, color: fg },
       '.cm-selectionMatch': { backgroundColor: rowHover },
-      '.cm-scroller': {
-        // The terminal's stack, not the UI font — an editor beside a terminal
-        // shares its typeface. main-runtime keeps this global current; the
-        // literal fallback below is only for the pre-init window and must
-        // stay in step with FONT_FALLBACKS in main-runtime.js:58-59.
-        fontFamily: global.__termlabTermFontFamily
-          || '"JetBrains Mono", "Fira Code", "Cascadia Code", "Symbols Nerd Font Mono", "Symbols Nerd Font", "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace',
-      },
+      '.cm-scroller': { fontFamily: fontStack },
+      // Panels: vim's `:` command line and the search bar. Both would
+      // otherwise take CodeMirror's own grey panel default and read as a
+      // foreign strip pasted under the editor. The vim package's base theme
+      // hardcodes `monospace` on its panel, which is why the font is restated
+      // here — an EditorView.theme rule outranks a baseTheme one.
+      '.cm-panels': { backgroundColor: bg, color: fg, fontFamily: fontStack },
+      '.cm-panels.cm-panels-bottom': { borderTop: `1px solid ${border}` },
+      '.cm-panels.cm-panels-top': { borderBottom: `1px solid ${border}` },
+      '.cm-vim-panel': { fontFamily: fontStack },
+      '.cm-vim-panel input': { color: fg, fontFamily: fontStack },
     }, { dark: isDarkTheme() });
 
     const t = CM.tags;

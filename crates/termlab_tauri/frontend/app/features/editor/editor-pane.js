@@ -6,10 +6,17 @@
 (function initTermLabEditorPane(global) {
   'use strict';
 
-  // Compartments let the font size and theme be reconfigured on a live view
-  // without rebuilding its state (which would discard undo history).
+  // Compartments let the font size, theme and vim keymap be reconfigured on a
+  // live view without rebuilding its state (which would discard undo history).
   const fontCompartments = new WeakMap();
   const themeCompartments = new WeakMap();
+  const vimCompartments = new WeakMap();
+
+  function vimExtensions(enabled) {
+    return global.termlabVimMode && typeof global.termlabVimMode.vimExtensions === 'function'
+      ? global.termlabVimMode.vimExtensions(enabled)
+      : [];
+  }
 
   function languageExtension(filename) {
     const CM = global.CM6;
@@ -36,6 +43,7 @@
 
     const fontComp = new CM.Compartment();
     const themeComp = new CM.Compartment();
+    const vimComp = new CM.Compartment();
     const themeExtensions = global.termlabEditorTheme
       ? global.termlabEditorTheme.buildTheme()
       : [];
@@ -52,6 +60,13 @@
       state: CM.EditorState.create({
         doc: typeof opts.doc === 'string' ? opts.doc : '',
         extensions: [
+          // FIRST, and it has to stay first. CodeMirror resolves keymaps in
+          // extension order, so anything ahead of vim wins the keystroke:
+          // put this after CM.keymap.of([...defaultKeymap]) below and `i`
+          // types an "i" instead of entering insert mode, `dd` deletes
+          // nothing, and the feature looks broken rather than absent.
+          // test_editor_vim_glue.mjs pins the position.
+          vimComp.of(vimExtensions(opts.vimMode === true)),
           CM.lineNumbers(),
           CM.highlightActiveLineGutter(),
           CM.highlightSpecialChars(),
@@ -80,6 +95,7 @@
 
     fontCompartments.set(view, fontComp);
     themeCompartments.set(view, themeComp);
+    vimCompartments.set(view, vimComp);
     // Callers clear dirty after a save; expose the reset without exposing state.
     view.termlabResetDirty = () => {
       dirty = false;
@@ -109,10 +125,21 @@
     view.dispatch({ effects: comp.reconfigure(global.termlabEditorTheme.buildTheme()) });
   }
 
+  // Turn vim keybindings on or off on a view that is already open. A
+  // compartment reconfigure keeps the document, the selection and the undo
+  // history — rebuilding the state would throw all three away, and the
+  // setting is meant to take effect without reopening the file.
+  function setVimMode(view, enabled) {
+    const comp = vimCompartments.get(view);
+    if (!view || !comp) return;
+    view.dispatch({ effects: comp.reconfigure(vimExtensions(enabled === true)) });
+  }
+
   global.termlabEditorPane = {
     createEditorView,
     destroyEditorView,
     setFontSize,
     refreshTheme,
+    setVimMode,
   };
 })(window);

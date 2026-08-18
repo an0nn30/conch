@@ -112,6 +112,19 @@ blinking = true
 # blinking = false
 
 # ---------------------------------------------------------------------------
+# Editor
+# ---------------------------------------------------------------------------
+
+[editor]
+
+# Use vim keybindings in the built-in editor.
+#
+# Off by default. When on, `:w` saves through the same path as Cmd+S (a remote
+# file is uploaded to its host), and `:q` closes the tab through the same
+# guard, so a file with unsaved changes still asks before it goes.
+vim_mode = false
+
+# ---------------------------------------------------------------------------
 # TermLab — Keyboard Shortcuts
 # ---------------------------------------------------------------------------
 #

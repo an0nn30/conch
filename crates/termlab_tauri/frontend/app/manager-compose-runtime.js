@@ -15,6 +15,7 @@
     const shortcutDebugEnabled = deps.shortcutDebugEnabled;
     const currentWindowLabel = deps.currentWindowLabel;
     const getTermFontSize = deps.getTermFontSize;
+    const getEditorVimMode = deps.getEditorVimMode;
 
     const getActiveTabId = deps.getActiveTabId;
     const setActiveTabId = deps.setActiveTabId;
@@ -132,6 +133,7 @@
           setNextTabLabel: (value) => setNextTabLabel(value),
           appEl,
           getTermFontSize: () => (typeof getTermFontSize === 'function' ? getTermFontSize() : 0),
+          getEditorVimMode: () => (typeof getEditorVimMode === 'function' ? getEditorVimMode() === true : false),
           setFocusedPane: (paneId) => setFocusedPane(paneId),
           fitAndResizeTab: (tab) => {
             if (layoutRuntime && layoutRuntime.fitAndResizeTab) return layoutRuntime.fitAndResizeTab(tab);
@@ -295,6 +297,41 @@
         setFocusedPane: (paneId) => paneManager.setFocusedPane(paneId),
         activateTab: (tabId) => tabManager.activateTab(tabId),
       };
+    }
+
+    // vim's `:w` and `:q` have to mean what Cmd+S and closing the tab mean, and
+    // this is the only scope where all three accessors exist at once:
+    // savePane is a plain global (editor-service.js), closeTab lives on
+    // managerDelegates, and currentPane comes off the composed paneManager.
+    // Registering here rather than inside vim-mode.js is what keeps that
+    // module from having to guess at any of them.
+    //
+    // Unconditional: the ex commands are registered against the vim engine
+    // itself, not against a view, so they are in place before the first editor
+    // pane exists and stay correct when the setting is toggled later. Cheap
+    // when vim_mode is off, because nothing can type `:` at a vim prompt that
+    // is not there.
+    if (
+      paneManager
+      && managerDelegates
+      && global.termlabVimMode
+      && typeof global.termlabVimMode.registerExCommands === 'function'
+    ) {
+      global.termlabVimMode.registerExCommands({
+        savePane: (pane) => {
+          const service = global.termlabEditorService;
+          if (!service || typeof service.savePane !== 'function') {
+            // Rejects rather than silently doing nothing: vim-mode turns this
+            // into a "Save Failed" toast, so `:w` never looks like it worked.
+            return Promise.reject(new Error('editor service unavailable'));
+          }
+          return service.savePane(pane);
+        },
+        // The GUARDED close — a dirty editor still gets its Save/Don't
+        // Save/Cancel prompt. closePane and view.destroy() do not ask.
+        closeTab: (tabId) => managerDelegates.closeTab(tabId),
+        currentPane: () => paneManager.currentPane(),
+      });
     }
 
     return {

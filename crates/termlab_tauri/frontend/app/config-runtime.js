@@ -8,6 +8,7 @@
     const getFontFallbacks = deps.getFontFallbacks;
     const setTermFontFamily = deps.setTermFontFamily;
     const setTermFontSize = deps.setTermFontSize;
+    const setEditorVimMode = deps.setEditorVimMode;
     const configService = global.termlabConfigService || {};
 
     async function applyConfigChanged() {
@@ -48,6 +49,24 @@
         }
 
         const appCfg = await invoke('get_app_config');
+        // Vim keybindings. Applied here, in the same event that carries the
+        // theme and the font, because this is the only place a settings save
+        // reaches an already-open window: save_settings writes the config and
+        // emits `config-changed` (settings.rs), and this listener is what turns
+        // that into live UI. A reconfigure of the vim compartment keeps the
+        // document, the selection and the undo history, so the toggle takes
+        // effect in an open editor without reopening the file.
+        //
+        // The stored flag is updated too, so the next editor pane this window
+        // opens is created with the new value instead of the startup one.
+        const vimMode = appCfg && appCfg.editor_vim_mode === true;
+        if (typeof setEditorVimMode === 'function') setEditorVimMode(vimMode);
+        for (const pane of getPanes().values()) {
+          if (pane.kind === 'editor' && pane.view && global.termlabEditorPane
+              && typeof global.termlabEditorPane.setVimMode === 'function') {
+            global.termlabEditorPane.setVimMode(pane.view, vimMode);
+          }
+        }
         if (typeof configService.applyUiConfig === 'function') {
           configService.applyUiConfig(appCfg);
         } else {

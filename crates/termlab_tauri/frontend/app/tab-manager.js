@@ -12,6 +12,7 @@
     // creation time: without it a new editor view renders at the inherited
     // page size until some later config change happens to reconfigure it.
     const getTermFontSize = deps.getTermFontSize;
+    const getEditorVimMode = deps.getEditorVimMode;
     const setFocusedPane = deps.setFocusedPane;
     const fitAndResizeTab = deps.fitAndResizeTab;
     const onTabChanged = deps.onTabChanged;
@@ -702,6 +703,11 @@
       pane.view = global.termlabEditorPane.createEditorView(hostEl, {
         doc: typeof opts.contents === 'string' ? opts.contents : '',
         filename: pane.filePath || '',
+        // Passed into the state rather than applied afterwards the way the
+        // font size below is: vim's keymap has to be in the extension list
+        // from the first keystroke, and a reconfigure a tick later would let
+        // the default keymap answer anything typed in between.
+        vimMode: typeof getEditorVimMode === 'function' ? getEditorVimMode() === true : false,
         onDirtyChange: (dirty) => {
           pane.dirty = dirty;
           dirtyMarker.hidden = !dirty;

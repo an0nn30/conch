@@ -216,6 +216,17 @@ mod tests {
     }
 
     #[test]
+    fn changed_vim_mode_no_restart() {
+        let a = UserConfig::default();
+        let mut b = UserConfig::default();
+        b.editor.vim_mode = true;
+        assert!(
+            !needs_restart(&a, &b),
+            "vim mode is applied live via config-changed; asking for a restart would be a lie"
+        );
+    }
+
+    #[test]
     fn changed_plugin_enabled_needs_restart() {
         let a = UserConfig::default();
         let mut b = UserConfig::default();
