@@ -47,7 +47,15 @@ java-sdk:
 # ===========================================================================
 
 .PHONY: build
-build:
+# The CodeMirror bundle is generated, git-ignored, and only built by Tauri's
+# beforeBuildCommand — which plain `cargo build` never fires. Any target that
+# packages the app must depend on this or it ships an editor that shows the
+# "bundle missing" toast. Same gap the linux release jobs patch in release.yml.
+frontend-vendor:
+	npm --prefix crates/termlab_tauri/frontend ci
+	npm --prefix crates/termlab_tauri/frontend run build:vendor
+
+build: frontend-vendor
 	cargo build --release -p termlab_tauri
 	@echo "Binary at target/release/termlab"
 
@@ -143,7 +151,7 @@ dmg-native: check-macos-tools java-sdk build
 # macOS — Universal DMG (ARM64 + x86_64)
 # ---------------------------------------------------------------------------
 .PHONY: dmg-universal
-dmg-universal: check-macos-tools java-sdk
+dmg-universal: check-macos-tools java-sdk frontend-vendor
 	rustup target add aarch64-apple-darwin x86_64-apple-darwin
 	cargo build --release -p termlab_tauri --target=aarch64-apple-darwin
 	cargo build --release -p termlab_tauri --target=x86_64-apple-darwin
