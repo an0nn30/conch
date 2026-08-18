@@ -167,6 +167,7 @@
             renameActiveTab: () => { throw new Error('managerDelegates.renameActiveTab is unavailable'); },
             startTabRename: () => { throw new Error('managerDelegates.startTabRename is unavailable'); },
             createTab: () => { throw new Error('managerDelegates.createTab is unavailable'); },
+            createEditorTab: () => { throw new Error('managerDelegates.createEditorTab is unavailable'); },
             createSshTab: () => { throw new Error('managerDelegates.createSshTab is unavailable'); },
             refreshWindowTitle: () => { throw new Error('managerDelegates.refreshWindowTitle is unavailable'); },
           };
@@ -188,6 +189,7 @@
             layoutRuntime,
             shortcutDebugEnabled,
             currentWindowLabel,
+            getTermFontSize: () => termFontSize,
             getActiveTabId: () => activeTabId,
             setActiveTabId: (tabId) => { activeTabId = tabId; },
             setNextTabLabel: (value) => { nextTabLabel = value; },
@@ -497,6 +499,13 @@
         termCursorBlink = termConfig.cursorBlink;
         termScrollSensitivity = termConfig.scrollSensitivity;
         for (const pane of panes.values()) {
+          // Font size only for editor panes: cursor style/blink are xterm
+          // options, and there is no fitAddon to fit — CodeMirror reflows
+          // itself when its font compartment is reconfigured.
+          if (pane.kind === 'editor' && pane.view && window.termlabEditorPane) {
+            window.termlabEditorPane.setFontSize(pane.view, termFontSize);
+            continue;
+          }
           if (pane.kind !== 'terminal' || !pane.term) continue;
           pane.term.options.fontFamily = termFontFamily;
           pane.term.options.fontSize = termFontSize;
@@ -512,6 +521,12 @@
         for (const pane of panes.values()) {
           if (pane.kind === 'terminal' && pane.term) {
             pane.term.options.theme = resolvedTheme;
+          }
+          // resolvedTheme is an xterm theme object and means nothing to
+          // CodeMirror; the editor rebuilds from the --tl-* variables the same
+          // startup path has just applied.
+          if (pane.kind === 'editor' && pane.view && window.termlabEditorPane) {
+            window.termlabEditorPane.refreshTheme(pane.view);
           }
         }
       }).catch(() => {});

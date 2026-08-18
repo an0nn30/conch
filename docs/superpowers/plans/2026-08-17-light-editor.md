@@ -217,11 +217,38 @@ Note this uses `npm install` **once**, deliberately, to create the lockfile. Eve
 
 - [ ] **Step 5: Check the bundle is a valid IIFE exposing the global**
 
+Every export name in `vendor-entry.mjs` must actually resolve — a legacy-mode name that is subtly wrong (`powerShell` vs `powershell`, `dockerFile` vs `dockerfile`) produces `undefined` rather than an error, and the only symptom is a file type that silently gets no highlighting.
+
+Create `crates/termlab_tauri/frontend/check-vendor.mjs`:
+
+```js
+// Asserts every name vendor-entry.mjs claims to export actually resolves in
+// the built bundle. A missing name is otherwise silent: the language just
+// never highlights.
+import fs from 'node:fs';
+import path from 'node:path';
+
+const here = import.meta.dirname;
+const entry = fs.readFileSync(path.join(here, 'vendor-entry.mjs'), 'utf8');
+const expected = [...entry.matchAll(/export\s*\{([^}]*)\}/g)]
+  .flatMap((m) => m[1].split(','))
+  .map((s) => s.trim().split(/\s+as\s+/).pop().trim())
+  .filter(Boolean);
+
+globalThis.window = globalThis;
+new Function(fs.readFileSync(path.join(here, 'vendor', 'codemirror', 'codemirror.js'), 'utf8'))();
+
+const missing = expected.filter((name) => globalThis.CM6[name] === undefined);
+if (!globalThis.CM6) throw new Error('CM6 global not defined — check globalName');
+if (missing.length) throw new Error(`missing from bundle: ${missing.join(', ')}`);
+console.log(`vendor check: ${expected.length} exports present`);
+```
+
 Run:
 ```bash
-cd crates/termlab_tauri/frontend && node -e "globalThis.window=globalThis; eval(require('fs').readFileSync('vendor/codemirror/codemirror.js','utf8')); console.log(typeof CM6.EditorView, typeof CM6.javascript, typeof CM6.shell, Object.keys(CM6).length)"
+cd crates/termlab_tauri/frontend && node check-vendor.mjs
 ```
-Expected: `function function object` and a key count of at least 40. If `CM6` is undefined the `globalName` is wrong; if a language is undefined the entry file is missing an export.
+Expected: `vendor check: N exports present` with N at least 40. If it names missing exports, the package genuinely exports a different identifier — look it up in that package's own `dist` types and correct `vendor-entry.mjs`, then rebuild and re-run until clean. Report any name you had to correct.
 
 - [ ] **Step 6: Record the bundle size**
 
@@ -316,6 +343,7 @@ git add crates/termlab_tauri/frontend/package.json \
         crates/termlab_tauri/frontend/package-lock.json \
         crates/termlab_tauri/frontend/vendor-entry.mjs \
         crates/termlab_tauri/frontend/build-vendor.mjs \
+        crates/termlab_tauri/frontend/check-vendor.mjs \
         crates/termlab_tauri/tauri.conf.json \
         crates/termlab_tauri/frontend/index.html \
         .gitignore .github/workflows/release.yml
@@ -1046,16 +1074,15 @@ Create `crates/termlab_tauri/frontend/app/features/editor/editor-pane.js`:
     if (!CM || !map) return [];
     const key = map.languageKeyFor(filename);
     if (!key) return [];
-    const factory = CM[key];
-    if (typeof factory !== 'function') return [];
-    // The lang-* packages export a function returning an extension; the
-    // legacy modes export a StreamParser that must be wrapped.
-    try {
-      const produced = factory();
-      return produced && produced.extension !== undefined ? [produced] : [produced];
-    } catch (_e) {
-      return [CM.StreamLanguage.define(factory)];
-    }
+    const entry = CM[key];
+    if (!entry) return [];
+    // Two shapes arrive here. The @codemirror/lang-* packages export a
+    // FUNCTION returning a LanguageSupport. The legacy modes export a plain
+    // StreamParser OBJECT, which has to be wrapped in StreamLanguage before
+    // CodeMirror will take it. Discriminating on typeof is the whole trick —
+    // treating the object as a factory silently yields no highlighting.
+    if (typeof entry === 'function') return [entry()];
+    return [CM.StreamLanguage.define(entry)];
   }
 
   function createEditorView(hostEl, options) {
@@ -1175,6 +1202,9 @@ Create `crates/termlab_tauri/frontend/styles/design-system/components/editor.css
 .tab-dirty-marker {
   margin-left: var(--tl-space-1);
   color: var(--tl-accent);
+}
+.tab-dirty-marker[hidden] {
+  display: none;
 }
 ```
 
@@ -1346,12 +1376,24 @@ Modelled on `createTab` (line 424) but with no terminal. Add beside it:
       button.addEventListener('click', () => activateTab(tabId));
       paneEl.addEventListener('mousedown', () => setFocusedPane(paneId));
 
+      // The modified marker is its own element, appended next to the tab's
+      // label. Do NOT write button.textContent — makeTabButton builds child
+      // elements (the label and the close affordance) and assigning
+      // textContent destroys them. Read makeTabButton, find the element that
+      // holds the label text, and insert the marker directly after it; append
+      // to the button only if no such element exists.
+      const dirtyMarker = document.createElement('span');
+      dirtyMarker.className = 'tab-dirty-marker';
+      dirtyMarker.textContent = '•';
+      dirtyMarker.hidden = true;
+      button.appendChild(dirtyMarker);
+
       pane.view = global.termlabEditorPane.createEditorView(hostEl, {
         doc: typeof opts.contents === 'string' ? opts.contents : '',
         filename: pane.filePath || '',
         onDirtyChange: (dirty) => {
           pane.dirty = dirty;
-          button.textContent = dirty ? `${fileName} •` : fileName;
+          dirtyMarker.hidden = !dirty;
         },
       });
 
@@ -2249,7 +2291,7 @@ After all eight tasks, these must all hold:
 
 - `cargo test --workspace` and `cargo clippy --all-targets` pass.
 - `node scripts/tests/test_language_map.mjs` and `test_scratch_naming.mjs` pass.
-- `./scripts/check_frontend_boundaries.sh .` passes.
+- `./scripts/check_frontend_boundaries.sh .` introduces **no new** violations. It does not pass today and did not before this branch: it fails on `app/ui/tl-dialog.js:334`, the dialog focus trap's capture-phase document keydown listener, verified on the base commit. Fixing a shared invariant from a feature branch about editors is the wrong place for it, so that failure is tracked separately; the gate here is that the violation list gains no new entries.
 - The eleven manual checks in the spec's Testing section have been run, each recorded pass or fail.
 - The recorded CodeMirror bundle size is in the final report.
 - No app module imports another app module — the build step covers third-party dependencies only.

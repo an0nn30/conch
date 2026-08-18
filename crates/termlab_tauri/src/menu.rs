@@ -39,6 +39,13 @@ pub(crate) const MENU_SPLIT_HORIZONTAL_ID: &str = "view.split_horizontal";
 pub(crate) const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
+/// Quit is a custom item, not `PredefinedMenuItem::quit`. The predefined one
+/// sends `[NSApp terminate:]`, which tao does not intercept
+/// (`applicationShouldTerminate:` is unimplemented) and which raises neither
+/// `WindowEvent::CloseRequested` nor `RunEvent::ExitRequested` — so there is
+/// no point at which unsaved editors could be checked. Routing quit through a
+/// menu id lets close_guard poll every window first.
+pub(crate) const MENU_QUIT_ID: &str = "app.quit";
 
 // ---------------------------------------------------------------------------
 // Menu action string constants (emitted to frontend via events)
@@ -117,6 +124,22 @@ pub(crate) fn config_key_to_accelerator(key: &str) -> String {
 // ---------------------------------------------------------------------------
 // Menu builders
 // ---------------------------------------------------------------------------
+
+/// The Quit item, carrying the user's configured accelerator (default
+/// `cmd+q`) so it behaves exactly like the predefined one it replaces.
+#[cfg(target_os = "macos")]
+fn quit_item<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    keyboard: &termlab_core::config::KeyboardConfig,
+) -> tauri::Result<MenuItem<R>> {
+    MenuItem::with_id(
+        app,
+        MENU_QUIT_ID,
+        "Quit TermLab",
+        true,
+        Some(&config_key_to_accelerator(&keyboard.quit)),
+    )
+}
 
 pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -390,7 +413,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
                 &PredefinedMenuItem::hide(app, None)?,
                 &PredefinedMenuItem::hide_others(app, None)?,
                 &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::quit(app, None)?,
+                &quit_item(app, keyboard)?,
             ],
         )?;
         #[cfg(debug_assertions)]
@@ -836,7 +859,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                     &PredefinedMenuItem::hide(app, None)?,
                     &PredefinedMenuItem::hide_others(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &quit_item(app, keyboard)?,
                 ],
             )?;
             #[cfg(debug_assertions)]

@@ -139,6 +139,63 @@
         handleMenuAction(action);
       });
 
+      // Unsaved-changes handshake. The webview owns the answer to "is anything
+      // unsaved?", so Rust stops the close, emits one of these, and waits to
+      // be told.
+      //
+      // One prompt at a time: a request that arrives while another is being
+      // answered is refused rather than allowed to stack a second dialog on
+      // top of the first. Refused, though — not dropped. Dropping it strands
+      // the sender: Rust's quit poll waits on a vote that never comes and,
+      // because request_quit early-returns while a quit is pending, Cmd+Q is
+      // then dead for the rest of the session. A "no" costs at most one extra
+      // keystroke; silence costs the feature.
+      {
+        let answering = false;
+        const answerCloseRequest = async (confirmCommand) => {
+          if (answering) {
+            invoke(confirmCommand, { allow: false }).catch(() => {});
+            return;
+          }
+          answering = true;
+          try {
+            const service = global.termlabEditorService;
+            // No editor service means no editors, and therefore nothing to
+            // lose — go ahead rather than wedging a window that can never be
+            // closed.
+            const ok = service && typeof service.confirmAllDirty === 'function'
+              ? await service.confirmAllDirty()
+              : true;
+            await invoke(confirmCommand, { allow: ok });
+          } catch (error) {
+            // Whether anything is unsaved is now unknown, so do not consent.
+            // Rust is told "no" explicitly rather than left waiting.
+            showStatus('Could not check for unsaved changes: ' + String(error));
+            try {
+              await invoke(confirmCommand, { allow: false });
+            } catch (_) {}
+          } finally {
+            answering = false;
+          }
+        };
+
+        await listenOnCurrentWindow('window-close-requested', () => {
+          answerCloseRequest('confirm_window_close');
+        });
+        await listenOnCurrentWindow('app-quit-requested', () => {
+          answerCloseRequest('quit_vote');
+        });
+        // Only armed windows get their close prevented. A window whose
+        // frontend never reaches this line (bundle missing, script error, the
+        // settings window's separate document) keeps the ordinary close
+        // behaviour instead of becoming unclosable.
+        try {
+          await invoke('window_close_guard_arm');
+        } catch (error) {
+          showStatus('Unsaved-changes guard unavailable: ' + String(error));
+        }
+      }
+
       if (global._initTitlebarPending && global.titlebar) {
         global.titlebar.init(handleMenuAction);
         delete global._initTitlebarPending;

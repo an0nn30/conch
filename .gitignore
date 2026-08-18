@@ -50,3 +50,7 @@ dist/
 dmg-staging/
 *.dmg
 Archive.zip
+
+# Frontend vendor build (esbuild-generated CodeMirror bundle)
+crates/termlab_tauri/frontend/node_modules/
+crates/termlab_tauri/frontend/vendor/codemirror/

@@ -24,12 +24,18 @@
     navigate_pane_down: 'Navigate Pane Down',
     navigate_pane_left: 'Navigate Pane Left',
     navigate_pane_right: 'Navigate Pane Right',
+    new_scratch: 'New Scratch',
+    save_file: 'Save File',
   };
 
   const KEYBOARD_CORE_GROUPS = [
     {
       label: 'Tab & Window',
       keys: ['new_tab', 'new_plain_shell_tab', 'close_tab', 'rename_tab', 'new_window', 'quit'],
+    },
+    {
+      label: 'Editor',
+      keys: ['new_scratch', 'save_file'],
     },
     {
       label: 'Tools',

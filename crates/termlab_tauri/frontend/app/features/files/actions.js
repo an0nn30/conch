@@ -44,13 +44,20 @@
     navigate(pane, '.', d);
   }
 
+  // Double-click (and Enter) on a row. A directory navigates into itself; a
+  // file is handed to the caller to open. Entries carry a `name`, not a full
+  // path, so both branches compose the path the same way.
   function activateEntry(pane, entry, deps) {
-    if (!pane || !entry || !entry.is_dir) return;
+    if (!pane || !entry) return;
     const d = deps || {};
     const sep = '/';
     const base = String(pane.currentPath || '');
     const next = base.endsWith(sep) ? (base + entry.name) : (base + sep + entry.name);
-    navigate(pane, next, d);
+    if (entry.is_dir) {
+      navigate(pane, next, d);
+      return;
+    }
+    if (typeof d.onOpenFile === 'function') d.onOpenFile(pane, entry, next);
   }
 
   global.termlabFilesActions = {

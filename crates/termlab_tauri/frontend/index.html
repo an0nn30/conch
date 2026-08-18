@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="styles/design-system/components/picker.css" />
   <link rel="stylesheet" href="styles/design-system/components/settings.css" />
   <link rel="stylesheet" href="styles/design-system/components/palette.css" />
+  <link rel="stylesheet" href="styles/design-system/components/editor.css" />
   <link rel="stylesheet" href="styles/base.css" />
   <link rel="stylesheet" href="styles/layout.css" />
   <link rel="stylesheet" href="styles/tool-windows.css" />
@@ -91,6 +92,11 @@
        canvas context before the WebGL texture atlas is built, causing the
        terminal to render with a fallback font.  The canvas renderer in
        xterm.js 5.x is fast enough for interactive use. -->
+
+  <!-- CodeMirror 6, bundled by frontend/build-vendor.mjs. Generated, git-ignored;
+       run `npm run build:vendor` in frontend/ if this 404s. -->
+  <script src="vendor/codemirror/codemirror.js"></script>
+
   <script src="app/core/utils.js"></script>
   <script src="app/core/pane-title.js"></script>
   <script src="app/core/window-size.js"></script>
@@ -150,6 +156,11 @@
   <script src="app/panels/tunnel-manager.js"></script>
   <script src="app/panels/tunnels-panel.js"></script>
   <script src="app/panels/notifications-panel.js"></script>
+  <script src="app/features/editor/language-map.js"></script>
+  <script src="app/features/editor/theme.js"></script>
+  <script src="app/features/editor/editor-pane.js"></script>
+  <script src="app/features/editor/scratch.js"></script>
+  <script src="app/features/editor/editor-service.js"></script>
   <script src="app/layout/split-tree.js"></script>
   <script src="app/layout/split-pane.js"></script>
   <script src="app/layout/pane-dnd.js"></script>

@@ -8,6 +8,10 @@
     const setFocusedPaneId = deps.setFocusedPaneId;
     const setNextTabLabel = deps.setNextTabLabel;
     const appEl = deps.appEl;
+    // The configured terminal font size, which editor panes share. Needed at
+    // creation time: without it a new editor view renders at the inherited
+    // page size until some later config change happens to reconfigure it.
+    const getTermFontSize = deps.getTermFontSize;
     const setFocusedPane = deps.setFocusedPane;
     const fitAndResizeTab = deps.fitAndResizeTab;
     const onTabChanged = deps.onTabChanged;
@@ -93,9 +97,24 @@
       });
     }
 
+    // A composed title describes a terminal — a user@host prefix, a cwd or
+    // foreground program, a PTY size. A tab whose focused pane is not a
+    // terminal (an editor tab, whose label is its filename; a docked plugin
+    // view) has none of that, and composing one destroys the label it does
+    // have.
+    function tabFocusesTerminalPane(tab) {
+      if (!tab || tab.focusedPaneId == null) return false;
+      const pane = getPanes().get(tab.focusedPaneId);
+      return !!(pane && pane.kind === 'terminal');
+    }
+
     // A plugin-supplied name is the user's own label and always wins.
     function refreshTabTitle(tab) {
       if (!tab || tab.pluginRenamed) return;
+      // Guarded here as well as at the poll below: this is the function that
+      // actually overwrites tab.label, the button and the window title, and it
+      // has several callers.
+      if (!tabFocusesTerminalPane(tab)) return;
       const title = composeFor(tab);
       if (!title || title === tab.label) return;
       tab.label = title;
@@ -109,6 +128,13 @@
       if (!tab || typeof getLocalPaneProcess !== 'function') return;
       const paneId = tab.focusedPaneId;
       if (paneId == null) return;
+      // Only a terminal pane has a process to poll. `get_local_pane_process`
+      // (crates/termlab_tauri/src/pty.rs) returns
+      // `PaneProcessInfo { cwd: None, program: None }` for a pane id it does
+      // not know — it never errors — so without this bail-out the reply is
+      // truthy, the cached cwd/program are blanked, and refreshTabTitle
+      // recomposes an editor tab's filename into a bare "user@host".
+      if (!tabFocusesTerminalPane(tab)) return;
       try {
         const info = await getLocalPaneProcess(paneId);
         if (!info) return;
@@ -367,6 +393,35 @@
       if (!tab) return;
       let closedSshPane = false;
 
+      // Ask before discarding edits. Unconditional, and deliberately so: this
+      // is the only tab-level dirty check, and an opt-out parameter would be a
+      // second door past it. The window-close and quit handshakes do not need
+      // one — they never call closeTab. The frontend answers
+      // `confirm_window_close` / `quit_vote` and Rust destroys the window
+      // itself, so no tab is ever closed twice over one question.
+      //
+      // Everything below this point destroys CodeMirror views and deletes
+      // panes, so the question has to be settled first.
+      {
+        const dirtyPanes = allPanesInTab(tabId)
+          .map((pid) => panes.get(pid))
+          .filter((p) => p && p.kind === 'editor' && p.dirty);
+        if (dirtyPanes.length > 0) {
+          const service = global.termlabEditorService;
+          if (!service || typeof service.confirmDirtyPanes !== 'function') {
+            // A dirty editor exists but the service that knows how to ask
+            // about it does not. Keep the tab.
+            showStatus('Cannot confirm unsaved changes; tab not closed.');
+            return;
+          }
+          const ok = await service.confirmDirtyPanes(dirtyPanes);
+          if (!ok) return;
+          // Awaiting the prompt yielded to the event loop; the tab may have
+          // been closed underneath us in the meantime.
+          if (!tabs.has(tabId)) return;
+        }
+      }
+
       const paneIds = allPanesInTab(tabId);
       for (const pid of paneIds) {
         const pane = panes.get(pid);
@@ -379,6 +434,23 @@
         } else if (notifyBackend && pane.kind === 'plugin_view' && pane.viewId) {
           notifyPluginViewClosed(pane.viewId);
           deletePluginViewPane(pane.viewId);
+        } else if (pane.kind === 'editor') {
+          // Unconditional, unlike the two branches above: destroying the
+          // CodeMirror view is local cleanup, not a backend notification, so it
+          // must happen even when notifyBackend is false.
+          if (pane.view && global.termlabEditorPane) {
+            global.termlabEditorPane.destroyEditorView(pane.view);
+          }
+          pane.view = null;
+          // A remote editor's file is a download in a temp directory, so
+          // closing the tab is the end of its life. The dirty prompt above has
+          // already run, so reaching here means the edit was either uploaded
+          // or deliberately discarded. The service owns the path rules; it
+          // refuses anything that is not one of its own temp files.
+          if (pane.remote && global.termlabEditorService
+              && typeof global.termlabEditorService.discardRemoteTemp === 'function') {
+            global.termlabEditorService.discardRemoteTemp(pane);
+          }
         }
         if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
         if (pane.resizeObserver) pane.resizeObserver.disconnect();
@@ -528,6 +600,120 @@
       return tabId;
     }
 
+    // An editor tab. Mirrors createTab's DOM and tab bookkeeping exactly —
+    // same button, same tree-root container, same divider wiring — so editor
+    // tabs participate in splits, drag-and-drop and activation with no
+    // special cases downstream. The only difference is what lives in the pane.
+    function createEditorTab(options) {
+      const opts = options || {};
+      const tabs = getTabs();
+      const panes = getPanes();
+      const tabId = allocateTabId();
+      const paneId = allocatePaneId();
+      const fileName = String(opts.filePath || 'untitled').split('/').pop();
+
+      const button = makeTabButton(fileName, () => closeTab(tabId));
+      button.dataset.tabId = String(tabId);
+      button.classList.add('entering');
+
+      const containerEl = document.createElement('div');
+      containerEl.className = 'tab-tree-root';
+
+      const paneEl = document.createElement('div');
+      paneEl.className = 'terminal-pane';
+      paneEl.dataset.paneId = paneId;
+      containerEl.appendChild(paneEl);
+
+      const hostEl = document.createElement('div');
+      hostEl.className = 'editor-pane-host';
+      paneEl.appendChild(hostEl);
+
+      tabBarEl.appendChild(button);
+      terminalHostEl.appendChild(containerEl);
+
+      const pane = {
+        paneId,
+        tabId,
+        kind: 'editor',
+        type: null,
+        connectionId: null,
+        term: null,
+        fitAddon: null,
+        root: paneEl,
+        spawned: false,
+        lastCols: 0,
+        lastRows: 0,
+        cleanupMouseBridge: null,
+        resizeObserver: null,
+        debounceTimer: null,
+        filePath: opts.filePath || null,
+        view: null,
+        dirty: false,
+        remote: opts.remote || null,
+      };
+      panes.set(paneId, pane);
+
+      const tab = {
+        id: tabId,
+        label: fileName,
+        type: 'editor',
+        hasCustomTitle: true,
+        button,
+        containerEl,
+        treeRoot: makeLeaf(paneId),
+        focusedPaneId: paneId,
+      };
+      tabs.set(tabId, tab);
+      setupDividerDrag(
+        containerEl,
+        () => tab.treeRoot,
+        (newTree) => { tab.treeRoot = newTree; },
+      );
+      updateTabBarVisibility();
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => button.classList.remove('entering'));
+      });
+
+      button.addEventListener('click', () => activateTab(tabId));
+      paneEl.addEventListener('mousedown', () => setFocusedPane(paneId));
+
+      // The modified marker is its own element, inserted between the tab's
+      // label span and its close affordance. Do NOT write button.textContent —
+      // makeTabButton builds child elements (icon, label span, close span) and
+      // assigning textContent destroys all of them.
+      const dirtyMarker = document.createElement('span');
+      dirtyMarker.className = 'tab-dirty-marker';
+      dirtyMarker.textContent = '•';
+      dirtyMarker.hidden = true;
+      if (button._labelSpan && button._labelSpan.parentNode === button) {
+        button.insertBefore(dirtyMarker, button._labelSpan.nextSibling);
+      } else {
+        button.appendChild(dirtyMarker);
+      }
+
+      pane.view = global.termlabEditorPane.createEditorView(hostEl, {
+        doc: typeof opts.contents === 'string' ? opts.contents : '',
+        filename: pane.filePath || '',
+        onDirtyChange: (dirty) => {
+          pane.dirty = dirty;
+          dirtyMarker.hidden = !dirty;
+        },
+      });
+
+      // createEditorView starts with an empty font compartment, so the view
+      // would inherit the page font size and only snap to the configured one
+      // on the next config-changed event. Apply it now.
+      const fontSize = typeof getTermFontSize === 'function' ? getTermFontSize() : 0;
+      if (pane.view && fontSize > 0) {
+        global.termlabEditorPane.setFontSize(pane.view, fontSize);
+      }
+
+      activateTab(tabId);
+      setFocusedPane(paneId);
+      return tabId;
+    }
+
     async function createSshTab(opts) {
       const tabs = getTabs();
       const panes = getPanes();
@@ -649,6 +835,7 @@
       activateTab,
       closeTab,
       createTab,
+      createEditorTab,
       createSshTab,
       makeTabButton,
       setTabLabel,

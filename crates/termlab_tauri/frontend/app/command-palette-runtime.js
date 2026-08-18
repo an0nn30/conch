@@ -114,6 +114,7 @@
 
       add('core:new-tab', 'New Tab', 'Terminal', 'tab terminal create', () => handleMenuAction('new-tab'));
       add('core:new-plain-shell-tab', 'New Plain Shell Tab', 'Terminal', 'tab terminal shell plain default login local pty', () => handleMenuAction('new-plain-shell-tab'));
+      add('core:new-scratch', 'New Scratch File', 'Editor', 'scratch file editor new note', () => handleMenuAction('new-scratch'));
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
       add('core:manage-tunnels', 'Manage Tunnels', 'SSH', 'tunnels manager', () => handleMenuAction('manage-tunnels'), 'Tunnels');
       add('core:focus-sessions', 'Focus Sessions', 'SSH', 'ssh sessions quick connect', () => handleMenuAction('focus-sessions'), 'SSH Hosts');
@@ -448,7 +449,10 @@
         const tlDialogOpen = !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
         if (tlDialogOpen) return;
         const pane = getCurrentPane();
-        if (pane && pane.term) pane.term.focus();
+        // An editor pane has no `term`. Without this arm the palette hands
+        // focus back to nothing and the editor silently stops taking keys.
+        if (pane && pane.kind === 'editor' && pane.view) pane.view.focus();
+        else if (pane && pane.term) pane.term.focus();
       }
     }
 
@@ -488,7 +492,10 @@
         const tlDialogOpen = !!(global.tlDialog && typeof global.tlDialog.count === 'function' && global.tlDialog.count() > 0);
         if (tlDialogOpen) return;
         const pane = getCurrentPane();
-        if (pane && pane.term) pane.term.focus();
+        // An editor pane has no `term`. Without this arm the palette hands
+        // focus back to nothing and the editor silently stops taking keys.
+        if (pane && pane.kind === 'editor' && pane.view) pane.view.focus();
+        else if (pane && pane.term) pane.term.focus();
       }, 80);
     }
 

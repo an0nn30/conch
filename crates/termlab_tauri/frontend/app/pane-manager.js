@@ -34,6 +34,16 @@
 
     function refocusActiveTerminal() {
       const pane = currentPane();
+      // A second focus entry point, independent of setFocusedPane — it is what
+      // dialog-runtime calls on Escape and after the last dialog closes. It
+      // cannot delegate to setFocusedPane, which early-returns when the pane is
+      // already the focused one, which is exactly this case. Without the editor
+      // arm, closing Settings leaves focus on <body> while the pane keeps its
+      // `.focused` border: it looks focused and swallows every keystroke.
+      if (pane && pane.kind === 'editor' && pane.view) {
+        pane.view.focus();
+        return true;
+      }
       if (pane && pane.term) {
         pane.term.focus();
         return true;
@@ -82,6 +92,9 @@
         pane.root.classList.add('focused');
         if (pane.kind === 'terminal' && pane.term) {
           pane.term.focus();
+        }
+        if (pane.kind === 'editor' && pane.view) {
+          pane.view.focus();
         }
         const tab = tabs.get(pane.tabId);
         if (tab) tab.focusedPaneId = paneId;
@@ -142,14 +155,53 @@
       return true;
     }
 
-    function closePane(paneId) {
+    async function closePane(paneId) {
       const panes = getPanes();
       const tabs = getTabs();
       const pane = panes.get(paneId);
       if (!pane) return;
+      const tab = tabs.get(pane.tabId);
+
+      // Ask before this function destroys a modified editor. Reachable on
+      // default bindings: cmd+d beside a focused editor (splitPane has no kind
+      // guard), then cmd+shift+w — which lands in the split branch below
+      // rather than the single-leaf hand-off to closeTab, so nothing else on
+      // the path would ever ask.
+      //
+      // Deliberately NOT asked for the single-leaf case: that delegates to
+      // closeTab, which does its own asking, and asking here as well would
+      // prompt twice for one keystroke. Deliberately before every mutation
+      // below, including unregisterPaneDnd, so a cancel really does leave the
+      // pane exactly as it was.
+      if (
+        tab && global.splitTree &&
+        pane.kind === 'editor' && pane.dirty &&
+        global.splitTree.leafCount(tab.treeRoot) > 1
+      ) {
+        const service = global.termlabEditorService;
+        if (!service || typeof service.confirmDirtyPanes !== 'function') {
+          if (typeof toastError === 'function') {
+            toastError('Cannot confirm unsaved changes; pane not closed.');
+          }
+          return;
+        }
+        let ok = false;
+        try {
+          ok = await service.confirmDirtyPanes([pane]);
+        } catch (error) {
+          if (typeof toastError === 'function') {
+            toastError('Could not check for unsaved changes: ' + String(error));
+          }
+          return;
+        }
+        if (!ok) return;
+        // The prompt yielded to the event loop; the pane or its tab may have
+        // been torn down underneath us in the meantime.
+        if (panes.get(paneId) !== pane || tabs.get(pane.tabId) !== tab) return;
+      }
+
       unregisterPaneDnd(paneId);
 
-      const tab = tabs.get(pane.tabId);
       if (!tab || !global.splitTree) return;
       if (pane.kind === 'plugin_view') rememberPluginViewSize(pane);
 
@@ -217,6 +269,23 @@
       } else if (pane.kind === 'plugin_view' && pane.viewId) {
         notifyPluginViewClosed(pane.viewId);
         deletePluginViewPane(pane.viewId);
+      } else if (pane.kind === 'editor') {
+        // The single-leaf case above hands off to closeTab, which destroys the
+        // view and discards the temp file; this is the split case, where the
+        // pane goes away on its own and nothing else would ever do either.
+        if (pane.view && global.termlabEditorPane) {
+          global.termlabEditorPane.destroyEditorView(pane.view);
+        }
+        pane.view = null;
+        // A remote editor's file is a download in a temp directory, so closing
+        // the pane is the end of its life. Same discard closeTab does — leaving
+        // it out here is how a split-close leaked the temp file and its
+        // directories. The service owns the path rules; it refuses anything
+        // that is not one of its own temp files.
+        if (pane.remote && global.termlabEditorService
+            && typeof global.termlabEditorService.discardRemoteTemp === 'function') {
+          global.termlabEditorService.discardRemoteTemp(pane);
+        }
       }
 
       if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();

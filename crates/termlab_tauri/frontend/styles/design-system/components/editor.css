@@ -1,0 +1,26 @@
+/* Editor pane — the host element a CodeMirror view is mounted into.
+   Tokens only; CodeMirror's own colours come from theme.js. */
+
+.editor-pane-host {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--tl-terminal-bg, var(--tl-bg));
+}
+
+.editor-pane-host .cm-editor {
+  height: 100%;
+}
+
+.editor-pane-host .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* The modified marker in the tab label. */
+.tab-dirty-marker {
+  margin-left: var(--tl-space-1);
+  color: var(--tl-accent);
+}
+.tab-dirty-marker[hidden] {
+  display: none;
+}

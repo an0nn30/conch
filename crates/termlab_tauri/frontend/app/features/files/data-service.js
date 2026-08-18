@@ -69,6 +69,18 @@
     return invoke('clipboard_write_text', { text });
   }
 
+  // Active SSH sessions, keyed by `"{window_label}:{pane_id}"`, each carrying
+  // host/user/port. The files panel uses these to name the host a remote file
+  // was opened from — the pane objects themselves carry no host identity.
+  async function getSessions(invoke) {
+    const sessions = await invoke('remote_get_sessions');
+    return Array.isArray(sessions) ? sessions : [];
+  }
+
+  async function getCurrentWindowLabel(invoke) {
+    return invoke('current_window_label');
+  }
+
   global.termlabFilesFeatureDataService = {
     getAllSettings,
     getHomeDir,
@@ -87,5 +99,7 @@
     remoteRename,
     remoteRemove,
     clipboardWriteText,
+    getSessions,
+    getCurrentWindowLabel,
   };
 })(window);

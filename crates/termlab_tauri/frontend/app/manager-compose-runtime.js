@@ -14,6 +14,7 @@
     const layoutRuntime = deps.layoutRuntime;
     const shortcutDebugEnabled = deps.shortcutDebugEnabled;
     const currentWindowLabel = deps.currentWindowLabel;
+    const getTermFontSize = deps.getTermFontSize;
 
     const getActiveTabId = deps.getActiveTabId;
     const setActiveTabId = deps.setActiveTabId;
@@ -130,6 +131,7 @@
           setFocusedPaneId: (paneId) => setFocusedPaneId(paneId),
           setNextTabLabel: (value) => setNextTabLabel(value),
           appEl,
+          getTermFontSize: () => (typeof getTermFontSize === 'function' ? getTermFontSize() : 0),
           setFocusedPane: (paneId) => setFocusedPane(paneId),
           fitAndResizeTab: (tab) => {
             if (layoutRuntime && layoutRuntime.fitAndResizeTab) return layoutRuntime.fitAndResizeTab(tab);
@@ -155,6 +157,23 @@
             pluginViewPaneById.delete(viewId);
           },
           showStatus: (message) => showStatus(message),
+          // PRECONDITION: only call this when every editor in this window is
+          // already gone.
+          //
+          // destroy() sends a raw WindowMessage::Destroy, which
+          // tauri-runtime-wry routes to on_window_close WITHOUT emitting
+          // CloseRequested — so the unsaved-changes guard in
+          // crates/termlab_tauri/src/close_guard.rs never runs and never can.
+          // This is the one window-teardown path the guard is structurally
+          // blind to.
+          //
+          // It is safe today because of its single caller: tab-manager.js's
+          // closeTab, under `if (tabs.size === 0 && closeWindowWhenLast)`.
+          // That branch is reached only after a closeTab that already asked
+          // about the closing tab's editors emptied the last tab, so by
+          // construction there is nothing left to lose. Calling this from
+          // anywhere else silently discards unsaved work; use
+          // `win.close()` instead, which does raise CloseRequested.
           destroyCurrentWindow: async () => {
             const windowApi = tauri.window;
             if (windowApi && typeof windowApi.getCurrentWindow === 'function') {
@@ -250,6 +269,32 @@
       : null;
     if (managerDelegates && managerDelegates.setTabManager) {
       managerDelegates.setTabManager(tabManager);
+    }
+
+    // The composed tabManager instance lives inside main-runtime's closure and
+    // has no window handle. `global.termlabTabManager` is the FACTORY ({create}),
+    // not an instance, so it cannot be used to open an editor tab. Publish the
+    // one entry point that callers outside the closure need — the editor
+    // service and the file-open command — under its own name, alongside the
+    // other `__termlab*` escape hatches this app already uses.
+    if (tabManager && typeof tabManager.createEditorTab === 'function') {
+      global.__termlabCreateEditorTab = (options) => tabManager.createEditorTab(options);
+    }
+
+    // Same problem, one level further out: editor-service.js is a plain script
+    // with no way into this closure, and it needs to ask which pane is focused,
+    // walk every pane, and focus an already-open editor. `panes` is the live
+    // Map main-runtime owns, and paneManager/tabManager are the composed
+    // instances — none of the three has a window handle. Publish read/focus
+    // access under one name rather than letting callers guess at
+    // `global.paneManager`, which does not exist.
+    if (paneManager && tabManager) {
+      global.__termlabPaneAccess = {
+        currentPane: () => paneManager.currentPane(),
+        allPanes: () => panes,
+        setFocusedPane: (paneId) => paneManager.setFocusedPane(paneId),
+        activateTab: (tabId) => tabManager.activateTab(tabId),
+      };
     }
 
     return {

@@ -5,7 +5,9 @@
 //! handles all terminal emulation.
 
 pub(crate) mod cleanup;
+pub(crate) mod close_guard;
 mod commands;
+mod editor_fs;
 pub(crate) mod font_metrics;
 pub(crate) mod fonts;
 mod ipc;
@@ -309,6 +311,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Arc::clone(&plugin_state))
         .manage(Arc::clone(&vault_state))
         .manage(updater::PendingUpdate::new())
+        .manage(close_guard::CloseGuard::default())
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
             let kb_config = config::load_user_config()
@@ -424,6 +427,15 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 })
                 .ok();
 
+            // Sweep orphaned light-editor temp files left by a previous crash.
+            // Uses a std::thread since we're not inside a tokio runtime here.
+            std::thread::Builder::new()
+                .name("editor-temp-sweep".into())
+                .spawn(|| {
+                    let _ = editor_fs::editor_temp_sweep();
+                })
+                .ok();
+
             // Vault auto-lock background checker (every 30 seconds).
             // Uses a std::thread since we're not inside a tokio runtime here.
             {
@@ -496,6 +508,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
+            // Not PredefinedMenuItem::quit — see menu::MENU_QUIT_ID. Every
+            // armed window gets asked about unsaved editors before the exit.
+            menu::MENU_QUIT_ID => close_guard::request_quit(app),
             menu::MENU_NEW_TAB_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_NEW_TAB)
             }
@@ -646,6 +661,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             }
         })
         .on_window_event(|window, event| {
+            // Stop the close and ask the webview about unsaved editors. It
+            // answers by calling `confirm_window_close`, which retries the
+            // close with permission in hand (see close_guard.rs).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let ask_first = close_guard::on_close_requested(window);
+                if ask_first {
+                    api.prevent_close();
+                }
+            }
+
             // IntelliJ-style modal focus: clicking the main window while
             // the settings window is open redirects focus to settings.
             if let tauri::WindowEvent::Focused(true) = event {
@@ -659,6 +684,11 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             if let tauri::WindowEvent::Destroyed = event {
                 let label = window.label().to_string();
                 log::info!("Window '{label}' destroyed — starting cleanup");
+
+                // Drop this label's close permission so it cannot be inherited
+                // by a future window that happens to reuse the name, and keep
+                // a quit poll moving if it was waiting on this window.
+                close_guard::on_window_destroyed(window);
 
                 // When the main window closes, also close child windows
                 // (settings, etc.) so they don't linger as orphans.
@@ -805,6 +835,21 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             updater::check_for_update,
             updater::install_update,
             updater::restart_app,
+            editor_fs::editor_can_open,
+            editor_fs::editor_read_file,
+            editor_fs::editor_write_file,
+            editor_fs::editor_scratch_dir,
+            editor_fs::editor_scratch_list,
+            editor_fs::editor_temp_path,
+            editor_fs::editor_temp_cleanup,
+            // editor_temp_sweep is deliberately absent, and is no longer a
+            // #[tauri::command] at all: it deletes the entire remote-edit temp
+            // root, which would destroy the backing file of every open remote
+            // editor. Both its callers are Rust — the setup hook above and
+            // close_guard::finish_exit — and neither runs with an editor live.
+            close_guard::window_close_guard_arm,
+            close_guard::confirm_window_close,
+            close_guard::quit_vote,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;

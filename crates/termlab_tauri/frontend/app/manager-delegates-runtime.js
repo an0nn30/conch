@@ -82,6 +82,9 @@
       createTab(options) {
         return requireTabManager('createTab')(options);
       },
+      createEditorTab(options) {
+        return requireTabManager('createEditorTab')(options);
+      },
       createSshTab(opts) {
         return requireTabManager('createSshTab')(opts);
       },

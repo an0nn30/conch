@@ -343,7 +343,93 @@
           ? filesDataService.getHomeDir(invoke)
           : Promise.reject(new Error('Files data service unavailable: getHomeDir'))
       ),
+      // openInEditor is async and nothing awaits it, so without this a rejection
+      // after its first `await` — or a throw from the toast it uses to report
+      // one — would be an unhandled rejection and the double-click would look
+      // like it did nothing at all.
+      onOpenFile: (pane, entry, path) => {
+        Promise.resolve(openInEditor(pane, entry, path)).catch((error) => {
+          console.error('files-panel: could not open in editor', error);
+          if (window.toast && typeof window.toast.error === 'function') {
+            window.toast.error('Could Not Open File', String(error && error.message ? error.message : error));
+          }
+        });
+      },
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Open in editor (double-click / Enter on a file row)
+  // ---------------------------------------------------------------------------
+
+  // The window label never changes for the life of the window, so one lookup
+  // is enough. A failure here is not fatal — it only costs the host's name.
+  let windowLabelPromise = null;
+  function currentWindowLabel() {
+    if (!windowLabelPromise) {
+      windowLabelPromise = (
+        filesDataService && typeof filesDataService.getCurrentWindowLabel === 'function'
+          ? filesDataService.getCurrentWindowLabel(invoke)
+          : Promise.resolve(null)
+      ).catch(() => null);
+    }
+    return windowLabelPromise;
+  }
+
+  // A stable, human-readable name for the host a remote pane is connected to.
+  // The editor hashes it into the temp path, so it is what keeps the same
+  // filename on two different hosts in two different tabs. Pane objects carry
+  // no host identity of their own; remote_get_sessions keys its entries by
+  // "{window_label}:{pane_id}", which is why both halves are needed.
+  //
+  // The fallback is per-pane rather than constant, which keeps two panes in
+  // *this* window apart when the lookup fails. It is not a guarantee across
+  // windows: pane ids are allocated per window, so window A's pane 3 on host X
+  // and window B's pane 3 on host Y both fall back to "pane-3" and hash to the
+  // same temp path. That is the failure the real lookup exists to avoid; the
+  // fallback only narrows it, and only a lookup that succeeds removes it.
+  async function remoteHostLabel(paneId) {
+    const fallback = `pane-${paneId}`;
+    if (!filesDataService || typeof filesDataService.getSessions !== 'function') return fallback;
+    try {
+      const [label, sessions] = await Promise.all([
+        currentWindowLabel(),
+        filesDataService.getSessions(invoke),
+      ]);
+      if (!label) return fallback;
+      const key = `${label}:${paneId}`;
+      const session = (sessions || []).find((s) => s && s.key === key);
+      if (!session || !session.host) return fallback;
+      const port = Number(session.port);
+      const host = port && port !== 22 ? `${session.host}:${port}` : String(session.host);
+      return session.user ? `${session.user}@${host}` : host;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  async function openInEditor(pane, entry, path) {
+    const editor = window.termlabEditorService;
+    if (!editor) {
+      window.toast.error('Editor Unavailable', 'The editor service is not loaded.');
+      return;
+    }
+    if (pane.isLocal) {
+      editor.openLocalFile(path);
+      return;
+    }
+    if (!activeRemotePaneId) return;
+    // Read the pane id once: the user can switch tabs while the host label is
+    // being resolved, and the download has to go to the session this row was
+    // actually listed from.
+    const paneId = activeRemotePaneId;
+    const hostLabel = await remoteHostLabel(paneId);
+    editor.openRemoteFile({
+      paneId,
+      remotePath: path,
+      hostLabel,
+      size: entry.size,
+    });
   }
 
   function navigate(pane, path) {
