@@ -195,6 +195,32 @@ check('vimExtensions(true) is empty when the bundle has no vim export', () => {
   assert.strictEqual(sandbox.termlabVimMode.vimExtensions(true).length, 0);
 });
 
+check('enabled-with-no-engine is LOUD, once — a stale bundle must not look like vim-off', () => {
+  // A checkout can carry a stale generated bundle whose CM6 predates the vim
+  // export; that shipped once and read as "the Settings toggle is broken".
+  const { sandbox } = loadModules([VIM_MODE]);
+  delete sandbox.CM6.vim;
+  const errors = [];
+  const toasts = [];
+  sandbox.console = { ...console, error: (...a) => errors.push(a.join(' ')) };
+  sandbox.toast = { error: (title, body) => toasts.push({ title, body }) };
+
+  sandbox.termlabVimMode.vimExtensions(true);
+  assert.strictEqual(errors.length, 1, 'console.error fired');
+  assert.ok(/build:vendor/.test(errors[0]), 'the message names the fix');
+  assert.strictEqual(toasts.length, 1, 'the user is told, not just the console');
+  assert.ok(/stale/i.test(toasts[0].body), 'the toast says the bundle is stale');
+
+  sandbox.termlabVimMode.vimExtensions(true);
+  assert.strictEqual(errors.length, 1, 'warned once, not per reconfigure');
+  assert.strictEqual(toasts.length, 1);
+
+  // vim-off stays silent — [] is a real answer there, not a failure.
+  errors.length = 0;
+  sandbox.termlabVimMode.vimExtensions(false);
+  assert.strictEqual(errors.length, 0, 'disabled never warns');
+});
+
 // --- registerExCommands ----------------------------------------------------
 check('registers write, quit and wq with vim\'s own short prefixes', () => {
   const h = makeExHarness();

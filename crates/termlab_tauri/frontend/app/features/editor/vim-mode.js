@@ -24,11 +24,29 @@
   }
 
   // The contents of editor-pane's vim compartment. An empty array is a real
-  // answer, not a failure: it is what "vim mode off" looks like, and what a
-  // reconfigure back to plain editing dispatches.
+  // answer for "vim mode off" — but enabled-with-no-engine is a FAILURE and
+  // must say so. The vendor bundle is generated and git-ignored, so a
+  // checkout can carry a stale bundle whose CM6 predates the vim export;
+  // returning [] silently there made the Settings toggle look broken with
+  // nothing anywhere saying why (it shipped that way and cost a bug report).
+  // Same class as the "editor bundle missing" toast in editor-service.js.
+  let warnedMissingEngine = false;
   function vimExtensions(enabled) {
     const CM = global.CM6;
-    if (!enabled || !CM || typeof CM.vim !== 'function') return [];
+    if (!enabled) return [];
+    if (!CM || typeof CM.vim !== 'function') {
+      if (!warnedMissingEngine) {
+        warnedMissingEngine = true;
+        console.error('vim mode is enabled but the vendor bundle has no vim engine — rebuild it: npm run build:vendor in crates/termlab_tauri/frontend');
+        if (global.toast) {
+          global.toast.error(
+            'Vim mode unavailable',
+            'The editor bundle is stale. Run "npm run build:vendor" in crates/termlab_tauri/frontend and relaunch.',
+          );
+        }
+      }
+      return [];
+    }
     return [CM.vim()];
   }
 
