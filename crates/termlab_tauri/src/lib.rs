@@ -6,6 +6,7 @@
 
 pub(crate) mod cleanup;
 mod commands;
+pub(crate) mod font_metrics;
 pub(crate) mod fonts;
 mod ipc;
 pub(crate) mod menu;
@@ -105,71 +106,135 @@ pub(crate) fn estimate_window_px(dims: &termlab_core::config::WindowDimensions) 
 
 /// The size a new window should open at, in logical pixels.
 ///
-/// Every launch after the first knows the real cell size and chrome, measured
-/// by the webview last time and persisted — so the window opens at exactly
-/// `columns x lines` and the frontend's correction finds nothing to do. Only
-/// a fresh install (or a wiped state file) falls back to the rough estimate,
-/// and that single first launch is the only time a visible correction can
-/// happen: the standard remember-your-geometry pattern, not a correction loop.
+/// Nothing ever resizes a visible window; whatever this returns is what the
+/// user gets, so the sources are ordered by how exactly they know the cell:
+///
+/// 1. The webview's own persisted measurement, when its font fingerprint
+///    matches the current config — bit-exact, available from the second
+///    launch under a given font.
+/// 2. Native metrics parsed from the bundled font file (Alacritty's
+///    approach) — exact cell, estimated chrome. Covers the first launch and
+///    any launch after a font change, for the default font.
+/// 3. The rough 8x16 estimate — only a user-chosen system font we cannot
+///    parse, before its first measurement lands.
 pub(crate) fn initial_window_px(
     dims: &termlab_core::config::WindowDimensions,
     metrics: &termlab_core::config::WindowMetrics,
+    font: &termlab_core::config::FontConfig,
+    zoom: f32,
 ) -> (f64, f64) {
-    if dims.columns == 0 || dims.lines == 0 || !metrics.is_usable() {
+    if dims.columns == 0 || dims.lines == 0 {
         return estimate_window_px(dims);
     }
-    let w = (dims.columns as f64) * (metrics.cell_width as f64) + metrics.chrome_width as f64;
-    let h = (dims.lines as f64) * (metrics.cell_height as f64) + metrics.chrome_height as f64;
-    (w.max(600.0), h.max(400.0))
+
+    if metrics.is_usable() && metrics.matches(&font.normal.family, font.size, zoom) {
+        let w = (dims.columns as f64) * (metrics.cell_width as f64) + metrics.chrome_width as f64;
+        let h = (dims.lines as f64) * (metrics.cell_height as f64) + metrics.chrome_height as f64;
+        return (w.max(600.0), h.max(400.0));
+    }
+
+    let zoom = if zoom > 0.0 { zoom as f64 } else { 1.0 };
+    if let Some((cell_w, cell_h)) =
+        font_metrics::default_font_cell(&font.normal.family, font.size as f64 * zoom)
+    {
+        // Chrome is estimated: the native path knows the cell exactly but not
+        // the tab bar. Deliberately NOT clamped to the 600x400 floor the other
+        // paths use — this size is already believable.
+        const CHROME_W: f64 = 4.0;
+        const CHROME_H: f64 = 44.0;
+        let w = (dims.columns as f64) * cell_w + CHROME_W;
+        let h = (dims.lines as f64) * cell_h + CHROME_H;
+        return (w, h);
+    }
+
+    estimate_window_px(dims)
 }
 
 #[cfg(test)]
 mod window_px_tests {
     use super::*;
-    use termlab_core::config::{WindowDimensions, WindowMetrics};
+    use termlab_core::config::{FontConfig, WindowDimensions, WindowMetrics};
 
-    #[test]
-    fn measured_metrics_beat_the_estimate() {
-        let dims = WindowDimensions {
-            columns: 102,
-            lines: 46,
-        };
-        let metrics = WindowMetrics {
+    fn dims(columns: u16, lines: u16) -> WindowDimensions {
+        WindowDimensions { columns, lines }
+    }
+
+    fn measured(family: &str, size: f32) -> WindowMetrics {
+        WindowMetrics {
             cell_width: 9.6,
-            cell_height: 20.0,
+            cell_height: 21.0,
             chrome_width: 16.0,
             chrome_height: 64.0,
-        };
-        let (w, h) = initial_window_px(&dims, &metrics);
-        assert!((w - (102.0 * 9.6 + 16.0)).abs() < 0.001);
-        assert!((h - (46.0 * 20.0 + 64.0)).abs() < 0.001);
+            font_family: family.to_string(),
+            font_size: size,
+            zoom: 1.0,
+        }
     }
 
     #[test]
-    fn unmeasured_metrics_fall_back_to_the_estimate() {
-        let dims = WindowDimensions {
-            columns: 102,
-            lines: 46,
+    fn matching_measurement_wins_outright() {
+        let font = FontConfig::default(); // "JetBrains Mono", 14.0
+        let m = measured(&font.normal.family, font.size);
+        let (w, h) = initial_window_px(&dims(102, 46), &m, &font, 1.0);
+        assert!((w - (102.0 * 9.6 + 16.0)).abs() < 0.001);
+        assert!((h - (46.0 * 21.0 + 64.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_stale_fingerprint_is_not_trusted() {
+        // Metrics measured under a different size must not be applied — the
+        // native path takes over instead, and its cell is 8.4 x 20 for the
+        // bundled font at 14px (pinned in font_metrics tests).
+        let font = FontConfig::default();
+        let stale = measured(&font.normal.family, 16.0);
+        let (w, h) = initial_window_px(&dims(110, 50), &stale, &font, 1.0);
+        assert!((w - (110.0 * 8.4 + 4.0)).abs() < 0.001, "width was {w}");
+        assert!((h - (50.0 * 20.0 + 44.0)).abs() < 0.001, "height was {h}");
+    }
+
+    #[test]
+    fn a_pre_fingerprint_state_file_is_remeasured_not_trusted() {
+        // Old state files deserialize with an empty family; that must never
+        // match, so the native path decides.
+        let font = FontConfig::default();
+        let legacy = WindowMetrics {
+            cell_width: 9.6,
+            cell_height: 21.0,
+            chrome_width: 16.0,
+            chrome_height: 64.0,
+            ..WindowMetrics::default()
         };
+        let (w, _) = initial_window_px(&dims(110, 50), &legacy, &font, 1.0);
+        assert!((w - (110.0 * 8.4 + 4.0)).abs() < 0.001, "width was {w}");
+    }
+
+    #[test]
+    fn a_custom_font_without_measurement_falls_back_to_the_estimate() {
+        let mut font = FontConfig::default();
+        font.normal.family = "Menlo".to_string();
         assert_eq!(
-            initial_window_px(&dims, &WindowMetrics::default()),
-            estimate_window_px(&dims)
+            initial_window_px(&dims(102, 46), &WindowMetrics::default(), &font, 1.0),
+            estimate_window_px(&dims(102, 46))
         );
     }
 
     #[test]
+    fn zoom_scales_the_native_cell() {
+        let font = FontConfig::default();
+        let (w1, _) = initial_window_px(&dims(110, 50), &WindowMetrics::default(), &font, 1.0);
+        let (w2, _) = initial_window_px(&dims(110, 50), &WindowMetrics::default(), &font, 2.0);
+        // Double zoom doubles the grid, not the chrome.
+        assert!(((w2 - 4.0) - 2.0 * (w1 - 4.0)).abs() < 0.001);
+    }
+
+    #[test]
     fn zero_dims_leave_it_to_the_system_regardless_of_metrics() {
-        let dims = WindowDimensions {
-            columns: 0,
-            lines: 0,
-        };
-        let metrics = WindowMetrics {
-            cell_width: 9.6,
-            cell_height: 20.0,
-            chrome_width: 16.0,
-            chrome_height: 64.0,
-        };
-        assert_eq!(initial_window_px(&dims, &metrics), (1200.0, 800.0));
+        let font = FontConfig::default();
+        let m = measured(&font.normal.family, font.size);
+        assert_eq!(
+            initial_window_px(&dims(0, 0), &m, &font, 1.0),
+            (1200.0, 800.0)
+        );
     }
 }
 
@@ -203,7 +268,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     // measurement fresh and corrects the one launch that has none).
     let persisted = config::load_persistent_state().unwrap_or_default();
     let cfg_dims = &config.window.dimensions;
-    let (initial_width, initial_height) = initial_window_px(cfg_dims, &persisted.window_metrics);
+    let (initial_width, initial_height) = initial_window_px(
+        cfg_dims,
+        &persisted.window_metrics,
+        config.resolved_terminal_font(),
+        persisted.layout.zoom_factor,
+    );
     let user_wants_decorations = !matches!(
         config.window.decorations,
         termlab_core::config::WindowDecorations::None

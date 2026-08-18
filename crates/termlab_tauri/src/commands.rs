@@ -326,16 +326,32 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
 /// measurement here means every future launch opens at a garbage size.
 #[tauri::command]
 pub(crate) fn save_window_metrics(
+    state: tauri::State<'_, TauriState>,
     cell_width: f64,
     cell_height: f64,
     chrome_width: f64,
     chrome_height: f64,
 ) {
+    // The fingerprint is stamped here from the SAME config the window was
+    // sized from, rather than trusted from the frontend — a mislabelled
+    // measurement would be applied to the wrong font forever.
+    let (family, size) = {
+        let cfg = state.config.read();
+        let font = cfg.resolved_terminal_font();
+        (font.normal.family.clone(), font.size)
+    };
+    let zoom = config::load_persistent_state()
+        .unwrap_or_default()
+        .layout
+        .zoom_factor;
     let metrics = termlab_core::config::WindowMetrics {
         cell_width: cell_width as f32,
         cell_height: cell_height as f32,
         chrome_width: chrome_width as f32,
         chrome_height: chrome_height as f32,
+        font_family: family,
+        font_size: size,
+        zoom: if zoom > 0.0 { zoom } else { 1.0 },
     };
     if !metrics.is_usable() {
         return;

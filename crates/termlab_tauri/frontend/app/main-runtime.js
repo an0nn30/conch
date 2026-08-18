@@ -397,110 +397,65 @@
         showStatus('Failed to show window: ' + String(e));
       }
 
-      // Verify the window is at the configured columns x lines, and keep the
-      // persisted measurement fresh.
+      // Measure the settled window and persist the cell/chrome metrics, so
+      // the NEXT launch opens at exactly the configured columns x lines.
       //
-      // On a normal launch this is a NO-OP: Rust already opened the window at
-      // the exact pixels, computed from the cell metrics this function saved
-      // last time. The window has been visible since app_ready above, so any
-      // resize issued here is on screen — which is exactly why the steady
-      // state must be "measure, confirm, save, return" with no resize at all.
-      //
-      // The correction below only fires when the measurement is missing or
-      // stale: the very first launch, or a changed font/zoom/panel layout. It
-      // measures, corrects, re-fits, and measures again until the terminal
-      // reports the requested cell count, then saves the new metrics so the
-      // NEXT launch opens right. The cap keeps a font that cannot hit the
-      // target exactly (fractional cell sizes) from looping forever.
-      async function applyConfiguredWindowSize() {
+      // This function must NEVER resize the window. Rust already opened it at
+      // final size — from a previous launch's measurement, or from native
+      // metrics parsed out of the bundled font file. A launch whose stored
+      // measurement was missing or stale opens slightly off and STAYS there;
+      // the fresh measurement below makes the next one exact. Every design
+      // that corrected the window after show animated on screen, in three
+      // separate attempts, and is not to be reintroduced.
+      async function measureAndPersistWindowMetrics() {
         const sizer = window.termlabWindowSize;
-        const appCfg = window.__termlabAppConfig || {};
-        const target = { cols: appCfg.window_columns, rows: appCfg.window_lines };
         const tauriWin = window.__TAURI__ && window.__TAURI__.window
           ? window.__TAURI__.window.getCurrentWindow()
           : null;
         if (!sizer || !tauriWin) return;
 
-        const MAX_PASSES = 4;
-        for (let pass = 0; pass < MAX_PASSES; pass++) {
-          const pane = currentPane();
-          const host = document.getElementById('terminal-host');
-          if (!pane || !pane.term || !host) return;
-
-          const delta = sizer.sizeDelta(
-            {
-              cols: pane.term.cols,
-              rows: pane.term.rows,
-              width: host.clientWidth,
-              height: host.clientHeight,
-            },
-            target,
-          );
-          if (!delta) return;                       // 0 = leave it to the system
-          if (delta.dw === 0 && delta.dh === 0) {
-            // Converged — persist the measurement so the NEXT launch opens at
-            // these exact pixels and this whole function finds nothing to do.
-            const inner = await tauriWin.innerSize();
-            const scale = await tauriWin.scaleFactor();
-            const metrics = sizer.metricsFor(
-              {
-                cols: pane.term.cols,
-                rows: pane.term.rows,
-                width: host.clientWidth,
-                height: host.clientHeight,
-              },
-              { width: inner.width / scale, height: inner.height / scale },
-            );
-            if (metrics) {
-              invoke('save_window_metrics', {
-                cellWidth: metrics.cellWidth,
-                cellHeight: metrics.cellHeight,
-                chromeWidth: metrics.chromeWidth,
-                chromeHeight: metrics.chromeHeight,
-              }).catch((err) => {
-                // Loud on purpose: a silently-failed save means every future
-                // launch opens at the estimate and visibly corrects itself,
-                // with nothing anywhere saying why.
-                console.error('Failed to persist window metrics:', err);
-              });
-            }
-            return;
-          }
-
-          const before = { width: host.clientWidth, height: host.clientHeight };
-          const size = await tauriWin.innerSize();
-          const factor = await tauriWin.scaleFactor();
-          const { LogicalSize } = window.__TAURI__.window;
-          await tauriWin.setSize(new LogicalSize(
-            Math.round(size.width / factor) + delta.dw,
-            Math.round(size.height / factor) + delta.dh,
-          ));
-
-          // Wait for the resize to actually land, never for a guessed number
-          // of milliseconds. A flat sleep here read the NEW host width against
-          // the OLD column count whenever the OS was slower than the guess,
-          // derived a garbage cell size from the pair, and oscillated — the
-          // grow-then-shrink visible on every launch.
-          const landed = await sizer.waitForSizeChange(
-            () => ({ width: host.clientWidth, height: host.clientHeight }),
-            before,
-            (cb) => requestAnimationFrame(cb),
-            60,
-          );
-          if (!landed) {
-            console.error('Window resize never landed; leaving the window as is.');
-            return;
-          }
-          // The refit is rAF-coalesced; request it and give it its frame, so
-          // the next pass measures a consistent (width, cols) pair.
-          debouncedFitAndResize();
-          await new Promise((resolve) => requestAnimationFrame(resolve));
+        // The measurement is only meaningful once the configured terminal
+        // font is applied and loaded — a cell measured under the fallback
+        // font poisons every future launch. Both are real conditions, not
+        // timers: the config promise resolves after its .then below applied
+        // the font, and fonts.ready resolves once the @font-face files are in.
+        await startupTermConfigPromise.catch(() => {});
+        if (document.fonts && document.fonts.ready) {
+          await document.fonts.ready.catch(() => {});
         }
-        // Falling out here means the metrics were NOT saved, so the next
-        // launch will run this correction again, visibly. Say so — a silent
-        // non-convergence looks identical to working until someone counts
-        // launches.
-        console.warn('Window size correction did not converge; metrics not saved.');
+        debouncedFitAndResize();
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+
+        const pane = currentPane();
+        const host = document.getElementById('terminal-host');
+        if (!pane || !pane.term || !host) return;
+
+        const inner = await tauriWin.innerSize();
+        const scale = await tauriWin.scaleFactor();
+        const rendererCell = sizer.rendererCellSize(pane.term) || {};
+        const metrics = sizer.metricsFor(
+          {
+            cols: pane.term.cols,
+            rows: pane.term.rows,
+            width: host.clientWidth,
+            height: host.clientHeight,
+            cellWidth: rendererCell.width,
+            cellHeight: rendererCell.height,
+          },
+          { width: inner.width / scale, height: inner.height / scale },
+        );
+        if (!metrics) return;
+        invoke('save_window_metrics', {
+          cellWidth: metrics.cellWidth,
+          cellHeight: metrics.cellHeight,
+          chromeWidth: metrics.chromeWidth,
+          chromeHeight: metrics.chromeHeight,
+        }).catch((err) => {
+          // Loud on purpose: a silently-failed save means every future launch
+          // opens from the fallback estimate, with nothing saying why.
+          console.error('Failed to persist window metrics:', err);
+        });
       }
 
       // Tell the user why this window has no panels — otherwise a window that
@@ -524,12 +479,12 @@
           // Only now are the font, the bottom-zone height and the sidebar
           // widths all applied, so this is the first moment the terminal's
           // measurements reflect what the user will actually see.
-          applyConfiguredWindowSize().catch((err) => {
+          measureAndPersistWindowMetrics().catch((err) => {
             // Deliberately not silent: an earlier version referenced an
             // identifier that does not exist in this scope, and a bare catch
-            // hid the ReferenceError so the resize simply never happened while
-            // appearing to work.
-            console.error('Failed to apply configured window size:', err);
+            // hid the ReferenceError so the measurement simply never happened
+            // while appearing to work.
+            console.error('Failed to measure window metrics:', err);
           });
         }, 250);
       });

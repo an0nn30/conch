@@ -41,6 +41,15 @@ pub struct WindowMetrics {
     pub chrome_width: f32,
     /// Window logical height minus (lines x cell_height).
     pub chrome_height: f32,
+    /// The font family these cells were measured under. A measurement from a
+    /// different font is worse than none: it converts columns to pixels with
+    /// the wrong cell and opens every window visibly wrong.
+    pub font_family: String,
+    /// The font size the measurement was taken at.
+    pub font_size: f32,
+    /// The UI zoom factor at measurement time (zoom rescales CSS pixels, so
+    /// it changes what a "cell" is in window-logical terms).
+    pub zoom: f32,
 }
 
 impl WindowMetrics {
@@ -52,6 +61,15 @@ impl WindowMetrics {
             && self.cell_height > 0.0
             && self.chrome_width >= 0.0
             && self.chrome_height >= 0.0
+    }
+
+    /// A measurement only applies to the configuration it was taken under.
+    /// Files written before fingerprinting existed have an empty family and
+    /// therefore never match — they get remeasured, not trusted.
+    pub fn matches(&self, family: &str, size: f32, zoom: f32) -> bool {
+        self.font_family == family
+            && (self.font_size - size).abs() < f32::EPSILON
+            && (self.zoom - zoom).abs() < 0.001
     }
 }
 

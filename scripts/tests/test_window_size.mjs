@@ -1,18 +1,11 @@
 // Run: node scripts/tests/test_window_size.mjs
 //
-// The cell→pixel arithmetic behind the "default window size in columns × lines"
-// setting. Pure, so it is tested directly; the DOM measurement that feeds it is
-// verified by using the app (no jsdom in this repo — see test_tl_dialog.mjs).
+// The measurement behind "windows open at the right size": pure arithmetic
+// that turns what the terminal reports into the cell/chrome metrics Rust uses
+// to size the NEXT window. Nothing here resizes anything — the previous
+// design corrected a visible window after show, and every variant of it
+// animated. The DOM measurement that feeds this is verified by using the app.
 import assert from 'node:assert';
-
-// deepStrictEqual compares prototypes, and objects built inside the vm sandbox
-// carry that realm's Object — so a structurally identical result fails. Compare
-// the fields instead, which also gives a clearer message on failure.
-function assertDelta(actual, dw, dh, what) {
-  assert.ok(actual, `${what}: expected a delta, got ${actual}`);
-  assert.strictEqual(actual.dw, dw, `${what}: dw`);
-  assert.strictEqual(actual.dh, dh, `${what}: dh`);
-}
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -27,53 +20,7 @@ sandbox.window = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(MODULE_PATH, 'utf8'), sandbox, { filename: MODULE_PATH });
 
-const { sizeDelta } = sandbox.termlabWindowSize;
-
-// A terminal measuring 80x24 in an 800x480 box has 10x20 cells. Growing it to
-// 102x46 needs 22 more columns and 22 more rows.
-const current = { cols: 80, rows: 24, width: 800, height: 480 };
-// 10x20 cells: 102.5 cells wide = 1025px (from 800), 46.5 tall = 930px (from 480).
-assertDelta(sizeDelta(current, { cols: 102, rows: 46 }), 225, 450, 'grow to 102x46');
-
-// Shrinking yields negatives rather than clamping to zero.
-assertDelta(sizeDelta(current, { cols: 60, rows: 20 }), -195, -70, 'shrink');
-
-// Already the right size: no movement, but still a delta rather than null, so
-// callers can distinguish "nothing to do" from "cannot compute".
-assertDelta(sizeDelta(current, { cols: 80, rows: 24 }), 0, 0, 'already correct');
-
-// Fractional cell sizes round rather than accumulating error.
-assertDelta(
-  sizeDelta({ cols: 80, rows: 24, width: 803, height: 484 }, { cols: 81, rows: 25 }),
-  15, 30, 'fractional cells round',
-);
-
-// The bug this bias exists for: one column short, with a fractional cell size.
-// Aiming at the boundary yields a delta that floors back to the same count, so
-// the loop sticks. The delta must clear the boundary instead.
-const oneShort = sizeDelta({ cols: 89, rows: 30, width: 748, height: 528 }, { cols: 90, rows: 30 });
-assert.ok(oneShort.dw >= Math.ceil(748 / 89), 'must add at least a full cell to gain a column');
-
-// 0 columns/lines is the documented "leave the window alone" escape hatch.
-assert.strictEqual(sizeDelta(current, { cols: 0, rows: 46 }), null);
-assert.strictEqual(sizeDelta(current, { cols: 102, rows: 0 }), null);
-assert.strictEqual(sizeDelta(current, { cols: 0, rows: 0 }), null);
-
-// An unfitted terminal reports 0 cols; dividing by it would produce Infinity
-// and resize the window off-screen, so these must refuse instead.
-assert.strictEqual(sizeDelta({ cols: 0, rows: 24, width: 800, height: 480 }, { cols: 102, rows: 46 }), null);
-assert.strictEqual(sizeDelta({ cols: 80, rows: 0, width: 800, height: 480 }, { cols: 102, rows: 46 }), null);
-assert.strictEqual(sizeDelta({ cols: 80, rows: 24, width: 0, height: 480 }, { cols: 102, rows: 46 }), null);
-assert.strictEqual(sizeDelta({ cols: 80, rows: 24, width: 800, height: 0 }, { cols: 102, rows: 46 }), null);
-
-// Garbage in does not throw.
-assert.strictEqual(sizeDelta(null, { cols: 102, rows: 46 }), null);
-assert.strictEqual(sizeDelta(current, null), null);
-assert.strictEqual(sizeDelta({}, {}), null);
-
-// --- metricsFor: the measurement persisted for the next launch ---
-
-const { metricsFor } = sandbox.termlabWindowSize;
+const { metricsFor, rendererCellSize } = sandbox.termlabWindowSize;
 
 // 80x24 in an 800x480 host inside a 840x560 window: 10x20 cells, 40x80 chrome.
 {
@@ -86,6 +33,20 @@ const { metricsFor } = sandbox.termlabWindowSize;
   assert.strictEqual(m.cellHeight, 20, 'cellHeight');
   assert.strictEqual(m.chromeWidth, 40, 'chromeWidth');
   assert.strictEqual(m.chromeHeight, 80, 'chromeHeight');
+}
+
+// When the renderer's exact cell size is supplied it wins over division —
+// division inflates the cell by the partial cell the host happens to hold.
+{
+  const m = metricsFor(
+    { cols: 80, rows: 24, width: 805, height: 484, cellWidth: 10, cellHeight: 20 },
+    { width: 845, height: 564 },
+  );
+  assert.strictEqual(m.cellWidth, 10, 'renderer cell width wins');
+  assert.strictEqual(m.cellHeight, 20, 'renderer cell height wins');
+  // Chrome accounts for the partial cell: 845 - 80*10 = 45.
+  assert.strictEqual(m.chromeWidth, 45, 'chrome absorbs the partial cell');
+  assert.strictEqual(m.chromeHeight, 84);
 }
 
 // Fractional cells survive rather than rounding to a lie.
@@ -109,73 +70,37 @@ assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 800, height: 480 }, {
 // measurement.
 assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 900, height: 480 }, { width: 840, height: 560 }), null);
 
+// A renderer cell that would put the grid outside the window is refused too.
+assert.strictEqual(
+  metricsFor(
+    { cols: 80, rows: 24, width: 800, height: 480, cellWidth: 11, cellHeight: 20 },
+    { width: 840, height: 560 },
+  ),
+  null,
+  '80 x 11px = 880 grid in an 840 window is not a measurement',
+);
+
 // Garbage in does not throw.
 assert.strictEqual(metricsFor(null, { width: 840, height: 560 }), null);
 assert.strictEqual(metricsFor({ cols: 80, rows: 24, width: 800, height: 480 }, null), null);
 
-// --- waitForSizeChange: the condition the correction loop synchronises on ---
-//
-// The loop used to sleep a flat 60ms after setSize and then re-measure. When
-// the OS resize landed later than that, the pass read the NEW host width with
-// the OLD column count, computed a garbage cell size from the pair, and issued
-// an overshooting second resize that a later pass walked back — the visible
-// grow-then-shrink on every launch. The wait must be on the CONDITION (the
-// size actually changed), not on a guess about how long that takes.
-
-const { waitForSizeChange } = sandbox.termlabWindowSize;
-const fakeRaf = (cb) => cb(); // every "frame" is immediate in the test
-
+// rendererCellSize: reads xterm's private dimensions when present, null on
+// anything else — it must never throw on a missing or reshaped internal.
 {
-  // Size changes on the third frame: resolves true, and consumed the extra
-  // settle frame afterwards (5 raf calls total: 3 polls + 1 detect... counted
-  // via wrapper below).
-  let frames = 0;
-  const countingRaf = (cb) => { frames += 1; cb(); };
-  const sizes = [
-    { width: 800, height: 480 }, // frame 1: unchanged
-    { width: 800, height: 480 }, // frame 2: unchanged
-    { width: 900, height: 480 }, // frame 3: landed
-    { width: 900, height: 480 }, // settle frame
-  ];
-  let i = 0;
-  const measure = () => sizes[Math.min(i++, sizes.length - 1)];
-  const changed = await waitForSizeChange(measure, { width: 800, height: 480 }, countingRaf, 10);
-  assert.strictEqual(changed, true, 'resolves true when the size lands');
-  assert.strictEqual(frames, 4, 'polls until the change, then one settle frame');
-}
-
-{
-  // Height-only change counts — a correction can be vertical only.
-  let i = 0;
-  const measure = () => (i++ < 1 ? { width: 800, height: 480 } : { width: 800, height: 520 });
+  const term = {
+    _core: { _renderService: { dimensions: { css: { cell: { width: 8.4, height: 20 } } } } },
+  };
+  // Field-by-field: deepStrictEqual fails on vm-sandbox objects (cross-realm
+  // prototypes).
+  const cell = rendererCellSize(term);
+  assert.strictEqual(cell.width, 8.4);
+  assert.strictEqual(cell.height, 20);
+  assert.strictEqual(rendererCellSize({}), null);
+  assert.strictEqual(rendererCellSize(null), null);
   assert.strictEqual(
-    await waitForSizeChange(measure, { width: 800, height: 480 }, fakeRaf, 10),
-    true,
-    'height-only change is a change',
-  );
-}
-
-{
-  // Never changes: returns false after maxFrames rather than hanging — a
-  // resize the OS swallowed must stop the loop, not wedge it.
-  let frames = 0;
-  const countingRaf = (cb) => { frames += 1; cb(); };
-  const changed = await waitForSizeChange(
-    () => ({ width: 800, height: 480 }),
-    { width: 800, height: 480 },
-    countingRaf,
-    7,
-  );
-  assert.strictEqual(changed, false, 'times out instead of hanging');
-  assert.strictEqual(frames, 7, 'gives up after exactly maxFrames');
-}
-
-{
-  // A measure that returns null (host torn down mid-wait) is a timeout, not a
-  // throw.
-  assert.strictEqual(
-    await waitForSizeChange(() => null, { width: 800, height: 480 }, fakeRaf, 3),
-    false,
+    rendererCellSize({ _core: { _renderService: { dimensions: { css: { cell: { width: 0, height: 20 } } } } } }),
+    null,
+    'a zero cell is not a measurement',
   );
 }
 

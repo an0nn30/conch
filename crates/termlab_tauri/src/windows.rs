@@ -111,7 +111,12 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
     // size, not the previous session's pixels and not the parent window's.
     // Opening a new window off a full-screen one used to inherit its size.
     let persisted = config::load_persistent_state().unwrap_or_default();
-    let (w, h) = crate::initial_window_px(&user_cfg.window.dimensions, &persisted.window_metrics);
+    let (w, h) = crate::initial_window_px(
+        &user_cfg.window.dimensions,
+        &persisted.window_metrics,
+        user_cfg.resolved_terminal_font(),
+        persisted.layout.zoom_factor,
+    );
     let user_wants_dec = !matches!(
         user_cfg.window.decorations,
         termlab_core::config::WindowDecorations::None
