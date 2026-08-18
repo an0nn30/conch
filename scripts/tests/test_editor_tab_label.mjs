@@ -34,10 +34,14 @@ checkLabel(
 
 // Remote file: the basename comes from the *remote* path, not the local temp
 // path the file was downloaded to — the temp filename is an implementation
-// detail the user never sees.
+// detail the user never sees. The two paths deliberately have DIFFERENT
+// basenames (a hashed temp name, unlike today's actual temp-path scheme,
+// which happens to preserve the basename) so this assertion can only pass by
+// reading remote.remotePath — if the implementation ever regresses to
+// deriving the label from pane.filePath instead, this must fail.
 checkLabel(
   editorTabLabel({
-    filePath: '/tmp/x/nginx.conf',
+    filePath: '/tmp/x/dl-8f3a2c.tmp',
     remote: { remotePath: '/etc/nginx.conf', hostLabel: 'dustin@web1' },
   }),
   { label: 'nginx.conf — dustin@web1', tooltip: 'dustin@web1:/etc/nginx.conf' },
