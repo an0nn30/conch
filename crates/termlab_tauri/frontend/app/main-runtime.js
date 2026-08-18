@@ -56,7 +56,9 @@
       const currentWindowLabel = await invoke('current_window_label');
 
       const FONT_FALLBACKS = ', "Symbols Nerd Font Mono", "Symbols Nerd Font", "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace';
+      // The editor theme reads this global so editor and terminal share one font source.
       let termFontFamily = '"JetBrains Mono", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
+      window.__termlabTermFontFamily = termFontFamily;
       let termFontSize = 14;
       let termCursorStyle = 'block';
       let termCursorBlink = true;
@@ -311,6 +313,7 @@
           setTermConfigState: (partial) => {
             if (partial && Object.prototype.hasOwnProperty.call(partial, 'fontFamily')) {
               termFontFamily = partial.fontFamily;
+              window.__termlabTermFontFamily = termFontFamily;
             }
             if (partial && Object.prototype.hasOwnProperty.call(partial, 'fontSize')) {
               termFontSize = partial.fontSize;
@@ -494,6 +497,7 @@
       startupTermConfigPromise.then((termConfig) => {
         if (!termConfig) return;
         termFontFamily = termConfig.fontFamily;
+        window.__termlabTermFontFamily = termFontFamily;
         termFontSize = termConfig.fontSize;
         termCursorStyle = termConfig.cursorStyle;
         termCursorBlink = termConfig.cursorBlink;

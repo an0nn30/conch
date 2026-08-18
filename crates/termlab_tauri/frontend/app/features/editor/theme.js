@@ -36,7 +36,13 @@
       '.cm-activeLine': { backgroundColor: rowHover },
       '.cm-activeLineGutter': { backgroundColor: rowHover, color: fg },
       '.cm-selectionMatch': { backgroundColor: rowHover },
-      '.cm-scroller': { fontFamily: 'inherit' },
+      '.cm-scroller': {
+        // The terminal's stack, not the UI font — an editor beside a terminal
+        // shares its typeface. main-runtime keeps this global current; the
+        // literal fallback matches its declaration for the pre-init window.
+        fontFamily: global.__termlabTermFontFamily
+          || '"JetBrains Mono", "Fira Code", "Cascadia Code", "Menlo", monospace',
+      },
     }, { dark: isDarkTheme() });
 
     const t = CM.tags;
