@@ -34,6 +34,7 @@ import vm from 'node:vm';
 const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
 const VIM_MODE = path.join(ROOT, 'app/features/editor/vim-mode.js');
 const EDITOR_PANE = path.join(ROOT, 'app/features/editor/editor-pane.js');
+const LANGUAGE_MAP = path.join(ROOT, 'app/features/editor/language-map.js');
 
 // --- CM6 stand-in ----------------------------------------------------------
 //
@@ -373,10 +374,14 @@ check('setVimMode on a view it does not know is a no-op', () => {
   assert.strictEqual(effects.length, 0);
 });
 
-check('the font and theme compartments still work alongside it', () => {
+check('the font, theme and language compartments still work alongside it', () => {
   const h = makePaneHarness({ doc: 'x', vimMode: true });
   const ids = h.extensions.filter((e) => e && typeof e.compartment === 'number').map((e) => e.compartment);
-  assert.strictEqual(new Set(ids).size, 3, 'vim, theme and font are three distinct compartments');
+  assert.strictEqual(
+    new Set(ids).size,
+    4,
+    'vim, language, theme and font are four distinct compartments',
+  );
   h.sandbox.termlabEditorPane.setFontSize(h.view, 15);
   assert.strictEqual(h.view.effects.length, 1);
   assert.notStrictEqual(
@@ -384,6 +389,49 @@ check('the font and theme compartments still work alongside it', () => {
     h.extensions[0].compartment,
     'setFontSize must not touch the vim compartment',
   );
+});
+
+// --- the language compartment (Save As renames a live pane) ----------------
+//
+// The language used to be fixed at creation. Save As changes a pane's name
+// while it is open, so it has to be reconfigurable — through a compartment
+// rather than a fresh EditorState, which would throw away the document, the
+// selection and the undo history.
+check('setLanguage re-derives highlighting on a live view, via its own compartment', () => {
+  const h = makePaneHarness({ doc: 'x', filename: 'notes.txt' });
+  // The app's REAL filename -> language table, so this is the derivation the
+  // editor actually performs rather than a restatement of it.
+  vm.runInContext(fs.readFileSync(LANGUAGE_MAP, 'utf8'), h.sandbox, { filename: LANGUAGE_MAP });
+  h.cm.CM.python = () => ({ ext: 'python' });
+
+  // Located structurally: the compartment that follows the default keymap is
+  // the language one (vim is ahead of the keymap; theme and font follow it).
+  const keymapAt = indexOfKeymap(h.extensions);
+  const languageAt = h.extensions.findIndex(
+    (e, i) => i > keymapAt && e && typeof e.compartment === 'number',
+  );
+  assert.ok(languageAt > keymapAt, 'the language extension is carried by a compartment');
+  const languageId = h.extensions[languageAt].compartment;
+  assert.notStrictEqual(languageId, h.extensions[0].compartment, 'not the vim one');
+
+  h.sandbox.termlabEditorPane.setLanguage(h.view, 'deploy.py');
+  assert.strictEqual(h.view.effects.length, 1, 'exactly one dispatch');
+  assert.strictEqual(h.view.effects[0].reconfigure, languageId, 'the language compartment');
+  assert.strictEqual(h.view.effects[0].contents.length, 1);
+  assert.strictEqual(h.view.effects[0].contents[0].ext, 'python', 'derived from the NEW name');
+
+  // A name with no known language empties it — how a .py saved as .txt
+  // correctly loses its highlighting.
+  h.sandbox.termlabEditorPane.setLanguage(h.view, 'plain.unknownext');
+  assert.strictEqual(h.view.effects[1].reconfigure, languageId);
+  assert.strictEqual(h.view.effects[1].contents.length, 0);
+});
+
+check('setLanguage on a view it does not know is a no-op', () => {
+  const h = makePaneHarness({ doc: 'x' });
+  const effects = [];
+  h.sandbox.termlabEditorPane.setLanguage({ dispatch: (tr) => effects.push(tr) }, 'a.py');
+  assert.strictEqual(effects.length, 0);
 });
 
 let failed = 0;

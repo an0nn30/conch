@@ -164,6 +164,11 @@ pub(crate) struct KeyboardShortcuts {
     rename_tab: String,
     manage_tunnels: String,
     vault_open: String,
+    /// Editor bindings. Display only, for the custom titlebar's menu: both
+    /// are dispatched by shortcut-runtime.js's guarded fallback table, not by
+    /// an accelerator registered from this payload.
+    open_file: String,
+    save_file_as: String,
 }
 
 #[tauri::command]
@@ -181,6 +186,8 @@ pub(crate) fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> Key
         rename_tab: kb.rename_tab.clone(),
         manage_tunnels: kb.manage_tunnels.clone(),
         vault_open: kb.vault_open.clone(),
+        open_file: kb.open_file.clone(),
+        save_file_as: kb.save_file_as.clone(),
     }
 }
 

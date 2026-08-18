@@ -119,6 +119,7 @@ pub struct KeyboardConfig {
     pub settings: String,
     pub new_scratch: String,
     pub save_file: String,
+    pub save_file_as: String,
     pub open_file: String,
     pub tool_window_shortcuts: HashMap<String, String>,
     pub plugin_shortcuts: HashMap<String, String>,
@@ -149,6 +150,7 @@ impl Default for KeyboardConfig {
             settings: "cmd+,".into(),
             new_scratch: "cmd+n".into(),
             save_file: "cmd+s".into(),
+            save_file_as: "cmd+shift+s".into(),
             open_file: "cmd+o".into(),
             tool_window_shortcuts: HashMap::new(),
             plugin_shortcuts: HashMap::new(),
@@ -223,6 +225,9 @@ mod tests {
         let k = KeyboardConfig::default();
         assert_eq!(k.new_scratch, "cmd+n");
         assert_eq!(k.save_file, "cmd+s");
+        // Scoped exactly like save_file: only a focused editor pane consumes
+        // it, so cmd+shift+s still reaches the shell in a terminal.
+        assert_eq!(k.save_file_as, "cmd+shift+s");
         // Unlike save_file, open_file is *not* scoped to a focused editor: it
         // opens the file chooser from anywhere, so it consumes cmd+o in a
         // terminal too. Deliberate — see shortcut-runtime.js.
@@ -298,6 +303,28 @@ mod tests {
         assert!(cfg.native);
         assert!(cfg.lua);
         assert!(cfg.java);
+    }
+
+    /// `save_file_as` is new, so every config already on disk has a
+    /// `[termlab.keyboard]` table without it — same reasoning as `open_file`
+    /// below: an empty string here would be dropped by
+    /// `normalizeShortcutString` and cmd+shift+S would silently do nothing
+    /// while still being listed in Settings.
+    #[test]
+    fn save_file_as_fills_in_for_a_config_written_before_it_existed() {
+        let toml = r#"
+            new_tab = "cmd+t"
+            save_file = "cmd+s"
+        "#;
+        let k: KeyboardConfig = toml::from_str(toml).unwrap();
+        assert_eq!(k.save_file_as, "cmd+shift+s");
+        assert_eq!(k.save_file, "cmd+s");
+    }
+
+    #[test]
+    fn save_file_as_round_trips_when_overridden() {
+        let k: KeyboardConfig = toml::from_str(r#"save_file_as = "cmd+alt+s""#).unwrap();
+        assert_eq!(k.save_file_as, "cmd+alt+s");
     }
 
     /// `open_file` is new, so every config already on disk has a

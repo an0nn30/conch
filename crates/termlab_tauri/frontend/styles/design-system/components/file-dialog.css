@@ -197,6 +197,29 @@
 }
 .tl-filedlg__empty[hidden] { display: none; }
 
+/* ---- save mode: the name to write, and New Folder ----------------------- */
+
+/* Below the listing rather than above it: the listing is context for the
+   name, and the name is the last thing you touch before pressing Save. */
+.tl-filedlg__save {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+}
+
+.tl-filedlg__namelabel {
+  flex-shrink: 0;
+  color: var(--tl-fg-muted);
+  white-space: nowrap;
+}
+
+.tl-filedlg__name { flex: 1 1 auto; min-width: 0; }
+.tl-filedlg__newfolder { flex-shrink: 0; white-space: nowrap; }
+
+/* The nested New Folder prompt (a tl-dialog of its own, stacked over the
+   chooser) — one field, full width of the small dialog. */
+.tl-filedlg__prompt-input { width: 100%; }
+
 /* ---- inline error ------------------------------------------------------- */
 
 /* In the body, under the list, not a toast: a listing that failed has to stay

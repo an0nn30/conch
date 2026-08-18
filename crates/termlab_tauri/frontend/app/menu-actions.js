@@ -84,6 +84,27 @@
         if (service) service.saveActiveEditor();
         return;
       }
+      if (action === 'save-file-as') {
+        // Scoped to editor panes exactly like save-file: shortcut-runtime
+        // declines the combo outside an editor, and the check here is what
+        // keeps the OTHER routes to this action (the File menu, the command
+        // palette) from opening a save chooser with a terminal focused —
+        // neither of those goes through that guard.
+        const pane = getCurrentPane();
+        if (!pane || pane.kind !== 'editor') return;
+        const dialog = global.termlabFileDialog;
+        if (!dialog) {
+          showStatus('File dialog unavailable');
+          return;
+        }
+        // Failures of the save itself are reported by the editor service,
+        // which also owns leaving the pane on its old binding; a rejection
+        // here only means the chooser could not be shown.
+        Promise.resolve(dialog.openForSave(pane)).catch((error) => {
+          showStatus('Failed to save file: ' + String(error));
+        });
+        return;
+      }
       if (action === 'open-file') {
         // Unscoped on purpose (see shortcut-runtime.js): the chooser opens
         // from a terminal too. Routing and error reporting live in the

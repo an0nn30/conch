@@ -48,12 +48,20 @@
       settings: 'settings',
       new_scratch: 'new-scratch',
       save_file: 'save-file',
+      // Scoped exactly like save_file (see the guard in runShortcutFallbacks):
+      // in a terminal, cmd+shift+s must reach the shell.
+      save_file_as: 'save-file-as',
       // Unlike save_file below, open_file is NOT dropped when a terminal pane
       // is focused: the chooser is how you get an editor in the first place,
       // so gating it on already having one would make it unreachable from a
       // fresh window. The cost is that cmd+o no longer reaches the shell.
       open_file: 'open-file',
     };
+
+    // Core actions that mean something only inside a focused editor pane. A
+    // hit on one of these with any other pane focused is DROPPED rather than
+    // consumed — see runShortcutFallbacks.
+    const EDITOR_SCOPED_ACTIONS = ['save-file', 'save-file-as'];
 
     function navigatePane(direction) {
       const tab = getActiveTab();
@@ -203,12 +211,12 @@
       const runShortcutFallbacks = (event) => {
         const combo = normalizeShortcutEventForPluginFallback(event);
         let coreHit = combo ? coreShortcutFallbacks.find((s) => s.combo === combo) : null;
-        // Returning true consumes the keystroke. cmd+s is a save only inside an
-        // editor pane; in a terminal it must reach the shell unchanged, so the
-        // core `save-file` binding is dropped while a non-editor pane is
-        // focused. getCurrentPane() is the composed paneManager.currentPane()
-        // (via managerDelegates) — the only accessor that actually resolves the
-        // focused pane.
+        // Returning true consumes the keystroke. cmd+s (and cmd+shift+s) are a
+        // save only inside an editor pane; in a terminal they must reach the
+        // shell unchanged, so an EDITOR_SCOPED_ACTIONS binding is dropped while
+        // a non-editor pane is focused. getCurrentPane() is the composed
+        // paneManager.currentPane() (via managerDelegates) — the only accessor
+        // that actually resolves the focused pane.
         //
         // Dropped rather than returned: the user may have bound the same combo
         // to a tool window or a plugin action, and those tables are consulted
@@ -216,12 +224,14 @@
         // It has to be dropped from the function-key table as well, because
         // refreshKeyboardShortcutFallbacks pushes *every* core binding there,
         // function key or not — so a bare `coreHit = null` would only move the
-        // save one table down.
-        let saveFileSuppressed = false;
-        if (coreHit && coreHit.action === 'save-file') {
+        // save one table down. Which action was suppressed is remembered (not
+        // just THAT one was), so dropping cmd+shift+s cannot also drop a
+        // cmd+s the user has bound to something else in that table.
+        let suppressedCoreAction = null;
+        if (coreHit && EDITOR_SCOPED_ACTIONS.indexOf(coreHit.action) !== -1) {
           const pane = getCurrentPane();
           if (!pane || pane.kind !== 'editor') {
-            saveFileSuppressed = true;
+            suppressedCoreAction = coreHit.action;
             coreHit = null;
           }
         }
@@ -237,7 +247,7 @@
         if (isTextInputTarget(event.target)) return false;
         if (!combo) return false;
         const fKeyHit = functionKeyShortcutFallbacks.find((s) => s.combo === combo
-          && !(saveFileSuppressed && s.kind === 'core' && s.action === 'save-file'));
+          && !(suppressedCoreAction && s.kind === 'core' && s.action === suppressedCoreAction));
         if (fKeyHit) {
           if (fKeyHit.kind === 'core') {
             handleMenuAction(fKeyHit.action);

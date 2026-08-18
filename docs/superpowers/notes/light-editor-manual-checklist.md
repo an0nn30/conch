@@ -84,3 +84,123 @@ Special checks first — the two things no harness could see:
 27. Modify a scratch, then: close tab / close window / ⌘Q — each prompts
     Save / Don't Save / Cancel; Cancel aborts and the pane stays dirty.
 28. ⌘S in a plain terminal pane → nothing is consumed; the shell receives it.
+
+## F. Editor polish branch — terminal font, host labels, the file dialog, vim
+
+Added by the editor-polish plan (four features: editor font, host-labelled
+remote tabs, the unified Open/Save As dialog, optional vim keybindings).
+Nothing below was run in a GUI by the implementer; every step is a human
+pass. **Steps marked [SSH] need a real SSH host**; the rest need only a local
+build. Run in order within each block; stop and report at the first mismatch.
+
+### F1. The editor uses the terminal font
+
+29. Settings → Terminal: note the terminal font family and size. Open a
+    scratch (⌘N) → the editor text is that same monospace family at that
+    size, not the UI font.
+30. With the editor still open, change the terminal font family in Settings
+    and Apply → the OPEN editor pane re-renders in the new family live (no
+    reopen). Change the size → same.
+31. Set the terminal font to a family that does not exist on this machine →
+    the editor falls back to a monospace stack, never to a proportional UI
+    font.
+
+### F2. Remote tabs name their host
+
+32. [SSH] Open a remote file → the tab reads `name — user@host` (and
+    `user@host:port` if the port is not 22). Hover it → the tooltip is the
+    full `user@host:/absolute/remote/path`.
+33. Open a local file → the tab is the bare basename; the tooltip is the
+    absolute local path.
+34. [SSH] The same filename open from two different hosts → two tabs, each
+    naming its own host; edits do not cross.
+35. Edit a remote file → the dirty dot appears AFTER the label and does not
+    disturb the host suffix.
+
+### F3. Vim keybindings
+
+36. Settings → Editor → "Vim keybindings" ON with an editor already open →
+    the open pane enters vim mode live (Escape then `i` toggles insert), and
+    the document, cursor position and undo history all survive the switch.
+37. `dd`, `p`, `u`, `/pattern` behave as vim; with the setting OFF again,
+    typing `i` inserts the letter `i` and nothing else changed.
+38. `:w` on a local file → saves; `cat` confirms. [SSH] `:w` on a remote file
+    → the "Uploaded" toast, and the host has the bytes.
+39. `:q` on a DIRTY pane → the app's Save / Don't Save / Cancel prompt, not a
+    vim error. Cancel leaves the tab open and still dirty.
+40. `:wq` on a dirty pane → saves, then closes. With the host down (see F4),
+    `:wq` must NOT close the tab.
+41. **Escape interplay:** with vim ON and the editor focused, Escape returns
+    to normal mode and does NOT close a dialog or leave zen mode. With the
+    editor NOT focused, Escape still reaches the app (open a dialog from a
+    terminal pane and dismiss it with Escape).
+42. **Note, not a defect:** `:q!` and `:wq!` are not special-cased — the
+    force variants still route through the app's unsaved-changes prompt, so a
+    dirty `:q!` asks rather than discarding. Confirm it asks.
+
+### F4. The file dialog — Open (⌘O)
+
+43. ⌘O from a terminal pane (no editor open) → the chooser appears. The scope
+    bar reads `This Mac` first, then one button per CONNECTED host.
+44. Browse: double-click and Enter descend; the ↑ button and the breadcrumbs
+    go back up; the filter box narrows; the Hidden checkbox reveals dotfiles.
+45. Paste `/etc/hosts` into the path field and press Enter → the file opens
+    (not just its directory). Paste a directory → it navigates there.
+46. Select a directory → the Open button stays DISABLED (Enter descends
+    instead). Select a file → it enables.
+47. Pick a `.png` → the "Cannot Open File" toast from the editor service; no
+    tab. Cancel / Escape / a backdrop click → no tab, no toast.
+48. [SSH] Switch to a host scope → it starts in that session's home directory
+    (resolved server-side). Open a remote file → the tab carries the host
+    label from F2.
+49. [SSH] Disconnect a host while browsing it → an inline error appears where
+    the list was, INSIDE the dialog, and the other scope buttons still work.
+50. [SSH] Two panes connected to the SAME host → two scope buttons, each
+    suffixed `(pane N)`. Opening from either produces ONE tab per file.
+
+### F5. Save As (⌘⇧S) — the risky one
+
+51. ⌘⇧S with a terminal pane focused → nothing happens and the SHELL receives
+    the keystroke (the binding is editor-scoped). File → Save File As… is
+    likewise inert with a terminal focused.
+52. Scratch → ⌘⇧S → the chooser opens in save mode: title "Save File As", a
+    filename field pre-filled with the current basename, a New Folder button,
+    and a primary button reading Save.
+53. Save the scratch to a new LOCAL path → the tab renames to the new
+    basename, the tooltip becomes the new absolute path, the dirty dot
+    clears, and the file exists on disk with the right bytes. Syntax
+    highlighting switches to the new extension (save a scratch as `x.py` and
+    watch Python highlighting appear).
+54. ⌘S afterwards → writes the NEW file. The original scratch is still on
+    disk, unchanged since its last save.
+55. Save As onto an EXISTING file → the "Overwrite File?" prompt appears
+    stacked over the chooser. Cancel → nothing is written, nothing rebinds,
+    and the chooser is still open at the same directory with the same typed
+    name. Overwrite → it writes.
+56. New Folder (local) → prompts for a name, creates it, and the listing
+    refreshes with the folder in it. Cancel at the prompt creates nothing.
+    An invalid name (e.g. one in a read-only directory) shows the error
+    INLINE in the dialog, not as a toast.
+57. [SSH] ⌘⇧S from a scratch → a host scope → type a filename in a directory
+    path that does NOT exist yet, creating it with New Folder first → Save.
+    Expect: the file appears on the host, the tab becomes
+    `name — user@host`, and the tooltip is the remote path.
+58. [SSH] After that rebind, ⌘S (and `:w` with vim on) uploads to the NEW
+    host and path — verify on the host, and verify the OLD location is not
+    written again.
+59. [SSH] **The one that must not half-rebind:** open a remote file, edit it,
+    kill the SSH connection, then ⌘⇧S to that same (now dead) host. Expect a
+    "Save As Failed" toast AND: the tab still shows the OLD name and host,
+    the tooltip is still the OLD remote path, the dirty dot is still there,
+    and ⌘W still PROMPTS. Reconnect and ⌘S → the edit uploads to the OLD
+    location.
+60. [SSH] New Folder on a host scope → `sftp_mkdir` creates it and the
+    listing refreshes; the same folder is visible from the files panel.
+61. [SSH] Save As from a remote file to a LOCAL path → the tab loses the host
+    suffix entirely, and the remote temp file for the old binding is gone
+    (`find "$(node -e 'console.log(require("os").tmpdir())')/termlab-sftp-edits" -type f`).
+62. Save As onto a path that is ALREADY OPEN in another editor tab → refused
+    with a message naming the file; nothing is written over it.
+63. Settings → Keymap → Editor lists New Scratch, Open File, Save File and
+    Save File As. Rebind Save File As, Apply, and confirm the new combo works
+    and the old one does not.

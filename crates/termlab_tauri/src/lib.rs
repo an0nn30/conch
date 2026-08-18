@@ -526,6 +526,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             menu::MENU_OPEN_FILE_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_OPEN_FILE)
             }
+            menu::MENU_SAVE_FILE_AS_ID => {
+                menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_SAVE_FILE_AS)
+            }
             menu::MENU_TOGGLE_LEFT_PANEL_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_LEFT_PANEL)
             }

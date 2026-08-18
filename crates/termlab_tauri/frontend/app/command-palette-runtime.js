@@ -116,6 +116,9 @@
       add('core:new-plain-shell-tab', 'New Plain Shell Tab', 'Terminal', 'tab terminal shell plain default login local pty', () => handleMenuAction('new-plain-shell-tab'));
       add('core:new-scratch', 'New Scratch File', 'Editor', 'scratch file editor new note', () => handleMenuAction('new-scratch'));
       add('core:open-file', 'Open File…', 'Editor', 'open file editor browse local remote sftp host chooser', () => handleMenuAction('open-file'));
+      // Editor-only, like the keybinding: handleMenuAction('save-file-as')
+      // returns without acting when the focused pane is not an editor.
+      add('core:save-file-as', 'Save File As…', 'Editor', 'save as file editor copy rename local remote sftp host upload', () => handleMenuAction('save-file-as'));
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
       add('core:manage-tunnels', 'Manage Tunnels', 'SSH', 'tunnels manager', () => handleMenuAction('manage-tunnels'), 'Tunnels');
       add('core:focus-sessions', 'Focus Sessions', 'SSH', 'ssh sessions quick connect', () => handleMenuAction('focus-sessions'), 'SSH Hosts');

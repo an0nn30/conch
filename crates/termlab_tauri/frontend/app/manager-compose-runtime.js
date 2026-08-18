@@ -296,6 +296,25 @@
         allPanes: () => panes,
         setFocusedPane: (paneId) => paneManager.setFocusedPane(paneId),
         activateTab: (tabId) => tabManager.activateTab(tabId),
+        // Save As rebinds a pane to a new file, so its tab has to say so. The
+        // caption is composed by features/editor/tab-label.js (the same
+        // function createEditorTab uses); this only applies it, through the
+        // tab manager's own setTabLabel rather than by writing textContent —
+        // the button holds an icon, a label span and a close affordance, and
+        // assigning textContent would destroy all three. `tab.label` is
+        // updated too because the window title reads it. Returns whether the
+        // tab was found.
+        setTabLabel: (tabId, label, tooltip) => {
+          const tab = tabs.get(tabId);
+          if (!tab || !tab.button) return false;
+          tab.label = label;
+          tabManager.setTabLabel(tab.button, label);
+          tab.button.title = tooltip || '';
+          if (typeof tabManager.refreshWindowTitle === 'function') {
+            tabManager.refreshWindowTitle();
+          }
+          return true;
+        },
       };
     }
 

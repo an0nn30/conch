@@ -59,6 +59,11 @@
           { id: 'new-plain-shell-tab', label: 'New Plain Shell Tab', shortcut: shortcuts.new_plain_shell_tab || `${ctrl}+Shift+T` },
           { id: 'new-window', label: 'New Window', shortcut: `${ctrl}+Shift+N` },
           { id: 'open-file', label: 'Open File…', shortcut: shortcuts.open_file || `${ctrl}+O` },
+          // noAccel: the shortcut is DISPLAYED but not registered here —
+          // Save As is scoped to a focused editor pane, and that scoping
+          // lives in shortcut-runtime.js's fallback guard. Registering it in
+          // this table would consume the combo in terminal panes too.
+          { id: 'save-file-as', label: 'Save File As…', shortcut: shortcuts.save_file_as || `${ctrl}+Shift+S`, noAccel: true },
           { type: 'separator' },
           { label: 'SSH Manager', submenu: [
             { id: 'ssh-export', label: 'Export' },

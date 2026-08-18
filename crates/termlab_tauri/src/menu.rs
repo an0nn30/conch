@@ -40,6 +40,7 @@ pub(crate) const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
 pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
+pub(crate) const MENU_SAVE_FILE_AS_ID: &str = "file.save_file_as";
 /// Quit is a custom item, not `PredefinedMenuItem::quit`. The predefined one
 /// sends `[NSApp terminate:]`, which tao does not intercept
 /// (`applicationShouldTerminate:` is unimplemented) and which raises neither
@@ -75,6 +76,7 @@ pub(crate) const MENU_ACTION_SPLIT_HORIZONTAL: &str = "split-horizontal";
 pub(crate) const MENU_ACTION_CLOSE_PANE: &str = "close-pane";
 pub(crate) const MENU_ACTION_RENAME_TAB: &str = "rename-tab";
 pub(crate) const MENU_ACTION_OPEN_FILE: &str = "open-file";
+pub(crate) const MENU_ACTION_SAVE_FILE_AS: &str = "save-file-as";
 pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
 pub(crate) const MENU_ACTION_CHECK_UPDATES: &str = "check-for-updates";
 pub(crate) const MENU_ACTION_ABOUT: &str = "about";
@@ -179,6 +181,22 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         Some(&open_file_accel),
     )?;
+    // Deliberately NO accelerator, unlike Open File… above. A native menu
+    // accelerator is consumed by AppKit before the webview sees the key, which
+    // is exactly why `save_file` has never had a menu item: Save As is scoped
+    // to a focused editor pane, and that scoping lives in
+    // shortcut-runtime.js's fallback guard. Binding Cmd+Shift+S here would
+    // take the combo from the shell in every terminal pane. The keystroke is
+    // still handled — by that guard — and Settings > Keymap still lists it;
+    // this item is the discoverable, always-safe route (menu-actions.js
+    // re-checks the focused pane before acting).
+    let save_file_as = MenuItem::with_id(
+        app,
+        MENU_SAVE_FILE_AS_ID,
+        "Save File As\u{2026}",
+        true,
+        None::<&str>,
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let close_window = PredefinedMenuItem::close_window(app, None)?;
 
@@ -216,6 +234,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             &new_plain_shell_tab,
             &new_window,
             &open_file,
+            &save_file_as,
             &separator,
             &ssh_manager_menu,
             &separator2,
@@ -683,6 +702,14 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             true,
             Some(&open_file_accel),
         )?;
+        // No accelerator — see build_app_menu above.
+        let save_file_as = MenuItem::with_id(
+            app,
+            MENU_SAVE_FILE_AS_ID,
+            "Save File As\u{2026}",
+            true,
+            None::<&str>,
+        )?;
         let new_window = MenuItem::with_id(
             app,
             MENU_NEW_WINDOW_ID,
@@ -713,6 +740,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 &new_plain_shell_tab,
                 &new_window,
                 &open_file,
+                &save_file_as,
                 &separator,
                 &ssh_manager_menu,
                 &separator2,

@@ -11,6 +11,10 @@
   const fontCompartments = new WeakMap();
   const themeCompartments = new WeakMap();
   const vimCompartments = new WeakMap();
+  // Save As renames a live pane, so the language can no longer be fixed at
+  // creation: a scratch saved as `deploy.py` has to start highlighting as
+  // Python without losing the document, the selection or the undo history.
+  const languageCompartments = new WeakMap();
 
   function vimExtensions(enabled) {
     return global.termlabVimMode && typeof global.termlabVimMode.vimExtensions === 'function'
@@ -44,6 +48,7 @@
     const fontComp = new CM.Compartment();
     const themeComp = new CM.Compartment();
     const vimComp = new CM.Compartment();
+    const languageComp = new CM.Compartment();
     const themeExtensions = global.termlabEditorTheme
       ? global.termlabEditorTheme.buildTheme()
       : [];
@@ -85,7 +90,7 @@
             ...CM.foldKeymap,
             CM.indentWithTab,
           ]),
-          languageExtension(opts.filename || ''),
+          languageComp.of(languageExtension(opts.filename || '')),
           themeComp.of(themeExtensions),
           fontComp.of([]),
           dirtyWatcher,
@@ -96,6 +101,7 @@
     fontCompartments.set(view, fontComp);
     themeCompartments.set(view, themeComp);
     vimCompartments.set(view, vimComp);
+    languageCompartments.set(view, languageComp);
     // Callers clear dirty after a save; expose the reset without exposing state.
     view.termlabResetDirty = () => {
       dirty = false;
@@ -135,11 +141,25 @@
     view.dispatch({ effects: comp.reconfigure(vimExtensions(enabled === true)) });
   }
 
+  // Re-derive the highlighting from a new name on a view that is already
+  // open. Save As is the only caller: the pane keeps its document, so this is
+  // a compartment reconfigure rather than a fresh state (which would discard
+  // undo history and the selection). `filename` may be a bare basename or a
+  // full path — languageKeyFor takes the basename either way — and a name
+  // with no known language reconfigures to an empty array, which is how a
+  // `.py` saved as `.txt` correctly loses its highlighting.
+  function setLanguage(view, filename) {
+    const comp = languageCompartments.get(view);
+    if (!view || !comp) return;
+    view.dispatch({ effects: comp.reconfigure(languageExtension(filename || '')) });
+  }
+
   global.termlabEditorPane = {
     createEditorView,
     destroyEditorView,
     setFontSize,
     refreshTheme,
     setVimMode,
+    setLanguage,
   };
 })(window);

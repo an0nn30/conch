@@ -165,6 +165,39 @@
   // Listing IO — everything goes through features/files/data-service.js
   // ---------------------------------------------------------------------------
 
+  // Does this path already exist? Resolves with the FileEntry, rejects when it
+  // does not exist (both backends return a bare String there). Save As reads
+  // the rejection as "free to write" and the resolution as "ask first".
+  function statScopePath(scope, path) {
+    const data = filesData();
+    if (!data) return Promise.reject(new Error('Files data service unavailable'));
+    if (scope.kind === 'local') {
+      if (typeof data.statLocal !== 'function') {
+        return Promise.reject(new Error('Files data service unavailable: statLocal'));
+      }
+      return data.statLocal(invoke, path);
+    }
+    if (typeof data.statRemote !== 'function') {
+      return Promise.reject(new Error('Files data service unavailable: statRemote'));
+    }
+    return data.statRemote(invoke, scope.paneId, path);
+  }
+
+  function mkdirInScope(scope, path) {
+    const data = filesData();
+    if (!data) return Promise.reject(new Error('Files data service unavailable'));
+    if (scope.kind === 'local') {
+      if (typeof data.localMkdir !== 'function') {
+        return Promise.reject(new Error('Files data service unavailable: localMkdir'));
+      }
+      return data.localMkdir(invoke, path);
+    }
+    if (typeof data.remoteMkdir !== 'function') {
+      return Promise.reject(new Error('Files data service unavailable: remoteMkdir'));
+    }
+    return data.remoteMkdir(invoke, scope.paneId, path);
+  }
+
   function listScopeDir(scope, path) {
     const data = filesData();
     if (!data) return Promise.reject(new Error('Files data service unavailable'));
@@ -240,6 +273,95 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Nested prompts (Save As only)
+  // ---------------------------------------------------------------------------
+  //
+  // Both stack ON TOP of the chooser rather than replacing it: answering
+  // "no" has to leave the user where they were, with the same directory and
+  // the same typed name, free to choose somewhere else. tl-dialog supports
+  // the nesting (its z-index/Escape/Tab-trap handling is all depth-aware);
+  // the `done` latch is dialog-service.js's confirmSave shape, so the onClose
+  // that close() itself fires cannot overwrite an answer already given.
+
+  function confirmOverwrite(name) {
+    return new Promise((resolve) => {
+      if (!global.tlDialog || typeof global.tlDialog.open !== 'function') {
+        resolve(false);
+        return;
+      }
+      let done = false;
+      let handle = null;
+      const finish = (accepted) => {
+        if (done) return;
+        done = true;
+        resolve(accepted);
+        if (handle) handle.close(accepted ? 'overwrite' : 'cancel');
+      };
+      handle = global.tlDialog.open({
+        title: 'Overwrite File?',
+        ariaLabel: 'Overwrite file',
+        size: 'sm',
+        body: (bodyEl) => {
+          const message = el('div', 'tl-dialog-message');
+          message.textContent = `"${name}" already exists. Replace it?`;
+          bodyEl.appendChild(message);
+        },
+        // Cancel first, so it is the button tl-dialog focuses: the destructive
+        // answer must never be the one a stray Return picks.
+        buttons: [
+          { label: 'Cancel', onSelect: () => finish(false) },
+          { label: 'Overwrite', primary: true, danger: true, onSelect: () => finish(true) },
+        ],
+        onClose: () => finish(false),
+      });
+    });
+  }
+
+  // Resolves with the typed name, or null. Validation of what the name means
+  // (and every error from the mkdir itself) belongs to the caller.
+  function promptForFolderName() {
+    return new Promise((resolve) => {
+      if (!global.tlDialog || typeof global.tlDialog.open !== 'function') {
+        resolve(null);
+        return;
+      }
+      let done = false;
+      let handle = null;
+      const input = el('input', 'tl-input tl-filedlg__prompt-input');
+      input.type = 'text';
+      input.spellcheck = false;
+      input.setAttribute('aria-label', 'Folder name');
+      input.setAttribute('placeholder', 'Folder name');
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        resolve(value);
+        if (handle) handle.close(value ? 'create' : 'cancel');
+      };
+      const submit = () => {
+        const typed = String(input.value || '').trim();
+        finish(typed || null);
+      };
+      input.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        submit();
+      });
+      handle = global.tlDialog.open({
+        title: 'New Folder',
+        ariaLabel: 'New folder',
+        size: 'sm',
+        body: (bodyEl) => { bodyEl.appendChild(input); },
+        buttons: [
+          { label: 'Cancel', onSelect: () => finish(null) },
+          { label: 'Create', primary: true, onSelect: () => submit() },
+        ],
+        onClose: () => finish(null),
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // The chooser
   // ---------------------------------------------------------------------------
 
@@ -249,21 +371,30 @@
 
   /**
    * Show the chooser. Resolves with
-   *   { scope, path, entry }   — a file the user picked
+   *   { scope, path, entry }   — a file the user picked (in save mode `entry`
+   *                              is the existing file being replaced, or null)
    *   null                     — cancelled (Cancel, Escape, backdrop, or a
    *                              failure to even build the scope list)
    * It never rejects: a cancelled chooser is not an error.
+   *
+   * options = { mode: 'open' | 'save', filename }
+   *   'save' adds the filename field (pre-filled with `filename`), the New
+   *   Folder button and the existence check; the primary button reads Save.
    */
-  function chooseFile() {
+  function chooseFile(options) {
     if (activeChoice) return activeChoice.promise;
+
+    const opts = options || {};
+    const saveMode = opts.mode === 'save';
+    const failTitle = saveMode ? 'Cannot Save File' : 'Cannot Open File';
 
     const model = fileModel();
     if (!model) {
-      toastError('Cannot Open File', 'The file dialog model is unavailable.');
+      toastError(failTitle, 'The file dialog model is unavailable.');
       return Promise.resolve(null);
     }
     if (!global.tlDialog || typeof global.tlDialog.open !== 'function') {
-      toastError('Cannot Open File', 'The dialog stack is unavailable.');
+      toastError(failTitle, 'The dialog stack is unavailable.');
       return Promise.resolve(null);
     }
 
@@ -341,6 +472,28 @@
     box.appendChild(emptyEl);
     root.appendChild(box);
 
+    // Save mode only: the name to write, plus the one directory-creating
+    // affordance a save dialog needs. Built (and appended) only in save mode
+    // so the open chooser is byte-for-byte the dialog Task 5 shipped.
+    let nameInput = null;
+    let newFolderBtn = null;
+    if (saveMode) {
+      const saveRow = el('div', 'tl-filedlg__save');
+      const nameLabel = el('label', 'tl-filedlg__namelabel', 'Save As:');
+      saveRow.appendChild(nameLabel);
+      nameInput = el('input', 'tl-input tl-filedlg__name');
+      nameInput.type = 'text';
+      nameInput.spellcheck = false;
+      nameInput.setAttribute('aria-label', 'File name');
+      nameInput.setAttribute('placeholder', 'File name');
+      nameInput.value = String(opts.filename || '');
+      saveRow.appendChild(nameInput);
+      newFolderBtn = el('button', 'tl-btn tl-filedlg__newfolder', 'New Folder');
+      newFolderBtn.type = 'button';
+      saveRow.appendChild(newFolderBtn);
+      root.appendChild(saveRow);
+    }
+
     // Inline, in the body, next to the list it describes — deliberately NOT a
     // toast. A toast for "cannot list /root" would fly away over the terminal
     // while the dialog sat there showing nothing and explaining nothing.
@@ -349,7 +502,8 @@
     errorEl.hidden = true;
     root.appendChild(errorEl);
 
-    let openButton = null;
+    // "Open" or "Save", depending on the mode.
+    let primaryButton = null;
 
     // ----- rendering -----
 
@@ -388,9 +542,17 @@
       return selectedIndex >= 0 && selectedIndex < visible.length ? visible[selectedIndex] : null;
     }
 
-    function syncOpenButton() {
+    // Open gates on a FILE being selected (a highlighted directory leaves it
+    // disabled — Enter descends instead). Save gates on a non-empty name: the
+    // whole point is to write somewhere that does not exist yet, so there is
+    // nothing in the listing to select.
+    function syncPrimaryButton() {
+      if (saveMode) {
+        setDisabled(primaryButton, !String(nameInput.value || '').trim());
+        return;
+      }
       const entry = selectedEntry();
-      setDisabled(openButton, !entry || !!entry.is_dir);
+      setDisabled(primaryButton, !entry || !!entry.is_dir);
     }
 
     function renderRows() {
@@ -412,11 +574,18 @@
         list.appendChild(row);
       });
       emptyEl.hidden = visible.length !== 0 || !errorEl.hidden;
-      syncOpenButton();
+      syncPrimaryButton();
     }
 
     function select(index) {
       selectedIndex = index;
+      // In save mode, picking a row means "use that name" — the Finder/GTK
+      // behaviour. It fills the field rather than saving, so the overwrite
+      // prompt is still one deliberate click away.
+      if (saveMode) {
+        const picked = index >= 0 && index < visible.length ? visible[index] : null;
+        if (picked && !picked.is_dir) nameInput.value = picked.name;
+      }
       const rows = list.children;
       for (let i = 0; i < rows.length; i++) {
         const isSelected = i === index;
@@ -426,7 +595,7 @@
           rows[i].scrollIntoView({ block: 'nearest' });
         }
       }
-      syncOpenButton();
+      syncPrimaryButton();
     }
 
     function showError(message) {
@@ -457,7 +626,7 @@
       visible = [];
       clearError();
       clearChildren(list);
-      syncOpenButton();
+      syncPrimaryButton();
       pathInput.value = path;
       renderCrumbs();
       list.setAttribute('aria-busy', 'true');
@@ -490,7 +659,7 @@
       filterInput.value = '';
       clearError();
       clearChildren(list);
-      syncOpenButton();
+      syncPrimaryButton();
       renderScopeBar();
       renderCrumbs();
 
@@ -513,15 +682,81 @@
       await navigate(next.start);
     }
 
-    // Enter / double-click. A directory descends; a file finishes.
+    // Enter / double-click. A directory descends; a file finishes (in save
+    // mode select() has already put its name in the field, so "finishing" is
+    // the same attempt the Save button makes, overwrite prompt and all).
     function activate() {
       const entry = selectedEntry();
-      if (!entry) return;
+      if (!entry) {
+        if (saveMode) attemptSave();
+        return;
+      }
       if (entry.is_dir) {
         navigate(model.joinPath(cwd, entry.name));
         return;
       }
+      if (saveMode) {
+        attemptSave();
+        return;
+      }
       finish({ scope, path: model.joinPath(cwd, entry.name), entry });
+    }
+
+    // ----- save mode -----
+
+    // The typed name resolved against the current directory. An absolute name
+    // is taken as written (pasting a full path into the name field is a real
+    // habit); anything else hangs off `cwd`.
+    function targetPathFor(name) {
+      return name.charAt(0) === '/' ? name : model.joinPath(cwd, name);
+    }
+
+    // Runs only while a Save is being decided, so a second click cannot open
+    // two overwrite prompts for the same file.
+    let saveInProgress = false;
+
+    async function attemptSave() {
+      if (!saveMode || saveInProgress || !scope) return;
+      const name = String(nameInput.value || '').trim();
+      if (!name) return;                       // the button is disabled too
+      const path = targetPathFor(name);
+      saveInProgress = true;
+      setDisabled(primaryButton, true);
+      clearError();
+      try {
+        let existing = null;
+        try {
+          existing = await statScopePath(scope, path);
+        } catch (_) {
+          // Does not exist — which is the ordinary case for a Save As, and
+          // the reason this is a rejection rather than an error to report.
+          existing = null;
+        }
+        if (existing && existing.is_dir) {
+          showError(`"${name}" is a directory.`);
+          return;
+        }
+        if (existing && !(await confirmOverwrite(name))) return;
+        finish({ scope, path, entry: existing });
+      } finally {
+        saveInProgress = false;
+        syncPrimaryButton();
+      }
+    }
+
+    async function createFolder() {
+      if (!scope) return;
+      const name = await promptForFolderName();
+      if (!name) return;
+      try {
+        await mkdirInScope(scope, targetPathFor(name));
+      } catch (error) {
+        // Inline, next to the listing it failed in — same reasoning as a
+        // listing error, and a toast would fly away over the terminal.
+        showError(errorText(error));
+        return;
+      }
+      await navigate(cwd);
     }
 
     // Enter in the path field. A directory is jumped to; a full file path is
@@ -533,7 +768,7 @@
       const token = ++navToken;
       selectedIndex = -1;
       clearError();
-      syncOpenButton();
+      syncPrimaryButton();
       list.setAttribute('aria-busy', 'true');
       let dirError = null;
       try {
@@ -598,6 +833,16 @@
       jumpToTypedPath();
     });
 
+    if (saveMode) {
+      nameInput.addEventListener('input', () => syncPrimaryButton());
+      nameInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        attemptSave();
+      });
+      newFolderBtn.addEventListener('click', () => { createFolder(); });
+    }
+
     list.addEventListener('keydown', (event) => {
       const key = event.key;
       if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
@@ -633,18 +878,26 @@
       if (handle) handle.close(result ? 'open' : 'cancel');
     }
 
+    const primaryLabel = saveMode ? 'Save' : 'Open';
     handle = global.tlDialog.open({
-      title: 'Open File',
-      ariaLabel: 'Open file',
+      title: saveMode ? 'Save File As' : 'Open File',
+      ariaLabel: saveMode ? 'Save file as' : 'Open file',
       size: 'lg',
       body: (bodyEl) => { bodyEl.appendChild(root); },
       buttons: [
         { label: 'Cancel', onSelect: () => finish(null) },
-        { label: 'Open', primary: true, disabled: true, onSelect: () => activate() },
+        {
+          label: primaryLabel,
+          primary: true,
+          disabled: true,
+          onSelect: () => (saveMode ? attemptSave() : activate()),
+        },
       ],
       onOpen: (panel) => {
-        openButton = findFooterButton(panel, 'Open');
-        setDisabled(openButton, true);
+        primaryButton = findFooterButton(panel, primaryLabel);
+        // Save starts enabled when the pane's current name was pre-filled,
+        // so ⌘⇧S → Return saves under the same name in a new place.
+        syncPrimaryButton();
       },
       onClose: () => finish(null),
     });
@@ -696,15 +949,58 @@
     return choice;
   }
 
+  function basename(p) {
+    const segments = String(p || '').split('/').filter(Boolean);
+    return segments.length ? segments[segments.length - 1] : '';
+  }
+
   /**
-   * Save As. NOT IMPLEMENTED HERE — Task 6 of the editor-polish plan
-   * implements it on top of the same chooser. It rejects rather than
-   * resolving so a caller wired up early fails loudly instead of silently
-   * appearing to have saved.
+   * ⌘⇧S. Shows the same chooser in save mode and routes the chosen target
+   * through `termlabEditorService.saveAs`, which owns the write, the upload
+   * and the pane rebind — this file never touches pane identity.
+   *
+   * Resolves with the chooser's result, or null when it was cancelled or the
+   * save failed. It does not reject: `saveAs` has already told the user what
+   * went wrong (and left the pane on its old binding), so a second report
+   * here would only say it twice.
    */
-  function openForSave(pane) {
-    void pane;
-    return Promise.reject(new Error('Save As is not implemented yet (Task 6 implements openForSave).'));
+  async function openForSave(pane) {
+    if (!pane || pane.kind !== 'editor') return null;
+    // The name the USER knows this file by. For a remote pane that is the
+    // remote basename — pane.filePath is the local temp file it was
+    // downloaded into, which they have never seen.
+    const currentName = pane.remote
+      ? basename(pane.remote.remotePath)
+      : basename(pane.filePath);
+
+    const choice = await chooseFile({ mode: 'save', filename: currentName });
+    if (!choice) return null;
+
+    const editor = global.termlabEditorService;
+    if (!editor || typeof editor.saveAs !== 'function') {
+      toastError('Editor Unavailable', 'The editor service is not loaded.');
+      return null;
+    }
+
+    const target = choice.scope.kind === 'local'
+      ? { scope: 'local', path: choice.path }
+      : {
+        scope: 'remote',
+        paneId: choice.scope.paneId,
+        // The CLEAN identity string, never the button's disambiguated
+        // caption: editor_temp_path hashes this into the file's temp path,
+        // so a " (pane N)" suffix here would split one remote file across
+        // two tabs.
+        hostLabel: choice.scope.hostLabel,
+        remotePath: choice.path,
+      };
+
+    try {
+      await editor.saveAs(pane, target);
+    } catch (_) {
+      return null;
+    }
+    return choice;
   }
 
   global.termlabFileDialog = {

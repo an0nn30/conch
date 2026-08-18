@@ -3,4 +3,10 @@
 /**
  * Keyboard shortcuts exposed to the frontend.
  */
-export type KeyboardShortcuts = { new_plain_shell_tab: string, toggle_right_panel: string, toggle_left_panel: string, toggle_bottom_panel: string, split_vertical: string, split_horizontal: string, close_pane: string, rename_tab: string, manage_tunnels: string, vault_open: string, };
+export type KeyboardShortcuts = { new_plain_shell_tab: string, toggle_right_panel: string, toggle_left_panel: string, toggle_bottom_panel: string, split_vertical: string, split_horizontal: string, close_pane: string, rename_tab: string, manage_tunnels: string, vault_open: string, 
+/**
+ * Editor bindings. Display only, for the custom titlebar's menu: both
+ * are dispatched by shortcut-runtime.js's guarded fallback table, not by
+ * an accelerator registered from this payload.
+ */
+open_file: string, save_file_as: string, };

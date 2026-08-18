@@ -796,12 +796,23 @@ await checkAsync('a full FILE path in the path field resolves via its parent and
   assert.strictEqual(picked.entry.size, 7);
 });
 
-await checkAsync('openForSave rejects with a message naming Task 6', async () => {
-  const { sandbox } = makeHarness({});
-  await assert.rejects(
-    () => sandbox.termlabFileDialog.openForSave({}),
-    /Task 6/,
+// Save mode itself (filename field, New Folder, the existence check and the
+// overwrite prompt) is covered by test_editor_save_as.mjs, which drives it
+// alongside the rebind it feeds. What matters here is that the entry point is
+// live rather than the Task 6 stub, and that it refuses a non-editor pane
+// without putting a dialog on screen.
+await checkAsync('openForSave is implemented and refuses a non-editor pane', async () => {
+  const { sandbox, doc } = makeHarness({});
+  assert.strictEqual(
+    fs.readFileSync(path.join(APP, 'features/editor/file-dialog.js'), 'utf8').includes('not implemented yet'),
+    false,
+    'the Task 6 stub is gone',
   );
+  const before = doc.body.children.length;
+  assert.strictEqual(await sandbox.termlabFileDialog.openForSave(null), null);
+  assert.strictEqual(await sandbox.termlabFileDialog.openForSave({ kind: 'terminal' }), null);
+  await settle();
+  assert.strictEqual(doc.body.children.length, before, 'and opened no dialog for either');
 });
 
 check('the public surface is exactly openForOpen + openForSave (plus test hooks)', () => {

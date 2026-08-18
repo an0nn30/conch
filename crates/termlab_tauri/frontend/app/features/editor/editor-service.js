@@ -439,19 +439,27 @@
     return confirmDirtyPanes(dirty);
   }
 
+  // Push local bytes at an explicit remote binding. Split out of uploadRemote
+  // because Save As uploads to a binding the pane does NOT have yet: the pane
+  // is only rebound once this has succeeded, so reading the destination off
+  // `pane.remote` here would upload the new file to the old host.
+  function uploadTo(remote, localPath) {
+    return runTransfer(() => invoke('transfer_upload', {
+      paneId: remote.paneId,
+      localPath,
+      remotePath: remote.remotePath,
+    }));
+  }
+
   // Push a saved remote file back to its host. Called by writeOnce for panes
   // that have a `remote`, and rejects on failure so the save it belongs to
   // fails too.
   async function uploadRemote(pane) {
     const remote = pane && pane.remote;
     if (!remote) return;
-    const { paneId, remotePath, hostLabel } = remote;
+    const { remotePath, hostLabel } = remote;
     try {
-      await runTransfer(() => invoke('transfer_upload', {
-        paneId,
-        localPath: pane.filePath,
-        remotePath,
-      }));
+      await uploadTo(remote, pane.filePath);
       toastSuccess('Uploaded', `${hostLabel}:${remotePath}`);
     } catch (error) {
       // The temp file stays exactly where it is, and the pane stays dirty.
@@ -465,12 +473,195 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Save As
+  // ---------------------------------------------------------------------------
+  //
+  // The only operation that changes what a pane IS. `filePath` and `remote`
+  // are the identity that focusExistingEditor, the dirty guards, opensInFlight
+  // and discardRemoteTemp all key on, so the rule this whole path is built
+  // around is: a rebind is all-or-nothing.
+  //
+  //   1. everything that can fail happens FIRST, against the new location
+  //      (temp path, write, upload) and touches the pane not at all;
+  //   2. the pane is then mutated in ONE synchronous block — no await inside
+  //      it, so nothing can observe a half-rebound pane;
+  //   3. the old temp file is deleted only afterwards, and only if the pane
+  //      owned one.
+  //
+  // A failure at any point in (1) leaves the pane on its OLD binding, dirty,
+  // with the old temp file untouched — because that file is still the only
+  // saved copy of the user's edit.
+
+  function basename(p) {
+    const segments = String(p || '').split('/').filter(Boolean);
+    return segments.length ? segments[segments.length - 1] : '';
+  }
+
+  // What to call the pane's current location in a failure message.
+  function describeBinding(pane) {
+    if (pane.remote) return `${pane.remote.hostLabel}:${pane.remote.remotePath}`;
+    return pane.filePath || 'its previous location';
+  }
+
+  // Recompose the tab's caption and tooltip from the pane's CURRENT identity.
+  // The composition itself lives in tab-label.js, which createEditorTab also
+  // uses — one formula, so a rebound tab and a freshly opened one cannot drift.
+  function refreshTabLabel(pane) {
+    const access = paneAccess();
+    const labels = global.termlabEditorTabLabel;
+    if (!access || typeof access.setTabLabel !== 'function' || !labels) return;
+    const { label, tooltip } = labels.editorTabLabel(pane);
+    access.setTabLabel(pane.tabId, label, tooltip);
+  }
+
+  function setPaneLanguage(view, filename) {
+    const pane = global.termlabEditorPane;
+    if (!pane || typeof pane.setLanguage !== 'function') return;
+    pane.setLanguage(view, filename);
+  }
+
+  // Two editors on one path is the exact state focusExistingEditor exists to
+  // prevent — each holds its own doc and the last save silently wins. Opening
+  // cannot produce it; Save As could, by aiming a pane at a path another tab
+  // already holds. Refuse before anything is written.
+  function pathHeldByAnotherPane(pane, filePath) {
+    let held = false;
+    eachEditorPane((other) => {
+      if (other !== pane && other.filePath === filePath) held = true;
+    });
+    return held;
+  }
+
+  // Everything fallible, then the atomic rebind. Never called directly —
+  // saveAs owns the in-flight guard around it.
+  async function writeElsewhere(pane, target) {
+    const contents = pane.view.state.doc.toString();
+    // Captured BEFORE anything is written: after the rebind, `pane.remote` is
+    // the new binding and this file would be unreachable.
+    const oldTemp = pane.remote && pane.filePath ? pane.filePath : null;
+    const oldWhere = describeBinding(pane);
+
+    let nextFilePath;
+    let nextRemote;
+    let displayName;
+    if (target.scope === 'remote') {
+      nextRemote = {
+        paneId: target.paneId,
+        remotePath: target.remotePath,
+        hostLabel: target.hostLabel,
+      };
+      displayName = basename(target.remotePath);
+      // Deterministic per (host, remote path) — the same function that gives a
+      // remote file its identity when it is opened, so a file saved here and
+      // later reopened resolves to this same tab.
+      nextFilePath = await invoke('editor_temp_path', {
+        hostLabel: target.hostLabel,
+        remotePath: target.remotePath,
+      });
+    } else {
+      nextRemote = null;
+      nextFilePath = target.path;
+      displayName = basename(target.path);
+    }
+
+    if (pathHeldByAnotherPane(pane, nextFilePath)) {
+      throw new Error(`"${displayName}" is open in another tab; close it before saving over it.`);
+    }
+
+    await invoke('editor_write_file', { path: nextFilePath, contents });
+    if (nextRemote) {
+      try {
+        await uploadTo(nextRemote, nextFilePath);
+      } catch (error) {
+        // The staged file at nextFilePath is deliberately NOT deleted. It may
+        // be the temp path of a remote file another tab holds (editor_temp_path
+        // is a pure function of host+path), and editor_temp_cleanup also
+        // removes the parent directories it empties — so deleting here could
+        // take out a file this pane never owned. Litter in the temp root is
+        // the cheaper mistake.
+        throw error;
+      }
+    }
+
+    // ----- the rebind: one synchronous block, no awaits -----
+    pane.filePath = nextFilePath;
+    pane.remote = nextRemote;
+    refreshTabLabel(pane);
+    setPaneLanguage(pane.view, displayName);
+    // Same rule as writeOnce: only claim the buffer is saved if it still
+    // matches the bytes that were written. A keystroke during the upload
+    // leaves the rebound pane honestly dirty.
+    if (pane.view && pane.view.state.doc.toString() === contents) {
+      pane.view.termlabResetDirty();
+    }
+    // ----- end of the rebind -----
+
+    // Only now, and only a temp file this pane owned. Before the rebind this
+    // would delete the pane's own backing file while it still pointed at it.
+    if (oldTemp && oldTemp !== nextFilePath) {
+      invoke('editor_temp_cleanup', { path: oldTemp }).catch(() => {});
+    }
+
+    if (nextRemote) toastSuccess('Saved', `${nextRemote.hostLabel}:${nextRemote.remotePath}`);
+    return { from: oldWhere, to: describeBinding(pane) };
+  }
+
+  /**
+   * Save the pane's contents to a new location and rebind the pane to it.
+   *
+   *   target = { scope: 'local',  path }
+   *          | { scope: 'remote', paneId, hostLabel, remotePath }
+   *
+   * Rejects if anything failed, having left the pane exactly as it was.
+   */
+  async function saveAs(pane, target) {
+    if (!pane || pane.kind !== 'editor' || !pane.view) return;
+    if (!target || (target.scope !== 'local' && target.scope !== 'remote')) {
+      throw new Error(`Save As: unknown target scope ${target && target.scope}`);
+    }
+
+    // The existing guard, not a second queue: a pane never has more than one
+    // write outstanding, so Save As waits for a save already running rather
+    // than writing over it. Each turn of this loop waits for a write that is
+    // genuinely in flight, so it cannot spin without work happening.
+    //
+    // The waited-for save's own outcome is deliberately swallowed: it wrote to
+    // the OLD location, and saving elsewhere is exactly how a user recovers
+    // from that failure. Its caller has already been told.
+    let pending = savesInFlight.get(pane);
+    while (pending) {
+      await pending.catch(() => {});
+      pending = savesInFlight.get(pane);
+    }
+
+    // Registered in the SAME map as an ordinary save, so a ⌘S landing during a
+    // Save As joins this operation instead of writing the old file underneath
+    // it. .finally is attached before the entry is stored, exactly as savePane
+    // does, so a joiner can never re-find its own settled entry.
+    const inFlight = writeElsewhere(pane, target).finally(() => {
+      savesInFlight.delete(pane);
+    });
+    savesInFlight.set(pane, inFlight);
+    try {
+      await inFlight;
+    } catch (error) {
+      toastError(
+        'Save As Failed',
+        `${String(error)} — nothing was rebound: this tab still points at `
+        + `${describeBinding(pane)} and still has unsaved changes.`,
+      );
+      throw error;
+    }
+  }
+
   global.termlabEditorService = {
     openLocalFile,
     openRemoteFile,
     openScratch,
     saveActiveEditor,
     savePane,
+    saveAs,
     confirmDirtyPanes,
     confirmAllDirty,
     eachEditorPane,

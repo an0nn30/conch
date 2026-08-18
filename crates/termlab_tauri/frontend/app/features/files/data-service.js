@@ -29,6 +29,18 @@
     return invoke('sftp_list_dir', { paneId, path });
   }
 
+  // One entry, or a rejection when the path does not exist. Both backends
+  // return the same `FileEntry` on success and a bare String on failure
+  // (remote/sftp_commands.rs: sftp_stat / local_stat), which is what makes
+  // "does this file already exist?" a rejection rather than a null.
+  async function statLocal(invoke, path) {
+    return invoke('local_stat', { path });
+  }
+
+  async function statRemote(invoke, paneId, path) {
+    return invoke('sftp_stat', { paneId, path });
+  }
+
   async function transferDownload(invoke, paneId, remotePath, localPath) {
     return invoke('transfer_download', { paneId, remotePath, localPath });
   }
@@ -120,6 +132,8 @@
     getRemotePaneCwd,
     listLocalDir,
     listRemoteDir,
+    statLocal,
+    statRemote,
     transferDownload,
     transferUpload,
     transferCancel,
