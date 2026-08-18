@@ -28,7 +28,7 @@ Two-region dialog body (`tl-dialog` size stays as shipped or one step wider if c
 ## Model additions (pure, `file-dialog-model.js`)
 
 - `formatSize(bytes) -> string` — `—` for null/dirs handled by caller; `B`, `KB`, `MB`, `GB` with one decimal below 10, none above.
-- `formatModified(epochSeconds, nowEpochSeconds) -> string` — `Today`, `Yesterday`, `Mon DD` within the year, `YYYY-MM-DD` otherwise; `now` injected for testability; null → `—`.
+- `formatModified(epochSeconds, nowEpochSeconds) -> string` — `Today`, `Yesterday`, `Mon D` within the year (no leading zero on the day — Finder/VS Code convention; the column aligns via tabular numerals, not padding), `YYYY-MM-DD` otherwise; `now` injected for testability; null → `—`.
 - `sortEntries(entries, key = 'name', direction = 'asc')` — extends the existing signature backward-compatibly (no-arg call keeps today's behavior exactly). Directories always sort before files regardless of key/direction; within each group, `name` (case-insensitive), `size` (numeric), `modified` (numeric, null last). Stable.
 
 ## Constraints
