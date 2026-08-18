@@ -46,7 +46,7 @@ java-sdk:
 # LOCAL BUILDS
 # ===========================================================================
 
-.PHONY: build
+.PHONY: build frontend-vendor dev
 # The CodeMirror bundle is generated, git-ignored, and only built by Tauri's
 # beforeBuildCommand — which plain `cargo build` never fires. Any target that
 # packages the app must depend on this or it ships an editor that shows the
@@ -54,6 +54,11 @@ java-sdk:
 frontend-vendor:
 	npm --prefix crates/termlab_tauri/frontend ci
 	npm --prefix crates/termlab_tauri/frontend run build:vendor
+
+# Bundle + build + run in one step. Plain `cargo run` now also self-heals the
+# bundle via build.rs, so this is convenience, not a requirement.
+dev:
+	cargo run -p termlab_tauri
 
 build: frontend-vendor
 	cargo build --release -p termlab_tauri
