@@ -270,9 +270,19 @@
         notifyPluginViewClosed(pane.viewId);
         deletePluginViewPane(pane.viewId);
       } else if (pane.kind === 'editor') {
-        // The single-leaf case above hands off to closeTab, which destroys the
-        // view and discards the temp file; this is the split case, where the
-        // pane goes away on its own and nothing else would ever do either.
+        // The single-leaf case above hands off to closeTab, which cancels the
+        // chooser, destroys the view and discards the temp file; this is the
+        // split case, where the pane goes away on its own and nothing else
+        // would ever do any of the three.
+        //
+        // The chooser first: it may still be on screen asking where to put this
+        // buffer (the dirty prompt above stacks over it rather than replacing
+        // it), and a modal bound to a destroyed pane blocks every other pane's
+        // chooser until it is answered.
+        if (global.termlabEditorService
+            && typeof global.termlabEditorService.cancelPendingChooser === 'function') {
+          global.termlabEditorService.cancelPendingChooser(pane);
+        }
         if (pane.view && global.termlabEditorPane) {
           global.termlabEditorPane.destroyEditorView(pane.view);
         }

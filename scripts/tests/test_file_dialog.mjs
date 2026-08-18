@@ -856,11 +856,125 @@ await checkAsync('openForSave is implemented and refuses a non-editor pane', asy
   assert.strictEqual(doc.body.children.length, before, 'and opened no dialog for either');
 });
 
-check('the public surface is exactly openForOpen + openForSave (plus test hooks)', () => {
+check('the public surface is exactly openForOpen + openForSave + cancelForPane (plus test hooks)', () => {
   const { sandbox } = makeHarness({});
   const fd = sandbox.termlabFileDialog;
   assert.strictEqual(typeof fd.openForOpen, 'function');
   assert.strictEqual(typeof fd.openForSave, 'function');
+  assert.strictEqual(typeof fd.cancelForPane, 'function');
+});
+
+// ---------------------------------------------------------------------------
+// 7. One dialog, one QUESTION: the activeChoice short-circuit is per mode
+// ---------------------------------------------------------------------------
+//
+// `activeChoice` hands a second caller the first caller's promise. That is
+// right for two callers asking the same thing and catastrophic for two callers
+// asking different things: the path a user picks in a Save As chooser is where
+// their untitled buffer is going, and handing it to openForOpen as well makes
+// one Return rebind the pane AND open a second tab on the same path. Two
+// editors on one file, no error, last save silently wins.
+//
+// ⌘O is a native menu accelerator (AppKit consumes it before the webview), so
+// no dialog focus trap prevents the second keystroke reaching here.
+
+console.log('file dialog: cross-mode sharing');
+
+// The file that is sitting in the listing, so an OPEN really has something to
+// pick and "no open happened" is a claim with teeth.
+const CROSS_MODE_LISTING = () => Promise.resolve([
+  { name: 'notes.md', is_dir: false, size: 11, modified: null },
+]);
+
+await checkAsync('⌘O while a SAVE chooser is up resolves null instead of sharing its answer', async () => {
+  const { sandbox, doc, calls } = makeHarness({ listLocal: CROSS_MODE_LISTING });
+
+  // The untitled buffer's first-save chooser.
+  const saving = sandbox.termlabFileDialog._chooseFile({
+    mode: 'save', filename: 'Untitled', selectFilename: true,
+  });
+  await settle();
+  const before = doc.body.children.length;
+  assert.strictEqual(before, 1, 'precondition: exactly the save chooser is up');
+
+  // ⌘O lands on top of it. Held, not awaited: a shared promise would not
+  // settle until the user answers the chooser, so awaiting here would turn the
+  // bug into a hang instead of a wrong answer.
+  const opening = sandbox.termlabFileDialog.openForOpen();
+  await settle();
+
+  assert.strictEqual(doc.body.children.length, before, 'no second modal was stacked');
+  assert.deepStrictEqual(calls.openLocal, [], 'and nothing was opened yet');
+
+  // The user answers the dialog they are actually looking at. It still works,
+  // and its answer goes only to the save.
+  const p = parts(doc);
+  const nameInput = p.overlay.querySelectorAll('.tl-filedlg__name')[0];
+  nameInput.value = 'draft.md';
+  nameInput.fire('input');
+  await settle();
+  p.buttons.find((b) => b.textContent === 'Save').fire('click');
+  const picked = await saving;
+  await settle();
+
+  assert.strictEqual(picked.path, '/home/u/draft.md', 'the save got its own answer');
+  assert.strictEqual(await opening, null, 'the open was refused, not handed the save\'s answer');
+  assert.deepStrictEqual(calls.openLocal, [],
+    'and the refused ⌘O never opened a second editor on the saved path');
+  assert.strictEqual(doc.body.children.length, 0, 'nothing left on screen');
+});
+
+await checkAsync('a second ⌘O while an OPEN chooser is up still shares the one dialog', async () => {
+  // The other direction of the same switch, and the reason it is a mode check
+  // rather than a blanket refusal: two ⌘O presses are one question asked
+  // twice, and both callers want the file the user picks. Sharing keeps a
+  // second modal off the screen.
+  const { sandbox, doc, calls } = makeHarness({ listLocal: CROSS_MODE_LISTING });
+
+  const first = sandbox.termlabFileDialog.openForOpen();
+  await settle();
+  assert.strictEqual(doc.body.children.length, 1, 'precondition: the open chooser is up');
+  const second = sandbox.termlabFileDialog.openForOpen();
+  await settle();
+  assert.strictEqual(doc.body.children.length, 1, 'still one dialog — not stacked, not refused');
+
+  const p = parts(doc);
+  p.rows[0].fire('click');
+  p.buttons.find((b) => b.textContent === 'Open').fire('click');
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.ok(a, 'the first caller got the pick');
+  assert.ok(b, 'and so did the second — it shared, it was not refused');
+  assert.strictEqual(a.path, '/home/u/notes.md');
+  assert.strictEqual(b.path, '/home/u/notes.md');
+  assert.deepStrictEqual(calls.openLocal, ['/home/u/notes.md', '/home/u/notes.md'],
+    'both routed the same pick (the deliberate double-open, closing deferred)');
+});
+
+await checkAsync('⌘⇧S while an OPEN chooser is up is refused too, with no second modal', async () => {
+  const { sandbox, doc, calls } = makeHarness({ listLocal: CROSS_MODE_LISTING });
+  sandbox.termlabEditorService.saveAs = () => {
+    throw new Error('saveAs must not be reached for a refused chooser');
+  };
+
+  const opening = sandbox.termlabFileDialog.openForOpen();
+  await settle();
+  assert.strictEqual(doc.body.children.length, 1, 'precondition: the open chooser is up');
+
+  const pane = { kind: 'editor', filePath: null, remote: null, untitledSeq: 1 };
+  const saved = await sandbox.termlabFileDialog.openForSave(pane);
+  await settle();
+
+  assert.strictEqual(saved, null, 'the save is refused');
+  assert.strictEqual(doc.body.children.length, 1, 'and no second modal was stacked');
+
+  // And the open chooser underneath is untouched and still answerable.
+  const p = parts(doc);
+  p.rows[0].fire('click');
+  p.buttons.find((b) => b.textContent === 'Open').fire('click');
+  const choice = await opening;
+  assert.strictEqual(choice.path, '/home/u/notes.md');
+  assert.deepStrictEqual(calls.openLocal, ['/home/u/notes.md']);
 });
 
 // ---------------------------------------------------------------------------

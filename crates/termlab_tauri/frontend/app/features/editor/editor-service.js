@@ -311,6 +311,23 @@
     invoke('editor_temp_cleanup', { path: pane.filePath }).catch(() => {});
   }
 
+  // A pane being torn down can still be the subject of a Save As chooser: the
+  // Unsaved Changes prompt STACKS on top of that chooser rather than replacing
+  // it, so ⌘W → "Don't Save" destroys the pane with the chooser still on
+  // screen and still bound to it. Both teardown paths (tab-manager's closeTab
+  // and pane-manager's split close) call this, unconditionally — a pathless
+  // pane can have a chooser up without being dirty at all (⌘S on an untouched
+  // untitled buffer opens one), so hanging this off the dirty prompt would miss
+  // exactly the case with no prompt to hang it off.
+  //
+  // Same shape as discardRemoteTemp above: the teardown says what happened, and
+  // this module owns what that means.
+  function cancelPendingChooser(pane) {
+    const dialog = global.termlabFileDialog;
+    if (!pane || !dialog || typeof dialog.cancelForPane !== 'function') return;
+    dialog.cancelForPane(pane);
+  }
+
   // ---------------------------------------------------------------------------
   // Untitled buffers
   // ---------------------------------------------------------------------------
@@ -819,6 +836,7 @@
     confirmAllDirty,
     eachEditorPane,
     discardRemoteTemp,
+    cancelPendingChooser,
     uploadRemote,
   };
 })(window);

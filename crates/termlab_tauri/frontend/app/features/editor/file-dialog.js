@@ -367,6 +367,11 @@
 
   // One dialog at a time. A second ⌘O while the chooser is up should surface
   // the dialog that is already open, not stack a second modal over it.
+  //
+  // The session records which QUESTION that dialog is asking (`mode`) and, for
+  // a save, which pane it is asking on behalf of (`pane`). Both are load
+  // bearing, not bookkeeping: see the mode check in chooseFile and
+  // cancelForPane below.
   let activeChoice = null;
 
   /**
@@ -377,18 +382,42 @@
    *                              failure to even build the scope list)
    * It never rejects: a cancelled chooser is not an error.
    *
-   * options = { mode: 'open' | 'save', filename, selectFilename }
+   * options = { mode: 'open' | 'save', filename, selectFilename, pane }
    *   'save' adds the filename field (pre-filled with `filename`), the New
    *   Folder button and the existence check; the primary button reads Save.
    *   `selectFilename` focuses that field with its text selected — for a
    *   placeholder name (an untitled buffer's "Untitled-2") that is there to be
    *   typed over rather than edited.
+   *   `pane` is the editor this save is FOR. It is never read for the dialog
+   *   itself; it exists so cancelForPane can close a chooser whose subject has
+   *   been destroyed out from under it.
    */
   function chooseFile(options) {
-    if (activeChoice) return activeChoice.promise;
-
     const opts = options || {};
     const saveMode = opts.mode === 'save';
+    const mode = saveMode ? 'save' : 'open';
+
+    if (activeChoice) {
+      // The SAME question asked twice — a second ⌘O while the open chooser is
+      // up. Both callers want whichever file the user is about to pick, so
+      // handing over the one dialog's answer is right (and is what keeps a
+      // second ⌘O from stacking a modal over the first).
+      if (activeChoice.mode === mode) return activeChoice.promise;
+
+      // A DIFFERENT question. ⌘O is a native menu accelerator: AppKit consumes
+      // it before the webview, so no focus trap stops it reaching here while an
+      // untitled buffer's first-save chooser is on screen. Sharing the promise
+      // would make one Return mean two things at once — the untitled pane
+      // rebinds to the chosen path AND openLocalFile opens a second tab on that
+      // same path. Two editors on one file is exactly the state
+      // focusExistingEditor exists to prevent, and it would happen silently.
+      //
+      // So: refuse. Null is the same answer a cancel gives, and both public
+      // entry points already treat it as "nothing to do, say nothing" — the
+      // dialog on screen is the one the user is answering.
+      return Promise.resolve(null);
+    }
+
     const failTitle = saveMode ? 'Cannot Save File' : 'Cannot Open File';
 
     const model = fileModel();
@@ -403,7 +432,10 @@
 
     let resolveChoice = null;
     const promise = new Promise((resolve) => { resolveChoice = resolve; });
-    const session = { promise };
+    // `finish` is a hoisted function declaration further down this closure, so
+    // the arrow resolves it at call time — the session is complete before the
+    // dialog exists, which is what lets cancelForPane fire at any moment.
+    const session = { promise, mode, pane: opts.pane || null, cancel: () => finish(null) };
     activeChoice = session;
 
     // ----- state -----
@@ -1038,6 +1070,9 @@
       mode: 'save',
       filename: currentName,
       selectFilename: untitled,
+      // Recorded so a teardown of this pane can close the dialog. See
+      // cancelForPane.
+      pane,
     });
     if (!choice) return null;
 
@@ -1068,9 +1103,31 @@
     return choice;
   }
 
+  /**
+   * Close the save chooser currently open FOR `pane`, resolving it null, and
+   * report whether there was one. A no-op for any other pane, for an open-mode
+   * chooser (which has no subject), and when nothing is on screen.
+   *
+   * Called from the two pane teardown paths — tab-manager.js's closeTab and
+   * pane-manager.js's split close — via the editor service. A chooser outlives
+   * its subject easily: ⌘W over an open chooser stacks the Unsaved Changes
+   * prompt on top of it, and "Don't Save" destroys the pane while the chooser
+   * stays up, still bound to it. What is left is a modal asking where to put a
+   * buffer that no longer exists — and, because it is still `activeChoice`, it
+   * blocks the chooser every OTHER pane would open until someone answers it.
+   * Answering does not even write: saveAs no-ops on a pane whose view has been
+   * nulled, so the save silently reports success having done nothing.
+   */
+  function cancelForPane(pane) {
+    if (!pane || !activeChoice || activeChoice.pane !== pane) return false;
+    activeChoice.cancel();
+    return true;
+  }
+
   global.termlabFileDialog = {
     openForOpen,
     openForSave,
+    cancelForPane,
     // Exposed for scripts/tests/test_file_dialog.mjs — pure derivations that
     // need no DOM (matches tl-dialog.js's _zIndexForDepth precedent). The host
     // label formula is deliberately NOT among them: it belongs to

@@ -436,6 +436,16 @@
           notifyPluginViewClosed(pane.viewId);
           deletePluginViewPane(pane.viewId);
         } else if (pane.kind === 'editor') {
+          // First, before anything is destroyed: a Save As chooser may still be
+          // on screen asking where to put this buffer. The dirty prompt above
+          // stacks ON TOP of it rather than replacing it, so "Don't Save" gets
+          // here with that chooser still open and still bound to this pane.
+          // Left alone it becomes a modal for a pane that no longer exists,
+          // blocking every other pane's chooser until someone answers it.
+          if (global.termlabEditorService
+              && typeof global.termlabEditorService.cancelPendingChooser === 'function') {
+            global.termlabEditorService.cancelPendingChooser(pane);
+          }
           // Unconditional, unlike the two branches above: destroying the
           // CodeMirror view is local cleanup, not a backend notification, so it
           // must happen even when notifyBackend is false.
