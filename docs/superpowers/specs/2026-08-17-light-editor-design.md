@@ -117,7 +117,7 @@ There are no filesystem commands in the app today. New module `crates/termlab_ta
 pub enum OpenRejection {
     TooLarge { size: u64, max: u64 },
     BlockedExtension { ext: String },
-    Binary,
+    Binary { name: String },
 }
 
 pub fn guard_openable(name: &str, size: u64) -> Result<(), OpenRejection>
@@ -189,7 +189,7 @@ Dirty state is tracked from CodeMirror's `updateListener` on `docChanged`, and t
 
 ### 6. Language Mapping and Theming
 
-**`frontend/app/features/editor/language-map.js`** — pure, testable: `languageForFilename(name)` returns a mode key or `null` for plain text. Maps by extension, with special cases for extensionless well-known names (`Dockerfile`, `Makefile`, `.bashrc`, `.zshrc`, `.gitignore`) and a lowercase comparison throughout. Being pure and table-driven, it is the natural home for the mapping and the easiest thing in this feature to test exhaustively.
+**`frontend/app/features/editor/language-map.js`** — pure, testable: `languageKeyFor(name)` returns a mode key or `null` for plain text. Maps by extension, with special cases for extensionless well-known names (`Dockerfile`, `Makefile`, `.bashrc`, `.zshrc`, `.gitignore`) and a lowercase comparison throughout. Being pure and table-driven, it is the natural home for the mapping and the easiest thing in this feature to test exhaustively.
 
 **`frontend/app/features/editor/theme.js`** — builds a CodeMirror theme from the existing `--tl-*` design tokens read off the document element, plus a `HighlightStyle` mapping Lezer tags to token colors. It re-reads on theme change, driven by the same path `config-runtime.js` already uses to push terminal themes, so the editor follows skins with the rest of the UI. No raw hex: tokens only, per the design-system rule.
 
@@ -244,10 +244,20 @@ Note the deviation from the app's `cmd+shift+*` convention: `cmd+s` for save is 
 
 **Frontend (`node scripts/tests/*.mjs`, matching the existing convention):**
 
+All ten test files added by this branch:
+
 - `test_language_map.mjs` — every mapped extension, case-insensitivity, the extensionless special cases, unknown extensions returning `null`, names that are only an extension (`.gitignore`).
 - `test_scratch_naming.mjs` — first name in an empty directory, first free number with gaps, no collision with an existing file.
+- `test_editor_close_guards.mjs` — guards refuse to close a dirty editor tab.
+- `test_tab_close_dirty_guard.mjs` — tab-close flow returns 'cancel' when the user chooses not to discard.
+- `test_window_close_answer.mjs` — window-close handler updates window state per the frontend's answer.
+- `test_editor_unsaved_end_to_end.mjs` — the complete close flow: dirty check, dialog, decision routing.
+- `test_editor_remote_transfer.mjs` — remote file transfer orchestration.
+- `test_editor_save_inflight.mjs` — save state and re-entrancy on upload.
+- `test_editor_save_race.mjs` — concurrent save requests.
+- `test_shortcut_save_fallthrough.mjs` — `cmd+s` passes through in non-editor panes.
 
-The DOM-bound parts — `editor-pane.js`, `theme.js`, the close guards — have no automated coverage; there is no jsdom in this repo, matching the precedent set by `test_tl_dialog.mjs`. They are covered by the manual pass below.
+The four close-guard tests above drive the real `tl-dialog` through a hand-rolled DOM, giving them the most coverage of any feature module. The DOM-bound parts not covered — `editor-pane.js`, `theme.js` CodeMirror integration — have no automated tests; there is no jsdom in this repo, matching the precedent set by `test_tl_dialog.mjs`. They are covered by the manual pass below.
 
 **Manual verification:**
 
