@@ -46,14 +46,14 @@ One `tl-dialog`-based chooser, two modes, one new module `app/features/editor/fi
 ### Layout
 
 - **Scope bar:** `This Mac` plus one entry per connected SFTP session (label `user@host[:port]`, same derivation `files-panel.js` uses). Disconnecting mid-browse surfaces the listing error in the dialog body; the dialog does not chase session state.
-- **Path bar:** clickable breadcrumbs plus an editable text field (paste a path, Enter to jump). `~` expands via `sftp_realpath` remotely and `editor_scratch_dir`'s parent convention locally.
+- **Path bar:** clickable breadcrumbs plus an editable text field (paste a path, Enter to jump). `~` expands via `sftp_realpath` remotely and via the home dir `get_host_identity` already returns locally.
 - **Listing:** directories first then files, both sorted, type-ahead filter box (reusing the `.tl-picker__filter` pattern), double-click or Enter to descend/choose, hidden files toggle (off by default).
 - **Save As adds:** filename field (pre-filled from the pane), **New Folder** button, primary button reads `Save`.
 - Keyboard: arrows + Enter + Escape per `tl-dialog` conventions; the dialog registers at the standard dialog router priority (225).
 
 ### Open mode — ⌘O
 
-Choosing a file routes through the exact existing entries: `openLocalFile(path)` or `openRemoteFile({paneId, remotePath, hostLabel, size})` with the size from the listing. Every guard (5 MB cap, blocklist pre-check, binary sniff, same-file-focuses-existing-tab) applies unchanged because the dialog adds no second open path.
+Choosing a file routes through the exact existing entries: `openLocalFile(path)` or `openRemoteFile({paneId, remotePath, hostLabel, size})` with the size from the listing and the `paneId` from the chosen session's entry in `remote_get_sessions` (the same id the scope bar was built from). Every guard (5 MB cap, blocklist pre-check, binary sniff, same-file-focuses-existing-tab) applies unchanged because the dialog adds no second open path.
 
 ### Save As mode — ⌘⇧S
 
