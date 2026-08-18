@@ -209,6 +209,33 @@
     });
   }
 
+  // Remote opens currently running, keyed by the temp path each is downloading
+  // into. `focusExistingEditor` only sees panes that already exist, so during
+  // the seconds a download takes there is nothing for it to find: a second
+  // double-click would pass the same check and start its own download onto the
+  // same path. That ends in the exact state focusExistingEditor exists to
+  // prevent — two editors on one file, the last save silently winning — and
+  // then in something worse. Closing either tab runs discardRemoteTemp, and
+  // editor_temp_cleanup deletes the file AND climbs deleting the parent
+  // directories it empties, while editor_write_file does not recreate them. So
+  // the surviving tab's next save fails with "No such file or directory" and
+  // the edit has nowhere to go.
+  const opensInFlight = new Map();
+
+  async function downloadAndOpen(paneId, remotePath, hostLabel, localPath) {
+    await runTransfer(() => invoke('transfer_download', { paneId, remotePath, localPath }));
+
+    // The guards run a second time here, against the bytes rather than the
+    // directory listing: a stale size and binary contents are both only
+    // knowable now.
+    const contents = await invoke('editor_read_file', { path: localPath });
+    createEditorTab({
+      filePath: localPath,
+      contents,
+      remote: { paneId, remotePath, hostLabel },
+    });
+  }
+
   // Open a file that lives on an SSH host: download it to a temp path, edit it
   // there, and upload it back on save.
   async function openRemoteFile(descriptor) {
@@ -216,6 +243,7 @@
     const { paneId, remotePath, hostLabel, size } = descriptor || {};
     const name = String(remotePath || '').split('/').pop();
     let localPath = null;
+    let owned = false;
     try {
       // Before a byte moves. A mis-click on a 2 GB file or a .jar has to cost
       // nothing, which is the whole reason editor_can_open takes a name and a
@@ -228,24 +256,36 @@
       localPath = await invoke('editor_temp_path', { hostLabel, remotePath });
       if (focusExistingEditor(localPath)) return;
 
-      await runTransfer(() => invoke('transfer_download', { paneId, remotePath, localPath }));
+      const pending = opensInFlight.get(localPath);
+      if (pending) {
+        // Join the download already running instead of starting a second one,
+        // then focus what it produced. A rejection here lands in the catch
+        // below, so a second click on a file whose download failed is told so
+        // too — but it cleans up nothing, because it owns nothing.
+        await pending;
+        focusExistingEditor(localPath);
+        return;
+      }
 
-      // The guards run a second time here, against the bytes rather than the
-      // directory listing: a stale size and binary contents are both only
-      // knowable now.
-      const contents = await invoke('editor_read_file', { path: localPath });
-      createEditorTab({
-        filePath: localPath,
-        contents,
-        remote: { paneId, remotePath, hostLabel },
-      });
+      owned = true;
+      // .finally is attached before the promise is stored, so the entry is
+      // gone by the time anything awaiting it wakes: a later open of the same
+      // path is never handed a settled promise from an attempt that is over.
+      // Clearing on failure as well as success is what keeps a failed download
+      // from wedging that path for the rest of the session.
+      const open = downloadAndOpen(paneId, remotePath, hostLabel, localPath)
+        .finally(() => { opensInFlight.delete(localPath); });
+      opensInFlight.set(localPath, open);
+      await open;
     } catch (error) {
       // Nothing reached an editor, so whatever landed on disk is litter rather
       // than content — unlike an upload failure, where the temp file is the
       // only copy of the user's edit and must stay. Safe to delete: localPath
       // came from editor_temp_path, and editor_temp_cleanup refuses anything
-      // outside the temp root regardless of what it is handed.
-      if (localPath) invoke('editor_temp_cleanup', { path: localPath }).catch(() => {});
+      // outside the temp root regardless of what it is handed. Only the caller
+      // that started the download deletes it, so a joiner cannot remove a file
+      // some other open is still working on.
+      if (owned && localPath) invoke('editor_temp_cleanup', { path: localPath }).catch(() => {});
       toastError('Cannot Open File', String(error));
     }
   }

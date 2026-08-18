@@ -202,6 +202,23 @@ function makeHarness(options = {}) {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// Every await below goes through this. The failure mode these tests exist to
+// catch is a promise that never settles, and an unguarded `await` on one turns
+// a regression into a wedged `node` with no message rather than a test failure.
+// The loser's timer is always cleared, so a passing run exits immediately and
+// no stray rejection is left unobserved.
+const TIMEOUT_MS = 2000;
+function settles(promise, what) {
+  let timer = null;
+  const bomb = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`timed out after ${TIMEOUT_MS}ms waiting for ${what}`)),
+      TIMEOUT_MS,
+    );
+  });
+  return Promise.race([promise, bomb]).finally(() => { if (timer) clearTimeout(timer); });
+}
 const progress = (id, status, extra = {}) => ({
   transfer_id: id,
   kind: 'download',
@@ -242,7 +259,7 @@ const progress = (id, status, extra = {}) => ({
   assert.strictEqual(h.panes.size, 0, 'another transfer id is ignored');
 
   h.emit(progress(h.started[0].id, 'completed'));
-  await opening;
+  await settles(opening, 'the open after a completed download');
 
   assert.strictEqual(h.panes.size, 1, 'completed opens exactly one tab');
   const pane = [...h.panes.values()][0];
@@ -274,7 +291,7 @@ const progress = (id, status, extra = {}) => ({
   assert.strictEqual(h.panes.size, 0, 'nothing can be matched yet — the id is unknown');
 
   h.started[0].release();
-  await opening;
+  await settles(opening, 'the open whose completion beat the command reply');
   assert.strictEqual(h.panes.size, 1, 'an early completion still opens the tab');
   assert.strictEqual(h.toasts.length, 0, 'and raises nothing');
   assert.strictEqual(h.activeListeners(), 0);
@@ -288,7 +305,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   });
   await tick();
   h.emit(progress(h.started[0].id, status, { error: status === 'failed' ? 'disk full' : null }));
-  await opening;
+  await settles(opening, `the open after a ${status} download`);
 
   assert.strictEqual(h.panes.size, 0, `${status} opens no tab`);
   assert.strictEqual(h.toasts.length, 1, `${status} raises a toast`);
@@ -313,9 +330,9 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
       ? `"${args.name}" is 10.0 MB; the editor opens files up to 5.0 MB.`
       : null),
   });
-  await h.service.openRemoteFile({
+  await settles(h.service.openRemoteFile({
     paneId: 4, remotePath: '/var/log/huge.log', hostLabel: 'me@example.com', size: 10 * 1024 * 1024,
-  });
+  }), 'the rejected oversized open');
 
   assert.strictEqual(h.started.length, 0, 'no transfer was started');
   assert.strictEqual(h.commandsNamed('editor_temp_path').length, 0, 'and no temp path was made');
@@ -335,7 +352,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   });
   await tick();
   h.emit(progress(h.started[0].id, 'completed'));
-  await opening;
+  await settles(opening, 'the open of a binary file');
 
   assert.strictEqual(h.panes.size, 0, 'no tab for a binary file');
   assert.match(h.toasts[0].body, /binary/);
@@ -355,7 +372,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
     });
     await tick();
     if (h.started.length) h.emit(progress(h.started[h.started.length - 1].id, 'completed'));
-    await p;
+    await settles(p, `the open of ${hostLabel}`);
   };
 
   await open('me@alpha');
@@ -375,6 +392,75 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   assert.strictEqual(h.panes.size, 2, 'the same filename on another host is its own tab');
 }
 
+// --- 6b. Two double-clicks DURING the download are still one tab ----------
+// The existing-tab check can only see panes that exist, and during the seconds
+// a download takes there is no pane to find. Two downloads onto one temp path
+// would give two editors on one file — and then closing either would delete
+// that file and the parent directories it empties, leaving the survivor's next
+// save with nowhere to write (editor_write_file does not recreate them).
+{
+  const h = makeHarness();
+  const descriptor = {
+    paneId: 4, remotePath: '/home/me/notes.txt', hostLabel: 'me@example.com', size: 120,
+  };
+  const first = h.service.openRemoteFile({ ...descriptor });
+  const second = h.service.openRemoteFile({ ...descriptor });
+  await tick();
+
+  assert.strictEqual(
+    h.commandsNamed('transfer_download').length,
+    1,
+    'the second double-click joins the running download instead of starting its own',
+  );
+
+  h.emit(progress(h.started[0].id, 'completed'));
+  await settles(first, 'the first of two concurrent opens');
+  await settles(second, 'the second of two concurrent opens');
+
+  assert.strictEqual(h.panes.size, 1, 'and there is exactly one tab on that temp path');
+  assert.deepStrictEqual(
+    h.activated.slice(-2),
+    [['tab', 1], ['pane', 1]],
+    'the joiner focuses the tab the first open produced',
+  );
+  assert.strictEqual(h.commandsNamed('editor_temp_cleanup').length, 0, 'nothing was deleted');
+  assert.strictEqual(h.toasts.length, 0, 'and neither click raised an error');
+}
+
+// --- 6c. A failed concurrent open cleans up once and wedges nothing -------
+{
+  const h = makeHarness();
+  const descriptor = {
+    paneId: 4, remotePath: '/home/me/notes.txt', hostLabel: 'me@example.com', size: 120,
+  };
+  const first = h.service.openRemoteFile({ ...descriptor });
+  const second = h.service.openRemoteFile({ ...descriptor });
+  await tick();
+  h.emit(progress(h.started[0].id, 'failed', { error: 'connection reset' }));
+  await settles(first, 'the first of two concurrent opens that failed');
+  await settles(second, 'the second of two concurrent opens that failed');
+
+  assert.strictEqual(h.panes.size, 0);
+  assert.strictEqual(h.toasts.length, 2, 'each click is told the open failed');
+  assert.strictEqual(
+    h.commandsNamed('editor_temp_cleanup').length,
+    1,
+    'but only the click that owned the download deletes the temp file',
+  );
+
+  // The path must not be stuck for the rest of the session.
+  const retry = h.service.openRemoteFile({ ...descriptor });
+  await tick();
+  assert.strictEqual(
+    h.commandsNamed('transfer_download').length,
+    2,
+    'a later open of the same path downloads again',
+  );
+  h.emit(progress(h.started[1].id, 'completed'));
+  await settles(retry, 'the retry after a failed open');
+  assert.strictEqual(h.panes.size, 1, 'and opens its tab');
+}
+
 // --- 7. Saving a remote pane uploads, then clears dirty -------------------
 {
   const h = makeHarness();
@@ -383,7 +469,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   });
   await tick();
   h.emit(progress(h.started[0].id, 'completed'));
-  await opening;
+  await settles(opening, 'the open before a save');
 
   const pane = [...h.panes.values()][0];
   pane.view.type(' and more');
@@ -406,7 +492,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   assert.strictEqual(pane.dirty, true, 'still dirty while the upload is in flight');
 
   h.emit({ ...progress(upload.id, 'completed'), kind: 'upload' });
-  await saving;
+  await settles(saving, 'the save after a completed upload');
 
   assert.strictEqual(pane.dirty, false, 'clean once the bytes reached the host');
   const success = h.toasts.filter((t) => t.kind === 'success');
@@ -426,7 +512,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   });
   await tick();
   h.emit(progress(h.started[0].id, 'completed'));
-  await opening;
+  await settles(opening, 'the open before a failing save');
 
   const pane = [...h.panes.values()][0];
   pane.view.type('!');
@@ -436,7 +522,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   const upload = h.started[h.started.length - 1];
   h.emit({ ...progress(upload.id, 'failed'), kind: 'upload', error: 'connection lost' });
 
-  await assert.rejects(() => saving, /connection lost/, 'the save fails');
+  await assert.rejects(() => settles(saving, 'the save after a failed upload'), /connection lost/, 'the save fails');
   assert.strictEqual(pane.dirty, true, 'and the pane is still dirty');
   assert.strictEqual(
     h.commandsNamed('editor_temp_cleanup').length,
@@ -452,7 +538,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   // dialog service is registered in this sandbox, so confirmDirtyPanes takes
   // its "cannot ask, so do not close" branch — which only fires because the
   // failed upload left the pane dirty.
-  const ok = await h.service.confirmDirtyPanes([pane]);
+  const ok = await settles(h.service.confirmDirtyPanes([pane]), 'the close guard');
   assert.strictEqual(ok, false, 'a dirty pane with no way to ask is not closeable');
 }
 
@@ -466,7 +552,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
     paneId: 4, remotePath: '/home/me/notes.txt', hostLabel: 'me@example.com', size: 120,
   });
   await tick();
-  await opening;
+  await settles(opening, 'the open onto a dead session');
 
   assert.strictEqual(h.panes.size, 0, 'the download could not even start');
   assert.strictEqual(h.toasts[0].title, 'Cannot Open File');
@@ -527,7 +613,7 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
   assert.ok(watchdog, 'a stall watchdog is armed');
   assert.strictEqual(watchdog.ms, 60000, 'it waits a minute before giving up');
   watchdog.fn();
-  await opening;
+  await settles(opening, 'the open abandoned by the stall watchdog');
 
   assert.ok(armed, 'silence produces an error rather than a hang');
   assert.strictEqual(armed.title, 'Cannot Open File');
