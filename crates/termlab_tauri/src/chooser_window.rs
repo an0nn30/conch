@@ -434,9 +434,49 @@ fn complete_chooser<R: tauri::Runtime>(
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+/// Which window labels may call `open_file_chooser`. Pulled out as a pure
+/// function (no Tauri handle needed) so the rejection rules are unit-tested
+/// directly, the same way the registry's invariants are — see the design
+/// spec, "Window & lifecycle"
+/// (`docs/superpowers/specs/2026-08-18-chooser-window-design.md:24`):
+/// "callable only from a main-app window (reject labels starting
+/// `chooser-`/`settings`)".
+fn validate_chooser_caller(label: &str) -> Result<(), String> {
+    if label.starts_with("chooser-") {
+        return Err("chooser windows cannot open choosers".to_string());
+    }
+    if label == "settings" {
+        return Err("the settings window cannot open a chooser".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod caller_validation_tests {
+    use super::validate_chooser_caller;
+
+    #[test]
+    fn rejects_chooser_windows() {
+        assert!(validate_chooser_caller("chooser-window-1").is_err());
+        assert!(validate_chooser_caller("chooser-main").is_err());
+    }
+
+    #[test]
+    fn rejects_the_settings_window() {
+        assert!(validate_chooser_caller("settings").is_err());
+    }
+
+    #[test]
+    fn allows_ordinary_windows() {
+        assert!(validate_chooser_caller("main").is_ok());
+        assert!(validate_chooser_caller("window-1").is_ok());
+    }
+}
+
 /// Open (or focus an existing) chooser for the calling window. Rejects
 /// callers whose own label starts with `chooser-` — a chooser cannot open a
-/// chooser.
+/// chooser — and the settings window (design spec, "Window & lifecycle",
+/// `docs/superpowers/specs/2026-08-18-chooser-window-design.md:24`).
 #[tauri::command]
 pub(crate) async fn open_file_chooser(
     window: tauri::WebviewWindow,
@@ -445,9 +485,7 @@ pub(crate) async fn open_file_chooser(
     select_filename: bool,
 ) -> Result<u64, String> {
     let parent_label = window.label().to_string();
-    if parent_label.starts_with("chooser-") {
-        return Err("chooser windows cannot open choosers".to_string());
-    }
+    validate_chooser_caller(&parent_label)?;
 
     let app = window.app_handle().clone();
     let request = ChooserRequest {
