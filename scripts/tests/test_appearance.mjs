@@ -841,6 +841,58 @@ check('applyConfigChanged fetches the theme with the resolved appearance too', a
   );
 });
 
+// F2 (branch-review.md): refetchThemeColors has no sequence guard on the
+// unpatched branch. Two in-flight get_theme_colors fetches (e.g. an OS
+// System flip landing between the appearance listener's own fetch and
+// applyConfigChanged's) apply in RESPONSE order, not ISSUE order — if the
+// earlier-issued call's IPC response happens to arrive last, its stale
+// palette overwrites the fresher one and nothing self-corrects until the
+// next event. The fix is a monotonic token (config-runtime.js's
+// `themeColorsFetchToken`, the deleted theme-preview stopgap's `previewSeq`
+// pattern): a fetch whose token has been superseded is dropped instead of
+// applied, so it is last-INITIATED that wins, regardless of resolution
+// order.
+check('two racing theme fetches: last-INITIATED wins even when it resolves first', async () => {
+  const { sandbox } = makeConfigRuntimeSandbox();
+  const appliedBackgrounds = [];
+  const resolvers = [];
+  const runtime = sandbox.termlabConfigRuntime.create({
+    invoke: async (command) => {
+      if (command !== 'get_theme_colors') throw new Error(`unexpected command ${command}`);
+      return new Promise((resolve) => { resolvers.push(resolve); });
+    },
+    listenOnCurrentWindow: () => {},
+    refreshKeyboardShortcutFallbacks: async () => {},
+    getPanes: () => new Map(),
+    setTheme: (t) => { appliedBackgrounds.push(t.background); },
+    getFontFallbacks: () => '',
+    setTermFontFamily: () => {},
+    setTermFontSize: () => {},
+    setEditorVimMode: () => {},
+  });
+  runtime.init();
+
+  // Two appearance flips fire back to back — both issue a fetch (each
+  // handleAppearanceChanged() call goes through refetchThemeColors()) before
+  // either resolves. The second call's token supersedes the first's the
+  // instant it is issued, synchronously, before either invoke() settles.
+  const first = runtime.handleAppearanceChanged();
+  const second = runtime.handleAppearanceChanged();
+  assert.strictEqual(resolvers.length, 2, 'both fetches are in flight simultaneously');
+
+  // Resolve OUT OF ORDER: the earlier-issued call's response arrives LAST —
+  // exactly the reordering that IPC round trips do not guarantee against.
+  resolvers[1]({ background: '#SECOND' }); // later-initiated call resolves first
+  await second;
+  resolvers[0]({ background: '#FIRST' }); // earlier-initiated call resolves last
+  await first;
+
+  assert.deepStrictEqual(appliedBackgrounds, ['#SECOND'],
+    'only the later-initiated fetch ever reached setTheme — the earlier one, ' +
+    'though its response arrived last, was recognized as stale by its token ' +
+    'and dropped before applying anything');
+});
+
 // -------------------------------------------------------- extendedAnsi
 //
 // Alacritty's colors.indexed_colors[] reaches xterm through

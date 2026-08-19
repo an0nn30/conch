@@ -64,9 +64,29 @@
       return newTheme;
     }
 
+    // F2 (branch-review.md): a monotonic token, incremented per call and
+    // captured in each call's own closure — the deleted theme-preview
+    // stopgap's `previewSeq` pattern (settings.js, pre-terminal-themes).
+    // Two in-flight get_theme_colors fetches (possible when an OS System
+    // flip lands between the appearance-listener fetch and
+    // applyConfigChanged's own fetch) can resolve in EITHER order if their
+    // IPC responses reorder; without a guard, whichever resolves LAST wins
+    // regardless of which was issued last, so a stale palette could
+    // overwrite a fresher one that already landed. The token makes it
+    // last-INITIATED-wins instead: a fetch whose token has been superseded
+    // by a newer call is dropped rather than applied.
+    let themeColorsFetchToken = 0;
+
     // Fetch the palette for the CURRENT resolved appearance and apply it.
     async function refetchThemeColors() {
+      const token = ++themeColorsFetchToken;
       const tc = await invoke('get_theme_colors', { resolvedAppearance: resolvedAppearance() });
+      if (token !== themeColorsFetchToken) {
+        // A newer refetch was issued while this one was in flight; that one
+        // owns the outcome (whether it has already applied or is still
+        // pending), so drop this stale result rather than overwrite it.
+        return undefined;
+      }
       return applyThemeColors(tc);
     }
 
