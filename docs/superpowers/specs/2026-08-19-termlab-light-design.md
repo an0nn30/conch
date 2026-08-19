@@ -6,7 +6,7 @@
 
 ## Context (verified 2026-08-19)
 
-- `tokens-light.css` is generated (extractor `scripts/extract_intellij_tokens.py`, sources in the JVM repo `../TermLab/core/resources/themes/`) and gated behind `:root[data-tl-appearance="light"]` — but NOTHING sets that attribute. `AppearanceMode` today only tints native window chrome (`windows.rs:20-29`, `terminal-runtime.js:411-438`).
+- `tokens-light.css` is generated (extractor `scripts/extract_intellij_tokens.py`, sources in the JVM repo `../TermLab/core/resources/themes/`) and gated behind `:root[data-tl-appearance="light"]` — but NOTHING sets that attribute. `AppearanceMode` today only tints native window chrome (`windows.rs:22-30`, `app/core/config-service.js:38-58` — `resolveNativeWindowTheme`/`applyNativeWindowTheme`; the `terminal-runtime.js:411-438` citation this line originally gave was already stale at spec-authoring time, a leftover from before the `1a2e5a8` frontend-module refactor moved this logic — `terminal-runtime.js` is 204 lines and has no appearance code at all).
 - `tl-icon.js:19-20` reads the attribute (always absent → always dark icon variants). `theme.js:86-92` infers editor dark-vs-light from `--tl-bg` luminance — works unchanged once tokens actually switch.
 - The extractor emits a terminal TOML only for dark (from `termlab-dark.xml`); the light theme JSON's `editorScheme` pointer still references the dark XML — there is no light terminal-palette source to extract.
 - Token parity is guarded by `scripts/tests/test_token_parity.mjs` (in the standard suite glob) since commit 9ae2898.
@@ -22,9 +22,11 @@
 
 ### The switch (frontend, one owner)
 
-A new small module `app/core/appearance.js` owns the attribute: `applyAppearance(mode)` sets `document.documentElement.dataset.tlAppearance = 'light' | removes it`, resolving `System` via `window.matchMedia('(prefers-color-scheme: dark)')` with a change listener (registered once; re-applies on OS flip). Called from: initial boot (all three HTML entries — index, settings, chooser — after `get_app_config`), and from the `config-changed` handler. The chooser window additionally receives the mode at boot the same way settings does (each window resolves independently from the same config — no cross-window event needed since `config-changed` already broadcasts).
+A new small module `app/core/appearance.js` owns the attribute: `global.termlabAppearance = { apply(mode, deps), current() }`. `apply(mode)` sets `data-tl-appearance="light"` (via `setAttribute`) or removes the attribute entirely for dark, resolving `System` via `window.matchMedia('(prefers-color-scheme: dark)')` with a change listener (registered once; re-applies on OS flip; `deps` optionally injects `doc`/`matchMedia` for tests). Called from: initial boot (all three HTML entries — index, settings, chooser — after `get_app_config`), and from the `config-changed` handler. The chooser window additionally receives the mode at boot the same way settings does (each window resolves independently from the same config — no cross-window event needed since `config-changed` already broadcasts).
 
-Every consumer that keys off the attribute then works for free: `tokens-light.css` activates, `tl-icon.js` picks `_dark`-vs-plain variants (NOTE: naming is inverted in the vendored set — verify which variant is which and that light mode picks legible glyphs; the redesign flagged `file.svg`/`search.svg` as having no `_dark` variant), and `theme.js`'s luminance inference flips the CodeMirror `dark` flag. Editor panes re-theme via the existing `refreshTheme` path in `applyConfigChanged`.
+**Traced field path (verified during implementation, Task 1):** `get_app_config` (`crates/termlab_tauri/src/commands.rs:29`) returns `appCfg` as a **flat** JSON object — `"appearance_mode": format!("{:?}", cfg.colors.appearance_mode).to_lowercase()` — so the frontend consumes `appCfg.appearance_mode` directly (a lowercase `"dark"`/`"light"`/`"system"` string), NOT `appCfg.colors.appearance_mode`. The nesting under `colors` exists only on the Rust side (`termlab_core::config::colors::UserConfig.appearance_mode`, read by `set_app_config`'s save path and by `windows.rs`/`chooser_window.rs`'s native-chrome theming) and on the settings-form's in-memory `pendingSettings.colors.appearance_mode` used when writing changes back — `get_app_config`'s read path flattens it before it ever reaches the frontend.
+
+Every consumer that keys off the attribute then works for free: `tokens-light.css` activates, `tl-icon.js` picks `_dark`-vs-plain variants (**confirmed non-inverted, Task 1:** `tl-icon.js:19-20`'s `isDarkAppearance()` is true whenever the attribute is anything other than `"light"`; checked the vendored SVG fills directly — `add.svg` fills `#6E6E6E` (dark grey, legible on light) while `add_dark.svg` fills `#AFB1B3` (light grey, legible on dark) — so `_dark` genuinely names the dark-appearance variant; the redesign's file-dialog spec separately flagged `file.svg`/`search.svg` as having no `_dark` variant at all — same asset both ways, unaffected by this), and `theme.js`'s luminance inference flips the CodeMirror `dark` flag. Editor panes re-theme via the existing `refreshTheme` path in `applyConfigChanged`.
 
 ### Tokens
 
@@ -32,7 +34,7 @@ Regenerate `tokens-light.css` from `TermLabLight.theme.json` (already supported 
 
 ### Terminal palette
 
-Hand-author `TermLab Light` as a built-in Alacritty-format palette in `termlab_core::color_scheme` beside the existing built-ins, seeded from the light theme JSON's colors (`background #E3E8EF`, `foreground #1F2933`, selection pair) plus a standard legible light ANSI 16 tuned against that background. It is NOT wired as any default in this spec — the terminal keeps following `colors.theme` exactly as today; the follow-up terminal-themes spec introduces `auto` and consumes this palette. (Deliberate: keeps this branch's terminal behavior at zero net change.)
+Hand-author `TermLab Light` as a bundled Alacritty-format TOML theme file, seeded from the light theme JSON's colors (`background #E3E8EF`, `foreground #1F2933`, selection pair) plus a standard legible light ANSI 16 tuned against that background. **Traced mechanism (Task 3):** there is no Rust-struct built-in for named themes other than the final-fallback `ColorScheme::default()` (Dracula) — "TermLab Dark" itself is not a hardcoded struct either, it is `crates/termlab_tauri/frontend/themes/TermLab Dark.toml`, discovered at runtime by `list_themes`/`list_themes_in` (`termlab_core::color_scheme` — `crates/termlab_core/src/color_scheme.rs:160-183`, scanning `bundled_themes_dir()`) and loaded by `resolve_theme_in` (`color_scheme.rs:191-237`) via an exact `HashMap` key lookup on the file stem. `TermLab Light` mirrors this exactly — a new `crates/termlab_tauri/frontend/themes/TermLab Light.toml` — no Rust struct, no new mechanism, no changes to `color_scheme.rs`'s discovery/resolution code. It is NOT wired as any default in this spec — the terminal keeps following `colors.theme` exactly as today; the follow-up terminal-themes spec introduces `auto` and consumes this palette. (Deliberate: keeps this branch's terminal behavior at zero net change.)
 
 ### Native chrome
 
@@ -48,7 +50,7 @@ Already keyed off `AppearanceMode` — no change; verify the settings/chooser wi
 
 - Branch `feat/termlab-light` from the post-skins-removal main; CLAUDE.md rules (no main commits, no trailers).
 - Dark-mode byte-identity: with appearance Dark, computed styles match today's (the attribute is simply absent — assert no CSS rule outside `tokens-light.css` keys on the attribute).
-- Tokens-only CSS; boundary + parity tests green; 30-suite baseline + 645 cargo baseline hold.
+- Tokens-only CSS; boundary + parity tests green; 31-suite baseline + 645 cargo baseline hold.
 - `applyThemeCss`'s 7 terminal-derived vars (`--tl-terminal-bg`, six ANSI accents) stay terminal-owned — light app chrome must not repaint them.
 
 ## Testing
@@ -56,4 +58,4 @@ Already keyed off `AppearanceMode` — no change; verify the settings/chooser wi
 - Unit (frontend): `appearance.js` — mode→attribute mapping incl. System via a stubbed matchMedia, change-listener re-application, and removal on Dark. `tl-icon.js` variant selection under both attribute states. Editor `isDarkTheme()` against light `--tl-bg`.
 - Unit (Rust): built-in palette resolves by name via `resolve_theme("TermLab Light")`; snapshot of its 16+4 colors.
 - Extractor golden: extend `test_extract_tokens.py` with a light-source assertion; parity test unchanged (it is the gate).
-- Manual checklist section J: full surface walk in Light (chrome, tool windows, settings window, chooser window, editor incl. syntax colors, toasts, context menus), System-mode live OS flip, dark unchanged-spot-check.
+- Manual checklist section J: full surface walk in Light (chrome, tool windows, settings window, chooser window, editor incl. syntax colors, toasts, context menus), System-mode live OS flip, dark unchanged-spot-check. Added — `docs/superpowers/notes/light-editor-manual-checklist.md`, steps 108-122; also carries the FG_MUTED contrast judgment call from Task 2, an icon-legibility pass now that the plain (non-`_dark`) variants render for the first time, a System-flip check with a chooser window open alongside its parent, and an explicit terminal-unchanged confirmation guarding this spec's Goal 4.

@@ -461,3 +461,116 @@ local build. Run in order; stop and report at the first mismatch.
      91, now about the WINDOW's own proportions rather than the row/column
      metrics inside it. Say which, with a number, if anything should
      change.
+
+## J. TermLab Light — the appearance switch actually works
+
+Added by the TermLab Light plan: `app/core/appearance.js` now owns
+`data-tl-appearance`, so Settings → Appearance Mode's Light and System
+options genuinely restyle the app for the first time (previously nothing
+ever set the attribute, so `tokens-light.css` never activated and every
+icon only ever rendered its `_dark` variant, dark or light setting
+notwithstanding). Nothing below was run in a GUI by the implementer; every
+step is a human pass. Run in order; stop and report at the first mismatch.
+
+108. Settings → Appearance → Appearance Mode: switch to **Light** → the
+     titlebar, the tool-strip rail and its tool-window tabs restyle to
+     light colors immediately, with no dark panel, border, or icon left
+     anywhere in the window.
+109. With Light active, open each tool window in turn — **Hosts**,
+     **Tunnels**, **Notifications**, and the **SFTP pane** — and confirm
+     each restyles fully: panel background, list rows, hover/selected
+     states, and any icons inside them read as light-themed, not a dark
+     island inside an otherwise light app.
+110. Open **Settings** (the in-app modal, ⌘,) with Light active → it
+     restyles fully. Separately open the **standalone settings window**
+     (if reachable independently of the modal) with Light active → same.
+     Scroll through every settings section, not just Appearance, checking
+     labels, descriptions, toggles and dividers all read as light.
+111. ⌘O and ⌘⇧S with Light active → the **chooser window**, in both Open
+     and Save As modes, is fully light: sidebar, listing, column headers,
+     footer, and — onto an existing filename — the overwrite-confirm
+     stacked over it.
+112. Open a real source file with syntax highlighting (e.g. a `.rs` or
+     `.ts` file) in the **editor** with Light active → the editor
+     background, gutter, and syntax token colors are all light-appropriate;
+     no token renders a dark background/foreground pair left over from
+     dark mode.
+113. Trigger a **toast** (e.g. a save confirmation, an induced error) with
+     Light active → it reads legibly light-themed, including any bold
+     call-out toast variant.
+114. Open a **context menu** (right-click a tab, a file row, a terminal
+     pane) with Light active → the menu, its hover state, and any icons in
+     it are light-themed.
+115. Open the **command palette** with Light active → the overlay, input
+     field, and result rows are light-themed, including the
+     selected-result highlight.
+116. **FG_MUTED contrast — judgment call.** Task 2 flagged the muted-text
+     anchor `FG_MUTED` (`#8A94A3`, e.g. `--tl-base-infoForeground` and
+     everything aliased to it) at **2.49:1** against the base background —
+     below general text-contrast guidance — and carried it forward as
+     given rather than fixing it, since it's the brief's own designated
+     "muted" anchor and mirrors dark's own low-contrast muted tone. With
+     Light active, read three places that use it: a **Settings row
+     description** (the small gray text under a setting label), the
+     **file-dialog listing's Modified column** (the dimmed secondary
+     date text), and a **toast's secondary/detail line**. Decide, at
+     normal viewing distance, whether that text is comfortably legible or
+     actually hard to read — say which. If it reads as hard to read, flag
+     it for a follow-up design pass through the source theme JSON
+     (`TermLabLight.theme.json`); do not hand-fix it here.
+117. **Icon legibility in Light — the vendored variant swap firing for the
+     first time.** `tl-icon.js` resolves a `_dark`-suffixed variant only
+     when the dark appearance is active — confirmed non-inverted in Task 1
+     by checking the actual SVG fills (`add.svg` fills `#6E6E6E`, dark
+     grey, legible on light; `add_dark.svg` fills `#AFB1B3`, light grey,
+     legible on dark). Before this branch, `data-tl-appearance` was never
+     set at runtime, so every icon in the app has only ever rendered its
+     `_dark` variant, in either theme setting. With Light active, walk the
+     titlebar, the tool-window tabs, the chooser sidebar/listing icons, and
+     the `file.svg`/`search.svg` glyphs (which have no `_dark` variant at
+     all, per step 90) — confirm the plain, non-`_dark` variants that now
+     render for real are actually legible against light backgrounds, not
+     merely present.
+118. **System-mode live OS flip, both directions, app open.** Settings →
+     Appearance Mode → **System**, with the app open and visible. Flip the
+     OS-level appearance (System Settings → Appearance, or the test
+     machine's equivalent) from light to dark → the app restyles live, no
+     relaunch. Flip back dark → light → same, live, no relaunch.
+119. **System-mode flip with a chooser window open.** With Appearance Mode
+     still **System** and a chooser window open (⌘O) alongside its parent
+     TermLab window, flip the OS appearance → **both windows restyle
+     together**, live, in the same flip. The parent and the chooser must
+     not visibly disagree on appearance even momentarily longer than a
+     repaint.
+120. **Dark spot-check — confirm zero net change.** Switch Appearance Mode
+     back to **Dark** → re-check the titlebar, a tool window, the editor,
+     and the chooser: everything should look and measure exactly as it did
+     before this branch. This is the visual counterpart to Task 4's grep
+     sweep, which confirmed `data-tl-appearance` is asserted only by
+     `tokens-light.css` (CSS) and `appearance.js`/`tl-icon.js` (JS) — with
+     the attribute absent under Dark, nothing else in the app can react to
+     it.
+121. **Terminal appearance — expected UNCHANGED.** With Appearance Mode set
+     to Light (and again to System, with the OS in light mode), open a new
+     terminal pane or tab → its colors follow `colors.theme` exactly as
+     before this branch — whatever palette that setting already names
+     (e.g. still Dracula, or "TermLab Dark," or whatever was configured).
+     It does **NOT** switch to "TermLab Light," even though that palette
+     now exists as a built-in (Task 3): this branch adds the palette but
+     wires nothing to select it — the next plan (`auto` terminal-theme
+     wiring) does that. Confirm a terminal pane's background, foreground
+     and ANSI colors look identical to a same-session terminal pane opened
+     under Dark appearance. This step guards the spec's Goal 4
+     (byte-identical dark experience) on the one surface that is
+     deliberately NOT wired to appearance yet.
+122. **Judgment call-outs — parity-passes-but-taste-fails tokens.** For any
+     surface walked above where the light color is technically present
+     (parity test passes, the token resolves to a real value) but reads
+     wrong to the eye — too washed out, insufficient contrast, a jarring
+     hue — note it here with the specific `--tl-*` token name if
+     identifiable (inspect the computed style in DevTools) or a precise
+     description of where it appears. Fix loops for anything found go
+     through the **SOURCE theme JSON**
+     (`../TermLab/core/resources/themes/TermLabLight.theme.json`) and a
+     regeneration via the extractor, per Task 2's process — never hand-edit
+     `tokens-light.css`.
