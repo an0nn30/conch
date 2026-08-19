@@ -51,7 +51,7 @@ Any valid Alacritty theme file parses and applies. Concretely, `color_scheme.rs`
 
 - Branch `feat/terminal-themes` from post-TermLab-Light main; CLAUDE.md rules.
 - Zero behavior change for configs that name a concrete existing theme.
-- Suites/baselines hold (30 frontend + parity, cargo ≥ 645 + new).
+- Suites/baselines hold (32 frontend + parity + extractor goldens, cargo ≥ 648 + new).
 
 ## Testing
 
