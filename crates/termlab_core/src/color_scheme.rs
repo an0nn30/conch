@@ -21,12 +21,21 @@
 //! this schema are tolerated too, since nothing here (or upstream `toml`/
 //! `serde`) sets `#[serde(deny_unknown_fields)]`.
 //!
+//! Those raw forms are canonicalized to a single `#rrggbb` form by
+//! [`crate::color_normalize::normalize_scheme`], called from [`load_theme`] —
+//! the one boundary in the crate where that happens. Everything downstream
+//! (`termlab_tauri::theme`'s hex helpers, [`PalettePreview`], the theme
+//! catalog) therefore only ever sees `#`-form colors.
+//!
 //! Only a subset of the accepted schema currently has terminal meaning and
 //! is APPLIED further down the pipeline (`termlab_tauri::theme`): `primary`,
-//! `cursor`, `selection`, `normal`, `bright`. `dim` and `indexed_colors` are
-//! parsed and preserved on [`ColorScheme`] but are not yet threaded through
-//! `ThemeColors`/xterm — see the crate-level task-1 report for the carry
-//! gap. `vi_mode_cursor`, `search`, `hints`, `line_indicator`, `footer_bar`,
+//! `cursor`, `selection`, `normal`, `bright`, and `indexed_colors` (carried
+//! into xterm's `ITheme.extendedAnsi` — see
+//! `termlab_tauri::extended_ansi`). `dim` is parsed and preserved but has no
+//! xterm carrier at all: xterm 5.5.0's `ITheme` has no dim palette and its
+//! renderers derive dim by halving the opacity of the already-chosen color
+//! (the `xterm-dim` class), so there is nothing to hand it. `vi_mode_cursor`,
+//! `search`, `hints`, `line_indicator`, `footer_bar`,
 //! `transparent_background_colors`, and `draw_bold_text_with_bright_colors`
 //! are parsed and otherwise ignored by design (no terminal-chrome meaning
 //! here today).
@@ -274,12 +283,21 @@ pub fn themes_dir() -> PathBuf {
 }
 
 /// Load a color scheme from an Alacritty-format TOML file.
+///
+/// This is the single fallible file → [`ColorScheme`] funnel in the crate,
+/// which makes it the one boundary where every accepted color form is
+/// canonicalized to `#rrggbb` (see [`crate::color_normalize`]). Both branches
+/// of [`resolve_theme_in`] and [`theme_list_entry_for`] go through here, and
+/// [`ColorScheme::default`] is already canonical, so no consumer downstream
+/// can ever observe a raw `0x`-prefixed or `CellRgb` value.
 pub fn load_theme(path: &Path) -> Result<ColorScheme> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read theme from {}", path.display()))?;
     let theme_file: AlacrittyThemeFile = toml::from_str(&contents)
         .with_context(|| format!("Failed to parse theme from {}", path.display()))?;
-    Ok(theme_file.colors)
+    let mut colors = theme_file.colors;
+    crate::color_normalize::normalize_scheme(&mut colors);
+    Ok(colors)
 }
 
 /// Scan `dirs` in order and return a map of `name -> path` for every `.toml`
@@ -324,12 +342,11 @@ pub enum ThemeSource {
 /// background, foreground, and the 16 ANSI colors in standard order (normal
 /// black..white at indices 0-7, bright black..white at indices 8-15).
 ///
-/// Colors are copied verbatim from the parsed theme, in whatever string form
-/// the file used (`#rrggbb` or the legacy `0x...` form) — no normalization.
-/// A theme using the `0x` form will therefore preview with colors that a
-/// literal CSS consumer renders incorrectly, matching the parse-time
-/// behavior of the rest of `ColorScheme`; normalizing that is out of scope
-/// here (see the module docs for where downstream normalization belongs).
+/// Colors are copied verbatim from the parsed theme. That is now safe for a
+/// literal CSS consumer: [`load_theme`] canonicalizes every accepted color
+/// form to `#rrggbb` before a `ColorScheme` escapes it (see
+/// [`crate::color_normalize`]), so a `0x`-form or `CellRgb` theme previews
+/// with the same colors it renders with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PalettePreview {
     pub bg: String,

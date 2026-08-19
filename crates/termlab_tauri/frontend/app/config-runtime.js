@@ -11,6 +11,65 @@
     const setEditorVimMode = deps.setEditorVimMode;
     const configService = global.termlabConfigService || {};
 
+    // The RESOLVED app appearance ('dark' | 'light'), which is the argument
+    // `get_theme_colors` needs to answer the reserved `auto` theme name.
+    // Rust cannot resolve it: `system` lives in matchMedia inside the
+    // webview. appearance.js's current() never returns 'system' — it returns
+    // the resolved value — and defaults to 'dark' before the first apply(),
+    // which is also the Rust-side default for a missing argument.
+    function resolvedAppearance() {
+      if (global.termlabAppearance && typeof global.termlabAppearance.current === 'function') {
+        return global.termlabAppearance.current();
+      }
+      return 'dark';
+    }
+
+    // The theme half of applyConfigChanged, extracted so the appearance-flip
+    // path can reuse the SAME pane walk and the same guards instead of
+    // growing a second, drifting copy. Both callers below go through here;
+    // nothing else applies a terminal palette.
+    function applyThemeColors(tc) {
+      if (typeof configService.applyThemeCss === 'function') {
+        configService.applyThemeCss(tc);
+      }
+
+      const fallbackTheme = {
+        background: tc.background, foreground: tc.foreground,
+        cursor: tc.cursor_color, cursorAccent: tc.cursor_text,
+        selectionBackground: tc.selection_bg, selectionForeground: tc.selection_text,
+        black: tc.black, red: tc.red, green: tc.green, yellow: tc.yellow,
+        blue: tc.blue, magenta: tc.magenta, cyan: tc.cyan, white: tc.white,
+        brightBlack: tc.bright_black, brightRed: tc.bright_red,
+        brightGreen: tc.bright_green, brightYellow: tc.bright_yellow,
+        brightBlue: tc.bright_blue, brightMagenta: tc.bright_magenta,
+        brightCyan: tc.bright_cyan, brightWhite: tc.bright_white,
+      };
+      const newTheme = typeof configService.toTerminalTheme === 'function'
+        ? configService.toTerminalTheme(tc, fallbackTheme)
+        : fallbackTheme;
+      setTheme(newTheme);
+      for (const pane of getPanes().values()) {
+        if (pane.kind === 'terminal' && pane.term) {
+          pane.term.options.theme = newTheme;
+        }
+        // The editor's colours come from the --tl-* variables, which
+        // applyThemeCss above has just rewritten, so a rebuild is all that is
+        // needed. Font size is not available at this site; it is applied in
+        // the terminal-config block below, which is the only place the new
+        // size exists.
+        if (pane.kind === 'editor' && pane.view && global.termlabEditorPane) {
+          global.termlabEditorPane.refreshTheme(pane.view);
+        }
+      }
+      return newTheme;
+    }
+
+    // Fetch the palette for the CURRENT resolved appearance and apply it.
+    async function refetchThemeColors() {
+      const tc = await invoke('get_theme_colors', { resolvedAppearance: resolvedAppearance() });
+      return applyThemeColors(tc);
+    }
+
     async function applyConfigChanged() {
       try {
         await refreshKeyboardShortcutFallbacks();
@@ -39,39 +98,9 @@
           console.warn('Failed to reload app config:', error);
         }
 
-        const tc = await invoke('get_theme_colors');
-        if (typeof configService.applyThemeCss === 'function') {
-          configService.applyThemeCss(tc);
-        }
-
-        const fallbackTheme = {
-          background: tc.background, foreground: tc.foreground,
-          cursor: tc.cursor_color, cursorAccent: tc.cursor_text,
-          selectionBackground: tc.selection_bg, selectionForeground: tc.selection_text,
-          black: tc.black, red: tc.red, green: tc.green, yellow: tc.yellow,
-          blue: tc.blue, magenta: tc.magenta, cyan: tc.cyan, white: tc.white,
-          brightBlack: tc.bright_black, brightRed: tc.bright_red,
-          brightGreen: tc.bright_green, brightYellow: tc.bright_yellow,
-          brightBlue: tc.bright_blue, brightMagenta: tc.bright_magenta,
-          brightCyan: tc.bright_cyan, brightWhite: tc.bright_white,
-        };
-        const newTheme = typeof configService.toTerminalTheme === 'function'
-          ? configService.toTerminalTheme(tc, fallbackTheme)
-          : fallbackTheme;
-        setTheme(newTheme);
-        for (const pane of getPanes().values()) {
-          if (pane.kind === 'terminal' && pane.term) {
-            pane.term.options.theme = newTheme;
-          }
-          // The editor's colours come from the --tl-* variables, which
-          // applyThemeCss above has just rewritten, so a rebuild is all that is
-          // needed. Font size is not available at this site; it is applied in
-          // the terminal-config block below, which is the only place the new
-          // size exists.
-          if (pane.kind === 'editor' && pane.view && global.termlabEditorPane) {
-            global.termlabEditorPane.refreshTheme(pane.view);
-          }
-        }
+        // The appearance re-apply above has already run, so the resolved
+        // appearance this fetch carries is the NEW one, not the outgoing one.
+        await refetchThemeColors();
 
         // appCfg was already fetched above (ahead of applyThemeCss, for the
         // appearance re-apply) and is reused here rather than fetched again.
@@ -163,23 +192,46 @@
       }
     }
 
+    // What an appearance flip does: re-fetch the palette for the newly
+    // resolved appearance and apply it to every pane.
+    //
+    // Under the default `auto` theme this is what makes terminals follow the
+    // app: Rust picks TermLab Dark or TermLab Light from the appearance this
+    // fetch carries. Under a concrete theme name (`gruvbox_dark`, …) the
+    // fetch still happens but the payload is identical either way — the
+    // resolution is decoupled by design, and that invariance is pinned in
+    // Rust by theme.rs's
+    // a_concrete_theme_name_yields_an_identical_payload_under_both_appearances.
+    //
+    // The failure path falls back to the editor-only refresh this listener
+    // used to do on its own, so a rejected fetch cannot leave open editors on
+    // the outgoing appearance's colours.
+    function handleAppearanceChanged() {
+      return refetchThemeColors().catch((error) => {
+        console.warn('Failed to re-theme after an appearance change:', error);
+        refreshEditorThemes();
+      });
+    }
+
     function init() {
       listenOnCurrentWindow('config-changed', () => {
         applyConfigChanged();
       });
 
-      // Appearance flips reach open editors here. Two paths emit the event:
-      // a settings save (which also runs applyConfigChanged above, whose own
-      // later refresh — after applyThemeCss — is the authoritative one; the
-      // rebuild is idempotent, so the extra pass costs a rebuild and changes
-      // nothing), and an OS light/dark flip while in 'system' mode, which
-      // emits NO config-changed at all and is the reason this listener has to
-      // exist separately.
+      // Appearance flips reach open terminals and editors here. Two paths
+      // emit the event: a settings save (which also runs applyConfigChanged
+      // above, whose own fetch — issued after the same appearance apply — is
+      // the authoritative one; both land on the same palette, so the extra
+      // pass costs one fetch and changes nothing), and an OS light/dark flip
+      // while in 'system' mode, which emits NO config-changed at all and is
+      // the reason this listener has to exist separately.
       const appearanceEvent = (global.termlabAppearance && global.termlabAppearance.CHANGED_EVENT)
         || 'tl-appearance-changed';
       if (global.document && typeof global.document.addEventListener === 'function') {
         global.document.addEventListener(appearanceEvent, () => {
-          refreshEditorThemes();
+          // Kept so a test (and only a test) can await the re-theme the DOM
+          // event kicked off; nothing in the app reads it.
+          pendingAppearanceRetheme = handleAppearanceChanged();
         });
       }
 
@@ -188,10 +240,14 @@
       };
     }
 
+    let pendingAppearanceRetheme = Promise.resolve();
+
     return {
       init,
       applyConfigChanged,
       refreshEditorThemes,
+      handleAppearanceChanged,
+      appearanceSettled: () => pendingAppearanceRetheme,
     };
   }
 

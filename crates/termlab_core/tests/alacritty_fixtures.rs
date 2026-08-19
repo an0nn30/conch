@@ -160,7 +160,10 @@ fn konsole_linux_snapshot_dim_bright_foreground_cell_rgb_sentinels() {
     assert_eq!(dim.white, "#b2b2b2");
 
     // search.matches uses ordinary hex; search.focused_match uses the
-    // CellForeground/CellBackground sentinel strings instead of hex.
+    // CellForeground/CellBackground sentinel strings instead of hex. The
+    // sentinels are RESOLVED by load_theme's normalization pass, against this
+    // theme's own primary fg/bg — the raw strings are still pinned at the
+    // serde layer by color_scheme.rs's deserialize_cell_rgb_sentinel_strings.
     let search = cs.search.as_ref().expect("search present");
     let matches = search.matches.as_ref().expect("search.matches present");
     assert_eq!(matches.foreground, "#b2b2b2");
@@ -169,8 +172,16 @@ fn konsole_linux_snapshot_dim_bright_foreground_cell_rgb_sentinels() {
         .focused_match
         .as_ref()
         .expect("search.focused_match present");
-    assert_eq!(focused.foreground, "CellBackground");
-    assert_eq!(focused.background, "CellForeground");
+    assert_eq!(
+        focused.foreground, "#1f1f1f",
+        "CellBackground resolves to this theme's primary background"
+    );
+    assert_eq!(
+        focused.background, "#e3e3e3",
+        "CellForeground resolves to this theme's primary foreground"
+    );
+    assert_eq!(focused.foreground, cs.primary.background);
+    assert_eq!(focused.background, cs.primary.foreground);
 
     assert!(cs.selection.is_none());
     assert!(cs.vi_mode_cursor.is_none());

@@ -38,6 +38,14 @@ pub(crate) struct ThemeColors {
     pub active_highlight: String,
     pub text_secondary: String,
     pub text_muted: String,
+    /// xterm.js `ITheme.extendedAnsi`: ANSI slots 16.. , element 0 == slot 16.
+    /// `None` means "this theme does not override that slot"; the frontend
+    /// turns those into `undefined`, which xterm leaves at its own default.
+    /// Empty when the theme carries no `indexed_colors` — the frontend then
+    /// omits the key entirely, so a theme without indexed colors produces the
+    /// exact xterm theme object it produced before this field existed.
+    /// See `crate::extended_ansi` for the hole-tolerance trace.
+    pub extended_ansi: Vec<Option<String>>,
 }
 
 fn darken(hex: &str, amount: i32) -> String {
@@ -174,11 +182,26 @@ pub(crate) fn resolve_theme_colors_from_scheme(
         // Derive text colors by blending fg toward bg for reduced emphasis.
         text_secondary: blend(fg, bg, 0.25),
         text_muted: blend(fg, bg, 0.50),
+        extended_ansi: crate::extended_ansi::build_extended_ansi(&scheme.indexed_colors),
     }
 }
 
-pub(crate) fn resolve_theme_colors(config: &UserConfig) -> ThemeColors {
-    let scheme = termlab_core::color_scheme::resolve_theme(&config.colors.theme);
+/// Resolve the theme colors for a given RESOLVED app appearance
+/// ('dark' | 'light'), honoring the reserved `auto` theme name.
+///
+/// `None` means the caller could not resolve an appearance and is treated as
+/// dark — the same unresolvable-is-dark convention used by `appearance.js`,
+/// `resolveNativeWindowTheme`, and `AppearanceMode::resolved_hint`. This is
+/// also the back-compat path for a `get_theme_colors` invoke that predates
+/// the argument.
+pub(crate) fn resolve_theme_colors_for_appearance(
+    config: &UserConfig,
+    resolved_appearance: Option<&str>,
+) -> ThemeColors {
+    let scheme = termlab_core::effective_theme::resolve_effective_theme(
+        &config.colors,
+        resolved_appearance.unwrap_or(termlab_core::effective_theme::DEFAULT_RESOLVED_APPEARANCE),
+    );
     resolve_theme_colors_from_scheme(&scheme)
 }
 
@@ -291,5 +314,322 @@ mod tests {
         let tc = resolve_theme_colors_from_scheme(&scheme);
         // text_muted should be closer to bg than text_secondary
         assert_ne!(tc.text_muted, tc.text_secondary);
+    }
+
+    // ---------------------------------------------------------------------
+    // Color-form normalization, end to end
+    //
+    // These go through load_theme -> resolve_theme_colors_from_scheme, i.e.
+    // the real pipeline including the darken/lighten/luminance/blend helpers
+    // above. That is the gap the Task-1 review found: the serde-level tests
+    // in color_scheme.rs pin that the forms PARSE, and these pin that they
+    // RENDER correctly.
+    // ---------------------------------------------------------------------
+
+    /// Write a theme file into a fresh temp dir and load it through the real
+    /// `load_theme` boundary (which is where normalization happens).
+    fn load_theme_str(label: &str, toml_str: &str) -> ColorScheme {
+        let dir = std::env::temp_dir().join(format!(
+            "termlab-theme-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("theme.toml");
+        std::fs::write(&path, toml_str).expect("write theme");
+        let scheme = termlab_core::color_scheme::load_theme(&path).expect("test theme must parse");
+        let _ = std::fs::remove_dir_all(&dir);
+        scheme
+    }
+
+    /// Body of a theme whose colors are all written in the given form.
+    /// `{p}` is the prefix (`#` or `0x`).
+    fn theme_in_form(prefix: &str) -> String {
+        format!(
+            r##"
+[colors.primary]
+background = "{prefix}1e1e2e"
+foreground = "{prefix}cdd6f4"
+dim_foreground = "{prefix}7f849c"
+
+[colors.cursor]
+text = "{prefix}1e1e2e"
+cursor = "{prefix}f5e0dc"
+
+[colors.selection]
+text = "{prefix}1e1e2e"
+background = "{prefix}f5e0dc"
+
+[colors.normal]
+black   = "{prefix}45475a"
+red     = "{prefix}f38ba8"
+green   = "{prefix}a6e3a1"
+yellow  = "{prefix}f9e2af"
+blue    = "{prefix}89b4fa"
+magenta = "{prefix}f5c2e7"
+cyan    = "{prefix}94e2d5"
+white   = "{prefix}bac2de"
+
+[colors.bright]
+black   = "{prefix}585b70"
+red     = "{prefix}f38ba8"
+green   = "{prefix}a6e3a1"
+yellow  = "{prefix}f9e2af"
+blue    = "{prefix}89b4fa"
+magenta = "{prefix}f5c2e7"
+cyan    = "{prefix}94e2d5"
+white   = "{prefix}a6adc8"
+"##
+        )
+    }
+
+    /// The headline regression: a `0x`-form theme must resolve to exactly the
+    /// same rendered colors as the identical theme written in `#` form —
+    /// including the DERIVED fields, which is where the mis-slicing showed
+    /// up (`darken("0x1e1e2e", 0)` used to yield `#001e1e`).
+    #[test]
+    fn a_0x_form_theme_renders_identically_to_the_same_theme_in_hash_form() {
+        let hash = resolve_theme_colors_from_scheme(&load_theme_str("hash", &theme_in_form("#")));
+        let zero_x = resolve_theme_colors_from_scheme(&load_theme_str("0x", &theme_in_form("0x")));
+
+        assert_eq!(zero_x.background, "#1e1e2e");
+        assert_eq!(zero_x.foreground, "#cdd6f4");
+        assert_eq!(zero_x.red, "#f38ba8");
+        assert_eq!(zero_x.bright_white, "#a6adc8");
+        assert_eq!(zero_x.cursor_color, "#f5e0dc");
+        assert_eq!(zero_x.selection_bg, "#f5e0dc");
+        assert_eq!(zero_x.dim_fg, "#7f849c");
+
+        // The derived fields: these are the ones that silently went wrong.
+        assert_eq!(zero_x.panel_bg, hash.panel_bg);
+        assert_eq!(zero_x.tab_bar_bg, hash.tab_bar_bg);
+        assert_eq!(zero_x.tab_border, hash.tab_border);
+        assert_eq!(zero_x.input_bg, hash.input_bg);
+        assert_eq!(zero_x.active_highlight, hash.active_highlight);
+        assert_eq!(zero_x.text_secondary, hash.text_secondary);
+        assert_eq!(zero_x.text_muted, hash.text_muted);
+
+        // And a positive statement of what "correct" is: a dark background
+        // darkens toward black for the panel, so panel_bg is the background
+        // minus 8 per channel.
+        assert_eq!(zero_x.panel_bg, "#161626");
+    }
+
+    /// `CellForeground`/`CellBackground` resolve to the theme's own fg/bg.
+    /// The cursor case doubles as the justification check: a theme spelling
+    /// out Alacritty's own cursor default must land on exactly what
+    /// `resolve_from_scheme_fallback_when_no_cursor` produces for a theme
+    /// with no `[colors.cursor]` at all.
+    #[test]
+    fn cell_rgb_sentinels_resolve_to_the_themes_own_foreground_and_background() {
+        let toml_str = r##"
+[colors.primary]
+background = "#1f1f1f"
+foreground = "#e3e3e3"
+
+[colors.cursor]
+text = "CellBackground"
+cursor = "CellForeground"
+
+[colors.selection]
+text = "CellBackground"
+background = "CellForeground"
+
+[colors.normal]
+black = "#000000"
+red = "#b21818"
+green = "#18b218"
+yellow = "#b26818"
+blue = "#1818b2"
+magenta = "#b218b2"
+cyan = "#18b2b2"
+white = "#b2b2b2"
+
+[colors.bright]
+black = "#686868"
+red = "#ff5454"
+green = "#54ff54"
+yellow = "#ffff54"
+blue = "#5454ff"
+magenta = "#ff54ff"
+cyan = "#54ffff"
+white = "#ffffff"
+"##;
+        let tc = resolve_theme_colors_from_scheme(&load_theme_str("cellrgb", toml_str));
+
+        assert_eq!(tc.cursor_text, "#1f1f1f", "CellBackground -> primary bg");
+        assert_eq!(tc.cursor_color, "#e3e3e3", "CellForeground -> primary fg");
+        assert_eq!(tc.selection_text, "#1f1f1f");
+        assert_eq!(tc.selection_bg, "#e3e3e3");
+
+        // The agreement check: Alacritty's cursor default is
+        // `text = CellBackground, cursor = CellForeground`, and theme.rs
+        // already falls back to bg/fg when a theme omits [colors.cursor].
+        // Spelling the default out must therefore change nothing.
+        let mut without_cursor = load_theme_str("cellrgb-nocursor", toml_str);
+        without_cursor.cursor = None;
+        let fallback = resolve_theme_colors_from_scheme(&without_cursor);
+        assert_eq!(tc.cursor_text, fallback.cursor_text);
+        assert_eq!(tc.cursor_color, fallback.cursor_color);
+
+        // No sentinel string survives into the rendered payload.
+        for value in [
+            &tc.cursor_text,
+            &tc.cursor_color,
+            &tc.selection_text,
+            &tc.selection_bg,
+            &tc.panel_bg,
+            &tc.text_muted,
+        ] {
+            assert!(
+                value.starts_with('#'),
+                "{value} is not canonical #-form after normalization"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // indexed_colors -> xterm ITheme.extendedAnsi
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_theme_without_indexed_colors_carries_an_empty_extended_ansi() {
+        let tc = resolve_theme_colors_from_scheme(&ColorScheme::default());
+        assert!(
+            tc.extended_ansi.is_empty(),
+            "no indexed_colors must mean no extendedAnsi key at all"
+        );
+    }
+
+    /// The github_dark fixture's shape, asserted as the exact expected array.
+    #[test]
+    fn indexed_colors_become_the_extended_ansi_array() {
+        let scheme = ColorScheme {
+            indexed_colors: vec![
+                termlab_core::color_scheme::IndexedColor {
+                    index: 16,
+                    color: "#d18616".into(),
+                },
+                termlab_core::color_scheme::IndexedColor {
+                    index: 18,
+                    color: "#f97583".into(),
+                },
+            ],
+            ..ColorScheme::default()
+        };
+        let tc = resolve_theme_colors_from_scheme(&scheme);
+        assert_eq!(
+            tc.extended_ansi,
+            vec![
+                Some("#d18616".to_string()),
+                None,
+                Some("#f97583".to_string()),
+            ]
+        );
+    }
+
+    /// Normalization reaches indexed_colors too: a `0x`-form indexed color
+    /// must arrive at xterm as `#`-form, since xterm's `css.toColor` only
+    /// understands `#`/`rgb()`/named CSS colors.
+    #[test]
+    fn indexed_colors_are_normalized_before_reaching_extended_ansi() {
+        let toml_str = r##"
+[colors.primary]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+
+[colors.normal]
+black = "#45475a"
+red = "#f38ba8"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+blue = "#89b4fa"
+magenta = "#f5c2e7"
+cyan = "#94e2d5"
+white = "#bac2de"
+
+[colors.bright]
+black = "#585b70"
+red = "#f38ba8"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+blue = "#89b4fa"
+magenta = "#f5c2e7"
+cyan = "#94e2d5"
+white = "#a6adc8"
+
+[[colors.indexed_colors]]
+index = 16
+color = "0xd18616"
+
+[[colors.indexed_colors]]
+index = 17
+color = "CellForeground"
+"##;
+        let tc = resolve_theme_colors_from_scheme(&load_theme_str("indexed", toml_str));
+        assert_eq!(
+            tc.extended_ansi,
+            vec![Some("#d18616".to_string()), Some("#cdd6f4".to_string()),]
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // auto resolution through the command-facing entry point
+    // ---------------------------------------------------------------------
+
+    fn config_with_theme(theme: &str) -> UserConfig {
+        UserConfig {
+            colors: termlab_core::config::ColorsConfig {
+                theme: theme.into(),
+                ..Default::default()
+            },
+            ..UserConfig::default()
+        }
+    }
+
+    #[test]
+    fn auto_resolves_to_a_different_palette_per_appearance() {
+        let cfg = config_with_theme("auto");
+        let dark = resolve_theme_colors_for_appearance(&cfg, Some("dark"));
+        let light = resolve_theme_colors_for_appearance(&cfg, Some("light"));
+        assert_ne!(dark.background, light.background);
+        assert_ne!(dark.foreground, light.foreground);
+    }
+
+    /// Back-compat: an invoke that omits `resolved_appearance` behaves as
+    /// dark. This is the pin for every pre-existing caller.
+    #[test]
+    fn an_absent_appearance_argument_resolves_as_dark() {
+        let cfg = config_with_theme("auto");
+        let absent = resolve_theme_colors_for_appearance(&cfg, None);
+        let dark = resolve_theme_colors_for_appearance(&cfg, Some("dark"));
+        assert_eq!(absent.background, dark.background);
+        assert_eq!(absent.foreground, dark.foreground);
+        assert_eq!(absent.text_muted, dark.text_muted);
+    }
+
+    /// The decoupling guarantee, at the level the frontend actually consumes:
+    /// a config naming a concrete theme produces a byte-identical payload
+    /// under both appearances, so the re-theme fetch an appearance flip
+    /// triggers is a no-op for that user.
+    #[test]
+    fn a_concrete_theme_name_yields_an_identical_payload_under_both_appearances() {
+        let cfg = config_with_theme("dracula");
+        let dark = resolve_theme_colors_for_appearance(&cfg, Some("dark"));
+        let light = resolve_theme_colors_for_appearance(&cfg, Some("light"));
+        let dark_json = serde_json::to_value(&dark).expect("serializable");
+        let light_json = serde_json::to_value(&light).expect("serializable");
+        assert_eq!(dark_json, light_json);
+        // And it is really Dracula, not a TermLab built-in.
+        assert_eq!(dark.background, "#282a36");
+    }
+
+    #[test]
+    fn the_default_config_is_auto_and_therefore_appearance_tracking() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.colors.theme, "auto");
+        let dark = resolve_theme_colors_for_appearance(&cfg, Some("dark"));
+        let light = resolve_theme_colors_for_appearance(&cfg, Some("light"));
+        assert_ne!(dark.background, light.background);
     }
 }

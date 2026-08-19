@@ -52,7 +52,15 @@
       }
 
       try {
-        const tc = await invoke('GET_THEME_COLORS');
+        // Deliberately after the appearance apply above, so the resolved
+        // value this carries is the new one. It is the argument the reserved
+        // `auto` theme resolves against; Rust cannot see `system`.
+        const tc = await invoke('GET_THEME_COLORS', {
+          resolvedAppearance: global.termlabAppearance
+            && typeof global.termlabAppearance.current === 'function'
+            ? global.termlabAppearance.current()
+            : 'dark',
+        });
         if (typeof configService.applyThemeCss === 'function') {
           configService.applyThemeCss(tc);
         }

@@ -96,17 +96,10 @@
       });
     }
 
-    // Apply theme colors.
-    try {
-      const tc = await invoke('GET_THEME_COLORS');
-      if (typeof configService.applyThemeCss === 'function') {
-        configService.applyThemeCss(tc);
-      }
-    } catch (e) {
-      console.warn('Failed to load theme colors:', e);
-    }
-
-    // Apply UI font sizes from config.
+    // Apply UI font sizes from config. Runs BEFORE the theme fetch below,
+    // because that fetch has to carry the resolved appearance and this is
+    // what resolves it (termlabAppearance.apply). Same ordering as
+    // app/config-runtime.js and app/core/appearance-sync.js.
     try {
       const appCfg = await invoke('GET_APP_CONFIG');
       if (window.termlabAppearance && typeof window.termlabAppearance.apply === 'function') {
@@ -118,6 +111,18 @@
         document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
       }
     } catch (_) {}
+
+    // Apply theme colors.
+    try {
+      const tc = await invoke('GET_THEME_COLORS', {
+        resolvedAppearance: window.termlabAppearance ? window.termlabAppearance.current() : 'dark',
+      });
+      if (typeof configService.applyThemeCss === 'function') {
+        configService.applyThemeCss(tc);
+      }
+    } catch (e) {
+      console.warn('Failed to load theme colors:', e);
+    }
 
     // Stay in step with an appearance/theme change made anywhere else — and,
     // more importantly, with this window's OWN Apply button: actions.js's

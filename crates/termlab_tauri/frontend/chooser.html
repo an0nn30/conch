@@ -67,25 +67,16 @@
 
       const configService = window.termlabConfigService || {};
 
-      // Apply theme colors — mirrors settings.html (settings.html:98-106).
-      // `data-tl-appearance` itself is set below, from the GET_APP_CONFIG
-      // fetch (app/core/appearance.js owns the attribute); applyThemeCss's
-      // CSS custom properties are the separate, always-on mechanism handled
-      // here.
-      (async () => {
-        try {
-          const tc = await invoke('GET_THEME_COLORS');
-          if (typeof configService.applyThemeCss === 'function') {
-            configService.applyThemeCss(tc);
-          }
-        } catch (e) {
-          console.warn('Failed to load theme colors:', e);
-        }
-      })();
-
+      // Appearance + custom titlebar, then theme colors — one sequential IIFE
+      // rather than two parallel ones, because the theme fetch has to carry
+      // the resolved appearance and `termlabAppearance.apply` below is what
+      // resolves it. `data-tl-appearance` is owned by app/core/appearance.js;
+      // applyThemeCss's CSS custom properties are the separate, always-on
+      // mechanism. Mirrors settings.html's ordering.
+      //
       // Activate custom titlebar on Windows/Linux (no native decorations
       // there — chooser_window.rs's use_custom_titlebar). Mirrors
-      // settings.html:118-132 with the ids renamed chooser-titlebar*.
+      // settings.html with the ids renamed chooser-titlebar*.
       (async () => {
         try {
           const appCfg = await invoke('GET_APP_CONFIG');
@@ -103,6 +94,17 @@
             titlebar.querySelector('.chooser-titlebar-btn-close').addEventListener('click', () => win.close());
           }
         } catch (_) {}
+
+        try {
+          const tc = await invoke('GET_THEME_COLORS', {
+            resolvedAppearance: window.termlabAppearance ? window.termlabAppearance.current() : 'dark',
+          });
+          if (typeof configService.applyThemeCss === 'function') {
+            configService.applyThemeCss(tc);
+          }
+        } catch (e) {
+          console.warn('Failed to load theme colors:', e);
+        }
       })();
 
       // A chooser is modal only over its own parent (chooser_window.rs), so a

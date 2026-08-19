@@ -9,6 +9,7 @@ pub(crate) mod cleanup;
 pub(crate) mod close_guard;
 mod commands;
 mod editor_fs;
+pub(crate) mod extended_ansi;
 pub(crate) mod font_metrics;
 pub(crate) mod fonts;
 mod ipc;

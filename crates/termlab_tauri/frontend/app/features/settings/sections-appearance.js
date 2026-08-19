@@ -50,15 +50,31 @@
     const previewBox = buildThemePreview();
     container.appendChild(previewBox);
 
+    // The reserved `auto` name resolves against the app's appearance, so the
+    // preview has to say which one — otherwise previewing `auto` would show
+    // the dark built-in on a light install. Read at call time, not captured,
+    // so a mode change made in this same dialog is reflected on the next
+    // preview.
+    const resolvedAppearance = () => (global.termlabAppearance
+      && typeof global.termlabAppearance.current === 'function'
+      ? global.termlabAppearance.current()
+      : 'dark');
+
     let previewSeq = 0;
-    invoke('preview_theme_colors', { name: pendingSettings.colors.theme })
+    invoke('preview_theme_colors', {
+      name: pendingSettings.colors.theme,
+      resolvedAppearance: resolvedAppearance(),
+    })
       .then((tc) => updateThemePreview(previewBox, tc))
       .catch(() => {});
 
     themeSelect.addEventListener('change', () => {
       pendingSettings.colors.theme = themeSelect.value;
       const seq = ++previewSeq;
-      invoke('preview_theme_colors', { name: themeSelect.value })
+      invoke('preview_theme_colors', {
+        name: themeSelect.value,
+        resolvedAppearance: resolvedAppearance(),
+      })
         .then((tc) => {
           if (seq === previewSeq) updateThemePreview(previewBox, tc);
         })

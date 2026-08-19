@@ -77,12 +77,21 @@
             cursorBlink: termCursorBlink,
             scrollSensitivity: termScrollSensitivity,
           });
-      const startupThemePromise = startupRuntime && startupRuntime.loadTheme
-        ? startupRuntime.loadTheme(invoke, fallbackTheme)
-        : Promise.resolve(fallbackTheme);
       const startupAppConfigPromise = startupRuntime && startupRuntime.applyAppConfig
         ? startupRuntime.applyAppConfig(invoke)
         : Promise.resolve({ borderlessMode: false, vimMode: false });
+      // Chained onto the app-config promise, not run alongside it: the theme
+      // fetch has to carry the RESOLVED appearance, and applyAppConfig is
+      // what resolves it (termlabAppearance.apply from appearance_mode). Under
+      // the default `auto` theme, fetching first would paint the dark built-in
+      // on a light install. The theme is applied to already-created panes far
+      // later (see startupThemePromise.then below) and the window reveal
+      // already awaits startupAppConfigPromise, so this costs no visible time.
+      const startupThemePromise = startupRuntime && startupRuntime.loadTheme
+        ? startupAppConfigPromise
+            .catch(() => {})
+            .then(() => startupRuntime.loadTheme(invoke, fallbackTheme))
+        : Promise.resolve(fallbackTheme);
       // A second consumer of the same promise: the block further down awaits
       // it for layout, this one only needs the flag. Editor tabs are opened by
       // the user, long after startup, so getEditorVimMode() below never reads

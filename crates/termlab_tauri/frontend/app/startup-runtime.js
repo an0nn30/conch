@@ -84,8 +84,16 @@
         });
     }
 
+    // Called AFTER applyAppConfig has resolved the appearance (main-runtime
+    // chains the two), because the palette `auto` resolves to depends on it:
+    // fetching in parallel would paint the dark built-in on a light install
+    // and only correct itself on the next flip.
     function loadTheme(invoke, fallbackTheme) {
-      return invoke('get_theme_colors')
+      const resolvedAppearance = global.termlabAppearance
+        && typeof global.termlabAppearance.current === 'function'
+        ? global.termlabAppearance.current()
+        : 'dark';
+      return invoke('get_theme_colors', { resolvedAppearance })
         .then((tc) => {
           const defaultTheme = {
             background: tc.background, foreground: tc.foreground,

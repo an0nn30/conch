@@ -412,7 +412,19 @@ impl HostApi for TauriHostApi {
     fn get_theme(&self) -> Option<String> {
         let tauri_state = self.app_handle.state::<crate::TauriState>();
         let cfg = tauri_state.config.read();
-        let colors = crate::theme::resolve_theme_colors(&cfg);
+        // Routed through the same effective resolution as get_theme_colors so
+        // a plugin asking for the theme under the default `auto` gets the
+        // built-in palette the terminal is actually showing, not the Dracula
+        // fallback an unresolved `auto` name would produce. This is a
+        // Rust-side call with no webview in reach, so the best appearance it
+        // can name is the configured mode's hint — `system` degrades to dark.
+        // `name` below still reports the CONFIGURED value verbatim (`"auto"`
+        // stays `"auto"`): it is a config echo, and `appearance_mode` is
+        // reported alongside it so a plugin can resolve it itself.
+        let colors = crate::theme::resolve_theme_colors_for_appearance(
+            &cfg,
+            Some(cfg.colors.appearance_mode.resolved_hint()),
+        );
         let appearance_mode = format!("{:?}", cfg.colors.appearance_mode).to_lowercase();
         let dark_mode = !matches!(
             cfg.colors.appearance_mode,

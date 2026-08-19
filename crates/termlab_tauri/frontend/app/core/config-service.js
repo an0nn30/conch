@@ -84,8 +84,36 @@
     }
   }
 
+  // Alacritty's `colors.indexed_colors[]` reaches xterm through
+  // `ITheme.extendedAnsi`: a plain array whose element 0 is ANSI slot 16.
+  // Rust sends it SPARSE — `null` for every slot the theme does not override
+  // (see crates/termlab_tauri/src/extended_ansi.rs for the trace against the
+  // vendored xterm 5.5.0 bundle). Those nulls are mapped to `undefined` here
+  // rather than passed through, because xterm's per-entry parser is
+  //   function p(e, t) { if (void 0 !== e) try { return css.toColor(e) } catch {} return t }
+  // and `undefined` takes the clean short-circuit branch, keeping the default
+  // the palette was already seeded with. A `null` would instead reach
+  // `css.toColor(null)` and rely on the resulting TypeError being swallowed
+  // by that `catch` — same outcome, worse contract to depend on.
+  //
+  // Returns undefined when there is nothing to send, so the key is OMITTED
+  // and a theme without indexed colors produces byte-for-byte the xterm theme
+  // object it produced before this existed.
+  function toExtendedAnsi(extendedAnsi) {
+    if (!Array.isArray(extendedAnsi) || extendedAnsi.length === 0) return undefined;
+    return extendedAnsi.map((color) => (typeof color === 'string' && color ? color : undefined));
+  }
+
   function toTerminalTheme(themeColors, fallbackTheme) {
     if (!themeColors || typeof themeColors !== 'object') return fallbackTheme;
+    const extendedAnsi = toExtendedAnsi(themeColors.extended_ansi);
+    if (extendedAnsi) {
+      return Object.assign(baseTerminalTheme(themeColors), { extendedAnsi });
+    }
+    return baseTerminalTheme(themeColors);
+  }
+
+  function baseTerminalTheme(themeColors) {
     return {
       background: themeColors.background,
       foreground: themeColors.foreground,

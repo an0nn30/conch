@@ -627,7 +627,7 @@ function makeConfigRuntimeSandbox(seedExtra) {
   return { sandbox, doc };
 }
 
-check('an appearance change refreshes every open editor pane (and nothing else)', () => {
+check('an appearance change refreshes every open editor pane (and nothing else)', async () => {
   const refreshed = [];
   const { sandbox, doc } = makeConfigRuntimeSandbox((s) => {
     s.termlabEditorPane = {
@@ -657,11 +657,283 @@ check('an appearance change refreshes every open editor pane (and nothing else)'
   });
   runtime.init();
 
+  // The flip now re-fetches the palette before walking the panes, so the walk
+  // lands a microtask later than it used to; appearanceSettled() is the
+  // handle on that promise (test-only — nothing in the app reads it).
   sandbox.termlabAppearance.apply('light', { doc });
+  await runtime.appearanceSettled();
   assert.deepStrictEqual(refreshed, [editorView], 'the one mounted editor rebuilt its theme');
 
   sandbox.termlabAppearance.apply('dark', { doc });
+  await runtime.appearanceSettled();
   assert.deepStrictEqual(refreshed, [editorView, editorView], 'and again on the way back');
+});
+
+// ------------------------------------------------- appearance -> re-theme
+//
+// The default terminal theme is now the reserved name `auto`, which resolves
+// to TermLab Dark or TermLab Light by the app's RESOLVED appearance. Rust
+// cannot resolve that itself — `system` lives in matchMedia inside the
+// webview — so every get_theme_colors invoke carries
+// `termlabAppearance.current()`, and an appearance flip has to re-fetch.
+
+check('the flip re-fetches get_theme_colors with the NEW resolved appearance', async () => {
+  const calls = [];
+  const { sandbox, doc } = makeConfigRuntimeSandbox((s) => {
+    s.termlabEditorPane = { refreshTheme: () => {}, setVimMode: () => {}, setFontSize: () => {} };
+  });
+
+  // A stand-in backend: `auto` answers with a different palette per
+  // appearance, exactly as termlab_core::effective_theme does.
+  const PALETTES = {
+    dark: { background: '#070A0E', foreground: '#BFC6CE' },
+    light: { background: '#FFFFFF', foreground: '#1F2933' },
+  };
+
+  const terminalPane = { kind: 'terminal', term: { options: {} } };
+  const applied = [];
+  const runtime = sandbox.termlabConfigRuntime.create({
+    invoke: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'get_theme_colors') return PALETTES[args.resolvedAppearance];
+      throw new Error(`unexpected command ${command}`);
+    },
+    listenOnCurrentWindow: () => {},
+    refreshKeyboardShortcutFallbacks: async () => {},
+    getPanes: () => new Map([['p1', terminalPane]]),
+    setTheme: (t) => { applied.push(t); },
+    getFontFallbacks: () => '',
+    setTermFontFamily: () => {},
+    setTermFontSize: () => {},
+    setEditorVimMode: () => {},
+  });
+  runtime.init();
+
+  sandbox.termlabAppearance.apply('light', { doc });
+  await runtime.appearanceSettled();
+
+  assert.strictEqual(calls.length, 1, 'the flip issued exactly one theme fetch');
+  assert.strictEqual(calls[0].command, 'get_theme_colors');
+  // Compared field-wise rather than with deepStrictEqual: the args object is
+  // built inside the vm context and does not share this realm's prototype.
+  assert.strictEqual(calls[0].args.resolvedAppearance, 'light',
+    'and it carried the NEW resolved value, not the outgoing one');
+  assert.deepStrictEqual(Object.keys(calls[0].args), ['resolvedAppearance'],
+    'and nothing else');
+  assert.strictEqual(applied.length, 1);
+  assert.strictEqual(applied[0].background, '#FFFFFF', 'the light palette reached setTheme');
+  assert.strictEqual(terminalPane.term.options.theme.background, '#FFFFFF',
+    'and the open terminal pane, via the same walk applyConfigChanged uses');
+
+  sandbox.termlabAppearance.apply('dark', { doc });
+  await runtime.appearanceSettled();
+  assert.strictEqual(calls[1].args.resolvedAppearance, 'dark');
+  assert.strictEqual(terminalPane.term.options.theme.background, '#070A0E', 'and back');
+});
+
+// The decoupling guarantee at the frontend boundary. A user on a concrete
+// theme still gets the re-fetch (harmless), but the RESULT must be identical
+// — their terminal must not shift palette when the app appearance flips.
+// Rust pins the resolution invariance itself
+// (theme.rs: a_concrete_theme_name_yields_an_identical_payload_under_both_appearances);
+// this pins that the frontend does not introduce a difference of its own.
+check('a concrete theme name produces an identical theme object across a flip', async () => {
+  const { sandbox, doc } = makeConfigRuntimeSandbox();
+  const GRUVBOX = {
+    background: '#282828', foreground: '#ebdbb2',
+    cursor_color: '#ebdbb2', cursor_text: '#282828',
+    selection_bg: '#504945', selection_text: '#ebdbb2',
+    black: '#282828', red: '#cc241d', green: '#98971a', yellow: '#d79921',
+    blue: '#458588', magenta: '#b16286', cyan: '#689d6a', white: '#a89984',
+    bright_black: '#928374', bright_red: '#fb4934', bright_green: '#b8bb26',
+    bright_yellow: '#fabd2f', bright_blue: '#83a598', bright_magenta: '#d3869b',
+    bright_cyan: '#8ec07c', bright_white: '#ebdbb2',
+    extended_ansi: [],
+  };
+
+  const applied = [];
+  const runtime = sandbox.termlabConfigRuntime.create({
+    // colors.theme = "gruvbox_dark": the backend ignores resolvedAppearance
+    // entirely for a concrete name, which is the whole point.
+    invoke: async () => GRUVBOX,
+    listenOnCurrentWindow: () => {},
+    refreshKeyboardShortcutFallbacks: async () => {},
+    getPanes: () => new Map(),
+    setTheme: (t) => { applied.push(t); },
+    getFontFallbacks: () => '',
+    setTermFontFamily: () => {},
+    setTermFontSize: () => {},
+    setEditorVimMode: () => {},
+  });
+  runtime.init();
+
+  sandbox.termlabAppearance.apply('light', { doc });
+  await runtime.appearanceSettled();
+  sandbox.termlabAppearance.apply('dark', { doc });
+  await runtime.appearanceSettled();
+
+  assert.strictEqual(applied.length, 2, 'both flips re-themed');
+  assert.deepStrictEqual(applied[0], applied[1],
+    'a Gruvbox user sees the same palette under both appearances');
+});
+
+check('a failing re-theme fetch still refreshes open editors', async () => {
+  const refreshed = [];
+  const { sandbox, doc } = makeConfigRuntimeSandbox((s) => {
+    s.termlabEditorPane = {
+      refreshTheme: (view) => { refreshed.push(view); },
+      setVimMode: () => {},
+      setFontSize: () => {},
+    };
+  });
+  const editorView = { id: 'editor-1' };
+  const runtime = sandbox.termlabConfigRuntime.create({
+    invoke: async () => { throw new Error('backend is unhappy'); },
+    listenOnCurrentWindow: () => {},
+    refreshKeyboardShortcutFallbacks: async () => {},
+    getPanes: () => new Map([['p1', { kind: 'editor', view: editorView }]]),
+    setTheme: () => {},
+    getFontFallbacks: () => '',
+    setTermFontFamily: () => {},
+    setTermFontSize: () => {},
+    setEditorVimMode: () => {},
+  });
+  runtime.init();
+
+  sandbox.termlabAppearance.apply('light', { doc });
+  await runtime.appearanceSettled();
+  assert.deepStrictEqual(refreshed, [editorView],
+    'the editor-only fallback ran, so a rejected fetch cannot strand open editors');
+});
+
+check('applyConfigChanged fetches the theme with the resolved appearance too', async () => {
+  const calls = [];
+  const { sandbox } = makeConfigRuntimeSandbox();
+  const runtime = sandbox.termlabConfigRuntime.create({
+    invoke: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'get_app_config') return { appearance_mode: 'light' };
+      if (command === 'get_theme_colors') return { background: '#FFFFFF' };
+      if (command === 'get_terminal_config') return { font_family: '', font_size: 14 };
+      throw new Error(`unexpected command ${command}`);
+    },
+    listenOnCurrentWindow: () => {},
+    refreshKeyboardShortcutFallbacks: async () => {},
+    getPanes: () => new Map(),
+    setTheme: () => {},
+    getFontFallbacks: () => '',
+    setTermFontFamily: () => {},
+    setTermFontSize: () => {},
+    setEditorVimMode: () => {},
+  });
+
+  await runtime.applyConfigChanged();
+  const themeCall = calls.find((c) => c.command === 'get_theme_colors');
+  assert.ok(themeCall, 'the theme was fetched');
+  assert.strictEqual(themeCall.args.resolvedAppearance, 'light',
+    'and it carried the appearance the same handler had just applied');
+  // Ordering matters: the appearance apply has to land BEFORE the fetch, or
+  // the fetch carries the outgoing value.
+  assert.ok(
+    calls.findIndex((c) => c.command === 'get_app_config')
+      < calls.findIndex((c) => c.command === 'get_theme_colors'),
+    'get_app_config (which resolves the appearance) precedes get_theme_colors',
+  );
+});
+
+// -------------------------------------------------------- extendedAnsi
+//
+// Alacritty's colors.indexed_colors[] reaches xterm through
+// ITheme.extendedAnsi. Rust sends it sparse (null per un-overridden slot);
+// config-service maps the nulls to undefined so xterm's
+//   function p(e, t) { if (void 0 !== e) try { return css.toColor(e) } catch {} return t }
+// takes the clean short-circuit branch instead of relying on the throw.
+
+check('extended_ansi becomes extendedAnsi, with nulls turned into undefined holes', () => {
+  const sandbox = loadFresh([CONFIG_SERVICE], (s) => {
+    s.document = { documentElement: { style: { setProperty() {}, removeProperty() {} } } };
+  });
+  const theme = sandbox.termlabConfigService.toTerminalTheme(
+    { background: '#000000', extended_ansi: ['#d18616', null, '#f97583'] },
+    {},
+  );
+  assert.strictEqual(theme.extendedAnsi.length, 3);
+  assert.strictEqual(theme.extendedAnsi[0], '#d18616', 'element 0 is ANSI slot 16');
+  assert.strictEqual(theme.extendedAnsi[1], undefined, 'a hole is undefined, not null');
+  assert.strictEqual(theme.extendedAnsi[2], '#f97583');
+});
+
+check('a theme with no indexed colors omits extendedAnsi entirely', () => {
+  const sandbox = loadFresh([CONFIG_SERVICE], (s) => {
+    s.document = { documentElement: { style: { setProperty() {}, removeProperty() {} } } };
+  });
+  for (const extended_ansi of [[], undefined, null]) {
+    const theme = sandbox.termlabConfigService.toTerminalTheme(
+      { background: '#000000', extended_ansi }, {},
+    );
+    assert.ok(!('extendedAnsi' in theme),
+      `extended_ansi=${JSON.stringify(extended_ansi)} must not add the key`);
+  }
+});
+
+// The wiring in the two HTML entrypoints and the boot/sync modules cannot be
+// driven from node, so it is asserted statically — without this, `auto` would
+// silently resolve dark in the settings window, the chooser and at startup.
+check('every get_theme_colors call site passes resolvedAppearance', () => {
+  const sites = [
+    'app/config-runtime.js',
+    'app/startup-runtime.js',
+    'app/core/appearance-sync.js',
+    'settings.html',
+    'chooser.html',
+  ];
+  for (const site of sites) {
+    const source = fs.readFileSync(path.join(FRONTEND, site), 'utf8');
+    const invokes = source.match(/invoke\(\s*'(?:get_theme_colors|GET_THEME_COLORS)'[^)]*/g) || [];
+    assert.ok(invokes.length > 0, `${site} still invokes get_theme_colors`);
+    for (const call of invokes) {
+      assert.ok(/resolvedAppearance/.test(call),
+        `${site} passes resolvedAppearance: ${call}`);
+    }
+  }
+});
+
+check('the settings preview passes resolvedAppearance so `auto` previews correctly', () => {
+  const source = fs.readFileSync(
+    path.join(FRONTEND, 'app/features/settings/sections-appearance.js'), 'utf8',
+  );
+  const invokes = source.match(/invoke\('preview_theme_colors',\s*\{[^}]*\}/g) || [];
+  assert.strictEqual(invokes.length, 2, 'both preview call sites found');
+  for (const call of invokes) {
+    assert.ok(/resolvedAppearance/.test(call), `preview passes resolvedAppearance: ${call}`);
+  }
+});
+
+// The startup ordering bug this would otherwise have: loadTheme used to run
+// alongside applyAppConfig, so under `auto` a light install painted the dark
+// built-in until the next flip.
+check('startup chains the theme load behind the app-config (appearance) fetch', () => {
+  const source = fs.readFileSync(path.join(FRONTEND, 'app/main-runtime.js'), 'utf8');
+  assert.ok(
+    source.indexOf('const startupAppConfigPromise') < source.indexOf('const startupThemePromise'),
+    'the app-config promise is created first',
+  );
+  assert.ok(
+    /startupThemePromise\s*=[\s\S]{0,400}startupAppConfigPromise[\s\S]{0,200}loadTheme/.test(source),
+    'and the theme load is chained onto it, not run in parallel',
+  );
+});
+
+// Both secondary windows fetch the theme AFTER applying the appearance, or
+// the fetch carries the outgoing value.
+check('settings.html and chooser.html resolve appearance before fetching the theme', () => {
+  for (const page of ['settings.html', 'chooser.html']) {
+    const html = fs.readFileSync(path.join(FRONTEND, page), 'utf8');
+    assert.ok(
+      html.indexOf('termlabAppearance.apply(') < html.indexOf("invoke('GET_THEME_COLORS'"),
+      `${page} applies the appearance before it fetches the theme`,
+    );
+  }
 });
 
 // F4: with the get_app_config fetch moved ahead of get_theme_colors, an

@@ -43,6 +43,16 @@ pub(crate) fn get_all_settings(state: tauri::State<'_, TauriState>) -> serde_jso
     serde_json::to_value(cfg).unwrap_or_default()
 }
 
+/// Theme names for the settings picker.
+///
+/// Does NOT read `colors.theme` — it enumerates the theme directories — so it
+/// needs no appearance resolution. It does have to OFFER the reserved `auto`
+/// name, though, now that `auto` is the default `colors.theme`: without it the
+/// picker could not display (or re-select) the value a fresh config carries.
+/// Same shape as the `dracula` guarantee below, which exists for the same
+/// reason (the built-in fallback is always selectable even with no file on
+/// disk). `auto` is prepended rather than sorted in, so it reads as the
+/// distinct reserved entry it is.
 #[tauri::command]
 pub(crate) fn list_themes() -> Vec<String> {
     let mut themes: Vec<String> = termlab_core::color_scheme::list_themes()
@@ -53,12 +63,29 @@ pub(crate) fn list_themes() -> Vec<String> {
         themes.push("dracula".into());
     }
     themes.sort();
+    themes.insert(0, termlab_core::effective_theme::AUTO_THEME_NAME.into());
     themes
 }
 
+/// Preview a theme BY NAME (the picker's current selection, not the saved
+/// config), so it does not read `colors.theme` either. It must still honor
+/// `auto`, because `list_themes` now offers it: previewing `auto` without
+/// resolution would fall through the name lookup and silently show Dracula.
+///
+/// `resolved_appearance` is optional and defaults to dark, exactly as in
+/// `commands::get_theme_colors`.
 #[tauri::command]
-pub(crate) fn preview_theme_colors(name: String) -> Result<theme::ThemeColors, String> {
-    let scheme = termlab_core::color_scheme::resolve_theme(&name);
+pub(crate) fn preview_theme_colors(
+    name: String,
+    resolved_appearance: Option<String>,
+) -> Result<theme::ThemeColors, String> {
+    let effective = termlab_core::effective_theme::effective_theme_name(
+        &name,
+        resolved_appearance
+            .as_deref()
+            .unwrap_or(termlab_core::effective_theme::DEFAULT_RESOLVED_APPEARANCE),
+    );
+    let scheme = termlab_core::color_scheme::resolve_theme(effective);
     Ok(theme::resolve_theme_colors_from_scheme(&scheme))
 }
 

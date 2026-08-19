@@ -103,10 +103,21 @@ pub(crate) fn clipboard_write_text(text: String) -> Result<(), String> {
 // Theme colors
 // ---------------------------------------------------------------------------
 
+/// Resolve the terminal palette for this window.
+///
+/// `resolved_appearance` ('dark' | 'light') is OPTIONAL: the frontend passes
+/// `termlabAppearance.current()`, which is the only place the `system`
+/// appearance is actually resolved (it lives in `matchMedia`, invisible to
+/// Rust). An invoke that omits it — any caller predating this argument —
+/// resolves as dark, which is the pre-existing behavior for every theme name
+/// except the new reserved `auto`.
 #[tauri::command]
-pub(crate) fn get_theme_colors(state: tauri::State<'_, TauriState>) -> theme::ThemeColors {
+pub(crate) fn get_theme_colors(
+    state: tauri::State<'_, TauriState>,
+    resolved_appearance: Option<String>,
+) -> theme::ThemeColors {
     let cfg = state.config.read();
-    theme::resolve_theme_colors(&cfg)
+    theme::resolve_theme_colors_for_appearance(&cfg, resolved_appearance.as_deref())
 }
 
 // ---------------------------------------------------------------------------

@@ -38,10 +38,35 @@ pub struct ColorsConfig {
     pub appearance_mode: AppearanceMode,
 }
 
+impl AppearanceMode {
+    /// The best resolved appearance Rust alone can name for this mode.
+    ///
+    /// `System` resolves through `matchMedia` inside the webview, which Rust
+    /// cannot see, so it degrades to `"dark"` — the same unresolvable-is-dark
+    /// convention as `app/core/appearance.js` and
+    /// `effective_theme::DEFAULT_RESOLVED_APPEARANCE`. Callers that CAN see
+    /// the real resolved value (anything reached from the frontend) must pass
+    /// that instead of using this.
+    pub fn resolved_hint(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark | Self::System => "dark",
+        }
+    }
+}
+
 impl Default for ColorsConfig {
+    /// `theme` defaults to the reserved `"auto"` name
+    /// (`effective_theme::AUTO_THEME_NAME`), which tracks the app appearance
+    /// across the two built-in TermLab palettes.
+    ///
+    /// This is a *serde* default only. `ColorsConfig` is `#[serde(default)]`,
+    /// so a `config.toml` that names any theme keeps that theme untouched;
+    /// only a config with no `colors.theme` key at all (including a brand-new
+    /// install) picks up `auto`.
     fn default() -> Self {
         Self {
-            theme: "dracula".into(),
+            theme: crate::effective_theme::AUTO_THEME_NAME.into(),
             appearance_mode: AppearanceMode::default(),
         }
     }
@@ -113,9 +138,46 @@ mod tests {
     }
 
     #[test]
-    fn colors_config_default_theme() {
+    fn colors_config_default_theme_is_auto() {
         let c = ColorsConfig::default();
-        assert_eq!(c.theme, "dracula");
+        assert_eq!(c.theme, "auto");
+    }
+
+    /// The default flip is serde-only. A config file that omits
+    /// `colors.theme` gets `auto`; a config file that names a theme keeps it
+    /// byte for byte, with no migration.
+    #[test]
+    fn a_config_without_the_theme_key_gets_auto() {
+        let parsed: ColorsConfig = toml::from_str(r#"appearance_mode = "light""#).unwrap();
+        assert_eq!(parsed.theme, "auto");
+        assert_eq!(parsed.appearance_mode, AppearanceMode::Light);
+    }
+
+    #[test]
+    fn a_config_naming_a_theme_is_left_untouched_by_the_default_flip() {
+        for name in ["dracula", "gruvbox_dark", "TermLab Light"] {
+            let parsed: ColorsConfig =
+                toml::from_str(&format!("theme = {}", toml::Value::from(name))).unwrap();
+            assert_eq!(parsed.theme, name, "{name} must survive the default flip");
+        }
+    }
+
+    #[test]
+    fn an_empty_colors_table_gets_auto_and_dark() {
+        let parsed: ColorsConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.theme, "auto");
+        assert_eq!(parsed.appearance_mode, AppearanceMode::Dark);
+    }
+
+    #[test]
+    fn resolved_hint_is_light_only_for_light() {
+        assert_eq!(AppearanceMode::Light.resolved_hint(), "light");
+        assert_eq!(AppearanceMode::Dark.resolved_hint(), "dark");
+        assert_eq!(
+            AppearanceMode::System.resolved_hint(),
+            "dark",
+            "Rust cannot see matchMedia, so System degrades to dark"
+        );
     }
 
     #[test]
