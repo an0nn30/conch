@@ -162,6 +162,34 @@ mod tests {
         }
     }
 
+    /// Saving ANY setting materializes `theme = "auto"` into a config file
+    /// that previously had no `colors.theme` key at all. `save_settings`
+    /// deserializes the whole `UserConfig` and re-serializes it, so every
+    /// `#[serde(default)]` field becomes explicit on the next write — a
+    /// pre-existing pattern that predates this key, not something `auto`
+    /// introduced.
+    ///
+    /// This is DELIBERATE and it is downgrade-safe. A build that predates
+    /// the reserved name treats `"auto"` as an ordinary theme name, finds no
+    /// `auto.toml`, and falls back to built-in Dracula — which is exactly
+    /// what that same build showed for the keyless config before the save,
+    /// since `"dracula"` was the old serde default. So the materialized key
+    /// changes nothing for an older binary reading the same file.
+    #[test]
+    fn a_keyless_config_materializes_theme_auto_on_the_next_save() {
+        let parsed: ColorsConfig = toml::from_str(r#"appearance_mode = "dark""#).unwrap();
+        let written = toml::to_string(&parsed).unwrap();
+        assert!(
+            written.contains(r#"theme = "auto""#),
+            "the next save writes the key explicitly; got:\n{written}"
+        );
+
+        // And it round-trips to the same value rather than drifting.
+        let reparsed: ColorsConfig = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed.theme, "auto");
+        assert_eq!(reparsed.appearance_mode, parsed.appearance_mode);
+    }
+
     #[test]
     fn an_empty_colors_table_gets_auto_and_dark() {
         let parsed: ColorsConfig = toml::from_str("").unwrap();

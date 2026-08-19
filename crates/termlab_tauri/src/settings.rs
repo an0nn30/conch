@@ -272,20 +272,124 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // list_themes / preview_theme_colors
+    //
+    // These call the command functions themselves. An earlier version of
+    // these tests re-implemented the command bodies (`resolve_theme(name)`
+    // inline), which meant they kept passing no matter what the commands
+    // actually did — they were decoys. Everything below goes through
+    // `super::list_themes()` / `super::preview_theme_colors(..)` so that
+    // deleting either the `auto` prepend or the effective-resolution routing
+    // reds a named test.
+    // -----------------------------------------------------------------
+
+    /// Background of a theme resolved the way the terminal itself resolves
+    /// it — the reference the previews are checked against, so a preview
+    /// cannot drift from what the pane will show.
+    fn terminal_background(name: &str) -> String {
+        crate::theme::resolve_theme_colors_from_scheme(&termlab_core::color_scheme::resolve_theme(
+            name,
+        ))
+        .background
+    }
+
+    /// `auto` is a reserved name with no file behind it, so the picker can
+    /// only offer it if `list_themes` puts it there. Without this the
+    /// settings picker cannot display (or re-select) the value a fresh
+    /// config carries, since `auto` is now the default `colors.theme`.
+    #[test]
+    fn list_themes_offers_the_reserved_auto_name_first() {
+        let themes = list_themes();
+        assert_eq!(
+            themes.first().map(String::as_str),
+            Some(termlab_core::effective_theme::AUTO_THEME_NAME),
+            "`auto` must be offered, and offered first"
+        );
+    }
+
+    /// The rest of the list keeps the pre-existing sorted-with-dracula
+    /// shape: `auto` is *prepended*, not sorted in, so it reads as the
+    /// distinct reserved entry it is.
+    #[test]
+    fn list_themes_keeps_the_remaining_entries_sorted_and_includes_dracula() {
+        let themes = list_themes();
+        let rest = &themes[1..];
+        let mut sorted = rest.to_vec();
+        sorted.sort();
+        assert_eq!(rest, sorted.as_slice(), "the tail is still sorted");
+        assert!(
+            themes.iter().any(|t| t == "dracula"),
+            "the built-in fallback is always selectable"
+        );
+    }
+
+    /// The routing under test: previewing `auto` must resolve it against the
+    /// appearance. Without the routing, `resolve_theme("auto")` finds no such
+    /// file and silently returns Dracula — so the picker would show Dracula
+    /// while the terminal shows a TermLab built-in.
+    #[test]
+    fn preview_theme_colors_resolves_auto_against_the_appearance() {
+        let dark = preview_theme_colors("auto".into(), Some("dark".into())).unwrap();
+        let light = preview_theme_colors("auto".into(), Some("light".into())).unwrap();
+
+        assert_eq!(
+            dark.background,
+            terminal_background(termlab_core::effective_theme::TERMLAB_DARK_THEME),
+            "auto/dark previews exactly what the terminal will show"
+        );
+        assert_eq!(
+            light.background,
+            terminal_background(termlab_core::effective_theme::TERMLAB_LIGHT_THEME),
+            "auto/light previews exactly what the terminal will show"
+        );
+        assert_ne!(
+            dark.background, light.background,
+            "auto must track the appearance"
+        );
+        // Stated negatively too, because Dracula is precisely what an
+        // unrouted `auto` would silently produce.
+        assert_ne!(
+            dark.background, "#282a36",
+            "not the unresolved-name fallback"
+        );
+        assert_ne!(
+            light.background, "#282a36",
+            "not the unresolved-name fallback"
+        );
+    }
+
+    /// Back-compat, matching `commands::get_theme_colors`: an omitted
+    /// appearance argument means dark.
+    #[test]
+    fn preview_theme_colors_defaults_to_dark_without_an_appearance() {
+        let absent = preview_theme_colors("auto".into(), None).unwrap();
+        assert_eq!(
+            absent.background,
+            terminal_background(termlab_core::effective_theme::TERMLAB_DARK_THEME)
+        );
+    }
+
+    /// Decoupling: a concrete name previews identically under both
+    /// appearances, so a Gruvbox user's preview does not shift on a flip.
+    #[test]
+    fn preview_theme_colors_is_appearance_independent_for_a_concrete_name() {
+        let dark = preview_theme_colors("dracula".into(), Some("dark".into())).unwrap();
+        let light = preview_theme_colors("dracula".into(), Some("light".into())).unwrap();
+        assert_eq!(dark.background, light.background);
+        assert_eq!(dark.background, "#282a36");
+    }
+
     #[test]
     fn preview_theme_colors_returns_dracula_defaults() {
-        let tc = crate::theme::resolve_theme_colors_from_scheme(
-            &termlab_core::color_scheme::resolve_theme("dracula"),
-        );
+        let tc = preview_theme_colors("dracula".into(), None).unwrap();
         assert_eq!(tc.background, "#282a36");
         assert_eq!(tc.red, "#ff5555");
     }
 
     #[test]
     fn preview_theme_colors_unknown_falls_back_to_dracula() {
-        let tc = crate::theme::resolve_theme_colors_from_scheme(
-            &termlab_core::color_scheme::resolve_theme("nonexistent_theme_xyz"),
-        );
+        let tc = preview_theme_colors("nonexistent_theme_xyz".into(), None).unwrap();
         // Should fall back to Dracula
         assert_eq!(tc.background, "#282a36");
     }
