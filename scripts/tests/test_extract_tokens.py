@@ -23,6 +23,26 @@ THEME = {
     },
 }
 
+LIGHT_THEME = {
+    "name": "TermLab Light",
+    "dark": False,
+    "colors": {
+        "background": "#E3E8EF",
+        "foreground": "#1F2933",
+        "selectionBackground": "#CAD4E2",
+    },
+    "ui": {
+        "*": {
+            "background": "background",
+            "foreground": "foreground",
+            "infoForeground": "#8A94A3",
+            "borderColor": "#C5CDD6",
+            "selectionBackground": "selectionBackground",
+        },
+        "Panel": {"background": "#E3E8EF"},
+    },
+}
+
 SCHEME_XML = """<?xml version="1.0"?>
 <scheme name="TermLab Dark" version="142">
   <colors>
@@ -48,6 +68,21 @@ def test_theme_to_css():
     assert "--tl-ToolWindow-Header-background: #6B80A1;" in css  # nested + named ref
     assert css.strip().startswith(":root {")
     assert "GENERATED FILE" in css                               # do-not-edit banner
+
+
+def test_theme_to_css_light_source():
+    """Light-source golden: minimal light theme JSON -> exact light-appearance
+    output, including the :root[data-tl-appearance="light"] wrapper selector
+    that scripts/extract_intellij_tokens.py's main() uses for tokens-light.css."""
+    css = theme_to_css(LIGHT_THEME, selector=':root[data-tl-appearance="light"]')
+    assert css.strip().startswith(':root[data-tl-appearance="light"] {')
+    assert "GENERATED FILE" in css
+    assert "--tl-base-background: #E3E8EF;" in css       # named ref resolved from light palette
+    assert "--tl-base-foreground: #1F2933;" in css
+    assert "--tl-base-infoForeground: #8A94A3;" in css    # literal passthrough
+    assert "--tl-base-borderColor: #C5CDD6;" in css
+    assert "--tl-base-selectionBackground: #CAD4E2;" in css
+    assert "--tl-Panel-background: #E3E8EF;" in css       # component key
 
 
 def test_scheme_to_alacritty():
@@ -83,6 +118,7 @@ def test_unresolved_reference_warning():
 
 if __name__ == "__main__":
     test_theme_to_css()
+    test_theme_to_css_light_source()
     test_scheme_to_alacritty()
     test_unresolved_reference_warning()
     print("ok")
