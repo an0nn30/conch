@@ -1549,6 +1549,162 @@ await checkAsync('open mode has no save controls anywhere in the chooser', async
 });
 
 // ---------------------------------------------------------------------------
+// 9. The chooser WINDOW runtime (app/chooser-window-runtime.js)
+// ---------------------------------------------------------------------------
+//
+// The thin boot module chooser.html loads last. A separate, minimal sandbox
+// from makeHarness()'s above — that one plays the PARENT side of the proxy
+// (file-dialog.js asking Rust for a chooser and getting `chooser-resolved`
+// back); this one plays the CHOOSER side: a bare `#chooser-root`, a stub
+// `invoke` that answers `get_chooser_request` / `chooser_ready` /
+// `resolve_file_chooser`, and the REAL view/model/data-service the runtime
+// actually hosts (stubbing them would test nothing about the wiring).
+
+function makeRuntimeHarness(options) {
+  const opts = options || {};
+  const doc = makeDocument();
+  const sandbox = { console, document: doc, setTimeout, clearTimeout, Promise };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+
+  const root = doc.createElement('div');
+  doc.getElementById = (id) => (id === 'chooser-root' ? root : null);
+
+  sandbox.termlabKeyboardRouter = { register: () => () => {} };
+  sandbox.toast = { error() {}, success() {} };
+  sandbox.utils = { formatSize: (n) => `${n}B`, formatDate: () => '' };
+
+  const invokeLog = [];
+  let viewBuilt = false;
+  const closeCalls = { count: 0 };
+
+  sandbox.termlabServices = {
+    tauriClient: {
+      invoke(command, args) {
+        invokeLog.push({ command, args, viewBuiltAtCallTime: viewBuilt });
+        if (command === 'get_chooser_request') {
+          return opts.requestRejects
+            ? Promise.reject(new Error('no pending chooser'))
+            : Promise.resolve(opts.request);
+        }
+        if (command === 'chooser_ready') return Promise.resolve(null);
+        if (command === 'resolve_file_chooser') return Promise.resolve(null);
+        return Promise.reject(new Error(`chooser window runtime: unexpected invoke ${command}`));
+      },
+    },
+  };
+
+  // window.__TAURI__.window.getCurrentWindow().close() — the fallback used
+  // when no close_current_window command exists (grepped commands.rs at
+  // HEAD: it does not).
+  sandbox.__TAURI__ = {
+    window: {
+      getCurrentWindow: () => ({ close: () => { closeCalls.count++; } }),
+    },
+  };
+
+  load(sandbox, 'features/files/data-service.js');
+  sandbox.termlabFilesFeatureDataService = Object.assign({}, sandbox.termlabFilesFeatureDataService, {
+    getHomeDir: () => Promise.resolve('/home/u'),
+    getSessions: () => Promise.resolve([]),
+    listLocalDir: () => Promise.resolve([]),
+  });
+  load(sandbox, 'ui/tl-dialog.js');
+  load(sandbox, 'ui/tl-icon.js');
+  load(sandbox, 'features/editor/file-dialog-model.js');
+  load(sandbox, 'features/editor/file-dialog-view.js');
+
+  // Spy on build() without replacing the module the runtime actually calls
+  // into — every check below reads buildCalls, but the REAL build still
+  // runs so the view is genuinely on screen for the resolution check.
+  const buildCalls = [];
+  const realBuild = sandbox.termlabFileDialogView.build;
+  sandbox.termlabFileDialogView = Object.assign({}, sandbox.termlabFileDialogView, {
+    build(mountRoot, deps) {
+      buildCalls.push(deps);
+      viewBuilt = true;
+      return realBuild(mountRoot, deps);
+    },
+  });
+
+  load(sandbox, 'chooser-window-runtime.js');
+
+  return { sandbox, doc, root, invokeLog, buildCalls, closeCalls };
+}
+
+console.log('file dialog: chooser window runtime');
+
+// Deliberately NOT 'main' (makeHarness's own default parentWindowLabel) and
+// not a `chooser-...`-shaped label either — a runtime bug that fell back to
+// some ambient default, or that mistakenly forwarded ITS OWN window label
+// instead of the request's, would still have to fail this exact-equality
+// check rather than accidentally matching a common fixture value.
+const RUNTIME_TEST_PARENT_LABEL = 'editor-9k2';
+
+await checkAsync('build() receives the request\'s parentLabel, never any window\'s own label', async () => {
+  const request = {
+    reqId: 77, mode: 'save', filename: 'notes.txt', selectFilename: true,
+    parentLabel: RUNTIME_TEST_PARENT_LABEL,
+  };
+  const h = makeRuntimeHarness({ request });
+  await settle();
+
+  assert.strictEqual(h.buildCalls.length, 1, 'build() is called exactly once');
+  assert.strictEqual(h.buildCalls[0].parentWindowLabel, RUNTIME_TEST_PARENT_LABEL,
+    'the PARENT label from the request, byte for byte');
+});
+
+await checkAsync('chooser_ready is invoked only after the view has been built', async () => {
+  const request = {
+    reqId: 5, mode: 'open', filename: null, selectFilename: false,
+    parentLabel: RUNTIME_TEST_PARENT_LABEL,
+  };
+  const h = makeRuntimeHarness({ request });
+  await settle();
+
+  const readyCall = h.invokeLog.find((entry) => entry.command === 'chooser_ready');
+  assert.ok(readyCall, 'chooser_ready was invoked');
+  assert.strictEqual(readyCall.viewBuiltAtCallTime, true,
+    'the view already existed when chooser_ready was called');
+});
+
+await checkAsync('a view resolution forwards {reqId, choice} to resolve_file_chooser', async () => {
+  const request = {
+    reqId: 42, mode: 'open', filename: null, selectFilename: false,
+    parentLabel: RUNTIME_TEST_PARENT_LABEL,
+  };
+  const h = makeRuntimeHarness({ request });
+  await settle();
+
+  // The view's own Escape handler (file-dialog-view.js) is registered on the
+  // root element it was handed — exactly `h.root` here, since
+  // document.getElementById('chooser-root') is stubbed to return it.
+  h.root.fire('keydown', { key: 'Escape' });
+  await settle();
+
+  const resolveCall = h.invokeLog.find((entry) => entry.command === 'resolve_file_chooser');
+  assert.ok(resolveCall, 'resolve_file_chooser was invoked');
+  // Not assert.deepStrictEqual against a plain object literal: resolveCall.args
+  // was built inside the vm sandbox, a different JS realm with its own
+  // Object.prototype, and deepStrictEqual's strict mode treats that as
+  // unequal even when every own property matches. Compare the two fields.
+  assert.strictEqual(resolveCall.args.reqId, 42);
+  assert.strictEqual(resolveCall.args.choice, null);
+});
+
+await checkAsync('a rejected get_chooser_request closes the window and never builds a view', async () => {
+  const h = makeRuntimeHarness({ requestRejects: true });
+  await settle();
+
+  assert.strictEqual(h.buildCalls.length, 0, 'the view never builds with no request to build it from');
+  assert.strictEqual(h.closeCalls.count, 1, 'the window closes itself (no close_current_window command exists)');
+  const commands = h.invokeLog.map((entry) => entry.command);
+  assert.ok(commands.includes('get_chooser_request'));
+  assert.ok(!commands.includes('chooser_ready'), 'never shown');
+  assert.ok(!commands.includes('resolve_file_chooser'), 'nothing to resolve');
+});
+
+// ---------------------------------------------------------------------------
 
 if (failures) {
   console.error(`file dialog: ${failures} of ${ran} check(s) FAILED`);
