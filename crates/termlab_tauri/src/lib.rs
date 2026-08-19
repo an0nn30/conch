@@ -4,6 +4,7 @@
 //! via `portable-pty`. This bypasses alacritty_terminal entirely — xterm.js
 //! handles all terminal emulation.
 
+pub(crate) mod chooser_window;
 pub(crate) mod cleanup;
 pub(crate) mod close_guard;
 mod commands;
@@ -312,6 +313,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Arc::clone(&vault_state))
         .manage(updater::PendingUpdate::new())
         .manage(close_guard::CloseGuard::default())
+        .manage(Mutex::new(chooser_window::ChooserRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
             let kb_config = config::load_user_config()
@@ -678,6 +680,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 if ask_first {
                     api.prevent_close();
                 }
+                // A chooser window's own close button (its native close, not
+                // the parent's) is Cancel. Does not prevent the close — the
+                // window is allowed to go away on its own; this only does the
+                // registry cleanup, the emit, and the size persistence while
+                // the window is still alive to read from.
+                chooser_window::on_chooser_close_requested(window);
             }
 
             // IntelliJ-style modal focus: clicking the main window while
@@ -688,6 +696,11 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                         let _ = settings_win.set_focus();
                     }
                 }
+                // Same idea for a chooser: focusing its parent bounces focus
+                // back to the chooser (the modal focus bounce, spec "Window &
+                // lifecycle" — works uniformly including Linux, where
+                // `.parent()` is best-effort).
+                chooser_window::on_window_focused(window);
             }
 
             if let tauri::WindowEvent::Destroyed = event {
@@ -698,6 +711,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 // by a future window that happens to reuse the name, and keep
                 // a quit poll moving if it was waiting on this window.
                 close_guard::on_window_destroyed(window);
+
+                // If this window was some chooser's parent, that chooser is
+                // now orphaned: resolve it as cancelled and close it. The
+                // `.parent()` owner relationship (macOS/Windows) is not
+                // trusted alone to do this on every platform.
+                chooser_window::on_window_destroyed(window);
 
                 // When the main window closes, also close child windows
                 // (settings, etc.) so they don't linger as orphans.
@@ -753,6 +772,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::clipboard_write_text,
             windows::open_new_window,
             windows::open_settings_window,
+            chooser_window::open_file_chooser,
+            chooser_window::get_chooser_request,
+            chooser_window::resolve_file_chooser,
+            chooser_window::cancel_file_chooser,
+            chooser_window::chooser_ready,
+            chooser_window::focus_file_chooser,
             commands::rebuild_menu,
             settings::get_all_settings,
             settings::save_settings,
