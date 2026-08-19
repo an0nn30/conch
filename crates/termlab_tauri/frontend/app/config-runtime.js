@@ -14,6 +14,18 @@
     async function applyConfigChanged() {
       try {
         await refreshKeyboardShortcutFallbacks();
+
+        // Fetched here (rather than at its old call site further down) so
+        // the appearance re-apply lands BEFORE applyThemeCss: both the
+        // token-CSS switch and the terminal accent vars it sets then land in
+        // the same repaint frame instead of two. appCfg is reused below for
+        // vim mode and applyUiConfig, so this is still exactly one
+        // get_app_config round trip per config-changed event, same as before.
+        const appCfg = await invoke('get_app_config');
+        if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
+          global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
+        }
+
         const tc = await invoke('get_theme_colors');
         if (typeof configService.applyThemeCss === 'function') {
           configService.applyThemeCss(tc);
@@ -48,7 +60,8 @@
           }
         }
 
-        const appCfg = await invoke('get_app_config');
+        // appCfg was already fetched above (ahead of applyThemeCss, for the
+        // appearance re-apply) and is reused here rather than fetched again.
         // Vim keybindings. Applied here, in the same event that carries the
         // theme and the font, because this is the only place a settings save
         // reaches an already-open window: save_settings writes the config and

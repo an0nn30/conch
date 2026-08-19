@@ -54,6 +54,7 @@
   <script src="app/core/keyboard-router.js"></script>
   <script src="app/core/dialog-service.js"></script>
   <script src="app/core/config-service.js"></script>
+  <script src="app/core/appearance.js"></script>
   <script src="app/ui/tl-icon.js"></script>
   <script src="app/ui/tl-menu.js"></script>
   <script src="app/ui/tl-dialog.js"></script>
@@ -107,6 +108,9 @@
     // Apply UI font sizes from config.
     try {
       const appCfg = await invoke('GET_APP_CONFIG');
+      if (window.termlabAppearance && typeof window.termlabAppearance.apply === 'function') {
+        window.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
+      }
       if (typeof configService.applyUiConfig === 'function') {
         configService.applyUiConfig(appCfg);
       } else {

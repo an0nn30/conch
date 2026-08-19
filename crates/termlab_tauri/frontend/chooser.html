@@ -38,6 +38,7 @@
   <script src="app/core/tauri-client.js"></script>
   <script src="app/core/keyboard-router.js"></script>
   <script src="app/core/config-service.js"></script>
+  <script src="app/core/appearance.js"></script>
 
   <!-- Publishes window.termlabServices.tauriClient and applies the theme CSS
        vars BEFORE app/chooser-window-runtime.js runs. This is deliberately a
@@ -66,10 +67,10 @@
       const configService = window.termlabConfigService || {};
 
       // Apply theme colors — mirrors settings.html (settings.html:98-106).
-      // `data-tl-appearance` is never set by anything in this codebase (the
-      // dark/light icon variant lookup in tl-icon.js just always reads
-      // "dark", same as every other window); applyThemeCss's CSS custom
-      // properties are the real mechanism, so that is all this does.
+      // `data-tl-appearance` itself is set below, from the GET_APP_CONFIG
+      // fetch (app/core/appearance.js owns the attribute); applyThemeCss's
+      // CSS custom properties are the separate, always-on mechanism handled
+      // here.
       (async () => {
         try {
           const tc = await invoke('GET_THEME_COLORS');
@@ -87,6 +88,9 @@
       (async () => {
         try {
           const appCfg = await invoke('GET_APP_CONFIG');
+          if (window.termlabAppearance && typeof window.termlabAppearance.apply === 'function') {
+            window.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
+          }
           if (appCfg.platform === 'windows' || appCfg.platform === 'linux') {
             const titlebar = document.getElementById('chooser-titlebar');
             titlebar.classList.add('visible');

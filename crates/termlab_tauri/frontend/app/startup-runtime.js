@@ -124,6 +124,9 @@
         // Published for the post-fit window sizing in main-runtime.js, which
         // runs long after this and needs the configured columns/lines.
         window.__termlabAppConfig = appCfg;
+        if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
+          global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
+        }
         if (typeof configService.applyUiConfig === 'function') {
           const uiResult = configService.applyUiConfig(appCfg) || {};
           borderlessMode = uiResult.borderlessMode === true;
