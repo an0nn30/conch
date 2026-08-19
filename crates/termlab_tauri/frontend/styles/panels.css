@@ -160,8 +160,7 @@
        (app/panels/notifications-panel.js via notification-panel.js's
        renderInto). .bottom-panel-action-btn is kept too — despite the name,
        it's not bottom-panel-specific: plugin-runtime.js reuses it for the
-       minimize/close buttons on docked plugin-view pane headers, and
-       skins.css has per-skin overrides for it. */
+       minimize/close buttons on docked plugin-view pane headers. */
     .bottom-panel-action-btn {
       border: none; background: none; color: var(--text-muted); cursor: pointer;
       font-size: var(--ui-font-small); padding: 2px 6px; border-radius: 3px;

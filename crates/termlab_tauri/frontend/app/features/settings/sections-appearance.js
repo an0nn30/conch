@@ -25,8 +25,6 @@
     const makeCheckbox = typeof d.makeCheckbox === 'function' ? d.makeCheckbox : null;
     const makeInput = typeof d.makeInput === 'function' ? d.makeInput : null;
     const makeToggleGroup = typeof d.makeToggleGroup === 'function' ? d.makeToggleGroup : null;
-    const configService = global.termlabConfigService || {};
-
     if (!addSectionLabel || !addRow || !setRowTarget || !addDivider || !buildThemePreview || !updateThemePreview || !invoke || !makeCheckbox || !makeInput || !makeToggleGroup) {
       return false;
     }
@@ -48,45 +46,6 @@
     const themeRow = addRow(container, 'Theme', 'Color theme for the terminal and UI', themeSelect);
     global.tlCombo.attach(themeSelect);
     setRowTarget(themeRow, 'appearance:theme');
-
-    const availableSkins = typeof configService.getAvailableSkins === 'function'
-      ? configService.getAvailableSkins()
-      : [
-        { id: 'default', label: 'Default' },
-        { id: 'metal', label: 'Metal (Swing)' },
-      ];
-    const skinSelect = document.createElement('select');
-    const selectedSkin = String(pendingSettings.termlab.ui.skin || 'default').toLowerCase();
-    let skinMatched = false;
-    for (const skin of availableSkins) {
-      if (!skin || !skin.id) continue;
-      const option = document.createElement('option');
-      option.value = skin.id;
-      option.textContent = skin.label || skin.id;
-      if (skin.id.toLowerCase() === selectedSkin) {
-        option.selected = true;
-        skinMatched = true;
-      }
-      skinSelect.appendChild(option);
-    }
-    if (!skinMatched) {
-      const fallbackOption = document.createElement('option');
-      fallbackOption.value = selectedSkin || 'default';
-      fallbackOption.textContent = selectedSkin || 'default';
-      fallbackOption.selected = true;
-      skinSelect.appendChild(fallbackOption);
-    }
-    skinSelect.addEventListener('change', () => {
-      pendingSettings.termlab.ui.skin = skinSelect.value;
-    });
-    const skinRow = addRow(
-      container,
-      'UI Skin',
-      'Controls chrome styling for panes, tabs, dialogs, and controls.',
-      skinSelect
-    );
-    global.tlCombo.attach(skinSelect);
-    setRowTarget(skinRow, 'appearance:ui-skin');
 
     const previewBox = buildThemePreview();
     container.appendChild(previewBox);

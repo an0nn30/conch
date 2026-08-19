@@ -1,9 +1,10 @@
 // A CodeMirror theme built from the app's design tokens.
 //
 // Reads the same --tl-* variables every other component uses, so the editor
-// follows skins and light/dark without a second palette to keep in sync. No
-// literal colours live here: an unset token yields an empty string and
-// CodeMirror falls back to its own default rather than to a wrong hardcode.
+// follows the active theme and light/dark without a second palette to keep in
+// sync. No literal colours live here: an unset token yields an empty string
+// and CodeMirror falls back to its own default rather than to a wrong
+// hardcode.
 (function initTermLabEditorTheme(global) {
   'use strict';
 
@@ -75,14 +76,14 @@
     return [theme, CM.syntaxHighlighting(highlight)];
   }
 
-  // Whether the current skin is dark, inferred from the perceived lightness of
+  // Whether the active theme is dark, inferred from the perceived lightness of
   // --tl-bg. There is no declared light/dark flag to read: the token pipeline
   // emits colour values only, and nothing in the app sets a theme attribute or
   // class on the document element. So the background colour itself is the
   // signal, and inference is the mechanism rather than a fallback for one.
   //
   // Unresolvable (--tl-bg unset, or not an rgb() value) is treated as dark,
-  // which is the default skin.
+  // which is the default theme.
   function isDarkTheme() {
     const bg = token('--tl-bg');
     const m = /rgb[a]?\((\d+),\s*(\d+),\s*(\d+)/.exec(bg);

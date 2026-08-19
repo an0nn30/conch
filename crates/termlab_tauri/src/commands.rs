@@ -39,7 +39,6 @@ pub(crate) fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json:
         "notification_position": cfg.termlab.ui.notification_position,
         "native_notifications": cfg.termlab.ui.native_notifications,
         "disable_animations": cfg.termlab.ui.disable_animations,
-        "ui_skin": cfg.termlab.ui.skin,
         "ui_font_family": cfg.termlab.ui.font_family,
         "ui_font_size": cfg.termlab.ui.font_size,
         // The editor's vim keymap. Carried here rather than on

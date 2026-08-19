@@ -3,7 +3,7 @@
 
   const SECTION_DEFS = [
     { group: 'Workspace', items: [
-      { id: 'appearance', label: 'Appearance', description: 'Theme, skin, notifications, UI fonts', keywords: 'theme colors skin interface notifications fonts typography appearance' },
+      { id: 'appearance', label: 'Appearance', description: 'Theme, notifications, UI fonts', keywords: 'theme colors interface notifications fonts typography appearance' },
       { id: 'keyboard', label: 'Keymap', description: 'Core shortcuts, tool window shortcuts, plugin shortcuts', keywords: 'keyboard shortcuts keymap bindings hotkeys commands tool windows plugins' },
       { id: 'files', label: 'Files', description: 'File explorer behavior and path following', keywords: 'files explorer path follow cwd directory' },
       { id: 'window', label: 'Window', description: 'Default size in columns and lines, title bar style, zen mode for new windows', keywords: 'window size columns lines rows dimensions title bar decorations chrome zen menu bar' },
@@ -24,7 +24,6 @@
 
   const SETTINGS_SEARCH_INDEX = [
     { section: 'appearance', label: 'Theme', keywords: 'color theme appearance scheme', targetId: 'appearance:theme' },
-    { section: 'appearance', label: 'UI Skin', keywords: 'skin metal swing chrome styling look and feel', targetId: 'appearance:ui-skin' },
     { section: 'appearance', label: 'Appearance Mode', keywords: 'dark light system mode', targetId: 'appearance:mode' },
     { section: 'appearance', label: 'Notification Position', keywords: 'toast notifications top bottom', targetId: 'appearance:notification-position' },
     { section: 'appearance', label: 'Native Notifications', keywords: 'system notifications os notifications', targetId: 'appearance:native-notifications' },

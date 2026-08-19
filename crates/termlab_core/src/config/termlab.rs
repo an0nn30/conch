@@ -188,8 +188,6 @@ impl Default for UiFontConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
-    /// Visual skin for UI chrome ("default", "metal", ...).
-    pub skin: String,
     pub font_family: String,
     pub font_size: f32,
     pub font: UiFontConfig,
@@ -205,7 +203,6 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            skin: "default".into(),
             font_family: String::new(),
             font_size: 13.0,
             font: UiFontConfig::default(),
@@ -467,10 +464,19 @@ mod tests {
         assert_eq!(cfg.notification_position, "bottom");
     }
 
+    /// The `skin` field was removed along with the UI-skins subsystem, but
+    /// existing `config.toml` files on disk still have `skin = "..."` under
+    /// `[termlab.ui]`. `UiConfig` has no `#[serde(deny_unknown_fields)]`, so
+    /// the unrecognized key is simply ignored rather than failing the parse
+    /// and silently reverting the rest of the user's config.
     #[test]
-    fn ui_skin_defaults_to_default() {
-        let cfg = UiConfig::default();
-        assert_eq!(cfg.skin, "default");
+    fn unknown_skin_key_is_tolerated_for_back_compat() {
+        let toml_str = r#"
+            skin = "metal"
+            native_menu_bar = false
+        "#;
+        let cfg: UiConfig = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.native_menu_bar);
     }
 
     #[test]
@@ -494,7 +500,6 @@ mod tests {
     #[test]
     fn ui_config_serde_default_fills_notification_fields() {
         let cfg: UiConfig = toml::from_str("").unwrap();
-        assert_eq!(cfg.skin, "default");
         assert_eq!(cfg.notification_position, "bottom");
         assert!(cfg.native_notifications);
         assert!(!cfg.disable_animations);

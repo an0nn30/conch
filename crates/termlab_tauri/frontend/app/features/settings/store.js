@@ -105,9 +105,6 @@
       if (!settings.termlab.ui || typeof settings.termlab.ui !== 'object') {
         settings.termlab.ui = {};
       }
-      if (!settings.termlab.ui.skin) {
-        settings.termlab.ui.skin = 'default';
-      }
       if (typeof settings.termlab.ui.disable_animations !== 'boolean') {
         settings.termlab.ui.disable_animations = false;
       }
