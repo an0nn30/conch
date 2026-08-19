@@ -489,6 +489,59 @@ white   = "#ffffff"
     }
 
     #[test]
+    fn list_themes_finds_bundled_termlab_light_theme_exactly_once() {
+        let themes = list_themes();
+        let count = themes.keys().filter(|k| *k == "TermLab Light").count();
+        assert_eq!(
+            count, 1,
+            "expected 'TermLab Light' to be discoverable exactly once, found: {:?}",
+            themes.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn resolve_theme_loads_termlab_light_by_exact_name() {
+        let scheme = resolve_theme("TermLab Light");
+        assert_eq!(scheme.primary.background, "#E3E8EF");
+    }
+
+    #[test]
+    fn resolve_theme_termlab_light_full_snapshot() {
+        let cs = resolve_theme("TermLab Light");
+
+        assert_eq!(cs.primary.background, "#E3E8EF", "background");
+        assert_eq!(cs.primary.foreground, "#1F2933", "foreground");
+
+        let normal = cs.normal.as_array();
+        assert_eq!(normal[0], "#1F2933", "normal black");
+        assert_eq!(normal[1], "#B3261E", "normal red");
+        assert_eq!(normal[2], "#1E7B34", "normal green");
+        assert_eq!(normal[3], "#9A6700", "normal yellow");
+        assert_eq!(normal[4], "#1D4ED8", "normal blue");
+        assert_eq!(normal[5], "#8E24AA", "normal magenta");
+        assert_eq!(normal[6], "#0E7490", "normal cyan");
+        assert_eq!(normal[7], "#D5DBE3", "normal white");
+
+        let bright = cs.bright.as_array();
+        assert_eq!(bright[0], "#52606D", "bright black");
+        assert_eq!(bright[1], "#D93025", "bright red");
+        assert_eq!(bright[2], "#2E9E4C", "bright green");
+        assert_eq!(bright[3], "#B8860B", "bright yellow");
+        assert_eq!(bright[4], "#3B82F6", "bright blue");
+        assert_eq!(bright[5], "#AB47BC", "bright magenta");
+        assert_eq!(bright[6], "#0891B2", "bright cyan");
+        assert_eq!(bright[7], "#F4F7FA", "bright white");
+
+        let cursor = cs.cursor.expect("cursor colors present");
+        assert_eq!(cursor.cursor, "#1F2933", "cursor color");
+        assert_eq!(cursor.text, "#E3E8EF", "cursor text color");
+
+        let selection = cs.selection.expect("selection colors present");
+        assert_eq!(selection.background, "#CAD4E2", "selection background");
+        assert_eq!(selection.text, "#1F2933", "selection foreground");
+    }
+
+    #[test]
     fn deserialize_with_dim_colors() {
         let toml_str = r##"
 [colors.primary]
