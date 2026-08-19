@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Generate design-system token CSS + terminal theme from the JVM TermLab repo.
+"""Generate design-system token CSS + terminal theme from vendored theme sources.
 
-Reads:
-  <termlab-repo>/core/resources/themes/TermLabDark.theme.json
-  <termlab-repo>/core/resources/themes/TermLabLight.theme.json
-  <termlab-repo>/core/resources/termlab-dark.xml
+Reads (from --sources, default design/theme-sources/ — vendored 2026-08-19 from
+the retired JVM repo, which is read-only reference and never a build input):
+  <sources>/TermLabDark.theme.json
+  <sources>/TermLabLight.theme.json
+  <sources>/termlab-dark.xml
 
 Writes (under --out-dir, default crates/termlab_tauri/frontend):
   styles/design-system/tokens-dark.css   (:root)
@@ -157,13 +158,18 @@ def main():
     import sys
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--termlab-repo", default=str(Path(__file__).resolve().parents[2] / "TermLab"))
+    # Sources are vendored in-repo (design/theme-sources/) since 2026-08-19:
+    # the retired JVM repo is read-only reference and no build step may
+    # depend on it. --sources exists for one-off experiments only.
+    ap.add_argument(
+        "--sources",
+        default=str(Path(__file__).resolve().parents[1] / "design" / "theme-sources"),
+    )
     ap.add_argument("--out-dir", default="crates/termlab_tauri/frontend")
     args = ap.parse_args()
 
-    repo = Path(args.termlab_repo)
     out = Path(args.out_dir)
-    themes_dir = repo / "core/resources/themes"
+    themes_dir = Path(args.sources)
 
     def warn(msg):
         print(f"warning: invalid CSS color in token {msg}", file=sys.stderr)
@@ -178,7 +184,7 @@ def main():
 
     theme_out = out / "themes"
     theme_out.mkdir(parents=True, exist_ok=True)
-    xml_text = (repo / "core/resources/termlab-dark.xml").read_text()
+    xml_text = (themes_dir / "termlab-dark.xml").read_text()
     (theme_out / "TermLab Dark.toml").write_text(scheme_to_alacritty(xml_text))
     print("wrote tokens-dark.css, tokens-light.css, TermLab Dark.toml")
 

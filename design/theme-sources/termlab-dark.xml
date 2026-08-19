@@ -1,0 +1,177 @@
+<!--
+  TermLab Dark editor color scheme.
+
+  Inherits Darcula syntax highlighting and rebalances editor + terminal
+  colors around the corrected TermLab Dark hierarchy: darker shell, deep
+  editor, and deepest terminal well.
+
+  The 16 ANSI keys (CONSOLE_*_OUTPUT) drive terminal color in TermLab via
+  TermLabTerminalSettings.java, which reads the active global editor
+  scheme. This file keeps ANSI output cohesive with the TermLab Dark theme
+  instead of falling back to Darcula defaults.
+-->
+<scheme name="TermLab Dark" parent_scheme="Darcula" version="1">
+  <metaInfo>
+    <property name="created">2026-04-15T12:00:00</property>
+    <property name="ide">TermLab</property>
+    <property name="ideVersion">262.SNAPSHOT</property>
+    <property name="originalScheme">TermLab Dark</property>
+  </metaInfo>
+
+  <colors>
+    <!-- Editor + terminal focus wells -->
+    <option name="CARET_COLOR" value="DEDFDF" />
+    <option name="CARET_ROW_COLOR" value="161F2B" />
+    <option name="CONSOLE_BACKGROUND_KEY" value="070A0E" />
+    <option name="GUTTER_BACKGROUND" value="243142" />
+    <option name="INDENT_GUIDE" value="384453" />
+    <option name="SELECTED_INDENT_GUIDE" value="4A5563" />
+    <option name="LINE_NUMBERS_COLOR" value="AEB4BA" />
+    <option name="SELECTION_BACKGROUND" value="243142" />
+    <option name="SELECTION_FOREGROUND" value="DEDFDF" />
+    <option name="RIGHT_MARGIN_COLOR" value="161F2B" />
+    <option name="WHITESPACES" value="384453" />
+    <option name="VISUAL_INDENT_GUIDE" value="384453" />
+    <option name="TEARLINE_COLOR" value="384453" />
+    <option name="TAB_UNDERLINE_INACTIVE" value="21252B" />
+  </colors>
+
+  <attributes>
+    <!-- Editor body text + terminal default foreground -->
+    <option name="TEXT">
+      <value>
+        <option name="FOREGROUND" value="DEDFDF" />
+        <option name="BACKGROUND" value="111823" />
+      </value>
+    </option>
+
+    <option name="TAB_SELECTED_INACTIVE">
+      <value>
+        <option name="BACKGROUND" value="21252B" />
+      </value>
+    </option>
+
+    <!-- ANSI 16-color terminal palette: muted and harmonized -->
+
+    <!-- 0 BLACK -->
+    <option name="CONSOLE_BLACK_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="070A0E" />
+      </value>
+    </option>
+    <!-- 1 RED -->
+    <option name="CONSOLE_RED_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="B37A80" />
+      </value>
+    </option>
+    <!-- 2 GREEN -->
+    <option name="CONSOLE_GREEN_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="89A885" />
+      </value>
+    </option>
+    <!-- 3 YELLOW -->
+    <option name="CONSOLE_YELLOW_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="B7A07A" />
+      </value>
+    </option>
+    <!-- 4 BLUE -->
+    <option name="CONSOLE_BLUE_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="7A92B3" />
+      </value>
+    </option>
+    <!-- 5 MAGENTA -->
+    <option name="CONSOLE_MAGENTA_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="9A88B5" />
+      </value>
+    </option>
+    <!-- 6 CYAN -->
+    <option name="CONSOLE_CYAN_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="7FA8AA" />
+      </value>
+    </option>
+    <!-- 7 GRAY (ISO "white") -->
+    <option name="CONSOLE_GRAY_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="C2C7CC" />
+      </value>
+    </option>
+
+    <!-- 8 DARKGRAY (bright black) -->
+    <option name="CONSOLE_DARKGRAY_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="838B95" />
+      </value>
+    </option>
+    <!-- 9 BRIGHT RED -->
+    <option name="CONSOLE_RED_BRIGHT_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="C6989D" />
+      </value>
+    </option>
+    <!-- 10 BRIGHT GREEN -->
+    <option name="CONSOLE_GREEN_BRIGHT_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="9BB896" />
+      </value>
+    </option>
+    <!-- 11 BRIGHT YELLOW -->
+    <option name="CONSOLE_YELLOW_BRIGHT_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="C9B38E" />
+      </value>
+    </option>
+    <!-- 12 BRIGHT BLUE -->
+    <option name="CONSOLE_BLUE_BRIGHT_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="8DA4C3" />
+      </value>
+    </option>
+    <!-- 13 BRIGHT MAGENTA -->
+    <option name="CONSOLE_MAGENTA_BRIGHT_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="AC9BC4" />
+      </value>
+    </option>
+    <!-- 14 BRIGHT CYAN -->
+    <option name="CONSOLE_CYAN_BRIGHT_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="90B8BA" />
+      </value>
+    </option>
+    <!-- 15 WHITE (ISO bright white) -->
+    <option name="CONSOLE_WHITE_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="DEDFDF" />
+      </value>
+    </option>
+
+    <!-- Semantic console output categories -->
+    <option name="CONSOLE_NORMAL_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="DEDFDF" />
+      </value>
+    </option>
+    <option name="CONSOLE_SYSTEM_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="7FA8AA" />
+      </value>
+    </option>
+    <option name="CONSOLE_USER_INPUT">
+      <value>
+        <option name="FOREGROUND" value="9BB896" />
+        <option name="FONT_TYPE" value="2" />
+      </value>
+    </option>
+    <option name="CONSOLE_ERROR_OUTPUT">
+      <value>
+        <option name="FOREGROUND" value="B37A80" />
+      </value>
+    </option>
+  </attributes>
+</scheme>
