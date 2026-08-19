@@ -21,6 +21,7 @@ pub(crate) mod remote;
 pub(crate) mod settings;
 pub(crate) mod share_commands;
 pub(crate) mod theme;
+pub(crate) mod theme_catalog;
 pub(crate) mod updater;
 pub(crate) mod utf8_stream;
 pub(crate) mod vault_commands;
@@ -783,6 +784,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             settings::save_settings,
             settings::list_themes,
             settings::preview_theme_colors,
+            theme_catalog::list_terminal_themes,
             fonts::list_system_fonts,
             remote::ssh_commands::ssh_connect,
             remote::ssh_commands::ssh_quick_connect,

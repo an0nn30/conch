@@ -311,6 +311,151 @@ pub fn list_themes() -> HashMap<String, PathBuf> {
     list_themes_in(&[bundled_themes_dir(), themes_dir()])
 }
 
+/// Where a discovered theme file came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeSource {
+    /// Shipped with the app (`bundled_themes_dir()`).
+    Builtin,
+    /// Supplied by the user (`themes_dir()`).
+    User,
+}
+
+/// A small, render-ready palette extracted from a parsed [`ColorScheme`]:
+/// background, foreground, and the 16 ANSI colors in standard order (normal
+/// black..white at indices 0-7, bright black..white at indices 8-15).
+///
+/// Colors are copied verbatim from the parsed theme, in whatever string form
+/// the file used (`#rrggbb` or the legacy `0x...` form) — no normalization.
+/// A theme using the `0x` form will therefore preview with colors that a
+/// literal CSS consumer renders incorrectly, matching the parse-time
+/// behavior of the rest of `ColorScheme`; normalizing that is out of scope
+/// here (see the module docs for where downstream normalization belongs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PalettePreview {
+    pub bg: String,
+    pub fg: String,
+    pub ansi: [String; 16],
+}
+
+impl PalettePreview {
+    /// Build a preview from an already-parsed theme, reusing the same
+    /// `ColorScheme` the rest of the app resolves and applies — there is no
+    /// second TOML parsing path for previews.
+    pub fn from_scheme(scheme: &ColorScheme) -> Self {
+        let normal = scheme.normal.as_array();
+        let bright = scheme.bright.as_array();
+        let ansi = std::array::from_fn(|i| {
+            if i < 8 {
+                normal[i].to_string()
+            } else {
+                bright[i - 8].to_string()
+            }
+        });
+        Self {
+            bg: scheme.primary.background.clone(),
+            fg: scheme.primary.foreground.clone(),
+            ansi,
+        }
+    }
+}
+
+/// One entry in a theme listing: either a theme that parsed successfully
+/// (with its preview), or a theme file that failed to parse. Broken files
+/// are surfaced rather than silently skipped, so a picker can grey them out
+/// with the parse error instead of hiding them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemeListEntry {
+    Parsed {
+        name: String,
+        source: ThemeSource,
+        // Boxed: PalettePreview's [String; 16] makes it much larger than
+        // the other fields here, which would otherwise blow up
+        // `size_of::<ThemeListEntry>()` to the size of its largest variant
+        // (clippy::large_enum_variant).
+        palette_preview: Box<PalettePreview>,
+        /// `true` when a user theme of this name shadows (overrides) a
+        /// bundled built-in of the same name — the existing later-dirs-win
+        /// collision rule (see [`list_themes_in`]), surfaced here rather
+        /// than changed.
+        shadows_builtin: bool,
+    },
+    Broken {
+        name: String,
+        error: String,
+    },
+}
+
+impl ThemeListEntry {
+    pub fn name(&self) -> &str {
+        match self {
+            ThemeListEntry::Parsed { name, .. } => name,
+            ThemeListEntry::Broken { name, .. } => name,
+        }
+    }
+}
+
+fn theme_list_entry_for(name: String, path: &Path, source: ThemeSource, shadows_builtin: bool) -> ThemeListEntry {
+    match load_theme(path) {
+        Ok(scheme) => ThemeListEntry::Parsed {
+            name,
+            source,
+            palette_preview: Box::new(PalettePreview::from_scheme(&scheme)),
+            shadows_builtin,
+        },
+        Err(e) => ThemeListEntry::Broken {
+            name,
+            error: e.to_string(),
+        },
+    }
+}
+
+/// Enumerate every theme discoverable in `bundled_dir` and `user_dir`,
+/// layering a [`PalettePreview`] (or a parse error) on top of the existing
+/// directory-scan + collision machinery ([`list_themes_in`]).
+///
+/// A user theme shadows a bundled theme of the same name exactly as
+/// `list_themes_in`/`resolve_theme_in` already behave (later dir wins): the
+/// shadowed built-in does not get a separate entry, and the surviving user
+/// entry carries `shadows_builtin: true`. This applies whether the user
+/// theme parses or not — a broken user override still shadows the bundled
+/// theme (the same file `resolve_theme_in` would fail to load and silently
+/// fall back from), it just surfaces as a `Broken` entry here instead of
+/// disappearing.
+///
+/// Ordering: built-ins first (sorted by name), then user themes (sorted by
+/// name).
+pub fn list_theme_entries_in(bundled_dir: &Path, user_dir: &Path) -> Vec<ThemeListEntry> {
+    let bundled = list_themes_in(&[bundled_dir.to_path_buf()]);
+    let user = list_themes_in(&[user_dir.to_path_buf()]);
+
+    let mut builtin_entries: Vec<ThemeListEntry> = bundled
+        .iter()
+        .filter(|(name, _)| !user.contains_key(*name))
+        .map(|(name, path)| theme_list_entry_for(name.clone(), path, ThemeSource::Builtin, false))
+        .collect();
+
+    let mut user_entries: Vec<ThemeListEntry> = user
+        .iter()
+        .map(|(name, path)| {
+            let shadows_builtin = bundled.contains_key(name);
+            theme_list_entry_for(name.clone(), path, ThemeSource::User, shadows_builtin)
+        })
+        .collect();
+
+    builtin_entries.sort_by(|a, b| a.name().cmp(b.name()));
+    user_entries.sort_by(|a, b| a.name().cmp(b.name()));
+
+    builtin_entries.extend(user_entries);
+    builtin_entries
+}
+
+/// Enumerate themes against the production directories: the bundled
+/// frontend `themes/` dir and `~/.config/termlab/themes/`. Rescanned on
+/// every call (no watcher/caching) — see [`list_theme_entries_in`].
+pub fn list_theme_entries() -> Vec<ThemeListEntry> {
+    list_theme_entries_in(&bundled_themes_dir(), &themes_dir())
+}
+
 /// Resolve a theme by name or path: load from disk or fall back to built-in Dracula.
 ///
 /// If `value` is a file path (contains `/`, `\`, or ends with `.toml`), it is
@@ -979,5 +1124,180 @@ white = "#000000"
         assert!(cs.indexed_colors.is_empty());
         assert!(cs.transparent_background_colors.is_none());
         assert!(cs.draw_bold_text_with_bright_colors.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // list_theme_entries_in / PalettePreview
+    // -----------------------------------------------------------------
+
+    fn fixtures_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alacritty-themes")
+    }
+
+    #[test]
+    fn entries_include_a_parsed_valid_theme_with_preview() {
+        let bundled = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join("Valid.toml"), theme_toml("#123456")).unwrap();
+
+        let entries = list_theme_entries_in(bundled.path(), user.path());
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            ThemeListEntry::Parsed {
+                name,
+                source,
+                palette_preview,
+                shadows_builtin,
+            } => {
+                assert_eq!(name, "Valid");
+                assert_eq!(*source, ThemeSource::Builtin);
+                assert_eq!(palette_preview.bg, "#123456");
+                assert_eq!(palette_preview.fg, "#ffffff");
+                assert!(!shadows_builtin);
+            }
+            ThemeListEntry::Broken { name, error } => {
+                panic!("expected a parsed entry for 'Valid', got Broken {{ name: {name}, error: {error} }}");
+            }
+        }
+    }
+
+    #[test]
+    fn entries_include_a_broken_theme_as_an_error_entry() {
+        let bundled = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join("Broken.toml"), "not valid toml [[[").unwrap();
+
+        let entries = list_theme_entries_in(bundled.path(), user.path());
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            ThemeListEntry::Broken { name, error } => {
+                assert_eq!(name, "Broken");
+                assert!(
+                    !error.is_empty(),
+                    "expected a non-empty parse error message"
+                );
+            }
+            ThemeListEntry::Parsed { name, .. } => {
+                panic!("expected a Broken entry for '{name}', got Parsed")
+            }
+        }
+    }
+
+    #[test]
+    fn entries_empty_when_both_dirs_are_empty() {
+        let bundled = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+
+        let entries = list_theme_entries_in(bundled.path(), user.path());
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn entries_no_error_when_user_dir_is_missing_just_builtins() {
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join("OnlyBuiltin.toml"), theme_toml("#000001")).unwrap();
+        let missing_user_dir = bundled.path().join("does-not-exist");
+
+        let entries = list_theme_entries_in(bundled.path(), &missing_user_dir);
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            ThemeListEntry::Parsed { name, source, .. } => {
+                assert_eq!(name, "OnlyBuiltin");
+                assert_eq!(*source, ThemeSource::Builtin);
+            }
+            ThemeListEntry::Broken { name, error } => {
+                panic!("expected a parsed builtin entry, got Broken {{ name: {name}, error: {error} }}");
+            }
+        }
+    }
+
+    #[test]
+    fn entries_user_theme_shadows_builtin_of_the_same_name() {
+        // Mirrors resolve_theme_prefers_user_dir_over_bundled_dir_on_name_collision,
+        // but through the listing rather than resolution, using the real
+        // production theme name so this exercises the exact scenario the
+        // brief calls out ("user 'TermLab Dark.toml' -> one entry,
+        // user-sourced, flagged").
+        let bundled = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bundled.path().join("TermLab Dark.toml"),
+            theme_toml("#070A0E"),
+        )
+        .unwrap();
+        std::fs::write(
+            user.path().join("TermLab Dark.toml"),
+            theme_toml("#111111"),
+        )
+        .unwrap();
+
+        let entries = list_theme_entries_in(bundled.path(), user.path());
+        assert_eq!(
+            entries.len(),
+            1,
+            "the shadowed built-in must not appear as a separate entry"
+        );
+        match &entries[0] {
+            ThemeListEntry::Parsed {
+                name,
+                source,
+                palette_preview,
+                shadows_builtin,
+            } => {
+                assert_eq!(name, "TermLab Dark");
+                assert_eq!(*source, ThemeSource::User);
+                assert_eq!(
+                    palette_preview.bg, "#111111",
+                    "the user theme's colors must win, not the shadowed built-in's"
+                );
+                assert!(*shadows_builtin);
+            }
+            ThemeListEntry::Broken { name, error } => {
+                panic!("expected a parsed user entry, got Broken {{ name: {name}, error: {error} }}");
+            }
+        }
+    }
+
+    #[test]
+    fn entries_ordered_builtins_first_then_users_each_sorted_by_name() {
+        let bundled = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        for name in ["Zeta", "Alpha"] {
+            std::fs::write(
+                bundled.path().join(format!("{name}.toml")),
+                theme_toml("#000000"),
+            )
+            .unwrap();
+        }
+        for name in ["Yankee", "Bravo"] {
+            std::fs::write(
+                user.path().join(format!("{name}.toml")),
+                theme_toml("#000000"),
+            )
+            .unwrap();
+        }
+
+        let entries = list_theme_entries_in(bundled.path(), user.path());
+        let names: Vec<&str> = entries.iter().map(|e| e.name()).collect();
+        assert_eq!(names, vec!["Alpha", "Zeta", "Bravo", "Yankee"]);
+    }
+
+    #[test]
+    fn palette_preview_from_known_fixture_matches_pinned_snapshot() {
+        // Cross-checked against the pinned values in
+        // tests/alacritty_fixtures.rs::dracula_snapshot.
+        let scheme = load_theme(&fixtures_dir().join("dracula.toml")).expect("dracula.toml parses");
+        let preview = PalettePreview::from_scheme(&scheme);
+
+        assert_eq!(preview.bg, "#282a36");
+        assert_eq!(preview.fg, "#f8f8f2");
+        assert_eq!(
+            preview.ansi,
+            [
+                "#000000", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd",
+                "#bbbbbb", "#555555", "#ff5555", "#50fa7b", "#f1fa8c", "#caa9fa", "#ff79c6",
+                "#8be9fd", "#ffffff",
+            ]
+        );
     }
 }
