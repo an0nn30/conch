@@ -46,7 +46,7 @@
     // now-caller-less backend command entirely). Fully decoupled from app
     // appearance (product rule 1): this picks colors.theme, never
     // colors.appearance_mode below.
-    const terminalThemeEntries = themePicker.normalizeThemeEntries(cachedTerminalThemes);
+    const terminalThemeEntries = themePicker.normalizeThemeEntries(cachedTerminalThemes, pendingSettings.colors.theme);
     const { select: terminalThemeSelect, list: terminalThemeList } = themePicker.buildTerminalThemePicker(
       terminalThemeEntries,
       pendingSettings.colors.theme,

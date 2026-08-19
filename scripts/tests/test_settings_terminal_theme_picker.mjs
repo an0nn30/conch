@@ -258,6 +258,52 @@ const RAW_ENTRIES = [
   console.log('normalizeThemeEntries: a broken auto.toml is reserved, not broken: ok');
 }
 
+// --- F1b/F4 (branch-review.md): the synthesized `missing` entry -----------
+// A currentValue that matches no real entry (the generic deleted-file case,
+// and — before dracula.toml shipped as a built-in — every pre-branch
+// `theme = "dracula"` config) used to leave the native <select> on
+// selectedIndex -1: an empty button label, no row marked selected, and
+// switching away as the only way out. normalizeThemeEntries now appends a
+// synthesized entry carrying the saved name so the combo always has
+// something to show and mark selected.
+{
+  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'dracula');
+  assert.equal(entries.length, 7, 'synthetic Auto + 5 raw entries + 1 synthesized missing entry');
+  const missing = entries[6];
+  assert.equal(missing.kind, 'missing');
+  assert.equal(missing.name, 'dracula');
+  assert.equal(missing.value, 'dracula', 'shares the saved value so a <select> assignment matches it');
+  assert.equal(missing.label, 'dracula', 'the saved name is shown, not a blank label');
+  assert.equal(missing.selectable, false, 'not independently re-selectable — it IS the current selection');
+  assert.equal(missing.palettePreview, null, 'greyed palette area: nothing to show for a name with no file');
+  assert.equal(missing.note, '(missing)');
+  console.log('normalizeThemeEntries: an unmatched currentValue synthesizes a visible missing entry: ok');
+}
+
+// A currentValue that DOES match a real entry must not synthesize anything
+// extra — the common case (Auto, or any concrete theme that still exists).
+{
+  const matchedAuto = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'auto');
+  assert.equal(matchedAuto.length, 6, 'currentValue "auto" matches the real Auto entry — no synthesis');
+
+  const matchedConcrete = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'Gruvbox');
+  assert.equal(matchedConcrete.length, 6, 'currentValue "Gruvbox" matches a real parsed entry — no synthesis');
+
+  console.log('normalizeThemeEntries: a matched currentValue never synthesizes an extra entry: ok');
+}
+
+// F4: a hand-edited config can spell the reserved name with any casing.
+// effective_theme_name matches it case-insensitively on the Rust side, so
+// the picker must not treat "Auto"/"AUTO" as an unmatched value either —
+// it resolves to the real Auto entry, not a synthesized one.
+{
+  for (const cased of ['Auto', 'AUTO', ' auto ']) {
+    const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, cased);
+    assert.equal(entries.length, 6, `currentValue "${cased}" must not synthesize a missing entry`);
+  }
+  console.log('normalizeThemeEntries: a cased "Auto" currentValue never synthesizes: ok');
+}
+
 // --- buildTerminalThemePicker: DOM shape + swatch colors + interaction ----
 {
   const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES);
@@ -339,6 +385,55 @@ const RAW_ENTRIES = [
   assert.equal(rows[0].classList.contains('is-selected'), false, 'the old selection (Auto) is cleared');
 
   console.log('buildTerminalThemePicker: selection round-trips via click: ok');
+}
+
+// --- F1b: an unmatched currentValue never renders a blank combo -----------
+// The mutation this proves: if normalizeThemeEntries stopped synthesizing a
+// `missing` entry for 'dracula' (i.e. entries came back as the plain 6, with
+// no option whose value is 'dracula'), the native <select>.value setter
+// below would fail to find a match, select.selectedIndex would land on -1,
+// and tl-combo's currentLabel() (app/ui/tl-combo.js: `opt ? opt.textContent
+// : ''`) would render an empty button label — the exact regression F1
+// reported. Asserting selectedIndex/value/is-selected here reds immediately
+// if that synthesis is ever removed.
+{
+  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'dracula');
+  const { select, list } = themePicker.buildTerminalThemePicker(entries, 'dracula', () => {});
+
+  assert.notEqual(select.selectedIndex, -1, 'the combo must never land on no selection at all');
+  assert.equal(select.value, 'dracula', 'the select carries the saved value, not a blank one');
+
+  const missingOption = select.options[select.options.length - 1];
+  assert.equal(missingOption.value, 'dracula');
+  assert.equal(missingOption.disabled, true, 'the synthesized entry is not independently selectable');
+
+  const missingRow = list.children[list.children.length - 1];
+  assert.equal(missingRow.dataset.themeKind, 'missing');
+  assert.equal(missingRow.classList.contains('is-selected'), true,
+    'the synthesized row is marked as the current selection');
+  assert.equal(missingRow.classList.contains('is-disabled'), true, 'greyed, like broken/reserved rows');
+  assert.equal(missingRow.children[0].children[1].textContent, '(missing)');
+  assert.equal(missingRow.children[1].children.length, 0, 'greyed palette area: no swatches to show');
+
+  console.log('buildTerminalThemePicker: an unmatched currentValue synthesizes a visible, selected entry (F1b): ok');
+}
+
+// --- F4: a hand-edited "Auto" (any casing) selects the REAL Auto row ------
+{
+  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'Auto');
+  assert.equal(entries.length, 6, 'no synthesis for a cased reserved name');
+  const { select, list } = themePicker.buildTerminalThemePicker(entries, 'Auto', () => {});
+
+  assert.equal(select.value, 'auto', 'the select lands on the real (lowercase) Auto option');
+  assert.equal(select.selectedIndex, 0);
+  assert.equal(list.children[0].classList.contains('is-selected'), true,
+    'the real Auto row (index 0) is marked selected');
+  for (let i = 1; i < list.children.length; i += 1) {
+    assert.equal(list.children[i].classList.contains('is-selected'), false,
+      `row ${i} must not also read as selected`);
+  }
+
+  console.log('buildTerminalThemePicker: a cased "Auto" currentValue selects the real Auto row (F4): ok');
 }
 
 // --- renderAppearance: end-to-end through the section renderer -------------

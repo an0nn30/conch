@@ -32,10 +32,40 @@
   }
 
   /**
+   * F1b/F4 (branch-review.md): a picker built from `entries` alone renders a
+   * blank combo whenever `pendingSettings.colors.theme` names something that
+   * isn't among them — a deleted user theme, or (the specific case that made
+   * this Important, not Low) any pre-branch `theme = "dracula"` config, since
+   * the old plain `<select>` special-cased that default and this picker's
+   * option list didn't, until dracula.toml shipped as a real built-in
+   * alongside this fix. A synthesized `missing` entry keeps the combo
+   * showing the saved name (not blank) and keeps it selected, while leaving
+   * every other row exactly as selectable as before — switching away is
+   * still one click on any other row.
+   */
+  function synthesizeMissingEntry(currentValue) {
+    return {
+      kind: 'missing',
+      name: currentValue,
+      value: currentValue,
+      label: currentValue,
+      selectable: false,
+      source: null,
+      shadowsBuiltin: false,
+      palettePreview: null,
+      error: null,
+      note: '(missing)',
+    };
+  }
+
+  /**
    * Normalize list_terminal_themes()'s raw entries (plus the synthetic Auto
-   * entry, always first) into descriptors of the shape:
-   *   { kind: 'auto'|'parsed'|'reserved'|'broken', name, value, label,
-   *     selectable, source, shadowsBuiltin, palettePreview, error, note }
+   * entry, always first, and — when `currentValue` matches none of them — a
+   * synthesized `missing` entry last, see `synthesizeMissingEntry`) into
+   * descriptors of the shape:
+   *   { kind: 'auto'|'parsed'|'reserved'|'broken'|'missing', name, value,
+   *     label, selectable, source, shadowsBuiltin, palettePreview, error,
+   *     note }
    *
    * `auto.toml` decision (Task 3 review Low #2 — a user theme file literally
    * named `auto.toml` is enumerable but unreachable, because
@@ -56,7 +86,7 @@
    * classified `reserved`, not `broken`, and never collides with the real
    * Auto entry's value).
    */
-  function normalizeThemeEntries(rawEntries) {
+  function normalizeThemeEntries(rawEntries, currentValue) {
     const out = [{
       kind: 'auto',
       name: 'Auto',
@@ -120,6 +150,18 @@
         error: null,
         note: entry.shadowsBuiltin ? 'Overrides built-in' : null,
       });
+    }
+
+    // F1b/F4: a reserved-cased currentValue ("Auto", "AUTO", ...) always
+    // resolves to the real Auto entry above (see buildTerminalThemePicker's
+    // own case-insensitive fold when it assigns select.value) — never
+    // synthesized here, and never counted as "no match".
+    if (
+      typeof currentValue === 'string' && currentValue.length > 0
+      && !isReservedName(currentValue)
+      && !out.some((entry) => entry.value === currentValue)
+    ) {
+      out.push(synthesizeMissingEntry(currentValue));
     }
 
     return out;
@@ -228,12 +270,19 @@
       }
     }
 
-    // A currentValue with no matching <option> (e.g. a theme file deleted
-    // after being selected) leaves the native select on whatever it
-    // defaults to; nothing here rewrites pendingSettings until the user
-    // actually picks something — matching the pre-existing plain <select>
-    // this replaces, which had the same gap.
-    select.value = currentValue;
+    // F4: a hand-edited config can spell the reserved name with any casing
+    // ("Auto", "AUTO", ...) — effective_theme_name matches it
+    // case-insensitively on the Rust side (same fold as isReservedName
+    // above), so the picker must land on the real Auto <option> (value
+    // AUTO_VALUE, always lowercase) rather than trying to match the literal
+    // typed casing against no option at all.
+    //
+    // F1b: every OTHER currentValue that names no entry now has a
+    // synthesized `missing` <option> of its own (see
+    // normalizeThemeEntries/synthesizeMissingEntry) with `value ===
+    // currentValue`, so this assignment always lands on a real option — the
+    // combo can no longer render blank (selectedIndex -1).
+    select.value = isReservedName(currentValue) ? AUTO_VALUE : currentValue;
     select.addEventListener('change', () => {
       refresh();
       if (typeof onChange === 'function') onChange(select.value);
