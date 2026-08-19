@@ -68,5 +68,9 @@
   --tl-Tree-selectionForeground: #FFFFFF;
   --tl-Viewport-background: #F4F7FA;
   --tl-base-background: #E3E8EF;
+  --tl-base-borderColor: #C5CDD6;
   --tl-base-foreground: #1F2933;
+  --tl-base-infoForeground: #8A94A3;
+  --tl-base-selectionBackground: #CAD4E2;
+  --tl-base-selectionForeground: #1F2933;
 }
