@@ -244,6 +244,94 @@ check('KeyboardShortcuts carries the four other configurable File-menu keys', ()
   }
 });
 
+console.log('titlebar accelerators: id ↔ KeyboardConfig convention holds for every row');
+
+// Every titlebar row id maps to its KeyboardConfig field by swapping dashes for
+// underscores ('new-tab' ↔ 'new_tab'). These checks derive the field list from
+// the KeyboardConfig struct itself, so the NEXT menu item added with a literal
+// while a config field exists fails here without anyone updating a list.
+function keyboardConfigFields() {
+  const source = fs.readFileSync(path.resolve(
+    import.meta.dirname, '../../crates/termlab_core/src/config/termlab.rs'), 'utf8');
+  const block = source.match(/pub struct KeyboardConfig \{([\s\S]*?)\n\}/);
+  assert.ok(block, 'KeyboardConfig struct found in termlab.rs');
+  const fields = [];
+  for (const m of block[1].matchAll(/pub (\w+): String,/g)) fields.push(m[1]);
+  assert.ok(fields.length >= 20, `parsed a plausible field list, got ${fields.length}`);
+  return fields;
+}
+
+function flattenRows(menuDef) {
+  const rows = [];
+  function walk(items) {
+    for (const item of items || []) {
+      if (item.type === 'separator') continue;
+      if (item.submenu) { walk(item.submenu); continue; }
+      rows.push(item);
+    }
+  }
+  for (const menu of menuDef) walk(menu.items);
+  return rows;
+}
+
+check('every titlebar row with a configurable keymap field reads from shortcuts', () => {
+  const titlebar = loadTitlebar('Win32');
+  const fields = keyboardConfigFields();
+  // Sentinel strings, not real combos: rows carry the raw config string, and
+  // acceleratorBindings parses the binding from that same string — so string
+  // equality pins display AND live binding in one assertion.
+  const sentinels = {};
+  for (const field of fields) sentinels[field] = `sentinel+${field}`;
+  const rows = flattenRows(titlebar._buildMenuDef(sentinels, true, []));
+  const offenders = [];
+  const matched = [];
+  for (const row of rows) {
+    if (typeof row.id !== 'string') continue;
+    const field = row.id.replace(/-/g, '_');
+    if (!fields.includes(field)) continue;
+    matched.push(row.id);
+    if (row.shortcut !== sentinels[field]) offenders.push(`${row.id} shows "${row.shortcut}"`);
+  }
+  assert.strictEqual(offenders.length, 0,
+    `these rows ignore their config field: ${offenders.join('; ')}`);
+  // Guard the convention itself: if row ids drift away from field names the
+  // loop above matches nothing and passes vacuously.
+  for (const id of ['new-tab', 'new-window', 'close-tab', 'settings', 'new-file', 'open-file']) {
+    assert.ok(matched.includes(id), `row ${id} is covered by the convention check`);
+  }
+});
+
+check('every such field travels in the KeyboardShortcuts payload', () => {
+  // The generic counterpart of the explicit per-key payload checks above: a
+  // field the titlebar consumes but commands.rs never fills leaves
+  // `shortcuts.<field>` undefined and the `||` fallback silently reinstates
+  // the hardcoded default.
+  const titlebar = loadTitlebar('Win32');
+  const fields = keyboardConfigFields();
+  const rowIds = new Set(flattenRows(titlebar._buildMenuDef({}, true, []))
+    .map((r) => r.id).filter((id) => typeof id === 'string'));
+  const commands = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/commands.rs'), 'utf8');
+  const generated = fs.readFileSync(path.join(ROOT, 'types/KeyboardShortcuts.ts'), 'utf8');
+  const missing = [];
+  for (const field of fields) {
+    if (!rowIds.has(field.replace(/_/g, '-'))) continue;
+    // zen_mode reaches the titlebar via get_app_config's zen_mode_shortcut,
+    // merged into shortcutsState in init() — not via KeyboardShortcuts.
+    if (field === 'zen_mode') continue;
+    if (!new RegExp(`struct KeyboardShortcuts \\{[\\s\\S]*?\\n    ${field}: String,`).test(commands)) {
+      missing.push(`${field} not declared in KeyboardShortcuts`);
+    }
+    if (!commands.includes(`${field}: kb.${field}.clone(),`)) {
+      missing.push(`${field} not filled from the keyboard config`);
+    }
+    if (!generated.includes(`${field}: string`)) {
+      missing.push(`${field} missing from the checked-in ts-rs export`);
+    }
+  }
+  assert.strictEqual(missing.length, 0, missing.join('; '));
+});
+
 if (failures) {
   console.error(`titlebar accelerators: ${failures} of ${ran} check(s) FAILED`);
   process.exit(1);
