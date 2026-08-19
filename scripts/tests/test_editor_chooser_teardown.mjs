@@ -2,22 +2,23 @@
 //
 // A Save As chooser outliving the pane it is asking about.
 //
-// The Unsaved Changes prompt STACKS on top of the chooser rather than replacing
-// it (tl-dialog nests), so ⌘W while an untitled buffer's first-save chooser is
-// on screen puts two modals up at once. "Don't Save" answers the top one, and
-// tab-manager.js then destroys the pane underneath — leaving a modal asking
-// where to put a buffer that no longer exists, and, because it is still
+// The Unsaved Changes prompt goes up in THIS window, over the scrim the
+// chooser raised, so ⌘W while an untitled buffer's first-save chooser is open
+// leaves the user answering two things at once. "Don't Save" answers the
+// prompt, and tab-manager.js then destroys the pane — leaving a chooser window
+// asking where to put a buffer that no longer exists, and, because it is still
 // file-dialog.js's `activeChoice`, blocking the chooser every OTHER pane would
 // open until somebody answers it.
 //
-// Everything below the DOM is real: ui/tl-dialog.js builds both dialogs,
-// core/dialog-service.js wires the prompt's three buttons, the REAL
-// features/editor/file-dialog.js builds the chooser, features/editor/
-// editor-service.js decides what the answers mean, and the REAL tab-manager.js
-// closeTab / pane-manager.js closePane do the teardown. That last part is the
-// point: a hand-rolled teardown in a probe can null the pane's view or forget
-// to, and the two differ in whether a ghost file is written. Only the shipped
-// teardown settles it.
+// Everything below the DOM is real: ui/tl-dialog.js builds the prompt,
+// core/dialog-service.js wires its three buttons, the REAL
+// features/editor/file-dialog.js proxies the chooser across the window
+// boundary, features/editor/file-dialog-view.js is the chooser itself,
+// features/editor/editor-service.js decides what the answers mean, and the
+// REAL tab-manager.js closeTab / pane-manager.js closePane do the teardown.
+// That last part is the point: a hand-rolled teardown in a probe can null the
+// pane's view or forget to, and the two differ in whether a ghost file is
+// written. Only the shipped teardown settles it.
 //
 // Stubs, and exactly what each returns:
 //   * document — a minimal element factory (no jsdom in this repo), with the
@@ -39,6 +40,7 @@ const MODULES = [
   'app/features/editor/tab-label.js',
   'app/features/files/data-service.js',
   'app/features/editor/file-dialog-model.js',
+  'app/features/editor/file-dialog-view.js',
   'app/features/editor/file-dialog.js',
   'app/features/editor/editor-service.js',
   'app/layout/split-tree.js',
@@ -237,7 +239,66 @@ function makeApp() {
     }
     return Promise.resolve(null);
   };
-  sandbox.termlabServices = { tauriClient: { invoke, listen: () => Promise.resolve(() => {}) } };
+  // The chooser WINDOW, stubbed. file-dialog.js is a proxy now: it raises a
+  // scrim on THIS window, invokes `open_file_chooser`, and waits for the
+  // `chooser-resolved` event. The stub below plays Rust and the chooser window
+  // together — it mounts the REAL view into a root of its own and sends the
+  // view's answer back over the event.
+  //
+  // What this leaves on `document.body` while a chooser is up is exactly one
+  // child, the scrim, so `dialogCount()` still reads 1 for "the chooser is up"
+  // and 2 for "the Unsaved Changes prompt is stacked over it" — which is the
+  // whole subject of this file.
+  const chooser = { root: null, mounted: null, reqId: 0, mode: 'open' };
+  const chooserEventHandlers = [];
+  let nextChooserReqId = 1;
+  const emitChooserResolved = (reqId, choice) => {
+    for (const handler of chooserEventHandlers.slice()) handler({ payload: { reqId, choice } });
+  };
+  const closeChooserWindow = () => { chooser.root = null; chooser.mounted = null; };
+
+  const chooserInvoke = (command, args) => {
+    if (command === 'open_file_chooser') {
+      const reqId = nextChooserReqId++;
+      chooser.reqId = reqId;
+      chooser.mode = args.mode;
+      chooser.root = document.createElement('div');
+      chooser.mounted = sandbox.termlabFileDialogView.build(chooser.root, {
+        data: sandbox.termlabFilesFeatureDataService,
+        mode: args.mode,
+        filename: args.filename,
+        selectFilename: args.selectFilename,
+        parentWindowLabel: 'main',
+        onResolve: (choice) => { closeChooserWindow(); emitChooserResolved(reqId, choice); },
+      });
+      if (chooser.mounted && typeof chooser.mounted.focusInitial === 'function') {
+        chooser.mounted.focusInitial();
+      }
+      return Promise.resolve(reqId);
+    }
+    if (command === 'cancel_file_chooser') {
+      const reqId = chooser.reqId;
+      closeChooserWindow();
+      emitChooserResolved(reqId, null);
+      return Promise.resolve(null);
+    }
+    if (command === 'focus_file_chooser') return Promise.resolve(null);
+    return null;
+  };
+
+  sandbox.termlabServices = {
+    tauriClient: {
+      invoke: (command, args) => chooserInvoke(command, args) || invoke(command, args),
+      listen: () => Promise.resolve(() => {}),
+      listenOnCurrentWindow: (name, handler) => {
+        chooserEventHandlers.push(handler);
+        return Promise.resolve(() => {
+          const i = chooserEventHandlers.indexOf(handler);
+          if (i >= 0) chooserEventHandlers.splice(i, 1);
+        });
+      },
+    },
+  };
 
   // editor-pane.js's contract, minus CodeMirror: `dirty` is a plain boolean and
   // the update listener stops firing once it is set.
@@ -403,15 +464,34 @@ function makeApp() {
     return termPaneId;
   }
 
-  // The topmost dialog on screen.
+  // The topmost thing the user is being asked to answer.
+  //
+  // The chooser is at the BOTTOM of that stack and lives in another window
+  // now, so: a tl-dialog on this document (the Unsaved Changes prompt) is the
+  // top; otherwise it is the chooser window. Its `title` is the harness's
+  // stand-in for "which question that window is asking" — the real title bar
+  // is Rust's ("Save As" / "Open", chooser_window.rs:350) and is not readable
+  // from this window at all. Its footer is the view's own row; there is no
+  // tl-dialog footer to borrow one from.
   function top() {
-    const overlay = document.body.children[document.body.children.length - 1] || null;
-    if (!overlay) return null;
+    const last = document.body.children[document.body.children.length - 1] || null;
+    const isDialog = last && String(last.className).includes('tl-dialog__overlay');
+    if (!isDialog) {
+      const root = chooser.root;
+      if (!root) return null;
+      return {
+        overlay: root,
+        title: chooser.mode === 'save' ? 'Save File As' : 'Open File',
+        nameInput: root.querySelectorAll('.tl-filedlg__name')[0] || null,
+        button: (label) => root.querySelectorAll('.tl-filedlg__footer-end .tl-btn')
+          .find((b) => b.textContent === label) || null,
+      };
+    }
     return {
-      overlay,
-      title: (overlay.querySelectorAll('.tl-dialog__title')[0] || {}).textContent,
-      nameInput: overlay.querySelectorAll('.tl-filedlg__name')[0] || null,
-      button: (label) => overlay.querySelectorAll('.tl-dialog__footer .tl-btn')
+      overlay: last,
+      title: (last.querySelectorAll('.tl-dialog__title')[0] || {}).textContent,
+      nameInput: last.querySelectorAll('.tl-filedlg__name')[0] || null,
+      button: (label) => last.querySelectorAll('.tl-dialog__footer .tl-btn')
         .find((b) => b.textContent === label) || null,
     };
   }

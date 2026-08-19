@@ -858,7 +858,67 @@ function makeDialogHarness(options = {}) {
     success: (title, body) => toasts.push({ level: 'success', title, body }),
   };
   sandbox.utils = { formatSize: (n) => `${n}B`, formatDate: () => '' };
-  sandbox.termlabServices = { tauriClient: { invoke: () => Promise.reject(new Error('no raw invoke expected')) } };
+
+  // The chooser WINDOW, stubbed. file-dialog.js no longer renders the chooser
+  // in this window: it invokes `open_file_chooser` and waits for the
+  // `chooser-resolved` event. This transport plays Rust and the chooser window
+  // together — it mounts the REAL view into a root of its own and sends the
+  // view's answer back as the event. The only thing file-dialog.js puts on
+  // THIS document is its scrim, which is why the dialog counts below still
+  // read 1 while a chooser is up.
+  const chooser = { root: null, mounted: null, reqId: 0 };
+  chooserOf.set(doc, chooser);
+  const eventHandlers = [];
+  let nextReqId = 1;
+  const emitResolved = (reqId, choice) => {
+    for (const handler of eventHandlers.slice()) handler({ payload: { reqId, choice } });
+  };
+
+  sandbox.termlabServices = {
+    tauriClient: {
+      invoke(command, args) {
+        if (command === 'open_file_chooser') {
+          const reqId = nextReqId++;
+          chooser.reqId = reqId;
+          chooser.root = doc.createElement('div');
+          chooser.mounted = sandbox.termlabFileDialogView.build(chooser.root, {
+            data: sandbox.termlabFilesFeatureDataService,
+            mode: args.mode,
+            filename: args.filename,
+            selectFilename: args.selectFilename,
+            parentWindowLabel: 'main',
+            onResolve: (choice) => {
+              chooser.root = null;
+              chooser.mounted = null;
+              emitResolved(reqId, choice);
+            },
+          });
+          // The chooser window focuses its own initial control on first paint;
+          // the filename-field checks below are about what it focuses.
+          if (chooser.mounted && typeof chooser.mounted.focusInitial === 'function') {
+            chooser.mounted.focusInitial();
+          }
+          return Promise.resolve(reqId);
+        }
+        if (command === 'cancel_file_chooser') {
+          const reqId = chooser.reqId;
+          chooser.root = null;
+          chooser.mounted = null;
+          emitResolved(reqId, null);
+          return Promise.resolve(null);
+        }
+        if (command === 'focus_file_chooser') return Promise.resolve(null);
+        return Promise.reject(new Error(`no raw invoke expected (${command})`));
+      },
+      listenOnCurrentWindow(name, handler) {
+        eventHandlers.push(handler);
+        return Promise.resolve(() => {
+          const i = eventHandlers.indexOf(handler);
+          if (i >= 0) eventHandlers.splice(i, 1);
+        });
+      },
+    },
+  };
 
   // The REAL data service with only its invoke-backed IO stubbed, so
   // sessionHostLabel stays the shared formula (Task 5's fix-round pattern).
@@ -904,15 +964,45 @@ function makeDialogHarness(options = {}) {
   // asking the one formula is that the two cannot drift.
   load(sandbox, 'features/editor/tab-label.js');
   load(sandbox, 'features/editor/file-dialog-model.js');
+  load(sandbox, 'features/editor/file-dialog-view.js');
   load(sandbox, 'features/editor/file-dialog.js');
 
   return { sandbox, doc, calls, toasts };
 }
 
-// The topmost dialog on screen.
+// Each harness's stub chooser window, keyed by its document, so `topDialog(doc)`
+// and `dialogCount(doc)` still read `(doc)` at every call site they always did.
+const chooserOf = new WeakMap();
+
+// The topmost thing the user is answering.
+//
+// The chooser is the BOTTOM of the stack now and is not in this window at all,
+// so: a tl-dialog on screen (the overwrite prompt, the New Folder prompt) is
+// the top; otherwise it is the chooser window. What each check reads off the
+// returned object is unchanged — only where it is looked up has moved.
 function topDialog(doc) {
   const overlay = doc.body.children[doc.body.children.length - 1] || null;
-  if (!overlay) return null;
+  // The scrim is a bare div; a tl-dialog announces itself.
+  const isDialog = overlay && String(overlay.className).includes('tl-dialog__overlay');
+  if (!isDialog) {
+    const chooser = chooserOf.get(doc);
+    const root = chooser && chooser.root;
+    if (!root) return null;
+    // The footer is the VIEW's own row in its own window — there is no
+    // tl-dialog footer to borrow one from.
+    const footBtns = () => root.querySelectorAll('.tl-filedlg__footer-end .tl-btn');
+    return {
+      overlay: root,
+      panel: root,
+      title: null,
+      rows: root.querySelectorAll('.tl-filedlg__row'),
+      nameInput: root.querySelectorAll('.tl-filedlg__name')[0] || null,
+      newFolderBtn: root.querySelectorAll('.tl-filedlg__newfolder')[0] || null,
+      promptInput: null,
+      buttons: footBtns(),
+      button: (label) => footBtns().find((b) => b.textContent === label) || null,
+    };
+  }
   return {
     overlay,
     panel: overlay.children[0],
@@ -926,6 +1016,9 @@ function topDialog(doc) {
   };
 }
 
+// What is on THIS document: file-dialog.js's scrim while a chooser window is
+// up, plus one overlay per tl-dialog stacked over it. The same counts as when
+// the chooser itself was the bottom overlay.
 const dialogCount = (doc) => doc.body.children.length;
 
 console.log('editor save as: the dialog');
@@ -1009,7 +1102,8 @@ await checkAsync('(b) a remote target routes the CLEAN host label and the pane i
   const saving = h.sandbox.termlabFileDialog.openForSave(pane);
   await dialogSettle();
 
-  const overlay = h.doc.body.children[0];
+  // The sidebar is in the chooser WINDOW; this document holds only the scrim.
+  const overlay = topDialog(h.doc).overlay;
   const scopes = overlay.querySelectorAll('.tl-filedlg__scope');
   // The caption moved into a label span when the scope pills became sidebar
   // rows (a row is icon + label + status dot). Same rows, same order, same

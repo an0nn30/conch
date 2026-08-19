@@ -1,17 +1,21 @@
 /* File dialog — the unified local/remote file chooser
-   (app/features/editor/file-dialog.js).
+   (app/features/editor/file-dialog-view.js).
 
-   Two regions, per the redesign spec
+   Two regions above a footer, per the redesign spec
    (docs/superpowers/specs/2026-08-18-file-dialog-redesign-design.md):
 
-     .tl-filedlg
-       .tl-filedlg__sidebar   Places / Hosts, one row per scope (150px, fixed)
-       .tl-filedlg__main      path bar -> listing box -> inline error
+     .tl-filedlg__view          the whole chooser, whatever hosts it
+       .tl-filedlg
+         .tl-filedlg__sidebar   Places / Hosts, one row per scope (150px, fixed)
+         .tl-filedlg__main      path bar -> listing box -> inline error
+       .tl-filedlg__footer
+         .tl-filedlg__footer-start   .tl-filedlg__footctl (Hidden, name, New Folder)
+         .tl-filedlg__footer-end     Cancel + Open|Save
 
-   plus .tl-filedlg__footctl, which is built with the body but appended into
-   tl-dialog's .tl-dialog__footer-start in onOpen (file-dialog.js:1093) — so
-   it is styled here as a footer strip, not as a body row, and carries a
-   fallback rule for the build where that slot does not exist.
+   The footer is the view's OWN row, not a host's: the chooser renders both
+   inside a tl-dialog and, in its own window, with no dialog chrome to borrow
+   a footer from. Its layout deliberately mirrors .tl-dialog__footer
+   (components/dialog.css) so the two hosts read identically.
 
    The listing box still reuses .tl-picker__box (components/picker.css) for
    its border, radius, background and bounded height, so the chooser and the
@@ -21,16 +25,19 @@
    Tokens only — raw hex belongs in base.css alone
    (scripts/check_frontend_boundaries.sh enforces this for this directory). */
 
+.tl-filedlg__view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
 .tl-filedlg {
   display: flex;
   align-items: stretch;
-  /* wrap is for the degraded path only: if a build's tl-dialog has no
-     .tl-dialog__footer-start, file-dialog.js appends .tl-filedlg__footctl to
-     this root instead. Wrapping puts it on its own line under the two
-     regions rather than beside them as a third column. */
-  flex-wrap: wrap;
   gap: var(--tl-space-3);
   min-width: 0;
+  min-height: 0;
 }
 
 /* ---- sidebar: Places (This Mac) + Hosts (every connected session) -------- */
@@ -400,19 +407,47 @@
 
 /* ---- footer strip: Hidden toggle, and in save mode the name + New Folder - */
 
-/* Lives in .tl-dialog__footer-start, opposite Cancel / Open|Save. These are
-   options about the whole dialog rather than about the directory on screen,
+/* The view's own footer row. Same layout as .tl-dialog__footer
+   (components/dialog.css) — options on the left, actions on the right — plus
+   a top border, because in the window host there is no dialog panel edge to
+   separate this row from the listing above it. */
+.tl-filedlg__footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--tl-space-2);
+  padding: var(--tl-space-3) 0 0;
+  margin-top: var(--tl-space-3);
+  border-top: 1px solid var(--tl-border);
+  min-width: 0;
+}
+.tl-filedlg__footer-start,
+.tl-filedlg__footer-end {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-width: 0;
+}
+/* The options group is the one that may need the room; the actions are
+   intrinsic width and must never be squeezed out of the row. */
+.tl-filedlg__footer-start { flex: 1 1 auto; }
+.tl-filedlg__footer-end { flex: 0 0 auto; }
+.tl-filedlg__footer .tl-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}
+/* Lives in .tl-filedlg__footer-start, opposite Cancel / Open|Save. These are
+   options about the whole chooser rather than about the directory on screen,
    which is why they are down here and not in the body. */
 .tl-filedlg__footctl {
   display: flex;
   align-items: center;
   gap: var(--tl-space-2);
   min-width: 0;
+  flex: 1 1 auto;
 }
-/* Fallback placement (no footer slot in this build): file-dialog.js appends
-   it to .tl-filedlg instead, where it takes a full line of its own under the
-   sidebar and the main column. */
-.tl-filedlg > .tl-filedlg__footctl { flex: 1 0 100%; }
 
 .tl-filedlg__hidden { flex-shrink: 0; white-space: nowrap; }
 
@@ -422,9 +457,9 @@
   white-space: nowrap;
 }
 
-/* An explicit width, not just flex-grow: .tl-dialog__footer-start is a
-   shrink-to-fit flex item (components/dialog.css), so the field only gets
-   room it asks for by intrinsic size. */
+/* An explicit width, not just flex-grow: the footer's start group is laid out
+   from its content, so the field only gets room it asks for by intrinsic
+   size. */
 .tl-filedlg__name {
   flex: 1 1 auto;
   width: 220px;
@@ -436,3 +471,143 @@
 /* The nested New Folder prompt (a tl-dialog of its own, stacked over the
    chooser) — one field, full width of the small dialog. */
 .tl-filedlg__prompt-input { width: 100%; }
+
+/* The parent window's scrim while a chooser WINDOW is up
+   (app/features/editor/file-dialog.js).
+
+   The chooser is window-modal, but a webview keeps taking clicks whether or
+   not another window is in front of it — so the modality has to be drawn and
+   enforced here as well: this covers the app, and `inert` on #app (set by the
+   same code) is what actually stops the keyboard reaching it.
+
+   z-index 2900 — above every app surface, and deliberately BELOW tl-dialog's
+   3000+ band (components/dialog.css, set inline per instance). This window can
+   still legitimately raise a dialog of its own while a chooser is open: ⌘W over
+   an unsaved buffer puts Unsaved Changes up, and the Settings accelerator is
+   reachable too. Those overlays are body children, so `inert` on #app does not
+   reach them — above the scrim they would be interactive but INVISIBLE, a
+   locked app with no way to see what is asking. Below the dialog band they
+   render normally over the scrim and stay answerable, and answering one that
+   destroys the pane cancels the chooser through cancelForPane anyway. */
+.tl-chooser-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--tl-dialog-scrim);
+  z-index: 2900;
+}
+
+/* ---------------------------------------------------------------------------
+   chooser.html's own window (Task 4).
+
+   chooser.html does not load styles/base.css (only index.html and
+   settings.html do — see its own trimmed <link> list), so everything below
+   is that window's ENTIRE html/body/shell floor: full height, no
+   page-level scrollbar, chrome background/foreground, and the flex chain
+   that lets `.tl-filedlg` fill the window while only `.tl-filedlg__box`
+   scrolls (its max-height/min-height pair, above, is unchanged — this floor
+   only gives it the ANCESTOR height to flex into).
+
+   Everything is scoped under body.tl-chooser-body (chooser.html's own
+   <body> class) except the bare `html` rule, which is a no-op duplicate of
+   styles/base.css's own `html, body { height: 100% }` wherever that
+   stylesheet IS loaded (same value, same property) and therefore safe to
+   leave unscoped. Scoping the rest keeps the tl-dialog-hosted bridge
+   (features/editor/file-dialog.js, in the main window — the same
+   `.tl-filedlg__view` sits inside a content-sized `.tl-dialog__body` there,
+   never a whole window) completely untouched. */
+html { height: 100%; }
+
+body.tl-chooser-body {
+  height: 100%;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--tl-bg);
+  color: var(--tl-fg);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* The window content below the (optional) custom titlebar — mirrors
+   #settings-root (styles/settings-window.css): flexed to fill whatever
+   height the titlebar left behind. */
+#chooser-root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.tl-chooser-body .tl-filedlg__view {
+  height: 100%;
+}
+
+/* `.tl-filedlg` (sidebar + main column) gains the height the tl-dialog host
+   never gives it, so `.tl-filedlg__main` can flex inside it. */
+body.tl-chooser-body .tl-filedlg {
+  height: 100%;
+}
+
+/* Windows/Linux custom titlebar (no native decorations there —
+   chooser_window.rs's `use_custom_titlebar`). Same shape as
+   #settings-titlebar/.settings-titlebar-* (styles/settings-window.css, not
+   loaded by chooser.html), kept here because file-dialog.css is the one
+   stylesheet this task is scoped to touch. */
+#chooser-titlebar {
+  display: none;
+  height: 30px;
+  flex-shrink: 0;
+  background: var(--tl-bg);
+  color: var(--tl-fg-muted);
+  font: 12px/30px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#chooser-titlebar.visible { display: flex; }
+
+.chooser-titlebar-drag {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 14px;
+  -webkit-app-region: drag;
+}
+
+.chooser-titlebar-title {
+  font-size: 12px;
+  color: var(--tl-fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.chooser-titlebar-controls {
+  display: flex;
+  flex-shrink: 0;
+  height: 30px;
+}
+
+.chooser-titlebar-btn {
+  width: 46px;
+  height: 30px;
+  border: none;
+  background: none;
+  color: var(--tl-fg-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  outline: none;
+}
+
+.chooser-titlebar-btn:hover {
+  background: var(--tl-row-hover);
+  color: var(--tl-fg);
+}
+
+.chooser-titlebar-btn-close:hover {
+  background: var(--tl-danger);
+  color: var(--tl-fg);
+}

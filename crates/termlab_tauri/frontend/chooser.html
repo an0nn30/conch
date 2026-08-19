@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chooser — TermLab</title>
+  <link rel="stylesheet" href="styles/design-system/tokens-dark.css" />
+  <link rel="stylesheet" href="styles/design-system/tokens-light.css" />
+  <link rel="stylesheet" href="styles/design-system/fonts.css" />
+  <link rel="stylesheet" href="styles/design-system/base.css" />
+  <link rel="stylesheet" href="styles/design-system/components/button.css" />
+  <link rel="stylesheet" href="styles/design-system/components/input.css" />
+  <link rel="stylesheet" href="styles/design-system/components/scrollbar.css" />
+  <link rel="stylesheet" href="styles/design-system/components/dialog.css" />
+  <link rel="stylesheet" href="styles/design-system/components/form.css" />
+  <link rel="stylesheet" href="styles/design-system/components/picker.css" />
+  <link rel="stylesheet" href="styles/design-system/components/file-dialog.css" />
+</head>
+<body class="tl-chooser-body">
+  <div id="chooser-titlebar">
+    <div class="chooser-titlebar-drag" data-tauri-drag-region>
+      <span class="chooser-titlebar-title" data-tauri-drag-region>Chooser</span>
+    </div>
+    <div class="chooser-titlebar-controls">
+      <button class="chooser-titlebar-btn chooser-titlebar-btn-maximize" aria-label="Maximize">
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <button class="chooser-titlebar-btn chooser-titlebar-btn-close" aria-label="Close">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/>
+          <line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+  <div id="chooser-root"></div>
+
+  <script src="app/core/tauri-client.js"></script>
+  <script src="app/core/keyboard-router.js"></script>
+  <script src="app/core/config-service.js"></script>
+
+  <!-- Publishes window.termlabServices.tauriClient and applies the theme CSS
+       vars BEFORE app/chooser-window-runtime.js runs. This is deliberately a
+       plain script, not `type="module"`: a module script is always deferred
+       until after the whole document has parsed (regardless of where it sits
+       in the markup), so app/chooser-window-runtime.js below — a plain
+       classic script that reads global.termlabServices synchronously the
+       moment it loads (settings.html:80-139 has the same boot logic, but
+       nothing after it depends on running before another classic script, so
+       it can afford to be a deferred module) — would run BEFORE this one
+       ever set termlabServices, and boot() would throw on
+       `client.invoke.bind(client)` against `undefined`. Keeping this a plain
+       script guarantees document-order execution across the whole chain. -->
+  <script>
+    (function bootChooserWindowShell() {
+      'use strict';
+      const client = window.termlabTauriClient && typeof window.termlabTauriClient.create === 'function'
+        ? window.termlabTauriClient.create({ tauri: window.__TAURI__ })
+        : null;
+      if (!client) {
+        throw new Error('Tauri client is unavailable in chooser window');
+      }
+      const invoke = client.invoke;
+      window.termlabServices = Object.assign({}, window.termlabServices, { tauriClient: client });
+
+      const configService = window.termlabConfigService || {};
+
+      // Apply theme colors — mirrors settings.html (settings.html:98-106).
+      // `data-tl-appearance` is never set by anything in this codebase (the
+      // dark/light icon variant lookup in tl-icon.js just always reads
+      // "dark", same as every other window); applyThemeCss's CSS custom
+      // properties are the real mechanism, so that is all this does.
+      (async () => {
+        try {
+          const tc = await invoke('GET_THEME_COLORS');
+          if (typeof configService.applyThemeCss === 'function') {
+            configService.applyThemeCss(tc);
+          }
+        } catch (e) {
+          console.warn('Failed to load theme colors:', e);
+        }
+      })();
+
+      // Activate custom titlebar on Windows/Linux (no native decorations
+      // there — chooser_window.rs's use_custom_titlebar). Mirrors
+      // settings.html:118-132 with the ids renamed chooser-titlebar*.
+      (async () => {
+        try {
+          const appCfg = await invoke('GET_APP_CONFIG');
+          if (appCfg.platform === 'windows' || appCfg.platform === 'linux') {
+            const titlebar = document.getElementById('chooser-titlebar');
+            titlebar.classList.add('visible');
+
+            const win = window.__TAURI__.window.getCurrentWindow();
+            titlebar.querySelector('.chooser-titlebar-btn-maximize').addEventListener('click', async () => {
+              if (await win.isMaximized()) { win.unmaximize(); } else { win.maximize(); }
+            });
+            titlebar.querySelector('.chooser-titlebar-btn-close').addEventListener('click', () => win.close());
+          }
+        } catch (_) {}
+      })();
+    })();
+  </script>
+
+  <script src="app/ui/tl-icon.js"></script>
+  <script src="app/ui/tl-dialog.js"></script>
+  <script src="app/features/files/data-service.js"></script>
+  <script src="app/features/editor/file-dialog-model.js"></script>
+  <script src="app/features/editor/file-dialog-view.js"></script>
+  <script src="app/chooser-window-runtime.js"></script>
+</body>
+</html>

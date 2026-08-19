@@ -13,6 +13,12 @@ pub struct PersistentState {
     /// open at the exact size for the configured columns x lines instead of
     /// opening at a guess and visibly correcting itself.
     pub window_metrics: WindowMetrics,
+    /// The file chooser window's size from its last close (logical px).
+    /// `None` means "never closed one yet" — the chooser opens at its floor
+    /// size instead. Written on every chooser close, read at open, and
+    /// clamped to the floor and the parent's monitor work area there (see
+    /// `termlab_tauri::chooser_window`).
+    pub chooser_window: Option<ChooserWindowSize>,
 }
 
 impl Default for PersistentState {
@@ -21,8 +27,17 @@ impl Default for PersistentState {
             layout: LayoutConfig::default(),
             loaded_plugins: Vec::new(),
             window_metrics: WindowMetrics::default(),
+            chooser_window: None,
         }
     }
+}
+
+/// The file chooser window's persisted size, in logical pixels. No position
+/// is persisted — the chooser is always re-centered on its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ChooserWindowSize {
+    pub width: f64,
+    pub height: f64,
 }
 
 /// The two numbers that turn "columns x lines" into window pixels: how big a
@@ -200,12 +215,17 @@ mod tests {
                 font_size: 14.0,
                 zoom: 1.0,
             },
+            chooser_window: Some(ChooserWindowSize {
+                width: 900.0,
+                height: 600.0,
+            }),
         };
         let toml_str = toml::to_string(&original).expect("serialize");
         let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
 
         assert_eq!(restored.window_metrics, original.window_metrics);
         assert!(restored.window_metrics.matches("JetBrains Mono", 14.0, 1.0));
+        assert_eq!(restored.chooser_window, original.chooser_window);
         assert!(!restored.window_metrics.matches("JetBrains Mono", 16.0, 1.0));
 
         assert_eq!(restored.layout.window_width, 1280.0);
@@ -240,6 +260,37 @@ mod tests {
         assert!(ps.layout.active_tool_windows.is_empty());
         assert_eq!(ps.layout.left_split_ratio, 0.5);
         assert_eq!(ps.layout.right_split_ratio, 0.5);
+    }
+
+    #[test]
+    fn chooser_window_size_round_trips_when_present() {
+        let original = PersistentState {
+            chooser_window: Some(ChooserWindowSize {
+                width: 800.0,
+                height: 500.0,
+            }),
+            ..PersistentState::default()
+        };
+        let toml_str = toml::to_string(&original).expect("serialize");
+        let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(
+            restored.chooser_window,
+            Some(ChooserWindowSize {
+                width: 800.0,
+                height: 500.0,
+            })
+        );
+    }
+
+    #[test]
+    fn chooser_window_size_defaults_to_none_when_key_absent() {
+        // Backward compat: every state.toml written before this field existed
+        // has no [chooser_window] table at all.
+        let toml_str = r#"
+loaded_plugins = ["my-plugin"]
+"#;
+        let ps: PersistentState = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(ps.chooser_window, None);
     }
 
     #[test]
