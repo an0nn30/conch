@@ -931,57 +931,105 @@ white   = "#ffffff"
         );
     }
 
-    /// F1, continued: `resolve_theme("dracula")` now reads that file instead
-    /// of silently falling back to `ColorScheme::default()` — pin a value
-    /// that is DIFFERENT between the two sources, so a regression back to
-    /// the old fallback (or a future edit to the file) reds visibly.
+    /// F1 round 2 (branch-review.md, fix-wave-report.md concern 1):
+    /// zero-behavior-change for a concrete-named theme is a BINDING branch
+    /// constraint, and rendering IS behavior. `dracula.toml` is therefore
+    /// NOT the vendored upstream alacritty-theme fixture (that stays a
+    /// parse-fixture-only file at
+    /// `termlab_core/tests/fixtures/alacritty-themes/dracula.toml`) — it is
+    /// instead a hand-serialized copy of `ColorScheme::default()`'s own
+    /// hardcoded values, so `resolve_theme("dracula")` renders EXACTLY what
+    /// every legacy `theme = "dracula"` config has always rendered, field
+    /// for field. This is the strongest possible pin of that constraint:
+    /// direct equality (no `PartialEq` derive on these structs, so compared
+    /// field by field) between the file-backed resolution and the hardcoded
+    /// default.
     ///
-    /// This IS a behavior change, and the branch review asked that it be
-    /// reported rather than hidden: `ColorScheme::default()`'s Dracula
-    /// palette (the official draculatheme.com values: normal.black
-    /// "#21222c", bright.black "#6272a4", bright.red "#ff6e6e", ...) is NOT
-    /// byte-identical to the vendored alacritty-theme community fixture
-    /// (normal.black "#000000", bright.black "#555555", bright.red
-    /// "#ff5555", ...). The primary background/foreground and the
-    /// non-bright normal ANSI colors happen to coincide, which is why nothing
-    /// downstream that only checked `primary.background == "#282a36"` (e.g.
-    /// `theme.rs::a_concrete_theme_name_yields_an_identical_payload_under_both_appearances`)
-    /// caught the drift. From this commit on, THE FILE WINS for a legacy
-    /// `"dracula"` config's rendering — this test pins that new truth.
+    /// Keep `crates/termlab_tauri/frontend/themes/dracula.toml` in sync with
+    /// `ColorScheme::default()` below, or this test reds.
     #[test]
-    fn resolve_theme_dracula_is_now_file_backed_not_the_hardcoded_default() {
+    fn resolve_theme_dracula_is_byte_identical_to_the_hardcoded_default() {
         let file_backed = resolve_theme("dracula");
-        let hardcoded_default = ColorScheme::default();
+        let hardcoded = ColorScheme::default();
 
-        // Primary colors coincide between the two sources (not what this
-        // test is about) ...
-        assert_eq!(file_backed.primary.background, "#282a36");
-        assert_eq!(file_backed.primary.foreground, "#f8f8f2");
-
-        // ... but the normal/bright ANSI palettes do NOT. These three fields
-        // are where the vendored fixture and the hardcoded default disagree;
-        // asserting the FILE's values here is the behavior-change pin.
+        assert_eq!(file_backed.primary.background, hardcoded.primary.background);
+        assert_eq!(file_backed.primary.foreground, hardcoded.primary.foreground);
         assert_eq!(
-            file_backed.normal.black, "#000000",
-            "the vendored dracula.toml's normal.black"
+            file_backed.primary.dim_foreground,
+            hardcoded.primary.dim_foreground
         );
         assert_eq!(
-            file_backed.bright.black, "#555555",
-            "the vendored dracula.toml's bright.black"
-        );
-        assert_eq!(
-            file_backed.bright.red, "#ff5555",
-            "the vendored dracula.toml's bright.red (draculatheme.com's is #ff6e6e)"
+            file_backed.primary.bright_foreground,
+            hardcoded.primary.bright_foreground
         );
 
-        assert_ne!(
-            file_backed.normal.black, hardcoded_default.normal.black,
-            "file-backed and hardcoded-default Dracula must now visibly disagree \
-             on normal.black — if this assertion fails, the two palettes were \
-             made to match and this whole test (and its doc comment) is stale"
+        assert_eq!(
+            file_backed.normal.as_array(),
+            hardcoded.normal.as_array(),
+            "normal ANSI colors"
         );
-        assert_ne!(file_backed.bright.black, hardcoded_default.bright.black);
-        assert_ne!(file_backed.bright.red, hardcoded_default.bright.red);
+        assert_eq!(
+            file_backed.bright.as_array(),
+            hardcoded.bright.as_array(),
+            "bright ANSI colors"
+        );
+
+        assert!(
+            file_backed.dim.is_none() && hardcoded.dim.is_none(),
+            "neither source defines colors.dim"
+        );
+
+        let (file_cursor, default_cursor) = (
+            file_backed.cursor.as_ref().expect("file defines cursor"),
+            hardcoded.cursor.as_ref().expect("default defines cursor"),
+        );
+        assert_eq!(file_cursor.text, default_cursor.text);
+        assert_eq!(file_cursor.cursor, default_cursor.cursor);
+
+        let (file_selection, default_selection) = (
+            file_backed
+                .selection
+                .as_ref()
+                .expect("file defines selection"),
+            hardcoded
+                .selection
+                .as_ref()
+                .expect("default defines selection"),
+        );
+        assert_eq!(file_selection.text, default_selection.text);
+        assert_eq!(file_selection.background, default_selection.background);
+
+        assert!(
+            file_backed.indexed_colors.is_empty() && hardcoded.indexed_colors.is_empty(),
+            "neither source defines colors.indexed_colors"
+        );
+    }
+
+    /// F1 round 2, continued: a regression alarm specifically for "someone
+    /// swapped the vendored upstream alacritty-theme fixture back in as
+    /// `frontend/themes/dracula.toml`" — the equality test above would
+    /// catch that too (an upstream swap breaks equality with
+    /// `ColorScheme::default()`), but this pins TermLab's actual hardcoded
+    /// values directly, on the three bright-ANSI fields where TermLab's
+    /// longstanding built-in and upstream alacritty-theme's community
+    /// fixture are known to disagree (see the vendored fixture's own
+    /// `normal.black "#000000"`, `bright.black "#555555"`, `bright.red
+    /// "#ff5555"` — all different from the values asserted below).
+    #[test]
+    fn resolve_theme_dracula_pins_termlabs_hardcoded_bright_colors_not_upstreams() {
+        let scheme = resolve_theme("dracula");
+        assert_eq!(
+            scheme.normal.black, "#21222c",
+            "TermLab's hardcoded value, not upstream alacritty-theme's #000000"
+        );
+        assert_eq!(
+            scheme.bright.black, "#6272a4",
+            "TermLab's hardcoded value, not upstream alacritty-theme's #555555"
+        );
+        assert_eq!(
+            scheme.bright.red, "#ff6e6e",
+            "TermLab's hardcoded value, not upstream alacritty-theme's #ff5555"
+        );
     }
 
     #[test]

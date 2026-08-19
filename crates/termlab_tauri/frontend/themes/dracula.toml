@@ -1,28 +1,53 @@
-# Colors (Dracula)
+# TermLab's built-in "dracula" theme.
+#
+# This is NOT the upstream alacritty-theme dracula.toml (that file remains
+# vendored verbatim, parse-fixture-only, at
+# crates/termlab_core/tests/fixtures/alacritty-themes/dracula.toml). This
+# file is instead a byte-for-byte serialization of
+# termlab_core::color_scheme::ColorScheme::default() — TermLab's own
+# historical hardcoded built-in Dracula variant, which predates this
+# picker and which every `theme = "dracula"` config (the pre-branch serde
+# default) has always rendered.
+#
+# It exists as a file, rather than only as the Default impl, so that
+# "dracula" enumerates as a real picker entry (branch-review.md F1) without
+# changing what a legacy config renders (the branch's own zero-behavior-
+# change-for-concrete-names constraint — rendering IS behavior). Keep this
+# file's values in exact sync with ColorScheme::default() in
+# crates/termlab_core/src/color_scheme.rs; the two are pinned equal,
+# field-for-field, by
+# color_scheme::tests::resolve_theme_dracula_is_byte_identical_to_the_hardcoded_default.
 
-# Default colors
 [colors.primary]
-background = '#282a36'
-foreground = '#f8f8f2'
+background = "#282a36"
+foreground = "#f8f8f2"
+dim_foreground = "#6272a4"
+bright_foreground = "#ffffff"
 
-# Normal colors
+[colors.cursor]
+text = "#282a36"
+cursor = "#f8f8f2"
+
+[colors.selection]
+text = "#f8f8f2"
+background = "#44475a"
+
 [colors.normal]
-black   = '#000000'
-red     = '#ff5555'
-green   = '#50fa7b'
-yellow  = '#f1fa8c'
-blue    = '#bd93f9'
-magenta = '#ff79c6'
-cyan    = '#8be9fd'
-white   = '#bbbbbb'
+black   = "#21222c"
+red     = "#ff5555"
+green   = "#50fa7b"
+yellow  = "#f1fa8c"
+blue    = "#bd93f9"
+magenta = "#ff79c6"
+cyan    = "#8be9fd"
+white   = "#f8f8f2"
 
-# Bright colors
 [colors.bright]
-black   = '#555555'
-red     = '#ff5555'
-green   = '#50fa7b'
-yellow  = '#f1fa8c'
-blue    = '#caa9fa'
-magenta = '#ff79c6'
-cyan    = '#8be9fd'
-white   = '#ffffff'
+black   = "#6272a4"
+red     = "#ff6e6e"
+green   = "#69ff94"
+yellow  = "#ffffa5"
+blue    = "#d6acff"
+magenta = "#ff92df"
+cyan    = "#a4ffff"
+white   = "#ffffff"

@@ -57,7 +57,7 @@ Any valid Alacritty theme file parses and applies. Concretely, `color_scheme.rs`
 ## Non-Goals
 
 - No file watcher / hot reload of theme files (the picker rescans on settings open — every `list_terminal_themes` call re-scans the directories — not on save; a save does not change the themes directory, so nothing rescans there).
-- No theme editing UI, no import button, no bundled third-party themes.
+- No theme editing UI, no import button. The bundled built-ins are all TermLab-owned palettes — TermLab Dark, TermLab Light, and the historical "dracula" variant (a serialization of the app's own longstanding hardcoded default, not the vendored upstream alacritty-theme fixture, which stays a parse-test fixture only). Third-party themes remain user-directory-only (`~/.config/termlab/themes/`), never bundled.
 - No per-pane or per-host terminal themes.
 
 ## Constraints
