@@ -1,0 +1,49 @@
+Provenance
+==========
+
+The 12 `.toml` files in this directory are vendored VERBATIM (byte-for-byte,
+no reformatting) from:
+
+    https://github.com/alacritty/alacritty-theme
+
+  Commit:  03cce642656759f440c97bb99ce65fc1c5b064a1
+  Fetched: 2026-08-19
+  License: Apache License 2.0 (see ../LICENSE-alacritty-theme.txt, copied
+           verbatim from the same repository's LICENSE file)
+
+Each file keeps its original upstream filename and content unmodified. They
+were chosen to span the Alacritty theme schema's variety rather than to
+represent any particular popularity ranking:
+
+  dracula.toml           - classic shape: primary/normal/bright only, comments
+  monokai.toml            - minimal: primary/normal/bright only, no comments,
+                             no cursor/selection/dim/etc. (floor case)
+  alacritty_0_12.toml     - dim, hints, search (no cursor/selection sections
+                             at all - tests optional-section omission)
+  konsole_linux.toml      - dim, bright_foreground, search using the
+                             CellForeground/CellBackground sentinel strings
+                             (not hex) in colors.search.focused_match
+  github_dark.toml        - indexed_colors ([[colors.indexed_colors]] array)
+  catppuccin_mocha.toml   - "kitchen sink": dim, dim_foreground,
+                             bright_foreground, vi_mode_cursor, search,
+                             footer_bar, hints, selection, inline comments
+  catppuccin_latte.toml   - same kitchen-sink shape as mocha, light palette
+  rose_pine.toml          - vi_mode_cursor, hints (foreground/background
+                             table form), no comments
+  gruvbox_dark.toml       - comments (incl. a commented-out alternate value)
+  nord.toml                - plain dark theme, comments, no optional sections
+  solarized_light.toml    - plain light theme, comments, no optional sections
+  one_dark.toml            - plain dark theme, comments, no optional sections
+
+None of the fetched upstream files use the legacy `0x`-prefixed color form
+(Alacritty deprecated it in favor of `#rrggbb`; a scan of ~50 files from the
+same repo turned up zero uses). `0x` parsing is covered instead by an inline
+synthetic TOML string in
+`crates/termlab_core/src/color_scheme.rs` (see the
+`deserialize_0x_prefixed_color_form` test) rather than by a vendored fixture,
+since it would not be an honest "verbatim real file" otherwise.
+
+`tests/fixtures/broken/not_a_valid_theme.toml` is NOT from upstream. It is a
+hand-written, deliberately-malformed file used only to assert that a broken
+theme file fails to parse without panicking. Do not treat it as vendored
+Alacritty content.

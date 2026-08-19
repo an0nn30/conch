@@ -1,0 +1,11 @@
+# Deliberately broken fixture, NOT vendored from upstream.
+#
+# Used by the "broken fixture errors without panicking" test in
+# crates/termlab_core/tests/alacritty_fixtures.rs. Missing the required
+# [colors.normal] and [colors.bright] tables, and has invalid TOML syntax
+# (an unterminated string) to make sure both a schema-shape failure and a
+# syntax failure are handled as errors, not panics.
+
+[colors.primary
+background = "#000000
+foreground = "#ffffff"
