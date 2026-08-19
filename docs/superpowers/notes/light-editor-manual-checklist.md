@@ -596,7 +596,7 @@ step is a human pass. Run in order; stop and report at the first mismatch.
      to Light (and again to System, with the OS in light mode), open a new
      terminal pane or tab → its colors follow `colors.theme` exactly as
      before this branch — whatever palette that setting already names
-     (e.g. still Dracula, or "TermLab Dark," or whatever was configured).
+     (e.g. still "TermLab Dark," or whatever was configured).
      It does **NOT** switch to "TermLab Light," even though that palette
      now exists as a built-in (Task 3): this branch adds the palette but
      wires nothing to select it — the next plan (`auto` terminal-theme
@@ -622,11 +622,14 @@ step is a human pass. Run in order; stop and report at the first mismatch.
 Added by the terminal-themes plan: `colors.theme` gains a reserved `"auto"`
 default that tracks app appearance via the two built-in TermLab palettes,
 plus a `~/.config/termlab/themes/*.toml` drop-in directory and a Settings →
-Appearance → "Terminal Theme" picker (palette-strip preview per entry) that
-lists them alongside the built-ins. None of this touches the editor or app
-chrome — that's the whole point of "terminal-only" — and none of it was run
-against a real GUI or a real packaged build by the implementer. Run in
-order; stop and report at the first mismatch.
+Appearance → "Terminal Theme" row — one combo listing them alongside the two
+built-ins, with a fake-terminal preview box below it showing the selected
+palette. That row sits directly under Appearance Mode; the built-ins are
+TermLab Dark (the app's own default palette) and TermLab Light. None of this
+touches the editor or app chrome — that's the whole point of
+"terminal-only" — and none of it was run against a real GUI or a real
+packaged build by the implementer. Run in order; stop and report at the
+first mismatch.
 
 123. Download a real theme file from
      [alacritty-theme](https://github.com/alacritty/alacritty-theme) (any
@@ -634,35 +637,36 @@ order; stop and report at the first mismatch.
      are already vendored, so pick something else, e.g. Tokyo Night or
      Everforest) and drop it into `~/.config/termlab/themes/` unmodified.
      Open Settings → Appearance → Terminal Theme → the new theme appears in
-     the picker list, under the user-themes group, with its own 16-swatch +
-     bg/fg palette strip rendered from the file's actual colors (not a
-     placeholder). Select it → the open terminal pane re-themes live, no
-     restart, matching the strip.
+     the combo's dropdown, after the built-ins, by its file stem. Select it →
+     the preview box below the row immediately repaints in that file's actual
+     colors (not a placeholder, and no visible fetch/flicker), AND the open
+     terminal pane re-themes live, no restart, matching the preview.
 124. Break that same file (delete a required table, e.g. `[colors.normal]`,
      or introduce a syntax error like an unterminated string) and reopen
-     Settings → Appearance → Terminal Theme → the entry stays listed (not
-     silently dropped) but renders greyed/disabled, with a note reading
-     "Parse error: " followed by the actual parse failure — not a generic
-     message. Clicking the row is a no-op: the current selection does not
-     change.
+     Settings → Appearance → Terminal Theme → the entry stays listed in the
+     dropdown (not silently dropped) but is greyed/disabled, its label
+     reading the theme name then "— Parse error: " followed by the actual
+     parse failure — not a generic message. Clicking it is a no-op: the
+     current selection, and the preview box, do not change.
 125. Rename a (working) theme file to `auto.toml` in the same directory →
-     it enumerates in the picker like any other user theme, but greyed and
-     unselectable, with the note "Reserved name, ignored (would resolve to
-     Auto). Rename this file to use it." **Judgment call-out:** this is
+     it enumerates in the dropdown like any other user theme, but greyed and
+     unselectable, its label reading `auto — Reserved name, ignored (would
+     resolve to Auto). Rename this file to use it.` **Judgment call-out:**
+     this is
      deliberate, not a bug — `auto` is a reserved `colors.theme` value
      intercepted before any file lookup runs, so a file by that name can
      never be reached by its own name no matter what. Also break this
-     file's TOML while it's still named `auto.toml` → the note changes to
-     "Reserved name, ignored — also fails to parse.", not the ordinary
-     parse-error note from step 124 — the reserved-name classification
-     wins over the broken classification.
+     file's TOML while it's still named `auto.toml` → the label's note
+     changes to "Reserved name, ignored — also fails to parse.", not the
+     ordinary parse-error label from step 124 — the reserved-name
+     classification wins over the broken classification.
 126. **Bold judgment call-out — a user theme can shadow a built-in, including
      for Auto.** Create `~/.config/termlab/themes/TermLab Dark.toml` with
      colors clearly different from the real built-in (e.g. a bright red
-     background) → in the picker, that entry shows a "TermLab Dark" name
-     with an "Overrides built-in" note, and the built-in "TermLab Dark"
-     entry itself is no longer offered as a separate row. Select it
-     explicitly → the terminal shows YOUR red background, not the built-in.
+     background) → in the dropdown, that entry reads `TermLab Dark
+     (overrides built-in)`, and the built-in "TermLab Dark" is no longer
+     offered as a separate option. Select it explicitly → the preview box and
+     the terminal both show YOUR red background, not the built-in.
      Then separately set Terminal Theme to **Auto** with Appearance Mode
      **Dark** → the terminal *also* shows your red background, not the
      built-in TermLab Dark palette. This is the existing later-dirs-win
@@ -682,7 +686,8 @@ order; stop and report at the first mismatch.
 128. **A concrete theme survives appearance flips unchanged.** Set Terminal
      Theme to a named palette (e.g. `gruvbox_dark.toml` — vendored at
      `crates/termlab_core/tests/fixtures/alacritty-themes/gruvbox_dark.toml`,
-     copy it into `~/.config/termlab/themes/`, or just pick Dracula) and
+     copy it into `~/.config/termlab/themes/`, or just pick TermLab Light,
+     which is a concrete name even though `auto` also uses it) and
      Appearance Mode to **System**. Flip the OS appearance both directions.
      → app chrome restyles as expected (per section J); the terminal pane's
      colors do not change at all — same background, same ANSI colors,
@@ -692,8 +697,8 @@ order; stop and report at the first mismatch.
      theme through the same code path.
 129. **The terminal-only promise, checked directly.** With a source file
      open in an editor pane and the Settings window open, switch Terminal
-     Theme through two or three visibly different palettes (e.g. Dracula →
-     Gruvbox → Solarized Light). Confirm nothing outside the terminal
+     Theme through two or three visibly different palettes (e.g. TermLab
+     Dark → Gruvbox → Solarized Light). Confirm nothing outside the terminal
      surface changes: the editor's background/gutter/syntax colors, the
      titlebar, the tool-window rail, Settings' own colors, and the file
      chooser (open one, ⌘O) all stay exactly as app appearance already has
@@ -734,8 +739,12 @@ order; stop and report at the first mismatch.
        Mode **Dark** → the terminal pane shows the **TermLab Dark** palette.
      - Switch Appearance Mode to **Light** (or set the OS to light with
        Appearance Mode **System**) → the terminal shows **TermLab Light**.
-     - **The failure mode to watch for:** Auto silently resolving to
-       built-in **Dracula** instead of either TermLab palette. That means
-       the packaged binary's resource-dir injection didn't run or found
-       nothing, and `bundled_themes_dir()` fell through to its dev-only
-       fallback, which does not exist inside a real app bundle.
+     - **The failure mode to watch for:** the terminal staying on the DARK
+       palette after switching to Light. TermLab Dark is byte-identical to
+       the hardcoded `ColorScheme::default()` fallback, so a dark terminal
+       under a light appearance is exactly what you'd see if the packaged
+       binary's resource-dir injection didn't run or found nothing and
+       `bundled_themes_dir()` fell through to its dev-only fallback (which
+       does not exist inside a real app bundle) — the dark half would look
+       fine and only the light half would give it away. Check the Light case
+       specifically; do not infer success from the Dark one.
