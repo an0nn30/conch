@@ -140,6 +140,8 @@ function makeHarness(options) {
   const listenGates = [];
   const openGates = [];
 
+  // Rust's registry, in miniature: at most one live chooser per parent.
+  let live = null;                 // { reqId } once the entry has been inserted
   let nextReqId = 1;
   sandbox.termlabServices = {
     tauriClient: {
@@ -151,9 +153,26 @@ function makeHarness(options) {
           if (handled !== undefined) return handled;
         }
         if (command === 'open_file_chooser') {
+          // Rust's one-chooser-per-parent rule: a second request is handed the
+          // live entry's req_id instead of building a second window
+          // (chooser_window.rs:506-518).
+          if (live) return Promise.resolve(live.reqId);
           const reqId = nextReqId++;
-          if (opts.gateOpen) return new Promise((resolve) => { openGates.push(() => resolve(reqId)); });
-          return Promise.resolve(reqId);
+          const insert = () => { live = { reqId }; return reqId; };
+          if (opts.gateOpen) return new Promise((resolve) => { openGates.push(() => resolve(insert())); });
+          return Promise.resolve(insert());
+        }
+        if (command === 'cancel_file_chooser') {
+          // The registry's `cancel`, in miniature: `reqId` scopes it, and a
+          // cancel that names a chooser which is no longer live resolves
+          // nothing and leaves whatever IS live alone.
+          const named = args && args.reqId != null ? args.reqId : null;
+          if (!live) return Promise.resolve(null);
+          if (named !== null && named !== live.reqId) return Promise.resolve(null);
+          const reqId = live.reqId;
+          live = null;
+          api.resolve(null, reqId);          // Rust emits the answer back
+          return Promise.resolve(null);
         }
         return Promise.resolve(null);
       },
@@ -177,6 +196,12 @@ function makeHarness(options) {
           });
         }
         listeners.push(entry);
+        // `unlistenThrows` models an event bus that fails on release: the
+        // handler stays registered AND the caller gets an exception, which is
+        // the harshest shape of the failure.
+        if (opts.unlistenThrows) {
+          return Promise.resolve(() => { throw new Error('event bus went away'); });
+        }
         return Promise.resolve(unlisten);
       },
     },
@@ -210,9 +235,15 @@ function makeHarness(options) {
     // Rust answering. `reqId` defaults to the one live chooser's.
     resolve: (choice, reqId) => {
       const payload = { reqId: reqId === undefined ? 1 : reqId, choice: choice === undefined ? null : choice };
+      if (live && live.reqId === payload.reqId) live = null;   // the entry is consumed
       log.push(`event:chooser-resolved:${payload.reqId}`);
       for (const entry of listeners.slice()) entry.handler({ payload });
     },
+    // Which chooser the registry currently holds, if any.
+    liveReqId: () => (live ? live.reqId : null),
+    // The wire delivering a message that was dispatched earlier — the transport
+    // called directly, bypassing the proxy.
+    wire: (command, args) => sandbox.termlabServices.tauriClient.invoke(command, args),
   };
   return api;
 }
@@ -355,16 +386,10 @@ await checkAsync('an unlisten that THROWS still lets the answer land', async () 
   // throw out of the latch it would skip `resolveChoice` and leave
   // `activeChoice` claimed on a promise nobody will ever settle — and every
   // later same-mode ⌘O takes the share branch and hangs on that dead promise.
-  const handlers = [];
-  const h = makeHarness({
-    listen: (name, handler) => {
-      handlers.push(handler);
-      return Promise.resolve(() => { throw new Error('event bus went away'); });
-    },
-  });
+  const h = makeHarness({ unlistenThrows: true });
   const first = h.fd._chooseFile();
   await settle();
-  handlers[0]({ payload: { reqId: 1, choice: { scope: { kind: 'local' }, path: '/a.txt', entry: null } } });
+  h.resolve({ scope: { kind: 'local' }, path: '/a.txt', entry: null }, 1);
 
   const value = await settles(first, 'a chooser whose unlisten threw');
   assert.ok(value, 'the pick still came back');
@@ -378,7 +403,7 @@ await checkAsync('an unlisten that THROWS still lets the answer land', async () 
   assert.notStrictEqual(second, first, 'a new session, not the dead one');
   await settle();
   assert.strictEqual(h.commands().filter((c) => c === 'open_file_chooser').length, 2);
-  handlers[1]({ payload: { reqId: 2, choice: null } });
+  h.resolve(null, 2);
   assert.strictEqual(await settles(second, 'the next chooser'), null);
 });
 
@@ -569,6 +594,48 @@ await checkAsync('that late cancel never reaches the NEXT session\'s chooser', a
   await settle();
   h.resolve(null, 2);
   assert.strictEqual(await settles(opening, 'the new session'), null);
+});
+
+await checkAsync('a cancel names its OWN chooser, so a late one cannot kill the next', async () => {
+  // `cancel_file_chooser` used to name no chooser at all — it force-resolved
+  // whatever was live for the calling window. Two IPC calls from one window
+  // have no ordering guarantee, so a cancel dispatched for chooser A could
+  // arrive after A was already answered and the parent had opened chooser B,
+  // and resolve B null instead: a ⌘O that silently does nothing.
+  //
+  // The transport below enforces the registry's rule (chooser_window.rs's
+  // `ChooserRegistry::cancel`): a reqId that does not name the live entry
+  // resolves nothing.
+  const h = makeHarness({});
+  const pane = { kind: 'editor', tabId: 1 };
+  const savingA = h.fd._chooseFile({ mode: 'save', filename: 'Untitled', pane });
+  await settle();
+  assert.strictEqual(h.liveReqId(), 1, 'precondition: chooser 1 is live');
+
+  assert.strictEqual(h.fd.cancelForPane(pane), true);
+  assert.strictEqual(await settles(savingA, 'the cancelled chooser'), null);
+  await settle();
+  assert.deepEqual(h.argsFor('cancel_file_chooser'), { reqId: 1 },
+    'the proxy names the chooser it opened, not "whatever is live"');
+
+  // ⌘O: a chooser of its own.
+  const opening = h.fd.openForOpen();
+  await settle();
+  assert.strictEqual(h.liveReqId(), 2, 'precondition: a DIFFERENT chooser is live now');
+  assert.strictEqual(h.scrimUp(), true);
+
+  // A's cancel finally lands at Rust, long after A was answered.
+  await h.wire('cancel_file_chooser', { reqId: 1 });
+  await settle();
+  assert.strictEqual(h.liveReqId(), 2, 'the stale cancel resolved nothing');
+  assert.strictEqual(h.scrimUp(), true, 'and the live chooser is untouched');
+
+  // While the one that names it really does close it.
+  await h.wire('cancel_file_chooser', { reqId: 2 });
+  assert.strictEqual(await settles(opening, 'the live chooser'), null);
+  await settle();
+  assert.strictEqual(h.liveReqId(), null);
+  assert.strictEqual(h.scrimUp(), false);
 });
 
 await checkAsync('a stale early event cannot crowd out this session\'s own answer', async () => {

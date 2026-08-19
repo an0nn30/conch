@@ -164,11 +164,33 @@ impl ChooserRegistry {
     }
 
     /// Force-remove the parent's entry regardless of `req_id`. Used whenever
-    /// there is no specific outcome to check against — the parent died, its
-    /// own `cancel_file_chooser` call (which has no `req_id` to hand in), or
-    /// the chooser window's own close button.
+    /// there is no specific outcome to check against — the parent died, or the
+    /// chooser window's own close button.
     pub(crate) fn resolve_for_parent_death(&mut self, parent_label: &str) -> Option<PendingChooser> {
         self.pending.remove(parent_label)
+    }
+
+    /// A parent cancelling its own chooser. `req_id` scopes it:
+    ///
+    /// * `Some(id)` — resolve only if the live entry IS that chooser. A cancel
+    ///   that names a chooser which has already been answered is a no-op and
+    ///   leaves whatever is live now untouched. This is the case that matters:
+    ///   a cancel and the user's pick can cross on the wire, and by the time
+    ///   the cancel lands the parent may have opened a *different* chooser —
+    ///   an unscoped force-resolve would answer that one null instead, a ⌘O
+    ///   that silently does nothing.
+    /// * `None` — force-resolve whatever is live, as before. The parent has no
+    ///   `req_id` to name until `open_file_chooser` has returned one, and a
+    ///   cancel in that window still has to work.
+    pub(crate) fn cancel(
+        &mut self,
+        parent_label: &str,
+        req_id: Option<u64>,
+    ) -> Option<PendingChooser> {
+        match req_id {
+            Some(id) => self.resolve(parent_label, id),
+            None => self.resolve_for_parent_death(parent_label),
+        }
     }
 
     /// The live request for this parent, if any (used by `get_chooser_request`).
@@ -247,6 +269,61 @@ mod tests {
         // The mode must still be the original request's — a duplicate open
         // must not overwrite the live entry.
         assert_eq!(r.get("window-1").unwrap().request.mode, "open");
+    }
+
+    #[test]
+    fn cancel_with_a_stale_req_id_leaves_the_live_chooser_alone() {
+        // The race this closes: the parent dispatches a cancel for chooser A,
+        // A is answered before it lands, the parent opens chooser B, and only
+        // then does the cancel arrive. Unscoped it would resolve B null — a ⌘O
+        // that silently does nothing.
+        let mut r = ChooserRegistry::default();
+        let a = r.open("window-1".into(), req("save")).unwrap();
+        assert!(r.resolve("window-1", a.req_id).is_some()); // A is answered
+        let b = r.open("window-1".into(), req("open")).unwrap();
+        assert_ne!(a.req_id, b.req_id);
+
+        assert!(
+            r.cancel("window-1", Some(a.req_id)).is_none(),
+            "a cancel naming a chooser that is already gone resolves nothing"
+        );
+        assert!(
+            r.contains_parent("window-1"),
+            "and leaves the chooser that IS live untouched"
+        );
+        assert_eq!(r.get("window-1").unwrap().req_id, b.req_id);
+    }
+
+    #[test]
+    fn cancel_with_the_matching_req_id_resolves_it() {
+        let mut r = ChooserRegistry::default();
+        let p = r.open("window-1".into(), req("save")).unwrap();
+        let cancelled = r.cancel("window-1", Some(p.req_id));
+        assert_eq!(cancelled.map(|c| c.req_id), Some(p.req_id));
+        assert!(!r.contains_parent("window-1"));
+    }
+
+    #[test]
+    fn cancel_without_a_req_id_still_force_resolves() {
+        // The parent has no id to name until `open_file_chooser` has returned
+        // one, and a cancel in that window must still work.
+        let mut r = ChooserRegistry::default();
+        let p = r.open("window-1".into(), req("save")).unwrap();
+        assert_eq!(r.cancel("window-1", None).map(|c| c.req_id), Some(p.req_id));
+        assert!(!r.contains_parent("window-1"));
+        // And it is a no-op when there is nothing live, as the mid-build cancel
+        // that races ahead of the registry insert always is.
+        assert!(r.cancel("window-1", None).is_none());
+    }
+
+    #[test]
+    fn cancel_never_reaches_another_parents_chooser() {
+        let mut r = ChooserRegistry::default();
+        let mine = r.open("window-1".into(), req("save")).unwrap();
+        let theirs = r.open("window-2".into(), req("open")).unwrap();
+        assert!(r.cancel("window-1", Some(mine.req_id)).is_some());
+        assert!(r.contains_parent("window-2"));
+        assert_eq!(r.get("window-2").unwrap().req_id, theirs.req_id);
     }
 
     #[test]
@@ -584,11 +661,23 @@ pub(crate) async fn resolve_file_chooser(
     Ok(())
 }
 
-/// Cancel the calling (PARENT) window's chooser, if any. Has no `req_id` —
-/// it force-resolves whatever is live for this parent, same as a parent
-/// death or the chooser's own close button.
+/// Cancel the calling (PARENT) window's chooser.
+///
+/// `req_id` scopes the cancel to one specific chooser and SHOULD be passed
+/// whenever the caller knows it: two IPC calls from the same window have no
+/// ordering guarantee between them, so a cancel can land after the chooser it
+/// was for has already been answered — and force-resolving "whatever is live"
+/// at that point answers the parent's NEXT chooser null instead.
+///
+/// `None` keeps the original unconditional behaviour, which is still needed:
+/// the parent has no `req_id` to name until `open_file_chooser` has returned
+/// one, and a cancel in that window (a pane torn down while the chooser window
+/// is still being built) must still work.
 #[tauri::command]
-pub(crate) async fn cancel_file_chooser(window: tauri::WebviewWindow) -> Result<(), String> {
+pub(crate) async fn cancel_file_chooser(
+    window: tauri::WebviewWindow,
+    req_id: Option<u64>,
+) -> Result<(), String> {
     let app = window.app_handle().clone();
     let parent_label = window.label().to_string();
     if parent_label.starts_with("chooser-") {
@@ -597,7 +686,7 @@ pub(crate) async fn cancel_file_chooser(window: tauri::WebviewWindow) -> Result<
 
     let resolved = {
         let registry = app.state::<Mutex<ChooserRegistry>>();
-        registry.lock().resolve_for_parent_death(&parent_label)
+        registry.lock().cancel(&parent_label, req_id)
     };
     let Some(pending) = resolved else {
         return Ok(());

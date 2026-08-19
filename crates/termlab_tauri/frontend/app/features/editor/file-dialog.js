@@ -240,9 +240,19 @@
     };
 
     function doCancel() {
-      // No reqId: Rust force-resolves whatever is live for the calling window,
-      // so this works even before the invoke has told us which chooser that is.
-      invoke('cancel_file_chooser').catch(() => {}).finally(() => settle(null));
+      // Scoped to OUR chooser whenever we know which one that is. Two IPC calls
+      // from this window have no ordering guarantee between them, so a cancel
+      // can land after the user's pick has already answered this chooser and
+      // the parent has opened a different one — and an unscoped force-resolve
+      // would answer THAT one null instead (a ⌘O that silently does nothing).
+      //
+      // Before `open_file_chooser` has returned, `myReqId` is null and Rust
+      // falls back to force-resolving whatever is live, which is both necessary
+      // (there is no id to name yet) and safe (we still hold `activeChoice`, so
+      // no other session can exist to be hit).
+      invoke('cancel_file_chooser', { reqId: myReqId })
+        .catch(() => {})
+        .finally(() => settle(null));
     }
 
     (async () => {
@@ -278,16 +288,23 @@
           // send it again now that there IS something, or the user is left with
           // a chooser window nobody is listening to.
           //
-          // Only when no successor has claimed the chooser, though.
-          // `cancel_file_chooser` carries no reqId: it force-resolves whatever
-          // is live for THIS window (chooser_window.rs:590-604). A newer
-          // session's `open_file_chooser` can have been handed this dead
-          // session's req_id by the AlreadyOpen arm (chooser_window.rs:506-512)
-          // and adopted the very window we are about to close — so a blind
-          // re-send would answer someone else's question with a silent null.
-          // `activeChoice` is the successor's claim; if it is set, the window
-          // is no longer ours to cancel and the successor owns its lifetime.
-          if (activeChoice === null) invoke('cancel_file_chooser').catch(() => {});
+          // Named, and only when no successor has claimed the chooser.
+          //
+          // `myReqId` is the correctness half: Rust resolves only if the live
+          // entry IS this chooser, so a re-send that arrives after someone else
+          // has opened a different one is a no-op rather than a silent null for
+          // them. The `activeChoice === null` test is a cheap short-circuit on
+          // top — if a successor already holds the claim, the window is no
+          // longer ours to close and it owns the lifetime from here.
+          //
+          // Not closed by either: a successor whose `open_file_chooser` beat
+          // this cancel to Rust is handed THIS req_id by the AlreadyOpen arm
+          // (chooser_window.rs:506-518) and adopts this very window, so it
+          // shares the id the cancel names. See the report — closing that needs
+          // the adoption to mint a fresh id, which is a Task 1 surface change.
+          if (activeChoice === null) {
+            invoke('cancel_file_chooser', { reqId: myReqId }).catch(() => {});
+          }
           return;
         }
         // Drain: at most one buffered event can carry our id, and any that do
