@@ -914,6 +914,76 @@ white   = "#ffffff"
         );
     }
 
+    /// F1 (branch-review.md): `dracula.toml` — the same fixture vendored at
+    /// `termlab_core/tests/fixtures/alacritty-themes/dracula.toml` — now
+    /// ships in the bundled frontend `themes/` dir, so legacy `theme =
+    /// "dracula"` configs (the pre-branch serde default; still what every
+    /// user who ever saved settings on an older build has on disk) get a
+    /// real picker entry back instead of an unmatched value.
+    #[test]
+    fn list_themes_finds_bundled_dracula_theme_exactly_once() {
+        let themes = list_themes();
+        let count = themes.keys().filter(|k| *k == "dracula").count();
+        assert_eq!(
+            count, 1,
+            "expected 'dracula' to be discoverable exactly once, found: {:?}",
+            themes.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// F1, continued: `resolve_theme("dracula")` now reads that file instead
+    /// of silently falling back to `ColorScheme::default()` — pin a value
+    /// that is DIFFERENT between the two sources, so a regression back to
+    /// the old fallback (or a future edit to the file) reds visibly.
+    ///
+    /// This IS a behavior change, and the branch review asked that it be
+    /// reported rather than hidden: `ColorScheme::default()`'s Dracula
+    /// palette (the official draculatheme.com values: normal.black
+    /// "#21222c", bright.black "#6272a4", bright.red "#ff6e6e", ...) is NOT
+    /// byte-identical to the vendored alacritty-theme community fixture
+    /// (normal.black "#000000", bright.black "#555555", bright.red
+    /// "#ff5555", ...). The primary background/foreground and the
+    /// non-bright normal ANSI colors happen to coincide, which is why nothing
+    /// downstream that only checked `primary.background == "#282a36"` (e.g.
+    /// `theme.rs::a_concrete_theme_name_yields_an_identical_payload_under_both_appearances`)
+    /// caught the drift. From this commit on, THE FILE WINS for a legacy
+    /// `"dracula"` config's rendering — this test pins that new truth.
+    #[test]
+    fn resolve_theme_dracula_is_now_file_backed_not_the_hardcoded_default() {
+        let file_backed = resolve_theme("dracula");
+        let hardcoded_default = ColorScheme::default();
+
+        // Primary colors coincide between the two sources (not what this
+        // test is about) ...
+        assert_eq!(file_backed.primary.background, "#282a36");
+        assert_eq!(file_backed.primary.foreground, "#f8f8f2");
+
+        // ... but the normal/bright ANSI palettes do NOT. These three fields
+        // are where the vendored fixture and the hardcoded default disagree;
+        // asserting the FILE's values here is the behavior-change pin.
+        assert_eq!(
+            file_backed.normal.black, "#000000",
+            "the vendored dracula.toml's normal.black"
+        );
+        assert_eq!(
+            file_backed.bright.black, "#555555",
+            "the vendored dracula.toml's bright.black"
+        );
+        assert_eq!(
+            file_backed.bright.red, "#ff5555",
+            "the vendored dracula.toml's bright.red (draculatheme.com's is #ff6e6e)"
+        );
+
+        assert_ne!(
+            file_backed.normal.black, hardcoded_default.normal.black,
+            "file-backed and hardcoded-default Dracula must now visibly disagree \
+             on normal.black — if this assertion fails, the two palettes were \
+             made to match and this whole test (and its doc comment) is stale"
+        );
+        assert_ne!(file_backed.bright.black, hardcoded_default.bright.black);
+        assert_ne!(file_backed.bright.red, hardcoded_default.bright.red);
+    }
+
     #[test]
     fn resolve_theme_loads_termlab_light_by_exact_name() {
         let scheme = resolve_theme("TermLab Light");

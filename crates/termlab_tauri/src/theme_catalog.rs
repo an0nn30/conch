@@ -182,4 +182,41 @@ mod tests {
             "expected 'TermLab Light' in the theme list, found: {names:?}"
         );
     }
+
+    /// F1 (branch-review.md): `dracula.toml` now ships alongside the two
+    /// TermLab built-ins, so it enumerates through the SAME
+    /// command-facing path the settings picker consumes
+    /// (`list_terminal_themes` -> `build_theme_list`), as a real `Parsed`
+    /// entry with `source: Builtin` — not merely a name a legacy config
+    /// happens to resolve without a picker row.
+    #[test]
+    fn build_theme_list_includes_dracula_as_a_builtin() {
+        let entries = build_theme_list();
+        let dracula = entries.iter().find(|e| match e {
+            ThemeListEntry::Parsed { name, .. } => name == "dracula",
+            ThemeListEntry::Broken { name, .. } => name == "dracula",
+        });
+        match dracula {
+            Some(ThemeListEntry::Parsed { source, .. }) => {
+                assert_eq!(
+                    *source,
+                    ThemeSource::Builtin,
+                    "dracula.toml lives in the bundled themes dir, so it must enumerate as Builtin"
+                );
+            }
+            Some(ThemeListEntry::Broken { error, .. }) => {
+                panic!("dracula.toml failed to parse: {error}")
+            }
+            None => panic!(
+                "expected 'dracula' in the theme list, found: {:?}",
+                entries
+                    .iter()
+                    .map(|e| match e {
+                        ThemeListEntry::Parsed { name, .. } => name.as_str(),
+                        ThemeListEntry::Broken { name, .. } => name.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+            ),
+        }
+    }
 }
