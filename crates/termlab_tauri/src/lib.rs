@@ -4,6 +4,7 @@
 //! via `portable-pty`. This bypasses alacritty_terminal entirely — xterm.js
 //! handles all terminal emulation.
 
+pub(crate) mod bundled_themes;
 pub(crate) mod chooser_window;
 pub(crate) mod cleanup;
 pub(crate) mod close_guard;
@@ -318,6 +319,13 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Mutex::new(chooser_window::ChooserRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
+
+            // Inject the packaged bundled-themes dir (if this is a packaged
+            // build) before anything else runs, so no command can resolve a
+            // theme — including the "auto" default — before the override is
+            // in place. No-op in a dev run; see bundled_themes.rs.
+            bundled_themes::inject_bundled_themes_dir(app.handle());
+
             let kb_config = config::load_user_config()
                 .map(|c| c.termlab.keyboard)
                 .unwrap_or_default();

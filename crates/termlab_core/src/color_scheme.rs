@@ -42,6 +42,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -260,21 +261,72 @@ impl Default for ColorScheme {
     }
 }
 
-/// Return the bundled themes directory shipped with the frontend:
-/// `crates/termlab_tauri/frontend/themes/`, resolved at compile time relative
-/// to this crate's manifest dir (siblings under `crates/`).
-// TODO(packaging): env!("CARGO_MANIFEST_DIR") only resolves inside a source
-// checkout — it is dev-only and will not point at the right location in a
-// packaged/release build. Before shipping any bundled or release build,
-// replace this with Tauri's resource resolver (bundle themes as Tauri
-// resources) or read from an installed config/resource directory, or
-// bundled themes will silently vanish at runtime.
-fn bundled_themes_dir() -> PathBuf {
+/// Host-injected override for [`bundled_themes_dir`], set at most once via
+/// [`set_bundled_themes_dir`]. `termlab_core` has no Tauri dependency, so it
+/// cannot resolve a packaged app's real resource directory itself — the
+/// Tauri host injects it at startup instead. See [`set_bundled_themes_dir`]
+/// for the full contract.
+static BUNDLED_THEMES_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Inject the real bundled-themes directory resolved by the host
+/// application (e.g. Tauri's `resource_dir()` in a packaged build),
+/// overriding the dev-only [`bundled_themes_dir`] fallback below.
+///
+/// Intended to be called exactly once, early at startup, before any theme
+/// is resolved — `termlab_tauri`'s `tauri::Builder::setup` does this (see
+/// `termlab_tauri::bundled_themes::inject_bundled_themes_dir`). Returns
+/// `true` if this call set the override, `false` if an override was already
+/// set. A duplicate call is treated as a no-op rather than a panic: the app
+/// only ever calls this once in practice, and a defensive re-init (or a
+/// stray second call from a future refactor) should not crash startup — the
+/// first-set value silently wins, matching [`OnceLock::set`]'s semantics.
+pub fn set_bundled_themes_dir(path: PathBuf) -> bool {
+    BUNDLED_THEMES_DIR_OVERRIDE.set(path).is_ok()
+}
+
+/// The dev-only fallback location for the bundled themes directory:
+/// `crates/termlab_tauri/frontend/themes/`, resolved at compile time
+/// relative to this crate's manifest dir (siblings under `crates/`). Only
+/// valid inside a source checkout — see [`bundled_themes_dir`].
+fn manifest_relative_themes_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("termlab_tauri")
         .join("frontend")
         .join("themes")
+}
+
+/// Precedence logic behind [`bundled_themes_dir`], pulled apart into a pure
+/// function so the override-vs-fallback rule is unit-testable without
+/// touching the process-global [`BUNDLED_THEMES_DIR_OVERRIDE`] (which, once
+/// set in a test binary, stays set for every other test sharing that
+/// binary — see the `color_scheme` test module for why the "once injected,
+/// wins" case is instead proven end-to-end in a separate integration test
+/// binary).
+fn resolve_bundled_themes_dir(
+    override_dir: Option<&Path>,
+    dev_fallback: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    match override_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => dev_fallback(),
+    }
+}
+
+/// Return the bundled themes directory shipped with the frontend.
+///
+/// Resolves to the host-injected [`BUNDLED_THEMES_DIR_OVERRIDE`] when one has
+/// been set via [`set_bundled_themes_dir`] (the packaged-app case — see that
+/// function's docs); otherwise falls back to
+/// [`manifest_relative_themes_dir`], which only resolves inside a source
+/// checkout. Nothing in this crate calls [`set_bundled_themes_dir`], so
+/// `termlab_core`'s own dev and test behavior is unaffected by this
+/// override — only a host application (`termlab_tauri`) injects it.
+fn bundled_themes_dir() -> PathBuf {
+    resolve_bundled_themes_dir(
+        BUNDLED_THEMES_DIR_OVERRIDE.get().map(PathBuf::as_path),
+        manifest_relative_themes_dir,
+    )
 }
 
 /// Return the user themes directory: `~/.config/termlab/themes/`.
@@ -565,6 +617,50 @@ cyan = "#000000"
 white = "#000000"
 "##
         )
+    }
+
+    // -----------------------------------------------------------------
+    // bundled_themes_dir override (set_bundled_themes_dir)
+    // -----------------------------------------------------------------
+    //
+    // These test `resolve_bundled_themes_dir` — the pure precedence
+    // function — rather than calling `set_bundled_themes_dir` on the real
+    // `BUNDLED_THEMES_DIR_OVERRIDE`. That static is process-global: once set
+    // it stays set for the rest of the test binary, which would make every
+    // OTHER test in this file (and in `effective_theme.rs`, compiled into
+    // the same `cargo test -p termlab_core` binary) nondeterministically see
+    // an injected dir instead of the real dev fallback, depending on test
+    // execution order/interleaving. The "injection actually wins, end to
+    // end, and is once-only" behavior of the real static is instead proven
+    // in `tests/bundled_themes_dir_injection.rs`, a separate integration
+    // test binary (its own process) where poisoning the static for the rest
+    // of that binary is safe because nothing else in it depends on the
+    // fallback.
+
+    #[test]
+    fn bundled_themes_dir_prefers_the_injected_override_when_present() {
+        let injected = PathBuf::from("/injected/packaged/themes");
+        let resolved = resolve_bundled_themes_dir(Some(&injected), manifest_relative_themes_dir);
+        assert_eq!(resolved, injected);
+    }
+
+    #[test]
+    fn bundled_themes_dir_falls_back_to_the_dev_path_when_nothing_injected() {
+        let resolved = resolve_bundled_themes_dir(None, manifest_relative_themes_dir);
+        assert_eq!(resolved, manifest_relative_themes_dir());
+    }
+
+    #[test]
+    fn bundled_themes_dir_is_byte_identical_to_the_dev_fallback_when_unset() {
+        // Sanity check on the real zero-arg `bundled_themes_dir()`: as long
+        // as nothing in this test binary ever calls `set_bundled_themes_dir`
+        // (nothing here does), it must keep resolving exactly like it did
+        // before this override existed.
+        assert_eq!(bundled_themes_dir(), manifest_relative_themes_dir());
+        assert!(
+            bundled_themes_dir().join("TermLab Dark.toml").is_file(),
+            "dev fallback must still find the real bundled theme on disk"
+        );
     }
 
     #[test]

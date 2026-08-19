@@ -29,7 +29,10 @@
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/icon.png"
-    ]
+    ],
+    "resources": {
+      "frontend/themes/": "themes/"
+    }
   },
   "plugins": {
     "updater": {
