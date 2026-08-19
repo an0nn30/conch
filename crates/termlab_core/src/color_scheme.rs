@@ -737,6 +737,29 @@ white = "#000000"
         );
     }
 
+    /// An unmatched name falls back to the built-in Dracula scheme, silently
+    /// (no error, no panic) — the name-lookup `else` branch of
+    /// `resolve_theme_in` when the value isn't a path and isn't found in
+    /// either dir. This is the one fallback path the settings-picker's
+    /// deleted `preview_theme_colors` stopgap used to exercise indirectly;
+    /// Task 5's removal of that command (and its tests) left it with no
+    /// direct coverage anywhere in the workspace until this test, per the
+    /// Task 5 review's finding. Distinctive Dracula values, not just
+    /// "some non-empty scheme," so a fallback to the wrong palette reds it.
+    #[test]
+    fn resolve_theme_falls_back_to_dracula_for_an_unmatched_name() {
+        let bundled = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+
+        let scheme = resolve_theme_in(
+            "definitely_not_a_real_theme_xyz",
+            &[bundled.path().to_path_buf(), user.path().to_path_buf()],
+        );
+        assert_eq!(scheme.primary.background, "#282a36", "Dracula background");
+        assert_eq!(scheme.primary.foreground, "#f8f8f2", "Dracula foreground");
+        assert_eq!(scheme.normal.red, "#ff5555", "Dracula red");
+    }
+
     #[test]
     fn default_color_scheme_primary_colors() {
         let cs = ColorScheme::default();

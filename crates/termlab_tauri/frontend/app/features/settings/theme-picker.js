@@ -136,11 +136,11 @@
   function appendSwatch(parent, className, color) {
     const el = document.createElement('span');
     el.className = className;
-    // Data-driven color, not a design token — same rule
-    // .tl-settings__theme-preview-swatch already follows (see
-    // components/settings.css): only inline style carries a parsed theme's
-    // actual colors, so the boundary script's hex scan (which only checks
-    // stylesheets) has nothing to flag here.
+    // Data-driven color, not a design token: only inline style carries a
+    // parsed theme's actual colors (see the .tl-settings__theme-picker*
+    // rules' own comment in components/settings.css for the structural-only
+    // CSS this pairs with), so the boundary script's hex scan (which only
+    // checks stylesheets) has nothing to flag here.
     if (color) el.style.background = color;
     parent.appendChild(el);
     return el;
