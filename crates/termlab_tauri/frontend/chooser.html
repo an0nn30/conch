@@ -39,6 +39,7 @@
   <script src="app/core/keyboard-router.js"></script>
   <script src="app/core/config-service.js"></script>
   <script src="app/core/appearance.js"></script>
+  <script src="app/core/appearance-sync.js"></script>
 
   <!-- Publishes window.termlabServices.tauriClient and applies the theme CSS
        vars BEFORE app/chooser-window-runtime.js runs. This is deliberately a
@@ -103,6 +104,19 @@
           }
         } catch (_) {}
       })();
+
+      // A chooser is modal only over its own parent (chooser_window.rs), so a
+      // save from the standalone settings window (or another main window's
+      // settings modal) can land while this one is open. Without this it
+      // would keep its boot-time appearance for its whole life. No
+      // applyUiConfig here: the boot above does not call it either.
+      if (window.termlabAppearanceSync && typeof window.termlabAppearanceSync.create === 'function') {
+        window.termlabAppearanceSync.create({
+          invoke,
+          listen: client.listenOnCurrentWindow,
+          label: 'chooser',
+        }).init();
+      }
     })();
   </script>
 

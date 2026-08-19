@@ -21,9 +21,22 @@
         // the same repaint frame instead of two. appCfg is reused below for
         // vim mode and applyUiConfig, so this is still exactly one
         // get_app_config round trip per config-changed event, same as before.
-        const appCfg = await invoke('get_app_config');
-        if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
-          global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
+        //
+        // It gets its OWN try so that moving it up cannot make an appearance
+        // failure swallow the theme: before the move, a rejecting
+        // get_app_config aborted the handler only AFTER applyThemeCss and the
+        // pane refresh had already run. Every block that genuinely needs
+        // appCfg is guarded on it below, so a failure here costs exactly what
+        // it used to — the appearance re-apply, vim mode and applyUiConfig —
+        // and nothing more.
+        let appCfg = null;
+        try {
+          appCfg = await invoke('get_app_config');
+          if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
+            global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
+          }
+        } catch (error) {
+          console.warn('Failed to reload app config:', error);
         }
 
         const tc = await invoke('get_theme_colors');
@@ -72,18 +85,24 @@
         //
         // The stored flag is updated too, so the next editor pane this window
         // opens is created with the new value instead of the startup one.
-        const vimMode = appCfg && appCfg.editor_vim_mode === true;
-        if (typeof setEditorVimMode === 'function') setEditorVimMode(vimMode);
-        for (const pane of getPanes().values()) {
-          if (pane.kind === 'editor' && pane.view && global.termlabEditorPane
-              && typeof global.termlabEditorPane.setVimMode === 'function') {
-            global.termlabEditorPane.setVimMode(pane.view, vimMode);
+        //
+        // Guarded on appCfg: if its fetch above failed there is no new vim
+        // flag and no new UI config to apply, and forcing vim off from a
+        // missing config would be a worse answer than leaving it alone.
+        if (appCfg) {
+          const vimMode = appCfg.editor_vim_mode === true;
+          if (typeof setEditorVimMode === 'function') setEditorVimMode(vimMode);
+          for (const pane of getPanes().values()) {
+            if (pane.kind === 'editor' && pane.view && global.termlabEditorPane
+                && typeof global.termlabEditorPane.setVimMode === 'function') {
+              global.termlabEditorPane.setVimMode(pane.view, vimMode);
+            }
           }
-        }
-        if (typeof configService.applyUiConfig === 'function') {
-          configService.applyUiConfig(appCfg);
-        } else {
-          document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
+          if (typeof configService.applyUiConfig === 'function') {
+            configService.applyUiConfig(appCfg);
+          } else {
+            document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
+          }
         }
 
         try {
@@ -130,10 +149,40 @@
       }
     }
 
+    // The editor-pane half of applyConfigChanged's walk, extracted so the
+    // appearance-change path can reuse the same iteration and the same
+    // guards. An editor's colours are baked into a CodeMirror theme at
+    // buildTheme() time, so a --tl-* change only reaches an open pane through
+    // a rebuild.
+    function refreshEditorThemes() {
+      if (!global.termlabEditorPane || typeof global.termlabEditorPane.refreshTheme !== 'function') return;
+      for (const pane of getPanes().values()) {
+        if (pane.kind === 'editor' && pane.view) {
+          global.termlabEditorPane.refreshTheme(pane.view);
+        }
+      }
+    }
+
     function init() {
       listenOnCurrentWindow('config-changed', () => {
         applyConfigChanged();
       });
+
+      // Appearance flips reach open editors here. Two paths emit the event:
+      // a settings save (which also runs applyConfigChanged above, whose own
+      // later refresh — after applyThemeCss — is the authoritative one; the
+      // rebuild is idempotent, so the extra pass costs a rebuild and changes
+      // nothing), and an OS light/dark flip while in 'system' mode, which
+      // emits NO config-changed at all and is the reason this listener has to
+      // exist separately.
+      const appearanceEvent = (global.termlabAppearance && global.termlabAppearance.CHANGED_EVENT)
+        || 'tl-appearance-changed';
+      if (global.document && typeof global.document.addEventListener === 'function') {
+        global.document.addEventListener(appearanceEvent, () => {
+          refreshEditorThemes();
+        });
+      }
+
       return {
         applyConfigChanged,
       };
@@ -142,6 +191,7 @@
     return {
       init,
       applyConfigChanged,
+      refreshEditorThemes,
     };
   }
 

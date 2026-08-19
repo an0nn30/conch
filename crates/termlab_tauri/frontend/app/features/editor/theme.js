@@ -15,17 +15,51 @@
     return fallbackToken ? styles.getPropertyValue(fallbackToken).trim() : '';
   }
 
+  // Whether the app is running under the LIGHT appearance, asked of the one
+  // owner of that answer (app/core/appearance.js). Not inferred from a token:
+  // the two colour sources this branches between (app tokens vs the terminal
+  // palette) can disagree, which is exactly the case being handled.
+  function isLightAppearance() {
+    const appearance = global.termlabAppearance;
+    return !!(appearance
+      && typeof appearance.current === 'function'
+      && appearance.current() === 'light');
+  }
+
   function buildTheme() {
     const CM = global.CM6;
     if (!CM) return [];
 
-    const bg = token('--tl-terminal-bg', '--tl-bg');
+    // Under LIGHT the editor is a document surface and follows the app
+    // appearance: every colour comes from the app's own --tl-* tokens.
+    //
+    // Under DARK nothing changes. The editor keeps matching the terminal
+    // beside it: the background prefers --tl-terminal-bg and the syntax
+    // accents come from the terminal's ANSI vars.
+    //
+    // The two sources have to be branched rather than merged because
+    // config-service.js:16-27 writes --tl-terminal-bg and --red/--green/...
+    // as INLINE root styles from the terminal colour scheme, which the app
+    // deliberately keeps dark under both appearances. Preferring them under
+    // Light paints a light-appearance editor (light selection bands, light
+    // gutter rules, #1F2933 text) onto a near-black background.
+    const light = isLightAppearance();
+
+    const bg = light ? token('--tl-bg') : token('--tl-terminal-bg', '--tl-bg');
     const fg = token('--tl-fg');
     const muted = token('--tl-fg-muted');
     const accent = token('--tl-accent');
     const border = token('--tl-border');
     const selection = token('--tl-selection-bg', '--tl-accent');
     const rowHover = token('--tl-row-hover');
+
+    // Syntax accents. Under Dark: the terminal's ANSI var, falling back to an
+    // app token when the palette does not define it — verbatim what this file
+    // has always done. Under Light: the app token directly, because the ANSI
+    // vars are terminal-owned and stay tuned for a dark canvas.
+    const syntax = light
+      ? (ansiVar, appToken) => token(appToken)
+      : (ansiVar, appToken) => token(ansiVar, appToken);
 
     // The terminal's stack, not the UI font — an editor beside a terminal
     // shares its typeface. main-runtime keeps this global current; the literal
@@ -55,16 +89,19 @@
       '.cm-panels.cm-panels-top': { borderBottom: `1px solid ${border}` },
       '.cm-vim-panel': { fontFamily: fontStack },
       '.cm-vim-panel input': { color: fg, fontFamily: fontStack },
-    }, { dark: isDarkTheme() });
+      // Under Light the flag is asserted rather than inferred: the app
+      // appearance IS the answer, and bg above now comes from --tl-bg, the
+      // very token isDarkTheme() measures.
+    }, { dark: light ? false : isDarkTheme() });
 
     const t = CM.tags;
     const highlight = CM.HighlightStyle.define([
       { tag: [t.keyword, t.controlKeyword, t.moduleKeyword], color: accent },
-      { tag: [t.string, t.special(t.string)], color: token('--green', '--tl-accent') },
+      { tag: [t.string, t.special(t.string)], color: syntax('--green', '--tl-accent') },
       { tag: [t.comment, t.lineComment, t.blockComment], color: muted, fontStyle: 'italic' },
-      { tag: [t.number, t.bool, t.null], color: token('--yellow', '--tl-accent') },
-      { tag: [t.function(t.variableName), t.definition(t.variableName)], color: token('--blue', '--tl-fg') },
-      { tag: [t.typeName, t.className], color: token('--cyan', '--tl-accent') },
+      { tag: [t.number, t.bool, t.null], color: syntax('--yellow', '--tl-accent') },
+      { tag: [t.function(t.variableName), t.definition(t.variableName)], color: syntax('--blue', '--tl-fg') },
+      { tag: [t.typeName, t.className], color: syntax('--cyan', '--tl-accent') },
       { tag: t.propertyName, color: fg },
       { tag: t.operator, color: muted },
       { tag: t.invalid, color: token('--tl-danger') },

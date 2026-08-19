@@ -55,6 +55,7 @@
   <script src="app/core/dialog-service.js"></script>
   <script src="app/core/config-service.js"></script>
   <script src="app/core/appearance.js"></script>
+  <script src="app/core/appearance-sync.js"></script>
   <script src="app/ui/tl-icon.js"></script>
   <script src="app/ui/tl-menu.js"></script>
   <script src="app/ui/tl-dialog.js"></script>
@@ -117,6 +118,21 @@
         document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
       }
     } catch (_) {}
+
+    // Stay in step with an appearance/theme change made anywhere else — and,
+    // more importantly, with this window's OWN Apply button: actions.js's
+    // keepOpen path saves the config and leaves the window open, so without
+    // this listener the settings window flips every OTHER window light and
+    // stays dark itself. `applyUiConfig: true` mirrors the boot block above,
+    // which is also what re-tints the native macOS frame.
+    if (window.termlabAppearanceSync && typeof window.termlabAppearanceSync.create === 'function') {
+      window.termlabAppearanceSync.create({
+        invoke,
+        listen,
+        applyUiConfig: true,
+        label: 'settings',
+      }).init();
+    }
 
     // Activate custom titlebar on Windows/Linux (no native decorations).
     try {

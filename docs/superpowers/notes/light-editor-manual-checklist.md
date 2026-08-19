@@ -494,7 +494,18 @@ step is a human pass. Run in order; stop and report at the first mismatch.
      `.ts` file) in the **editor** with Light active → the editor
      background, gutter, and syntax token colors are all light-appropriate;
      no token renders a dark background/foreground pair left over from
-     dark mode.
+     dark mode. **Note (fix round, F2):** the editor deliberately does NOT
+     match the terminal pane beside it under Light — the terminal palette
+     stays dark on this branch (step 121), and the ruling is that the
+     editor is a document surface that follows APP appearance. An editor
+     and a terminal side by side will show a light pane next to a dark
+     one; that is the intended outcome until the terminal-themes plan's
+     `auto` lands, not a defect. Also expect the light syntax palette to
+     be flatter than dark's — under Light the accents come from the app's
+     own tokens, so keywords, strings, numbers and types share
+     `--tl-accent`. Judgment call: say whether that flatness is
+     acceptable for now or wants a real light syntax palette as a
+     follow-up.
 113. Trigger a **toast** (e.g. a save confirmation, an induced error) with
      Light active → it reads legibly light-themed, including any bold
      call-out toast variant.
@@ -542,6 +553,37 @@ step is a human pass. Run in order; stop and report at the first mismatch.
      together**, live, in the same flip. The parent and the chooser must
      not visibly disagree on appearance even momentarily longer than a
      repaint.
+119a. **The standalone settings window flips ITSELF (fix round, F1/F3).**
+     Open the **standalone settings window** with Dark active. Change
+     Appearance Mode to **Light** and click **Apply** — the button that
+     saves without closing. → The settings window you are looking at goes
+     light immediately: background, rows, dividers, **the icons in its
+     sidebar**, and (macOS, full decorations) its native title bar. It
+     must not stay dark until closed and reopened. Switch back to Dark
+     with Apply → same, in reverse.
+119b. **A chooser open across an explicit save (fix round, F3).** With a
+     chooser window open (⌘O) and Appearance Mode currently Dark, save an
+     appearance change to **Light** from somewhere else — the standalone
+     settings window, or another main window's settings modal. → The
+     already-open chooser restyles too; it does not keep its boot-time
+     appearance for the rest of its life.
+119c. **Persistent icons across an explicit flip (fix round, F1).** This is
+     the one step 108 could not catch by eye alone. With several tool
+     windows open and their rails visible, and **without touching any of
+     them**, flip Dark → Light from Settings. → Every icon in the
+     always-visible tool-strip rail, the tool-window title bars (gear,
+     hide), the tab bar, and any open Hosts/Tunnels/Notifications panel
+     re-resolves in place. The tell for a failure is a light-grey glyph
+     (`#AFB1B3`) on the new light surface — near-invisible rather than
+     merely wrong. Flip back → the dark variants return. Then open a menu
+     and the command palette to confirm the rebuild-per-open surfaces
+     agree with the persistent ones.
+119d. **An open editor survives an OS flip (fix round, F2).** Appearance
+     Mode → **System**, with a source file open in an editor pane. Flip
+     the OS appearance. → The open editor pane itself re-themes in the
+     same flip — background, gutter, syntax — without reopening the file.
+     Before the fix round only the chrome moved and the editor kept its
+     old colours entirely.
 120. **Dark spot-check — confirm zero net change.** Switch Appearance Mode
      back to **Dark** → re-check the titlebar, a tool window, the editor,
      and the chooser: everything should look and measure exactly as it did

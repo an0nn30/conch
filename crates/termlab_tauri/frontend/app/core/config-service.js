@@ -40,10 +40,21 @@
     if (String(appCfg.platform || '').toLowerCase() !== 'macos') return undefined;
     if (String(appCfg.decorations || '').toLowerCase() !== 'full') return undefined;
 
-    const appearanceMode = String(appCfg.appearance_mode || 'system').toLowerCase();
-    if (appearanceMode === 'dark') return 'dark';
+    // Same fallback convention as app/core/appearance.js: 'light' is the only
+    // affirmative light answer, 'system' is the only hand-off to the OS, and
+    // anything else — including a missing appearance_mode — is 'dark'. The
+    // webview and the native chrome have to agree on the unresolvable case:
+    // mapping falsy to 'system' here would tint the frame by OS preference
+    // while appearance.js forces the content dark.
+    //
+    // The only consumer is applyNativeWindowTheme() below, which turns
+    // 'dark'/'light' into window.setTheme(...) and null into "follow the OS";
+    // undefined (returned above) means "do not touch the frame at all".
+    // Unreachable in practice: the backend always emits a lowercase enum.
+    const appearanceMode = String(appCfg.appearance_mode || '').toLowerCase();
     if (appearanceMode === 'light') return 'light';
-    return null;
+    if (appearanceMode === 'system') return null;
+    return 'dark';
   }
 
   function applyNativeWindowTheme(appCfg) {
