@@ -105,12 +105,21 @@ static NEXT_CHOOSER_REQ: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 pub(crate) struct PendingChooser {
     pub req_id: u64,
+    /// The chooser WINDOW's label, `chooser-<parent_label>-<req_id>`, built
+    /// exactly once here at open time. Unique per request — never reused, so a
+    /// replacement window never collides with a displaced one whose `Destroyed`
+    /// event has not yet round-tripped Tauri's event loop (Tauri only clears a
+    /// label from its window map when that event lands). Every lookup or window
+    /// handle fetch goes through THIS stored value; nothing may re-derive a
+    /// parent by parsing the label (parent labels contain dashes themselves).
+    pub window_label: String,
     pub request: ChooserRequest,
 }
 
 /// One-per-parent registry of in-flight choosers, keyed by the *parent's*
-/// window label (never the chooser window's own label, which is derived from
-/// it: `chooser-<parent_label>`).
+/// window label. The chooser window's own label is stored per entry
+/// ([`PendingChooser::window_label`]) and is unique per request; the
+/// one-per-parent invariant lives only here, never in the label scheme.
 #[derive(Debug, Default)]
 pub(crate) struct ChooserRegistry {
     pending: HashMap<String, PendingChooser>,
@@ -118,7 +127,8 @@ pub(crate) struct ChooserRegistry {
 
 impl ChooserRegistry {
     /// Register a new chooser for `parent_label` with a freshly minted
-    /// `req_id`, overwriting whatever the caller put in `request.req_id`.
+    /// `req_id` (overwriting whatever the caller put in `request.req_id`) and
+    /// a freshly built, request-unique `window_label`.
     ///
     /// This never fails on an entry already being there — but the caller must
     /// not simply overwrite one either. `open_file_chooser` runs the pair
@@ -133,7 +143,12 @@ impl ChooserRegistry {
         let req_id = NEXT_CHOOSER_REQ.fetch_add(1, Ordering::Relaxed);
         request.req_id = req_id;
         request.parent_label = parent_label.clone();
-        let pending = PendingChooser { req_id, request };
+        let window_label = format!("chooser-{parent_label}-{req_id}");
+        let pending = PendingChooser {
+            req_id,
+            window_label,
+            request,
+        };
         self.pending.insert(parent_label, pending.clone());
         pending
     }
@@ -187,14 +202,30 @@ impl ChooserRegistry {
         }
     }
 
-    /// The live request for this parent, if any (used by `get_chooser_request`).
+    /// The live request for this parent, if any.
     pub(crate) fn get(&self, parent_label: &str) -> Option<&PendingChooser> {
         self.pending.get(parent_label)
     }
 
-    /// Whether this parent currently has a live chooser (used by the focus
-    /// bounce on `WindowEvent::Focused`).
-    pub(crate) fn contains_parent(&self, parent_label: &str) -> bool {
+    /// The live entry whose chooser WINDOW is `window_label`, if any — the
+    /// lookup every chooser-window-side caller (`get_chooser_request`,
+    /// `resolve_file_chooser`, the CloseRequested hook) resolves itself
+    /// through. Exact match on the stored label, deliberately: deriving the
+    /// parent by parsing `chooser-...` is banned — parent labels contain
+    /// dashes, and a displaced window's stale label must find NOTHING, not the
+    /// replacement entry that shares its parent.
+    pub(crate) fn get_by_window_label(&self, window_label: &str) -> Option<&PendingChooser> {
+        self.pending
+            .values()
+            .find(|p| p.window_label == window_label)
+    }
+}
+
+#[cfg(test)]
+impl ChooserRegistry {
+    /// Test-readability shorthand; production code goes through `get` (it
+    /// needs the entry — its stored `window_label` — not just existence).
+    fn contains_parent(&self, parent_label: &str) -> bool {
         self.pending.contains_key(parent_label)
     }
 }
@@ -248,11 +279,63 @@ mod tests {
             second.req_id, first.req_id,
             "the replacement is a chooser of its own, never the old id reused"
         );
+        assert_ne!(
+            second.window_label, first.window_label,
+            "and its WINDOW is fresh too: Tauri clears a destroyed window's \
+             label asynchronously, so a same-label rebuild would collide"
+        );
         assert_eq!(r.get("window-1").unwrap().req_id, second.req_id);
         assert_eq!(
             r.get("window-1").unwrap().request.mode,
             "save",
             "and it is the NEW request that is live, not the displaced one"
+        );
+    }
+
+    #[test]
+    fn window_labels_are_unique_per_request_and_prefixed() {
+        let mut r = ChooserRegistry::default();
+        let a = r.open("window-1".into(), req("open"));
+        assert_eq!(a.window_label, format!("chooser-window-1-{}", a.req_id));
+        assert!(
+            a.window_label.starts_with("chooser-"),
+            "validate_chooser_caller and the CloseRequested filter key on this prefix"
+        );
+    }
+
+    #[test]
+    fn lookup_by_window_label_finds_the_live_entry_and_misses_a_stale_one() {
+        // The lookup `get_chooser_request` / `resolve_file_chooser` / the
+        // CloseRequested hook all resolve themselves through. Exact match on
+        // the STORED label: after displacement the old window's label must
+        // find nothing — a prefix/parse-based match would hand the displaced
+        // window the replacement's request, because both labels share the
+        // `chooser-window-1` prefix (and parent labels contain dashes, so
+        // parsing cannot even tell where the parent ends).
+        let mut r = ChooserRegistry::default();
+        let first = r.open("window-1".into(), req("open"));
+        let other = r.open("window-2".into(), req("save"));
+
+        let hit = r.get_by_window_label(&first.window_label).unwrap();
+        assert_eq!(hit.req_id, first.req_id);
+        assert_eq!(hit.request.parent_label, "window-1");
+        assert_eq!(
+            r.get_by_window_label(&other.window_label).unwrap().req_id,
+            other.req_id,
+            "each window finds its OWN entry, not another parent's"
+        );
+
+        // Displace window-1's chooser: the stale label finds nothing, the
+        // replacement's label finds the replacement.
+        let _ = r.take_pending("window-1");
+        let second = r.open("window-1".into(), req("save"));
+        assert!(
+            r.get_by_window_label(&first.window_label).is_none(),
+            "a displaced window's stale label names NOTHING"
+        );
+        assert_eq!(
+            r.get_by_window_label(&second.window_label).unwrap().req_id,
+            second.req_id
         );
     }
 
@@ -458,6 +541,7 @@ fn centered_position<R: tauri::Runtime>(
 fn create_chooser_window<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     parent_label: &str,
+    chooser_label: &str,
     request: &ChooserRequest,
 ) -> Result<(), String> {
     let parent = app
@@ -472,10 +556,9 @@ fn create_chooser_window<R: tauri::Runtime>(
     let (target_w, target_h) = clamped_chooser_size(&parent, persisted_state.chooser_window);
 
     let title = if request.mode == "save" { "Save As" } else { "Open" };
-    let chooser_label = format!("chooser-{parent_label}");
 
     let mut builder =
-        WebviewWindowBuilder::new(app, &chooser_label, WebviewUrl::App("chooser.html".into()))
+        WebviewWindowBuilder::new(app, chooser_label, WebviewUrl::App("chooser.html".into()))
             .title(title)
             .inner_size(target_w, target_h)
             .min_inner_size(CHOOSER_MIN_WIDTH, CHOOSER_MIN_HEIGHT)
@@ -540,34 +623,38 @@ fn persist_chooser_size_from<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
 /// mid-teardown there and a second `close()` call is unnecessary.)
 fn complete_chooser<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-    parent_label: &str,
-    req_id: u64,
+    pending: &PendingChooser,
     choice: Option<serde_json::Value>,
 ) {
-    let payload = ChooserResolvedEvent { req_id, choice };
-    let _ = app.emit_to(parent_label, CHOOSER_RESOLVED_EVENT, &payload);
+    let payload = ChooserResolvedEvent {
+        req_id: pending.req_id,
+        choice,
+    };
+    let _ = app.emit_to(
+        pending.request.parent_label.as_str(),
+        CHOOSER_RESOLVED_EVENT,
+        &payload,
+    );
 
-    let chooser_label = format!("chooser-{parent_label}");
-    if let Some(win) = app.get_webview_window(&chooser_label) {
+    if let Some(win) = app.get_webview_window(&pending.window_label) {
         persist_chooser_size_from(&win);
         let _ = win.close();
     }
 }
 
-/// Tear down the chooser window that `open_file_chooser` is replacing.
+/// Tear down the chooser window that `open_file_chooser` is replacing, by its
+/// stored (request-unique) label.
 ///
 /// `destroy()`, deliberately, not `close()`: `close()` raises CloseRequested,
-/// and `on_chooser_close_requested` answers that by taking THIS parent's
-/// registry entry — which by now belongs to the replacement — and resolving it
-/// null. The window being replaced has already been resolved by its own
-/// req_id; there is nothing left for that hook to do here.
-///
-/// Must run on the main thread immediately before the new window is built: the
-/// two share the `chooser-<parent>` label, and a build against a label that is
-/// still taken fails.
-fn destroy_displaced_chooser<R: tauri::Runtime>(app: &tauri::AppHandle<R>, parent_label: &str) {
-    let chooser_label = format!("chooser-{parent_label}");
-    if let Some(win) = app.get_webview_window(&chooser_label) {
+/// and `on_chooser_close_requested` would answer it by resolving whatever that
+/// label still names — nothing, now that labels are unique, but `destroy()`
+/// also skips the hook entirely and the window being replaced has already been
+/// resolved under its own req_id. The teardown is asynchronous in Tauri (the
+/// Destroy message is queued on the event loop, even from the main thread) and
+/// that is fine here: the replacement is built under a DIFFERENT label, so
+/// nothing waits on this window's actual destruction.
+fn destroy_displaced_chooser<R: tauri::Runtime>(app: &tauri::AppHandle<R>, window_label: &str) {
+    if let Some(win) = app.get_webview_window(window_label) {
         persist_chooser_size_from(&win);
         let _ = win.destroy();
     }
@@ -616,7 +703,8 @@ mod caller_validation_tests {
     }
 }
 
-/// Open (or focus an existing) chooser for the calling window. Rejects
+/// Open a chooser for the calling window (displacing, by cancel-and-recreate,
+/// any live one — see the comment inside for why that is abnormal). Rejects
 /// callers whose own label starts with `chooser-` — a chooser cannot open a
 /// chooser — and the settings window (design spec, "Window & lifecycle",
 /// `docs/superpowers/specs/2026-08-18-chooser-window-design.md:24`).
@@ -676,19 +764,30 @@ pub(crate) async fn open_file_chooser(
     }
 
     // Window creation must happen on the main thread — same deadlock rule as
-    // open_new_window/open_settings_window (windows.rs:42-51).
+    // open_new_window/open_settings_window (windows.rs:42-51). The displaced
+    // window is destroyed by its own stored label and the replacement is built
+    // under a fresh one, so the build never races the (always-asynchronous)
+    // destroy for a label: Tauri only clears a label from its window map once
+    // the Destroyed event round-trips the event loop, which a same-label
+    // rebuild in this very closure could not wait for.
     let handle = app.clone();
     let build_parent_label = parent_label.clone();
+    let build_chooser_label = pending.window_label.clone();
     let build_request = pending.request.clone();
-    let had_displaced = displaced.is_some();
+    let displaced_label = displaced.as_ref().map(|old| old.window_label.clone());
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     handle
         .clone()
         .run_on_main_thread(move || {
-            if had_displaced {
-                destroy_displaced_chooser(&handle, &build_parent_label);
+            if let Some(old_label) = displaced_label.as_deref() {
+                destroy_displaced_chooser(&handle, old_label);
             }
-            let result = create_chooser_window(&handle, &build_parent_label, &build_request);
+            let result = create_chooser_window(
+                &handle,
+                &build_parent_label,
+                &build_chooser_label,
+                &build_request,
+            );
             let _ = tx.send(result);
         })
         .map_err(|e| e.to_string())?;
@@ -705,20 +804,22 @@ pub(crate) async fn open_file_chooser(
     Ok(pending.req_id)
 }
 
-/// The pending request for the calling (chooser) window, derived from its
-/// own label.
+/// The pending request for the calling (chooser) window, resolved through the
+/// registry by the caller's own window label — never by parsing a parent out
+/// of it (parent labels contain dashes; only the registry knows whose window
+/// this is). A displaced window's stale label finds nothing here.
 #[tauri::command]
 pub(crate) fn get_chooser_request(
     window: tauri::WebviewWindow,
     registry: tauri::State<'_, Mutex<ChooserRegistry>>,
 ) -> Result<ChooserRequest, String> {
     let label = window.label();
-    let parent_label = label
-        .strip_prefix("chooser-")
-        .ok_or_else(|| "not a chooser window".to_string())?;
+    if !label.starts_with("chooser-") {
+        return Err("not a chooser window".to_string());
+    }
     registry
         .lock()
-        .get(parent_label)
+        .get_by_window_label(label)
         .map(|p| p.request.clone())
         .ok_or_else(|| "no pending chooser".to_string())
 }
@@ -734,20 +835,26 @@ pub(crate) async fn resolve_file_chooser(
 ) -> Result<(), String> {
     let app = window.app_handle().clone();
     let label = window.label().to_string();
-    let parent_label = label
-        .strip_prefix("chooser-")
-        .ok_or_else(|| "not a chooser window".to_string())?
-        .to_string();
+    if !label.starts_with("chooser-") {
+        return Err("not a chooser window".to_string());
+    }
 
+    // The caller identifies its session by its own window label; the registry
+    // maps that to the parent (never a parse of the label). Both steps under
+    // one lock, so the entry cannot change between the lookup and the resolve.
     let resolved = {
         let registry = app.state::<Mutex<ChooserRegistry>>();
-        registry.lock().resolve(&parent_label, req_id)
+        let mut guard = registry.lock();
+        let parent_label = guard
+            .get_by_window_label(&label)
+            .map(|p| p.request.parent_label.clone());
+        parent_label.and_then(|parent| guard.resolve(&parent, req_id))
     };
     let Some(pending) = resolved else {
         return Ok(()); // late resolver — someone else already settled this
     };
 
-    complete_chooser(&app, &parent_label, pending.req_id, choice);
+    complete_chooser(&app, &pending, choice);
     Ok(())
 }
 
@@ -782,7 +889,7 @@ pub(crate) async fn cancel_file_chooser(
         return Ok(());
     };
 
-    complete_chooser(&app, &parent_label, pending.req_id, None);
+    complete_chooser(&app, &pending, None);
     Ok(())
 }
 
@@ -799,10 +906,20 @@ pub(crate) fn chooser_ready(window: tauri::WebviewWindow) -> Result<(), String> 
 /// when a same-mode accelerator (⌘O/⌘S) shares the existing promise instead
 /// of opening a second chooser.
 #[tauri::command]
-pub(crate) fn focus_file_chooser(window: tauri::WebviewWindow) -> Result<(), String> {
+pub(crate) fn focus_file_chooser(
+    window: tauri::WebviewWindow,
+    registry: tauri::State<'_, Mutex<ChooserRegistry>>,
+) -> Result<(), String> {
     let parent_label = window.label();
-    let chooser_label = format!("chooser-{parent_label}");
-    if let Some(win) = window.app_handle().get_webview_window(&chooser_label) {
+    // The live entry's STORED window label — never reconstructed, since the
+    // label embeds a req_id only the registry knows.
+    let chooser_label = registry
+        .lock()
+        .get(parent_label)
+        .map(|p| p.window_label.clone());
+    if let Some(win) =
+        chooser_label.and_then(|label| window.app_handle().get_webview_window(&label))
+    {
         let _ = win.set_focus();
     }
     Ok(())
@@ -824,7 +941,7 @@ pub(crate) fn on_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) 
     };
     let resolved = registry.lock().take_pending(&label);
     if let Some(pending) = resolved {
-        complete_chooser(app, &label, pending.req_id, None);
+        complete_chooser(app, &pending, None);
     }
 }
 
@@ -836,14 +953,23 @@ pub(crate) fn on_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) 
 /// `Destroyed`).
 pub(crate) fn on_chooser_close_requested<R: tauri::Runtime>(window: &tauri::Window<R>) {
     let label = window.label();
-    let Some(parent_label) = label.strip_prefix("chooser-") else {
+    // Prefix as a cheap FILTER only; the parent comes from the registry entry
+    // whose stored window_label is this exact window, never from parsing the
+    // label. A displaced window's stale label matches no entry and is a no-op.
+    if !label.starts_with("chooser-") {
         return;
-    };
+    }
     let app = window.app_handle();
     let Some(registry) = app.try_state::<Mutex<ChooserRegistry>>() else {
         return;
     };
-    let resolved = registry.lock().take_pending(parent_label);
+    let resolved = {
+        let mut guard = registry.lock();
+        let parent_label = guard
+            .get_by_window_label(label)
+            .map(|p| p.request.parent_label.clone());
+        parent_label.and_then(|parent| guard.take_pending(&parent))
+    };
     let Some(pending) = resolved else {
         return;
     };
@@ -852,7 +978,11 @@ pub(crate) fn on_chooser_close_requested<R: tauri::Runtime>(window: &tauri::Wind
         req_id: pending.req_id,
         choice: None,
     };
-    let _ = window.emit_to(parent_label, CHOOSER_RESOLVED_EVENT, &payload);
+    let _ = window.emit_to(
+        pending.request.parent_label.as_str(),
+        CHOOSER_RESOLVED_EVENT,
+        &payload,
+    );
     if let (Ok(inner), Ok(scale)) = (window.inner_size(), window.scale_factor())
         && scale > 0.0
     {
@@ -870,10 +1000,8 @@ pub(crate) fn on_window_focused<R: tauri::Runtime>(window: &tauri::Window<R>) {
     let Some(registry) = app.try_state::<Mutex<ChooserRegistry>>() else {
         return;
     };
-    if !registry.lock().contains_parent(label) {
-        return;
-    }
-    if let Some(chooser_win) = app.get_webview_window(&format!("chooser-{label}")) {
+    let chooser_label = registry.lock().get(label).map(|p| p.window_label.clone());
+    if let Some(chooser_win) = chooser_label.and_then(|l| app.get_webview_window(&l)) {
         let _ = chooser_win.set_focus();
     }
 }
