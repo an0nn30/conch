@@ -491,11 +491,18 @@
    enforced here as well: this covers the app, and `inert` on #app (set by the
    same code) is what actually stops the keyboard reaching it.
 
-   z-index 4000: above tl-dialog's 3000 band (components/dialog.css), because
-   a prompt this window still owns must not paint over the block. */
+   z-index 2900 — above every app surface, and deliberately BELOW tl-dialog's
+   3000+ band (components/dialog.css, set inline per instance). This window can
+   still legitimately raise a dialog of its own while a chooser is open: ⌘W over
+   an unsaved buffer puts Unsaved Changes up, and the Settings accelerator is
+   reachable too. Those overlays are body children, so `inert` on #app does not
+   reach them — above the scrim they would be interactive but INVISIBLE, a
+   locked app with no way to see what is asking. Below the dialog band they
+   render normally over the scrim and stay answerable, and answering one that
+   destroys the pane cancels the chooser through cancelForPane anyway. */
 .tl-chooser-scrim {
   position: fixed;
   inset: 0;
   background: var(--tl-dialog-scrim);
-  z-index: 4000;
+  z-index: 2900;
 }

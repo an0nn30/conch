@@ -509,6 +509,35 @@ check('the proxy never asks for its own window label', () => {
     'and the chooser\'s DOM belongs to file-dialog-view.js alone');
 });
 
+check('the scrim sits BELOW tl-dialog\'s band, not above it', () => {
+  // Same idiom as the source greps around it: no styles are computed in this
+  // harness, so the rule is read from the stylesheet it ships in.
+  //
+  // The trap this guards: the parent can still raise a dialog of its own while
+  // a chooser is open (⌘W's Unsaved Changes, the Settings accelerator), and
+  // those overlays are `document.body` children — `inert` on #app does not
+  // reach them. A scrim above the dialog band leaves such a prompt
+  // interactive but invisible, which is the locked app the scrim's own
+  // `finally` exists to prevent. Below the band it renders over the scrim and
+  // stays answerable.
+  const css = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend/styles/design-system/components/file-dialog.css'),
+    'utf8',
+  );
+  const rule = /\.tl-chooser-scrim\s*\{([^}]*)\}/.exec(css);
+  assert.ok(rule, 'the scrim class file-dialog.js applies has a rule of its own');
+  const zIndex = /z-index:\s*(\d+)/.exec(rule[1]);
+  assert.ok(zIndex, 'and that rule sets a z-index');
+  const value = Number(zIndex[1]);
+  // 3000 is tl-dialog's base, +10 per stacked depth (test_tl_dialog.mjs:66-68).
+  assert.ok(value < 3000,
+    `the scrim must stay under tl-dialog's 3000 band, got ${value}`);
+  assert.ok(value > 1000,
+    `and over the app's own surfaces, got ${value}`);
+  assert.match(rule[1], /background:\s*var\(--tl-dialog-scrim\)/,
+    'tokens only — the same scrim colour the modal dialogs use');
+});
+
 check('the proxy registers nothing with the close guard', () => {
   // close_guard::on_close_requested already fires for chooser windows; the
   // Rust registry owns the chooser window's close semantics.
