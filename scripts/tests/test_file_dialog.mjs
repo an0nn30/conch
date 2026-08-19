@@ -196,6 +196,10 @@ function load(sandbox, relPath) {
   vm.runInContext(fs.readFileSync(path.join(APP, relPath), 'utf8'), sandbox, { filename: relPath });
 }
 
+// Each harness's stub chooser WINDOW, keyed by the document it belongs to, so
+// `parts(doc)` below still reads `(doc)` at every call site it always did.
+const chooserOf = new WeakMap();
+
 function makeHarness(options) {
   const opts = options || {};
   const doc = makeDocument();
@@ -220,7 +224,76 @@ function makeHarness(options) {
     success: (title, body) => toasts.push({ level: 'success', title, body }),
   };
   sandbox.utils = { formatSize: (n) => `${n}B`, formatDate: () => '' };
-  sandbox.termlabServices = { tauriClient: { invoke: () => Promise.reject(new Error('no raw invoke expected')) } };
+
+  // THE CHOOSER WINDOW, in miniature.
+  //
+  // file-dialog.js is a proxy now: it asks Rust for a chooser window and waits
+  // for the `chooser-resolved` event carrying the answer back. This transport
+  // plays both halves — `open_file_chooser` mounts the REAL view into a root
+  // of its own (deliberately NOT in this document's body: the chooser is not
+  // in this window any more, and the only thing file-dialog.js may put there
+  // is its scrim), and the view's `onResolve` comes back as the event.
+  //
+  // Any other invoke still rejects: neither the view nor the model may reach
+  // for a raw command of its own.
+  const chooser = { root: null, mounted: null, reqId: 0 };
+  chooserOf.set(doc, chooser);
+  const eventHandlers = [];
+  let nextReqId = 1;
+
+  function emitResolved(reqId, choice) {
+    for (const handler of eventHandlers.slice()) handler({ payload: { reqId, choice } });
+  }
+  function closeChooserWindow() {
+    chooser.root = null;
+    chooser.mounted = null;
+  }
+
+  sandbox.termlabServices = {
+    tauriClient: {
+      invoke(command, args) {
+        if (command === 'open_file_chooser') {
+          const reqId = nextReqId++;
+          chooser.reqId = reqId;
+          chooser.root = doc.createElement('div');
+          chooser.mounted = sandbox.termlabFileDialogView.build(chooser.root, {
+            data: sandbox.termlabFilesFeatureDataService,
+            mode: args.mode,
+            filename: args.filename,
+            selectFilename: args.selectFilename,
+            // The PARENT's label, handed down — the chooser window never asks
+            // for one of its own.
+            parentWindowLabel: Object.prototype.hasOwnProperty.call(opts, 'windowLabel')
+              ? opts.windowLabel
+              : 'main',
+            onResolve: (choice) => { closeChooserWindow(); emitResolved(reqId, choice); },
+          });
+          if (chooser.mounted && typeof chooser.mounted.focusInitial === 'function') {
+            chooser.mounted.focusInitial();
+          }
+          return Promise.resolve(reqId);
+        }
+        if (command === 'cancel_file_chooser') {
+          // Rust force-resolves the caller's chooser and emits the answer back
+          // — it does not simply close the window behind the proxy's back.
+          const reqId = chooser.reqId;
+          closeChooserWindow();
+          emitResolved(reqId, null);
+          return Promise.resolve(null);
+        }
+        if (command === 'focus_file_chooser') return Promise.resolve(null);
+        return Promise.reject(new Error(`no raw invoke expected (${command})`));
+      },
+      listenOnCurrentWindow(name, handler) {
+        assert.strictEqual(name, 'chooser-resolved');
+        eventHandlers.push(handler);
+        return Promise.resolve(() => {
+          const i = eventHandlers.indexOf(handler);
+          if (i >= 0) eventHandlers.splice(i, 1);
+        });
+      },
+    },
+  };
 
   const listLocal = opts.listLocal || (() => Promise.resolve([]));
   const listRemote = opts.listRemote || (() => Promise.resolve([]));
@@ -286,6 +359,7 @@ function partsOf(container) {
     empty: find('tl-filedlg__empty')[0] || null,
     list: find('tl-filedlg__list')[0] || null,
     pathInput: find('tl-filedlg__path')[0] || null,
+    nameInput: find('tl-filedlg__name')[0] || null,
     filterInput: find('tl-filedlg__filter')[0] || null,
     hiddenBox: (find('tl-filedlg__hidden')[0] || { children: [] }).children[0] || null,
     // The footer is the VIEW's now, in both hosts: it renders the Hidden
@@ -297,12 +371,21 @@ function partsOf(container) {
   };
 }
 
-// Locate the live tl-dialog's parts by class, from document.body.
+// Locate the chooser's parts for the proxy-driven checks. The chooser lives in
+// its own window now, so this reads the stub window's root rather than an
+// overlay in this document — everything those checks assert about the chooser
+// is unchanged, only where it is rendered has moved.
 function parts(doc) {
-  const overlay = doc.body.children[doc.body.children.length - 1] || null;
-  if (!overlay) return null;
-  return Object.assign(partsOf(overlay), { overlay, panel: overlay.children[0] });
+  const chooser = chooserOf.get(doc);
+  if (!chooser || !chooser.root) return null;
+  return Object.assign(partsOf(chooser.root), { root: chooser.root });
 }
+
+// NOTE for the checks below that count `doc.body.children`: what file-dialog.js
+// puts on this document while a chooser is up is its SCRIM, and nothing else.
+// One child means "a chooser is up"; a second means a tl-dialog stacked over
+// it. The counts are the same as they were when that one child was the
+// chooser's own overlay.
 
 // THE WINDOW HOST, in miniature: an element, a `build` call, and a place for
 // the one answer to land. No dialog, no overlay, nothing to close.
@@ -878,35 +961,12 @@ await checkAsync('Cancel in the view footer resolves null', async () => {
   assert.deepStrictEqual(m.answers, [null]);
 });
 
-await checkAsync('Escape resolves null through tl-dialog\'s own router registration', async () => {
-  const { sandbox, doc, routed } = makeHarness({ listLocal: () => Promise.resolve([]) });
-  const choice = sandbox.termlabFileDialog._chooseFile();
-  let resolved = 'unset';
-  choice.then((v) => { resolved = v; });
-  await settle();
-
-  const escape = routed.find((r) => r.name === 'tl-dialog');
-  assert.ok(escape, 'tl-dialog registered an Escape handler with the keyboard router');
-  assert.strictEqual(escape.isActive(), true);
-  assert.strictEqual(escape.onKeyDown({ key: 'Escape' }), true, 'Escape was consumed');
-  await settle();
-  assert.strictEqual(resolved, null);
-  assert.strictEqual(doc.body.children.length, 0);
-});
-
-await checkAsync('a backdrop mousedown resolves null', async () => {
-  const { sandbox, doc } = makeHarness({ listLocal: () => Promise.resolve([]) });
-  const choice = sandbox.termlabFileDialog._chooseFile();
-  let resolved = 'unset';
-  choice.then((v) => { resolved = v; });
-  await settle();
-
-  const overlay = doc.body.children[0];
-  overlay.dispatchEvent({ type: 'mousedown', target: overlay });
-  await settle();
-  assert.strictEqual(resolved, null);
-  assert.strictEqual(doc.body.children.length, 0);
-});
+// The two checks that used to live here — Escape through tl-dialog's keyboard
+// router, and a backdrop mousedown — were about the tl-dialog HOST that
+// file-dialog.js no longer has: the chooser is a window, with no overlay and
+// no backdrop to click. Their behaviour is covered where it now lives: the
+// view's own Escape, two checks up, and `cancel_file_chooser` in
+// test_file_dialog_proxy.mjs.
 
 await checkAsync('Cancel resolves null and opens nothing', async () => {
   const { sandbox, doc, calls } = makeHarness({
@@ -1125,7 +1185,7 @@ await checkAsync('⌘O while a SAVE chooser is up resolves null instead of shari
   // The user answers the dialog they are actually looking at. It still works,
   // and its answer goes only to the save.
   const p = parts(doc);
-  const nameInput = p.overlay.querySelectorAll('.tl-filedlg__name')[0];
+  const nameInput = p.nameInput;
   nameInput.value = 'draft.md';
   nameInput.fire('input');
   await settle();

@@ -482,3 +482,20 @@
 /* The nested New Folder prompt (a tl-dialog of its own, stacked over the
    chooser) — one field, full width of the small dialog. */
 .tl-filedlg__prompt-input { width: 100%; }
+
+/* The parent window's scrim while a chooser WINDOW is up
+   (app/features/editor/file-dialog.js).
+
+   The chooser is window-modal, but a webview keeps taking clicks whether or
+   not another window is in front of it — so the modality has to be drawn and
+   enforced here as well: this covers the app, and `inert` on #app (set by the
+   same code) is what actually stops the keyboard reaching it.
+
+   z-index 4000: above tl-dialog's 3000 band (components/dialog.css), because
+   a prompt this window still owns must not paint over the block. */
+.tl-chooser-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--tl-dialog-scrim);
+  z-index: 4000;
+}
