@@ -56,7 +56,7 @@ Any valid Alacritty theme file parses and applies. Concretely, `color_scheme.rs`
 
 ## Non-Goals
 
-- No file watcher / hot reload of theme files (rescan on settings open and on save).
+- No file watcher / hot reload of theme files (the picker rescans on settings open — every `list_terminal_themes` call re-scans the directories — not on save; a save does not change the themes directory, so nothing rescans there).
 - No theme editing UI, no import button, no bundled third-party themes.
 - No per-pane or per-host terminal themes.
 
