@@ -166,10 +166,13 @@ mod tests {
         // the full command-facing conversion, complementing the hermetic
         // tests in termlab_core::color_scheme.
         let entries = build_theme_list();
-        let names: Vec<&str> = entries.iter().map(|e| match e {
-            ThemeListEntry::Parsed { name, .. } => name.as_str(),
-            ThemeListEntry::Broken { name, .. } => name.as_str(),
-        }).collect();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| match e {
+                ThemeListEntry::Parsed { name, .. } => name.as_str(),
+                ThemeListEntry::Broken { name, .. } => name.as_str(),
+            })
+            .collect();
         assert!(
             names.contains(&"TermLab Dark"),
             "expected 'TermLab Dark' in the theme list, found: {names:?}"

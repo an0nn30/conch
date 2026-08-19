@@ -144,8 +144,8 @@ fn alacritty_0_12_snapshot_dim_hints_search_no_cursor_section() {
 
 #[test]
 fn konsole_linux_snapshot_dim_bright_foreground_cell_rgb_sentinels() {
-    let cs = load_theme(&fixtures_dir().join("konsole_linux.toml"))
-        .expect("konsole_linux.toml parses");
+    let cs =
+        load_theme(&fixtures_dir().join("konsole_linux.toml")).expect("konsole_linux.toml parses");
     assert_eq!(cs.primary.background, "#1f1f1f");
     assert_eq!(cs.primary.foreground, "#e3e3e3");
     assert_eq!(cs.primary.bright_foreground.as_deref(), Some("#ffffff"));
@@ -189,8 +189,7 @@ fn konsole_linux_snapshot_dim_bright_foreground_cell_rgb_sentinels() {
 
 #[test]
 fn github_dark_snapshot_indexed_colors() {
-    let cs =
-        load_theme(&fixtures_dir().join("github_dark.toml")).expect("github_dark.toml parses");
+    let cs = load_theme(&fixtures_dir().join("github_dark.toml")).expect("github_dark.toml parses");
     assert_eq!(cs.primary.background, "#24292e");
     assert_eq!(cs.primary.foreground, "#d1d5da");
     assert_eq!(cs.indexed_colors.len(), 2);
@@ -232,14 +231,8 @@ fn catppuccin_mocha_snapshot_kitchen_sink() {
     assert_eq!(footer_bar.background.as_deref(), Some("#A6ADC8"));
 
     let search = cs.search.as_ref().expect("search present");
-    assert_eq!(
-        search.matches.as_ref().unwrap().background,
-        "#A6ADC8"
-    );
-    assert_eq!(
-        search.focused_match.as_ref().unwrap().background,
-        "#A6E3A1"
-    );
+    assert_eq!(search.matches.as_ref().unwrap().background, "#A6ADC8");
+    assert_eq!(search.focused_match.as_ref().unwrap().background, "#A6E3A1");
 
     let hints = cs.hints.as_ref().expect("hints present");
     assert_eq!(hints.start.as_ref().unwrap().background, "#F9E2AF");

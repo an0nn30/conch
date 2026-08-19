@@ -463,7 +463,12 @@ impl ThemeListEntry {
     }
 }
 
-fn theme_list_entry_for(name: String, path: &Path, source: ThemeSource, shadows_builtin: bool) -> ThemeListEntry {
+fn theme_list_entry_for(
+    name: String,
+    path: &Path,
+    source: ThemeSource,
+    shadows_builtin: bool,
+) -> ThemeListEntry {
     match load_theme(path) {
         Ok(scheme) => ThemeListEntry::Parsed {
             name,
@@ -1269,7 +1274,9 @@ white = "#000000"
                 assert!(!shadows_builtin);
             }
             ThemeListEntry::Broken { name, error } => {
-                panic!("expected a parsed entry for 'Valid', got Broken {{ name: {name}, error: {error} }}");
+                panic!(
+                    "expected a parsed entry for 'Valid', got Broken {{ name: {name}, error: {error} }}"
+                );
             }
         }
     }
@@ -1308,7 +1315,11 @@ white = "#000000"
     #[test]
     fn entries_no_error_when_user_dir_is_missing_just_builtins() {
         let bundled = tempfile::tempdir().unwrap();
-        std::fs::write(bundled.path().join("OnlyBuiltin.toml"), theme_toml("#000001")).unwrap();
+        std::fs::write(
+            bundled.path().join("OnlyBuiltin.toml"),
+            theme_toml("#000001"),
+        )
+        .unwrap();
         let missing_user_dir = bundled.path().join("does-not-exist");
 
         let entries = list_theme_entries_in(bundled.path(), &missing_user_dir);
@@ -1319,7 +1330,9 @@ white = "#000000"
                 assert_eq!(*source, ThemeSource::Builtin);
             }
             ThemeListEntry::Broken { name, error } => {
-                panic!("expected a parsed builtin entry, got Broken {{ name: {name}, error: {error} }}");
+                panic!(
+                    "expected a parsed builtin entry, got Broken {{ name: {name}, error: {error} }}"
+                );
             }
         }
     }
@@ -1338,11 +1351,7 @@ white = "#000000"
             theme_toml("#070A0E"),
         )
         .unwrap();
-        std::fs::write(
-            user.path().join("TermLab Dark.toml"),
-            theme_toml("#111111"),
-        )
-        .unwrap();
+        std::fs::write(user.path().join("TermLab Dark.toml"), theme_toml("#111111")).unwrap();
 
         let entries = list_theme_entries_in(bundled.path(), user.path());
         assert_eq!(
@@ -1366,7 +1375,9 @@ white = "#000000"
                 assert!(*shadows_builtin);
             }
             ThemeListEntry::Broken { name, error } => {
-                panic!("expected a parsed user entry, got Broken {{ name: {name}, error: {error} }}");
+                panic!(
+                    "expected a parsed user entry, got Broken {{ name: {name}, error: {error} }}"
+                );
             }
         }
     }
