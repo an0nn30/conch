@@ -10,7 +10,7 @@
       return false;
     }
 
-    const cachedThemes = Array.isArray(d.cachedThemes) ? d.cachedThemes : [];
+    const cachedTerminalThemes = Array.isArray(d.cachedTerminalThemes) ? d.cachedTerminalThemes : [];
     const cachedFonts = d.cachedFonts && typeof d.cachedFonts === 'object'
       ? d.cachedFonts
       : { all: [] };
@@ -19,13 +19,13 @@
     const addRow = typeof d.addRow === 'function' ? d.addRow : null;
     const setRowTarget = typeof d.setRowTarget === 'function' ? d.setRowTarget : null;
     const addDivider = typeof d.addDivider === 'function' ? d.addDivider : null;
-    const buildThemePreview = typeof d.buildThemePreview === 'function' ? d.buildThemePreview : null;
-    const updateThemePreview = typeof d.updateThemePreview === 'function' ? d.updateThemePreview : null;
-    const invoke = typeof d.invoke === 'function' ? d.invoke : null;
+    const themePicker = global.termlabSettingsThemePicker;
     const makeCheckbox = typeof d.makeCheckbox === 'function' ? d.makeCheckbox : null;
     const makeInput = typeof d.makeInput === 'function' ? d.makeInput : null;
     const makeToggleGroup = typeof d.makeToggleGroup === 'function' ? d.makeToggleGroup : null;
-    if (!addSectionLabel || !addRow || !setRowTarget || !addDivider || !buildThemePreview || !updateThemePreview || !invoke || !makeCheckbox || !makeInput || !makeToggleGroup) {
+    if (!addSectionLabel || !addRow || !setRowTarget || !addDivider
+      || !themePicker || typeof themePicker.normalizeThemeEntries !== 'function' || typeof themePicker.buildTerminalThemePicker !== 'function'
+      || !makeCheckbox || !makeInput || !makeToggleGroup) {
       return false;
     }
 
@@ -35,51 +35,31 @@
 
     addSectionLabel(container, 'Theme & Color');
 
-    const themeSelect = document.createElement('select');
-    for (const theme of cachedThemes) {
-      const opt = document.createElement('option');
-      opt.value = theme;
-      opt.textContent = theme;
-      if (theme === pendingSettings.colors.theme) opt.selected = true;
-      themeSelect.appendChild(opt);
-    }
-    const themeRow = addRow(container, 'Theme', 'Color theme for the terminal and UI', themeSelect);
-    global.tlCombo.attach(themeSelect);
-    setRowTarget(themeRow, 'appearance:theme');
-
-    const previewBox = buildThemePreview();
-    container.appendChild(previewBox);
-
-    // The reserved `auto` name resolves against the app's appearance, so the
-    // preview has to say which one — otherwise previewing `auto` would show
-    // the dark built-in on a light install. Read at call time, not captured,
-    // so a mode change made in this same dialog is reflected on the next
-    // preview.
-    const resolvedAppearance = () => (global.termlabAppearance
-      && typeof global.termlabAppearance.current === 'function'
-      ? global.termlabAppearance.current()
-      : 'dark');
-
-    let previewSeq = 0;
-    invoke('preview_theme_colors', {
-      name: pendingSettings.colors.theme,
-      resolvedAppearance: resolvedAppearance(),
-    })
-      .then((tc) => updateThemePreview(previewBox, tc))
-      .catch(() => {});
-
-    themeSelect.addEventListener('change', () => {
-      pendingSettings.colors.theme = themeSelect.value;
-      const seq = ++previewSeq;
-      invoke('preview_theme_colors', {
-        name: themeSelect.value,
-        resolvedAppearance: resolvedAppearance(),
-      })
-        .then((tc) => {
-          if (seq === previewSeq) updateThemePreview(previewBox, tc);
-        })
-        .catch(() => {});
-    });
+    // Terminal theme picker: Auto + built-ins + user themes
+    // (~/.config/termlab/themes/*.toml), each entry carrying its own
+    // palette_preview so every candidate renders a swatch strip without a
+    // per-entry round trip (list_terminal_themes returns them all at once).
+    // This REPLACES the old plain <select> + single "current selection"
+    // preview panel (which called preview_theme_colors per selection) — see
+    // Task 3's report/review for why that stopgap existed and that it was
+    // always meant to be superseded here. Fully decoupled from app
+    // appearance (product rule 1): this picks colors.theme, never
+    // colors.appearance_mode below.
+    const terminalThemeEntries = themePicker.normalizeThemeEntries(cachedTerminalThemes);
+    const { select: terminalThemeSelect, list: terminalThemeList } = themePicker.buildTerminalThemePicker(
+      terminalThemeEntries,
+      pendingSettings.colors.theme,
+      (value) => { pendingSettings.colors.theme = value; }
+    );
+    const terminalThemeRow = addRow(
+      container,
+      'Terminal Theme',
+      'Color palette for the terminal. Auto follows the app appearance below.',
+      terminalThemeSelect
+    );
+    global.tlCombo.attach(terminalThemeSelect);
+    setRowTarget(terminalThemeRow, 'appearance:terminal-theme');
+    container.appendChild(terminalThemeList);
 
     const modeToggle = makeToggleGroup(
       [

@@ -806,15 +806,12 @@
       if (settingsSectionsAppearance && typeof settingsSectionsAppearance.renderAppearance === 'function') {
         const handled = settingsSectionsAppearance.renderAppearance(c, {
           pendingSettings: store.getPendingSettings(),
-          cachedThemes: store.getCachedThemes(),
+          cachedTerminalThemes: store.getCachedTerminalThemes(),
           cachedFonts: store.getCachedFonts(),
           addSectionLabel,
           addRow,
           setRowTarget,
           addDivider,
-          buildThemePreview,
-          updateThemePreview,
-          invoke: d.getInvoke(),
           makeCheckbox,
           makeInput,
           makeToggleGroup,

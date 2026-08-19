@@ -2,9 +2,9 @@
   'use strict';
 
   async function loadRuntimeData(invoke) {
-    const [settings, themes, plugins, pluginMenuItems, pluginSettingsSections, fonts] = await Promise.all([
+    const [settings, terminalThemes, plugins, pluginMenuItems, pluginSettingsSections, fonts] = await Promise.all([
       invoke('get_all_settings'),
-      invoke('list_themes'),
+      invoke('list_terminal_themes'),
       invoke('scan_plugins'),
       invoke('get_plugin_menu_items').catch(() => []),
       invoke('get_plugin_settings_sections').catch(() => []),
@@ -12,7 +12,7 @@
     ]);
     return {
       settings,
-      themes,
+      terminalThemes: Array.isArray(terminalThemes) ? terminalThemes : [],
       plugins: Array.isArray(plugins) ? plugins : [],
       pluginMenuItems: Array.isArray(pluginMenuItems) ? pluginMenuItems : [],
       pluginSettingsSections: Array.isArray(pluginSettingsSections) ? pluginSettingsSections : [],

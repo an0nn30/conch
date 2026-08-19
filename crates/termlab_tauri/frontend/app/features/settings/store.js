@@ -80,7 +80,7 @@
     let currentSection = 'appearance';
     let pendingSettings = null;
     let originalSettings = null;
-    let cachedThemes = [];
+    let cachedTerminalThemes = [];
     let cachedPlugins = [];
     let cachedPluginMenuItems = [];
     let cachedPluginSettingsSections = [];
@@ -122,7 +122,7 @@
       pendingSettings = JSON.parse(JSON.stringify(loaded.settings || {}));
       ensureSettingsShape(originalSettings);
       ensureSettingsShape(pendingSettings);
-      cachedThemes = Array.isArray(loaded.themes) ? loaded.themes : [];
+      cachedTerminalThemes = Array.isArray(loaded.terminalThemes) ? loaded.terminalThemes : [];
       cachedPlugins = Array.isArray(loaded.plugins) ? loaded.plugins : [];
       cachedPluginMenuItems = Array.isArray(loaded.pluginMenuItems) ? loaded.pluginMenuItems : [];
       cachedPluginSettingsSections = Array.isArray(loaded.pluginSettingsSections) ? loaded.pluginSettingsSections : [];
@@ -391,7 +391,7 @@
       getOriginalSettings: () => originalSettings,
       getPendingKeyboardMap: () => pendingSettings?.termlab?.keyboard || {},
 
-      getCachedThemes: () => cachedThemes,
+      getCachedTerminalThemes: () => cachedTerminalThemes,
       getCachedFonts: () => cachedFonts,
       getCachedPlugins: () => cachedPlugins,
       setCachedPlugins: (next) => { cachedPlugins = Array.isArray(next) ? next : []; },

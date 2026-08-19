@@ -898,15 +898,29 @@ check('every get_theme_colors call site passes resolvedAppearance', () => {
   }
 });
 
-check('the settings preview passes resolvedAppearance so `auto` previews correctly', () => {
+// terminal-themes Task 4 retired this call site: the settings "Theme" row's
+// old single-selection preview (which re-fetched preview_theme_colors, and
+// so needed resolvedAppearance to render `auto` correctly) was replaced by
+// the "Terminal Theme" picker (app/features/settings/theme-picker.js),
+// which renders every entry's palette strip straight from
+// list_terminal_themes()'s already-included palette_preview — no per-entry
+// round trip, so no appearance argument to get right or wrong here. (The
+// picker's Auto entry has no fixed palette to show at all — see
+// test_settings_terminal_theme_picker.mjs's "auto renders no palette
+// strip" — sidestepping the stale-preview failure mode this check used to
+// guard, rather than reproducing it.) This assertion now pins the
+// retirement itself, so the round trip cannot silently come back without
+// the resolvedAppearance plumbing this suite's other checks require.
+check('the settings preview round trip was retired, not left half-removed', () => {
   const source = fs.readFileSync(
     path.join(FRONTEND, 'app/features/settings/sections-appearance.js'), 'utf8',
   );
-  const invokes = source.match(/invoke\('preview_theme_colors',\s*\{[^}]*\}/g) || [];
-  assert.strictEqual(invokes.length, 2, 'both preview call sites found');
-  for (const call of invokes) {
-    assert.ok(/resolvedAppearance/.test(call), `preview passes resolvedAppearance: ${call}`);
-  }
+  assert.ok(!/invoke\(\s*['"]preview_theme_colors['"]/.test(source),
+    'sections-appearance.js must not call preview_theme_colors any more');
+  assert.ok(/themePicker\.normalizeThemeEntries/.test(source),
+    'sections-appearance.js must build its entries via theme-picker.js');
+  assert.ok(/themePicker\.buildTerminalThemePicker/.test(source),
+    'sections-appearance.js must render via theme-picker.js');
 });
 
 // The startup ordering bug this would otherwise have: loadTheme used to run

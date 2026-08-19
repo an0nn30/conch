@@ -23,7 +23,7 @@
   ];
 
   const SETTINGS_SEARCH_INDEX = [
-    { section: 'appearance', label: 'Theme', keywords: 'color theme appearance scheme', targetId: 'appearance:theme' },
+    { section: 'appearance', label: 'Terminal Theme', keywords: 'terminal theme color palette auto built-in user scheme', targetId: 'appearance:terminal-theme' },
     { section: 'appearance', label: 'Appearance Mode', keywords: 'dark light system mode', targetId: 'appearance:mode' },
     { section: 'appearance', label: 'Notification Position', keywords: 'toast notifications top bottom', targetId: 'appearance:notification-position' },
     { section: 'appearance', label: 'Native Notifications', keywords: 'system notifications os notifications', targetId: 'appearance:native-notifications' },

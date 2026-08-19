@@ -347,3 +347,50 @@
 .tl-settings__theme-preview-swatches { display: flex; gap: 4px; }
 .tl-settings__theme-preview-swatches--normal { margin-bottom: 4px; }
 .tl-settings__theme-preview-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }
+
+/* Terminal theme picker (Task 4, app/features/settings/theme-picker.js) —
+   one row per list_terminal_themes() entry (plus the synthetic Auto entry),
+   each showing bg/fg chips + 16 ANSI swatches so every candidate is
+   comparable without opening the row's <select>/tl-combo dropdown. Same
+   rule as .tl-settings__theme-preview-swatch above: colors here are DATA (a
+   parsed theme's actual palette, or nothing for a broken/reserved entry),
+   so only structural CSS lives in this file — theme-picker.js sets each
+   chip's/swatch's background via inline style from palette_preview. */
+.tl-settings__theme-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: var(--tl-space-2) 0 var(--tl-space-3);
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  padding: var(--tl-space-1);
+}
+.tl-settings__theme-picker-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--tl-space-3);
+  padding: var(--tl-space-1) var(--tl-space-2);
+  border-radius: var(--tl-radius);
+  cursor: pointer;
+}
+.tl-settings__theme-picker-row:hover { background: var(--tl-row-hover); }
+.tl-settings__theme-picker-row:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+.tl-settings__theme-picker-row.is-selected { background: var(--tl-row-hover); outline: 1px solid var(--tl-accent); outline-offset: -1px; }
+.tl-settings__theme-picker-row.is-disabled { cursor: default; opacity: 0.6; }
+.tl-settings__theme-picker-row.is-disabled:hover { background: transparent; }
+.tl-settings__theme-picker-info { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.tl-settings__theme-picker-name {
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tl-settings__theme-picker-note {
+  font-size: 11px;
+  color: var(--tl-fg-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tl-settings__theme-picker-note.is-error { color: var(--tl-danger); }
+.tl-settings__theme-picker-swatches { display: flex; gap: 2px; flex-shrink: 0; }
+.tl-settings__theme-picker-chip { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 1px solid var(--tl-border); }
+.tl-settings__theme-picker-swatch { width: 10px; height: 14px; border-radius: 2px; flex-shrink: 0; }

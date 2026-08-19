@@ -28,6 +28,7 @@
 
     GET_ALL_SETTINGS: 'get_all_settings',
     LIST_THEMES: 'list_themes',
+    LIST_TERMINAL_THEMES: 'list_terminal_themes',
     PREVIEW_THEME_COLORS: 'preview_theme_colors',
     SAVE_SETTINGS: 'save_settings',
     LIST_SYSTEM_FONTS: 'list_system_fonts',
