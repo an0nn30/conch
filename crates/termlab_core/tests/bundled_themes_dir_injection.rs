@@ -82,7 +82,7 @@ fn injected_dir_wins_over_dev_fallback_and_injection_is_once_only() {
     // Prove the injected dir is what actually gets read now, not just that
     // resolution still succeeds: overwrite the copy on disk after
     // injecting, with a value distinguishable from both the real bundled
-    // theme and the built-in Dracula fallback, and confirm resolve_theme
+    // theme and the built-in default fallback palette, and confirm resolve_theme
     // reads that exact byte content back out.
     let marker_background = "#00ff00";
     fs::write(

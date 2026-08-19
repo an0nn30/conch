@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate design-system token CSS + terminal theme from vendored theme sources.
+"""Generate design-system token CSS from vendored theme sources.
 
 Reads (from --sources, default design/theme-sources/ — vendored 2026-08-19 from
 the retired JVM repo, which is read-only reference and never a build input):
@@ -10,10 +10,17 @@ the retired JVM repo, which is read-only reference and never a build input):
 Writes (under --out-dir, default crates/termlab_tauri/frontend):
   styles/design-system/tokens-dark.css   (:root)
   styles/design-system/tokens-light.css  (:root[data-tl-appearance="light"])
-  themes/TermLab Dark.toml               (Alacritty-format terminal theme)
 
 Generated files are committed. Never hand-edit them; semantic aliases live in
 styles/design-system/base.css instead.
+
+This script no longer emits a terminal theme. `themes/TermLab Dark.toml` is
+now the app's default terminal palette — a hand-maintained serialization of
+termlab_core::color_scheme::ColorScheme::default(), pinned to it by a Rust
+test — not the console colors extracted from termlab-dark.xml. Regenerating
+it here would silently overwrite that palette, so main() stops short of
+writing it. `scheme_to_alacritty` below is retained as a one-off conversion
+helper (golden-tested) for hand-porting an IntelliJ console scheme.
 """
 import argparse
 import json
@@ -182,11 +189,7 @@ def main():
     (ds / "tokens-light.css").write_text(
         theme_to_css(light, ':root[data-tl-appearance="light"]', on_warning=warn))
 
-    theme_out = out / "themes"
-    theme_out.mkdir(parents=True, exist_ok=True)
-    xml_text = (themes_dir / "termlab-dark.xml").read_text()
-    (theme_out / "TermLab Dark.toml").write_text(scheme_to_alacritty(xml_text))
-    print("wrote tokens-dark.css, tokens-light.css, TermLab Dark.toml")
+    print("wrote tokens-dark.css, tokens-light.css")
 
 
 if __name__ == "__main__":

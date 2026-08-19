@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from extract_intellij_tokens import theme_to_css, scheme_to_alacritty
+from extract_intellij_tokens import main, theme_to_css, scheme_to_alacritty
 
 THEME = {
     "name": "TermLab Dark",
@@ -86,10 +86,43 @@ def test_theme_to_css_light_source():
 
 
 def test_scheme_to_alacritty():
+    """`scheme_to_alacritty` is retained as a one-off conversion helper only:
+    main() no longer calls it, because `themes/TermLab Dark.toml` is now the
+    app's default terminal palette (a hand-maintained serialization of
+    ColorScheme::default()), not a generated artifact. The conversion itself
+    still has to be correct for anyone hand-porting an IntelliJ console
+    scheme, so its golden assertions stay exactly as they were."""
     toml_text = scheme_to_alacritty(SCHEME_XML)
     assert 'black = "#3c4048"' in toml_text
     assert 'red = "#e06c75"' in toml_text
     assert 'background = "#070A0E"' in toml_text
+
+
+def test_main_writes_tokens_but_never_a_terminal_theme():
+    """The regression alarm for the retirement above: a rerun of the extractor
+    must not recreate (and so silently overwrite) `themes/TermLab Dark.toml`,
+    whose values are pinned to ColorScheme::default() by
+    color_scheme::tests::resolve_theme_termlab_dark_is_byte_identical_to_the_hardcoded_default.
+    Drives the real main() end to end against temp source/output dirs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sources, out = root / "sources", root / "out"
+        sources.mkdir()
+        (sources / "TermLabDark.theme.json").write_text(json.dumps(THEME))
+        (sources / "TermLabLight.theme.json").write_text(json.dumps(LIGHT_THEME))
+        (sources / "termlab-dark.xml").write_text(SCHEME_XML)
+
+        argv = sys.argv
+        sys.argv = ["extract_intellij_tokens.py", "--sources", str(sources), "--out-dir", str(out)]
+        try:
+            main()
+        finally:
+            sys.argv = argv
+
+        assert (out / "styles/design-system/tokens-dark.css").is_file()
+        assert (out / "styles/design-system/tokens-light.css").is_file()
+        assert not (out / "themes").exists(), \
+            "the extractor must not write a terminal theme (or its themes/ dir) at all"
 
 
 def test_unresolved_reference_warning():
@@ -120,5 +153,6 @@ if __name__ == "__main__":
     test_theme_to_css()
     test_theme_to_css_light_source()
     test_scheme_to_alacritty()
+    test_main_writes_tokens_but_never_a_terminal_theme()
     test_unresolved_reference_warning()
     print("ok")

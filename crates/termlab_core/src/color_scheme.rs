@@ -1,7 +1,9 @@
 //! Alacritty-compatible color theme loading.
 //!
-//! Deserializes unmodified Alacritty `.toml` theme files (e.g. dracula.toml,
-//! catppuccin_mocha.toml) and provides a built-in Dracula fallback.
+//! Deserializes unmodified Alacritty `.toml` theme files (e.g. gruvbox_dark.toml,
+//! catppuccin_mocha.toml) and provides a built-in fallback palette — the same
+//! one bundled as `frontend/themes/TermLab Dark.toml` (see [`ColorScheme`]'s
+//! `Default` impl).
 //!
 //! ## Compatibility contract
 //!
@@ -211,7 +213,8 @@ impl AnsiColors {
 }
 
 impl Default for ColorScheme {
-    /// Built-in Dracula theme matching the real `dracula.toml`.
+    /// TermLab Dark — the app's default terminal palette, kept byte-identical
+    /// to the bundled `frontend/themes/TermLab Dark.toml`.
     fn default() -> Self {
         Self {
             primary: PrimaryColors {
@@ -530,7 +533,8 @@ pub fn list_theme_entries() -> Vec<ThemeListEntry> {
     list_theme_entries_in(&bundled_themes_dir(), &themes_dir())
 }
 
-/// Resolve a theme by name or path: load from disk or fall back to built-in Dracula.
+/// Resolve a theme by name or path: load from disk or fall back to the
+/// built-in default palette ([`ColorScheme::default`], i.e. TermLab Dark).
 ///
 /// If `value` is a file path (contains `/`, `\`, or ends with `.toml`), it is
 /// loaded directly. A leading `~` is expanded to the home directory.
@@ -554,7 +558,7 @@ fn resolve_theme_in(value: &str, dirs: &[PathBuf]) -> ColorScheme {
             }
             Err(e) => {
                 log::warn!(
-                    "Failed to load theme from '{}': {e}, using built-in Dracula",
+                    "Failed to load theme from '{}': {e}, using the built-in default palette",
                     expanded.display()
                 );
             }
@@ -569,14 +573,19 @@ fn resolve_theme_in(value: &str, dirs: &[PathBuf]) -> ColorScheme {
                 }
                 Err(e) => {
                     log::warn!(
-                        "Failed to load theme '{}': {e}, using built-in Dracula",
+                        "Failed to load theme '{}': {e}, using the built-in default palette",
                         value
                     );
                 }
             }
-        } else if !value.eq_ignore_ascii_case("dracula") {
+        } else {
+            // No name is special-cased here any more: the former "dracula"
+            // exemption existed only because that name resolved to the
+            // hardcoded default without a file behind it. That palette now
+            // ships as `TermLab Dark.toml` and resolves through the normal
+            // lookup above, so an unmatched name is always worth logging.
             log::info!(
-                "Theme '{}' not found in themes dir, using built-in Dracula",
+                "Theme '{}' not found in themes dir, using the built-in default palette",
                 value
             );
         }
@@ -737,17 +746,17 @@ white = "#000000"
         );
     }
 
-    /// An unmatched name falls back to the built-in Dracula scheme, silently
-    /// (no error, no panic) — the name-lookup `else` branch of
-    /// `resolve_theme_in` when the value isn't a path and isn't found in
+    /// An unmatched name falls back to the built-in default palette (TermLab
+    /// Dark), silently (no error, no panic) — the name-lookup `else` branch
+    /// of `resolve_theme_in` when the value isn't a path and isn't found in
     /// either dir. This is the one fallback path the settings-picker's
     /// deleted `preview_theme_colors` stopgap used to exercise indirectly;
     /// Task 5's removal of that command (and its tests) left it with no
-    /// direct coverage anywhere in the workspace until this test, per the
-    /// Task 5 review's finding. Distinctive Dracula values, not just
-    /// "some non-empty scheme," so a fallback to the wrong palette reds it.
+    /// direct coverage anywhere in the workspace until this test.
+    /// Distinctive values, not just "some non-empty scheme," so a fallback
+    /// to the wrong palette reds it.
     #[test]
-    fn resolve_theme_falls_back_to_dracula_for_an_unmatched_name() {
+    fn resolve_theme_falls_back_to_the_default_palette_for_an_unmatched_name() {
         let bundled = tempfile::tempdir().unwrap();
         let user = tempfile::tempdir().unwrap();
 
@@ -755,25 +764,25 @@ white = "#000000"
             "definitely_not_a_real_theme_xyz",
             &[bundled.path().to_path_buf(), user.path().to_path_buf()],
         );
-        assert_eq!(scheme.primary.background, "#282a36", "Dracula background");
-        assert_eq!(scheme.primary.foreground, "#f8f8f2", "Dracula foreground");
-        assert_eq!(scheme.normal.red, "#ff5555", "Dracula red");
+        assert_eq!(scheme.primary.background, "#282a36", "TermLab Dark bg");
+        assert_eq!(scheme.primary.foreground, "#f8f8f2", "TermLab Dark fg");
+        assert_eq!(scheme.normal.red, "#ff5555", "TermLab Dark red");
     }
 
     #[test]
     fn default_color_scheme_primary_colors() {
         let cs = ColorScheme::default();
-        assert_eq!(cs.primary.background, "#282a36", "Dracula background");
-        assert_eq!(cs.primary.foreground, "#f8f8f2", "Dracula foreground");
+        assert_eq!(cs.primary.background, "#282a36", "TermLab Dark background");
+        assert_eq!(cs.primary.foreground, "#f8f8f2", "TermLab Dark foreground");
         assert_eq!(
             cs.primary.dim_foreground.as_deref(),
             Some("#6272a4"),
-            "Dracula dim foreground"
+            "TermLab Dark dim foreground"
         );
         assert_eq!(
             cs.primary.bright_foreground.as_deref(),
             Some("#ffffff"),
-            "Dracula bright foreground"
+            "TermLab Dark bright foreground"
         );
     }
 
@@ -914,42 +923,38 @@ white   = "#ffffff"
         );
     }
 
-    /// F1 (branch-review.md): `dracula.toml` — the same fixture vendored at
-    /// `termlab_core/tests/fixtures/alacritty-themes/dracula.toml` — now
-    /// ships in the bundled frontend `themes/` dir, so legacy `theme =
-    /// "dracula"` configs (the pre-branch serde default; still what every
-    /// user who ever saved settings on an older build has on disk) get a
-    /// real picker entry back instead of an unmatched value.
     #[test]
-    fn list_themes_finds_bundled_dracula_theme_exactly_once() {
+    fn list_themes_finds_bundled_termlab_dark_theme_exactly_once() {
         let themes = list_themes();
-        let count = themes.keys().filter(|k| *k == "dracula").count();
+        let count = themes.keys().filter(|k| *k == "TermLab Dark").count();
         assert_eq!(
             count, 1,
-            "expected 'dracula' to be discoverable exactly once, found: {:?}",
+            "expected 'TermLab Dark' to be discoverable exactly once, found: {:?}",
             themes.keys().collect::<Vec<_>>()
         );
     }
 
-    /// F1 round 2 (branch-review.md, fix-wave-report.md concern 1):
-    /// zero-behavior-change for a concrete-named theme is a BINDING branch
-    /// constraint, and rendering IS behavior. `dracula.toml` is therefore
-    /// NOT the vendored upstream alacritty-theme fixture (that stays a
-    /// parse-fixture-only file at
-    /// `termlab_core/tests/fixtures/alacritty-themes/dracula.toml`) — it is
-    /// instead a hand-serialized copy of `ColorScheme::default()`'s own
-    /// hardcoded values, so `resolve_theme("dracula")` renders EXACTLY what
-    /// every legacy `theme = "dracula"` config has always rendered, field
-    /// for field. This is the strongest possible pin of that constraint:
-    /// direct equality (no `PartialEq` derive on these structs, so compared
-    /// field by field) between the file-backed resolution and the hardcoded
-    /// default.
+    /// `frontend/themes/TermLab Dark.toml` carries the app's default terminal
+    /// palette, so the file-backed resolution and the hardcoded
+    /// `ColorScheme::default()` must agree field for field: the file is what
+    /// the picker offers and what `auto` selects under a dark appearance,
+    /// while the Default impl is what every unmatched/broken name falls back
+    /// to. If they drift, the same nominal palette renders two different ways
+    /// depending on which path a user reaches it by.
     ///
-    /// Keep `crates/termlab_tauri/frontend/themes/dracula.toml` in sync with
+    /// The file is deliberately NOT the vendored upstream alacritty-theme
+    /// `dracula.toml` this palette descends from (that stays a
+    /// parse-fixture-only file at
+    /// `termlab_core/tests/fixtures/alacritty-themes/dracula.toml`) — see the
+    /// discriminator test below.
+    ///
+    /// This is the strongest possible pin: direct equality (no `PartialEq`
+    /// derive on these structs, so compared field by field). Keep
+    /// `crates/termlab_tauri/frontend/themes/TermLab Dark.toml` in sync with
     /// `ColorScheme::default()` below, or this test reds.
     #[test]
-    fn resolve_theme_dracula_is_byte_identical_to_the_hardcoded_default() {
-        let file_backed = resolve_theme("dracula");
+    fn resolve_theme_termlab_dark_is_byte_identical_to_the_hardcoded_default() {
+        let file_backed = resolve_theme("TermLab Dark");
         let hardcoded = ColorScheme::default();
 
         assert_eq!(file_backed.primary.background, hardcoded.primary.background);
@@ -1005,19 +1010,19 @@ white   = "#ffffff"
         );
     }
 
-    /// F1 round 2, continued: a regression alarm specifically for "someone
-    /// swapped the vendored upstream alacritty-theme fixture back in as
-    /// `frontend/themes/dracula.toml`" — the equality test above would
-    /// catch that too (an upstream swap breaks equality with
-    /// `ColorScheme::default()`), but this pins TermLab's actual hardcoded
-    /// values directly, on the three bright-ANSI fields where TermLab's
-    /// longstanding built-in and upstream alacritty-theme's community
-    /// fixture are known to disagree (see the vendored fixture's own
-    /// `normal.black "#000000"`, `bright.black "#555555"`, `bright.red
-    /// "#ff5555"` — all different from the values asserted below).
+    /// A regression alarm specifically for "someone swapped the vendored
+    /// upstream alacritty-theme dracula fixture in as `frontend/themes/
+    /// TermLab Dark.toml`" — the equality test above would catch that too
+    /// (an upstream swap breaks equality with `ColorScheme::default()`), but
+    /// this pins TermLab's actual hardcoded values directly, on the three
+    /// ANSI fields where TermLab's longstanding built-in and upstream
+    /// alacritty-theme's community fixture are known to disagree (see the
+    /// vendored fixture's own `normal.black "#000000"`, `bright.black
+    /// "#555555"`, `bright.red "#ff5555"` — all different from the values
+    /// asserted below).
     #[test]
-    fn resolve_theme_dracula_pins_termlabs_hardcoded_bright_colors_not_upstreams() {
-        let scheme = resolve_theme("dracula");
+    fn resolve_theme_termlab_dark_pins_termlabs_hardcoded_colors_not_upstreams() {
+        let scheme = resolve_theme("TermLab Dark");
         assert_eq!(
             scheme.normal.black, "#21222c",
             "TermLab's hardcoded value, not upstream alacritty-theme's #000000"

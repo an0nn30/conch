@@ -12,9 +12,10 @@
 //!
 //! Everything that is NOT `"auto"` is handed to
 //! [`crate::color_scheme::resolve_theme`] completely unchanged — same lookup
-//! order, same collision rule, same silent Dracula fallback. A config naming a
-//! concrete theme therefore resolves to the identical palette under both
-//! appearances, which is the spec's decoupling guarantee.
+//! order, same collision rule, same silent fallback to the built-in default
+//! palette. A config naming a concrete theme therefore resolves to the
+//! identical palette under both appearances, which is the spec's decoupling
+//! guarantee.
 
 use crate::color_scheme::{ColorScheme, resolve_theme};
 use crate::config::ColorsConfig;
@@ -113,7 +114,12 @@ mod tests {
 
     #[test]
     fn a_concrete_name_is_returned_untouched_under_both_appearances() {
-        for name in ["dracula", "gruvbox_dark", "TermLab Light", "~/mine.toml"] {
+        for name in [
+            "gruvbox_dark",
+            "TermLab Dark",
+            "TermLab Light",
+            "~/mine.toml",
+        ] {
             assert_eq!(effective_theme_name(name, "dark"), name);
             assert_eq!(effective_theme_name(name, "light"), name);
         }
@@ -121,19 +127,24 @@ mod tests {
 
     /// The decoupling guarantee, at the level that actually loads files: a
     /// config naming a concrete theme must produce the SAME palette under
-    /// both appearances. `"dracula"` is used because it resolves without
-    /// touching the user's config directory (built-in fallback).
+    /// both appearances. `"TermLab Light"` is used because it is a bundled
+    /// built-in (so it resolves without touching the user's config
+    /// directory) AND it is the palette `auto` would pick under only ONE of
+    /// the two appearances — so a regression that leaked appearance into a
+    /// concrete name's resolution shows up as a changed background here,
+    /// rather than coincidentally matching.
     #[test]
     fn a_concrete_name_resolves_to_an_identical_palette_under_both_appearances() {
-        let cfg = colors("dracula");
+        let cfg = colors(TERMLAB_LIGHT_THEME);
         let dark = resolve_effective_theme(&cfg, "dark");
         let light = resolve_effective_theme(&cfg, "light");
         assert_eq!(dark.primary.background, light.primary.background);
         assert_eq!(dark.primary.foreground, light.primary.foreground);
         assert_eq!(dark.normal.as_array(), light.normal.as_array());
         assert_eq!(dark.bright.as_array(), light.bright.as_array());
-        // And specifically: it is Dracula, not a TermLab built-in.
-        assert_eq!(dark.primary.background, "#282a36");
+        // And specifically: it stayed the LIGHT palette under a dark
+        // appearance, rather than being swapped for the dark built-in.
+        assert_eq!(dark.primary.background, "#E3E8EF");
     }
 
     /// `auto` must actually change the loaded palette, not merely the name.

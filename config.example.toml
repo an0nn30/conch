@@ -61,8 +61,10 @@ y = 0.0
 [colors]
 
 # Color scheme name. Themes are loaded from ~/.config/termlab/themes/<name>.toml.
-# Built-in fallback: dracula.
-theme = "dracula"
+# Built-ins: "TermLab Dark" and "TermLab Light". The reserved name "auto"
+# follows appearance_mode below, picking between those two. An unknown name
+# falls back to TermLab Dark.
+theme = "auto"
 
 # UI appearance mode: "dark", "light", or "system".
 # Controls the native title bar and egui widget styling.

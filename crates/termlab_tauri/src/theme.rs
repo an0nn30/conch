@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn resolve_from_scheme_uses_primary_colors() {
-        let scheme = ColorScheme::default(); // Dracula
+        let scheme = ColorScheme::default(); // TermLab Dark
         let tc = resolve_theme_colors_from_scheme(&scheme);
         assert_eq!(tc.background, "#282a36");
         assert_eq!(tc.foreground, "#f8f8f2");
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn text_secondary_differs_from_fg() {
-        let scheme = ColorScheme::default(); // Dracula: light fg on dark bg
+        let scheme = ColorScheme::default(); // TermLab Dark: light fg on dark bg
         let tc = resolve_theme_colors_from_scheme(&scheme);
         assert_ne!(tc.text_secondary, tc.foreground);
         assert_ne!(tc.text_secondary, tc.background);
@@ -614,14 +614,15 @@ color = "CellForeground"
     /// triggers is a no-op for that user.
     #[test]
     fn a_concrete_theme_name_yields_an_identical_payload_under_both_appearances() {
-        let cfg = config_with_theme("dracula");
+        let cfg = config_with_theme("TermLab Light");
         let dark = resolve_theme_colors_for_appearance(&cfg, Some("dark"));
         let light = resolve_theme_colors_for_appearance(&cfg, Some("light"));
         let dark_json = serde_json::to_value(&dark).expect("serializable");
         let light_json = serde_json::to_value(&light).expect("serializable");
         assert_eq!(dark_json, light_json);
-        // And it is really Dracula, not a TermLab built-in.
-        assert_eq!(dark.background, "#282a36");
+        // And it really stayed the LIGHT palette under a dark appearance,
+        // rather than being swapped for the dark built-in `auto` would pick.
+        assert_eq!(dark.background, "#E3E8EF");
     }
 
     #[test]

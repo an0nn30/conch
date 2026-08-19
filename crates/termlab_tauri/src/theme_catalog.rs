@@ -183,40 +183,48 @@ mod tests {
         );
     }
 
-    /// F1 (branch-review.md): `dracula.toml` now ships alongside the two
-    /// TermLab built-ins, so it enumerates through the SAME
-    /// command-facing path the settings picker consumes
-    /// (`list_terminal_themes` -> `build_theme_list`), as a real `Parsed`
-    /// entry with `source: Builtin` — not merely a name a legacy config
-    /// happens to resolve without a picker row.
+    /// TermLab ships exactly TWO built-in palettes — the pair `auto` picks
+    /// between. Both must enumerate through the SAME command-facing path the
+    /// settings picker consumes (`list_terminal_themes` -> `build_theme_list`)
+    /// as real `Parsed` entries with `source: Builtin`, and nothing else may
+    /// enumerate as a built-in (a third bundled file would show up as an
+    /// unexplained extra row in the picker).
     #[test]
-    fn build_theme_list_includes_dracula_as_a_builtin() {
+    fn build_theme_list_offers_exactly_two_builtins() {
         let entries = build_theme_list();
-        let dracula = entries.iter().find(|e| match e {
-            ThemeListEntry::Parsed { name, .. } => name == "dracula",
-            ThemeListEntry::Broken { name, .. } => name == "dracula",
-        });
-        match dracula {
-            Some(ThemeListEntry::Parsed { source, .. }) => {
-                assert_eq!(
-                    *source,
-                    ThemeSource::Builtin,
-                    "dracula.toml lives in the bundled themes dir, so it must enumerate as Builtin"
-                );
+        let mut builtins: Vec<&str> = Vec::new();
+        for entry in &entries {
+            match entry {
+                ThemeListEntry::Parsed { name, source, .. } => {
+                    if *source == ThemeSource::Builtin {
+                        builtins.push(name.as_str());
+                    }
+                }
+                ThemeListEntry::Broken { name, error } => {
+                    // A bundled file that stopped parsing would silently drop
+                    // out of the count below; fail loudly instead.
+                    assert!(
+                        name != "TermLab Dark" && name != "TermLab Light",
+                        "bundled '{name}' failed to parse: {error}"
+                    );
+                }
             }
-            Some(ThemeListEntry::Broken { error, .. }) => {
-                panic!("dracula.toml failed to parse: {error}")
-            }
-            None => panic!(
-                "expected 'dracula' in the theme list, found: {:?}",
-                entries
-                    .iter()
-                    .map(|e| match e {
-                        ThemeListEntry::Parsed { name, .. } => name.as_str(),
-                        ThemeListEntry::Broken { name, .. } => name.as_str(),
-                    })
-                    .collect::<Vec<_>>()
-            ),
+        }
+        // A user theme of the same name shadows the built-in (later-dirs-win),
+        // in which case that entry is `source: User` and legitimately absent
+        // from this list — so this is an upper bound plus a subset check, not
+        // an exact set the developer's own ~/.config could perturb. The
+        // "both names are present under SOME source" half is
+        // build_theme_list_includes_production_builtins above.
+        assert!(
+            builtins.len() <= 2,
+            "only TermLab Dark/Light may ship as built-ins, found: {builtins:?}"
+        );
+        for name in &builtins {
+            assert!(
+                *name == "TermLab Dark" || *name == "TermLab Light",
+                "unexpected bundled built-in theme: {name}"
+            );
         }
     }
 }

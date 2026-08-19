@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn a_config_naming_a_theme_is_left_untouched_by_the_default_flip() {
-        for name in ["dracula", "gruvbox_dark", "TermLab Light"] {
+        for name in ["gruvbox_dark", "TermLab Dark", "TermLab Light"] {
             let parsed: ColorsConfig =
                 toml::from_str(&format!("theme = {}", toml::Value::from(name))).unwrap();
             assert_eq!(parsed.theme, name, "{name} must survive the default flip");
@@ -171,10 +171,11 @@ mod tests {
     ///
     /// This is DELIBERATE and it is downgrade-safe. A build that predates
     /// the reserved name treats `"auto"` as an ordinary theme name, finds no
-    /// `auto.toml`, and falls back to built-in Dracula — which is exactly
-    /// what that same build showed for the keyless config before the save,
-    /// since `"dracula"` was the old serde default. So the materialized key
-    /// changes nothing for an older binary reading the same file.
+    /// `auto.toml`, and falls back to its own built-in default palette —
+    /// which is exactly what that same build showed for the keyless config
+    /// before the save, since the old serde default resolved to that same
+    /// hardcoded palette too. So the materialized key changes nothing for an
+    /// older binary reading the same file.
     #[test]
     fn a_keyless_config_materializes_theme_auto_on_the_next_save() {
         let parsed: ColorsConfig = toml::from_str(r#"appearance_mode = "dark""#).unwrap();

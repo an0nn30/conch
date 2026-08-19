@@ -414,8 +414,8 @@ impl HostApi for TauriHostApi {
         let cfg = tauri_state.config.read();
         // Routed through the same effective resolution as get_theme_colors so
         // a plugin asking for the theme under the default `auto` gets the
-        // built-in palette the terminal is actually showing, not the Dracula
-        // fallback an unresolved `auto` name would produce. This is a
+        // built-in palette the terminal is actually showing, not the default
+        // fallback palette an unresolved `auto` name would produce. This is a
         // Rust-side call with no webview in reach, so the best appearance it
         // can name is the configured mode's hint — `system` degrades to dark.
         // `name` below still reports the CONFIGURED value verbatim (`"auto"`

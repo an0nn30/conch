@@ -202,7 +202,7 @@ Alacritty-compatible sections (`[window]`, `[font]`, `[colors]`, `[terminal]`) w
 
 ```toml
 [colors]
-theme = "dracula"           # Any Alacritty .toml theme file name
+theme = "auto"              # "auto" follows the app appearance; or any Alacritty .toml theme file name
 
 [termlab]
 check_for_updates = true    # Check for new versions on startup (macOS/Windows)

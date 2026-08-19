@@ -34,14 +34,11 @@
   /**
    * F1b/F4 (branch-review.md): a picker built from `entries` alone renders a
    * blank combo whenever `pendingSettings.colors.theme` names something that
-   * isn't among them — a deleted user theme, or (the specific case that made
-   * this Important, not Low) any pre-branch `theme = "dracula"` config, since
-   * the old plain `<select>` special-cased that default and this picker's
-   * option list didn't, until dracula.toml shipped as a real built-in
-   * alongside this fix. A synthesized `missing` entry keeps the combo
-   * showing the saved name (not blank) and keeps it selected, while leaving
-   * every other row exactly as selectable as before — switching away is
-   * still one click on any other row.
+   * isn't among them — a deleted user theme, or a hand-edited config naming
+   * a theme that was never installed. A synthesized `missing` entry keeps
+   * the combo showing the saved name (not blank) and keeps it selected,
+   * while leaving every other entry exactly as selectable as before —
+   * switching away is still one pick in the dropdown.
    */
   function synthesizeMissingEntry(currentValue) {
     return {

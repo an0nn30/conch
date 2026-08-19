@@ -16,9 +16,10 @@
 //! [`crate::color_scheme::load_theme`], the single fallible file →
 //! `ColorScheme` funnel that `resolve_theme_in` (both its path branch and its
 //! name branch) and `theme_list_entry_for` both go through.
-//! `ColorScheme::default()` (built-in Dracula) is already canonical, so after
-//! that one call site there is no way to obtain a `ColorScheme` whose colors
-//! are not `#`-form. Every downstream consumer — `theme.rs`'s helpers,
+//! `ColorScheme::default()` (the built-in TermLab Dark palette) is already
+//! canonical, so after that one call site there is no way to obtain a
+//! `ColorScheme` whose colors are not `#`-form. Every downstream consumer —
+//! `theme.rs`'s helpers,
 //! `PalettePreview`, the theme catalog — is fixed by that single call.
 //!
 //! ### Why not in a serde `Deserialize` impl?

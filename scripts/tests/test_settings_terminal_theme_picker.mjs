@@ -259,21 +259,21 @@ const RAW_ENTRIES = [
 }
 
 // --- F1b/F4 (branch-review.md): the synthesized `missing` entry -----------
-// A currentValue that matches no real entry (the generic deleted-file case,
-// and — before dracula.toml shipped as a built-in — every pre-branch
-// `theme = "dracula"` config) used to leave the native <select> on
+// A currentValue that matches no real entry (a deleted user theme, or a
+// hand-edited config naming a theme that was never installed) used to leave
+// the native <select> on
 // selectedIndex -1: an empty button label, no row marked selected, and
 // switching away as the only way out. normalizeThemeEntries now appends a
 // synthesized entry carrying the saved name so the combo always has
 // something to show and mark selected.
 {
-  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'dracula');
+  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'GoneTheme');
   assert.equal(entries.length, 7, 'synthetic Auto + 5 raw entries + 1 synthesized missing entry');
   const missing = entries[6];
   assert.equal(missing.kind, 'missing');
-  assert.equal(missing.name, 'dracula');
-  assert.equal(missing.value, 'dracula', 'shares the saved value so a <select> assignment matches it');
-  assert.equal(missing.label, 'dracula', 'the saved name is shown, not a blank label');
+  assert.equal(missing.name, 'GoneTheme');
+  assert.equal(missing.value, 'GoneTheme', 'shares the saved value so a <select> assignment matches it');
+  assert.equal(missing.label, 'GoneTheme', 'the saved name is shown, not a blank label');
   assert.equal(missing.selectable, false, 'not independently re-selectable — it IS the current selection');
   assert.equal(missing.palettePreview, null, 'greyed palette area: nothing to show for a name with no file');
   assert.equal(missing.note, '(missing)');
@@ -389,22 +389,22 @@ const RAW_ENTRIES = [
 
 // --- F1b: an unmatched currentValue never renders a blank combo -----------
 // The mutation this proves: if normalizeThemeEntries stopped synthesizing a
-// `missing` entry for 'dracula' (i.e. entries came back as the plain 6, with
-// no option whose value is 'dracula'), the native <select>.value setter
+// `missing` entry for 'GoneTheme' (i.e. entries came back as the plain 6,
+// with no option whose value is 'GoneTheme'), the native <select>.value setter
 // below would fail to find a match, select.selectedIndex would land on -1,
 // and tl-combo's currentLabel() (app/ui/tl-combo.js: `opt ? opt.textContent
 // : ''`) would render an empty button label — the exact regression F1
 // reported. Asserting selectedIndex/value/is-selected here reds immediately
 // if that synthesis is ever removed.
 {
-  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'dracula');
-  const { select, list } = themePicker.buildTerminalThemePicker(entries, 'dracula', () => {});
+  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'GoneTheme');
+  const { select, list } = themePicker.buildTerminalThemePicker(entries, 'GoneTheme', () => {});
 
   assert.notEqual(select.selectedIndex, -1, 'the combo must never land on no selection at all');
-  assert.equal(select.value, 'dracula', 'the select carries the saved value, not a blank one');
+  assert.equal(select.value, 'GoneTheme', 'the select carries the saved value, not a blank one');
 
   const missingOption = select.options[select.options.length - 1];
-  assert.equal(missingOption.value, 'dracula');
+  assert.equal(missingOption.value, 'GoneTheme');
   assert.equal(missingOption.disabled, true, 'the synthesized entry is not independently selectable');
 
   const missingRow = list.children[list.children.length - 1];
