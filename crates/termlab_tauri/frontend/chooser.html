@@ -22,9 +22,6 @@
       <span class="chooser-titlebar-title" data-tauri-drag-region>Chooser</span>
     </div>
     <div class="chooser-titlebar-controls">
-      <button class="chooser-titlebar-btn chooser-titlebar-btn-minimize" aria-label="Minimize">
-        <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
-      </button>
       <button class="chooser-titlebar-btn chooser-titlebar-btn-maximize" aria-label="Maximize">
         <svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg>
       </button>
@@ -95,7 +92,6 @@
             titlebar.classList.add('visible');
 
             const win = window.__TAURI__.window.getCurrentWindow();
-            titlebar.querySelector('.chooser-titlebar-btn-minimize').addEventListener('click', () => win.minimize());
             titlebar.querySelector('.chooser-titlebar-btn-maximize').addEventListener('click', async () => {
               if (await win.isMaximized()) { win.unmaximize(); } else { win.maximize(); }
             });

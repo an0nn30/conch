@@ -36,6 +36,19 @@
 
 ### Task 1: Rust chooser window module (registry, commands, builder, persistence)
 
+> **Superseded during execution:** this task's text below describes the
+> single label per parent (`chooser-<parent>`) and an `AlreadyOpen` arm that
+> re-focuses the existing chooser window on a duplicate `open_file_chooser`.
+> Both were replaced by fix-round work after this task landed: labels are
+> now unique per request (`chooser-<parentLabel>-<reqId>`), and a duplicate
+> open cancels the live entry and builds a fresh window under a fresh label
+> and `req_id` instead of adopting it (see commits "Replace the chooser
+> AlreadyOpen adoption arm with cancel-and-recreate" and "Make chooser window
+> labels unique per request so displacement can rebuild"). The design spec's
+> "Window & lifecycle" Label and cancel-and-recreate bullets
+> (`docs/superpowers/specs/2026-08-18-chooser-window-design.md`) are the
+> current source of truth; this task's body is left as-run, not rewritten.
+
 **Files:**
 - Create: `crates/termlab_tauri/src/chooser_window.rs`
 - Modify: `crates/termlab_core/src/config/persistent.rs` (add field), `crates/termlab_tauri/src/lib.rs` (register module/commands/state/hooks)

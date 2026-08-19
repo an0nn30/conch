@@ -367,3 +367,97 @@ build. Run in order; stop and report at the first mismatch.
     screen, decide whether the 24px row height, the 150px sidebar, the 80px
     Size column and the 110px Modified column read as comfortable or as
     cramped, in both themes. Say which, with a number, if any should change.
+
+## I. The chooser as an independent window
+
+Added by the chooser-window plan: the unified Open/Save As dialog moved out
+of the in-app `tl-dialog` overlay into its own OS window (`chooser.html`),
+window-modal over the requesting TermLab window, IntelliJ-save-dialog-style.
+Nothing below was run in a GUI by the implementer; every step is a human
+pass. **Steps marked [SSH] need a real SSH host**; the rest need only a
+local build. Run in order; stop and report at the first mismatch.
+
+92. ⌘O (or ⌘⇧S) from a terminal pane → a separate OS window appears, titled
+    "Open" or "Save As" respectively, centered on the PARENT window (not the
+    screen), with its own titlebar and traffic lights — not an overlay
+    inside the parent.
+93. With the chooser open, click into the parent window's body and try to
+    type → the parent grays out under a scrim; neither the click nor the
+    keystrokes reach it (no tab switch, no menu action, no terminal input).
+    The chooser window itself is unaffected and keeps working normally.
+94. Click the parent window (its titlebar or its grayed-out body) → the
+    chooser comes back to the front instead of the parent taking focus.
+95. Press ⌘O again while a chooser is already open for that window → no
+    second window opens; the existing chooser is re-fronted instead. Press
+    ⌘O while a SAVE-mode chooser is open → nothing happens at all — no
+    re-front, no toast, no second window. The cross-mode refusal is silent
+    by design; confirm it stays silent.
+96. **Escape while the PARENT window has focus** (focus it via its titlebar,
+    not its inert body, so the click doesn't route through the scrim) → the
+    chooser stays open. Escape only resolves the chooser when the chooser
+    window itself has focus — window-modal semantics, previously untested
+    behavior; don't assume it from the code.
+97. Drag the chooser window's edge smaller → it stops shrinking at a
+    content-fit floor (720×420 logical px). At that floor, nothing but the
+    file listing has a scrollbar — the sidebar, path bar, column header and
+    footer stay fully visible and unclipped all the way down to it.
+98. Resize the chooser larger, then close it (Cancel or complete a pick) and
+    reopen (⌘O again) → it reopens at the SAME size, not back at the floor.
+    Quit and relaunch the app, reopen once more → the size is still
+    remembered (it persists to disk, not just in-memory for the session).
+99. Open two separate TermLab windows, then open a chooser from EACH → two
+    independent chooser windows, each graying out only its own parent (the
+    other app window stays fully usable). Browse, sort, or resize one →
+    the other's scrim, listing, selection and size are untouched.
+100. **Displacement — no automated coverage for this GUI path.** With a
+     chooser open, open Developer Console (F12) on the PARENT window and run
+     `location.reload()` there — this resets the parent's JS state (so its
+     own same-mode/cross-mode guards forget the open chooser) while the
+     Rust-side registry entry for that parent survives. Trigger ⌘O again
+     from the reloaded page. Expect: the OLD chooser window closes, a NEW
+     one opens with the correct mode and title, and the parent's scrim
+     stays continuous across the swap (no flash of the parent's real
+     content in between). **If this path isn't reachable this way, say so
+     and note it as race-only** — the actual IPC race the spec describes
+     isn't reproducible on demand from the UI, and the Rust registry's own
+     unit tests are the only coverage that exists for it; do not force a
+     result you didn't actually see.
+101. [SSH] Open a chooser, switch to a host scope, then kill that session's
+     connection mid-browse → an inline error replaces the listing (not a
+     toast), the other scope buttons keep working, and clicking the failed
+     scope again retries rather than doing nothing.
+102. ⌘⇧S onto a filename that already exists → the "Overwrite File?" confirm
+     appears STACKED INSIDE the chooser window, not as a separate window and
+     not hidden behind it. Cancel returns to the chooser at the same
+     directory with the same typed name; confirming writes.
+103. **Save-mode focus timing.** Open a Save As chooser with a placeholder
+     filename (e.g. ⌘⇧S from an untitled buffer) → within a beat of the
+     window appearing, the filename field has focus AND its text is fully
+     selected, so the first keystroke replaces it rather than appending.
+     This window host adds one more deferred frame on top of the view's own
+     (at most one extra frame total beyond what the in-app chooser in
+     section H needed). **Flag it if the delay reads as laggy rather than
+     instant — that judgment is yours.**
+104. With that same save-mode chooser, type a name and press Escape → it
+     closes with no save, same as the overlay's save-mode Escape behavior in
+     F5/H.
+105. Close the PARENT window (its native close button) while its chooser is
+     still open → the chooser window closes too, with no leftover orphan
+     and no crash. Check the OS window list/dock afterward to confirm
+     nothing lingers.
+106. **Both themes.** Repeat 92, 93, 97 and 102 with the appearance set to
+     light and again to dark: the scrim reads as a translucent scrim, not a
+     flat block, in both; the chooser window's own chrome (sidebar, listing,
+     footer) stays legible in both; and the overwrite confirm stacked over
+     the chooser is legible in both. **Known:** light theme is still the
+     app-wide approximation documented in the file-dialog-redesign spec's
+     Known limitations (token-pipeline gap) — this branch does not attempt
+     to fix it. Report anything chooser-specific that looks wrong, but a
+     light-theme border or muted text reading dark is that known gap, not a
+     regression from this branch.
+107. **The judgment call:** at the resize floor (720×420), decide whether
+     the chooser window reads as comfortably small or cramped relative to
+     the TermLab window it sits modal over — the same kind of call as step
+     91, now about the WINDOW's own proportions rather than the row/column
+     metrics inside it. Say which, with a number, if anything should
+     change.
