@@ -438,17 +438,6 @@
   cursor: default;
   pointer-events: none;
 }
-/* TEMPORARY, with the tl-dialog bridge host in file-dialog.js: that host
-   re-homes this row inside the panel's own .tl-dialog__footer, which already
-   supplies the padding and the separation from the body. Goes away when the
-   chooser moves into its own window. */
-.tl-dialog__footer > .tl-filedlg__footer {
-  flex: 1 1 auto;
-  padding: 0;
-  margin-top: 0;
-  border-top: none;
-}
-
 /* Lives in .tl-filedlg__footer-start, opposite Cancel / Open|Save. These are
    options about the whole chooser rather than about the directory on screen,
    which is why they are down here and not in the body. */

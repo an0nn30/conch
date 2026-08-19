@@ -297,11 +297,18 @@
           // top — if a successor already holds the claim, the window is no
           // longer ours to close and it owns the lifetime from here.
           //
-          // Not closed by either: a successor whose `open_file_chooser` beat
-          // this cancel to Rust is handed THIS req_id by the AlreadyOpen arm
-          // (chooser_window.rs:506-518) and adopts this very window, so it
-          // shares the id the cancel names. See the report — closing that needs
-          // the adoption to mint a fresh id, which is a Task 1 surface change.
+          // A legitimate duplicate never reaches this branch at all: a
+          // same-mode repeat shares this very session through `activeChoice`
+          // (see `focus_file_chooser` below) and a cross-mode one is refused
+          // outright, both decided entirely on this side before any second
+          // `open_file_chooser` invoke. The only way an open reaches Rust
+          // against a live entry is the abnormal race this whole block exists
+          // for, and Rust's answer to it is cancel-and-recreate: the entry we
+          // raced against gets displaced, and whatever opened next holds a
+          // freshly minted req_id and a fresh, request-unique window label —
+          // never this one. So the re-send above, scoped by `myReqId`, can only
+          // ever resolve THIS session; it has no id in common with a successor
+          // to accidentally land on.
           if (activeChoice === null) {
             invoke('cancel_file_chooser', { reqId: myReqId }).catch(() => {});
           }

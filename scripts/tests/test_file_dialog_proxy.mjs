@@ -486,7 +486,7 @@ await checkAsync('cancelForPane cancels the chooser opened FOR that pane', async
   assert.strictEqual(await settles(saving, 'the cancelled chooser'), null);
   await settle();
   assert.ok(h.commands().includes('cancel_file_chooser'),
-    'Rust closes the window — cancel_file_chooser takes no reqId, it uses the caller label');
+    'Rust closes the window — cancel_file_chooser is passed reqId, scoping the resolve to this chooser');
   assert.strictEqual(h.scrimUp(), false);
   assert.strictEqual(h.appRoot.hasAttribute('inert'), false);
 });
@@ -571,12 +571,16 @@ await checkAsync('a cancel while the window is being built re-sends the cancel',
 });
 
 await checkAsync('that late cancel never reaches the NEXT session\'s chooser', async () => {
-  // `cancel_file_chooser` carries no reqId — it force-resolves whatever is live
-  // for this window. Meanwhile Rust's AlreadyOpen arm hands a second request
-  // the FIRST request's req_id (chooser_window.rs:506-512), so a successor can
-  // legitimately adopt the very window the dead session is trying to close. An
-  // unscoped re-send would answer the successor's question with a silent null:
-  // a ⌘O that does nothing at all.
+  // The dead session's re-send carries ITS OWN reqId (myReqId, from its own
+  // open_file_chooser). By the time it lands, the parent has already opened a
+  // second chooser: Rust's open_file_chooser displaces a live entry by
+  // cancel-and-recreate rather than reusing it, so the successor is minted a
+  // FRESH req_id and a fresh, request-unique window label
+  // (chooser_window.rs's `open_file_chooser`/`ChooserRegistry::open`). The
+  // dead session's cancel names the old id, which the registry no longer has
+  // live, so scoping by reqId resolves nothing — an unscoped force-resolve
+  // would instead answer the successor's question with a silent null: a ⌘O
+  // that does nothing at all.
   const h = makeHarness({ gateOpen: true });
   const pane = { kind: 'editor', tabId: 1 };
   const saving = h.fd._chooseFile({ mode: 'save', filename: 'Untitled', pane });

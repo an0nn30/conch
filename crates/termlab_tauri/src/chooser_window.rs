@@ -465,6 +465,39 @@ mod tests {
         assert!(r.contains_parent("window-1"));
         assert!(r.get("window-1").is_some());
     }
+
+    #[test]
+    fn destroy_by_window_label_resolves_the_entry_exactly_once() {
+        // Registry-level mirror of `on_window_destroyed`'s abnormal-chooser-
+        // death branch (F4): a chooser window died without CloseRequested (OS
+        // kill / webview crash), so the hook has only the destroyed WINDOW's
+        // label, not the parent's. It resolves via the same two-step
+        // `get_by_window_label` → `take_pending(parent)` lookup
+        // `on_chooser_close_requested` already uses.
+        let mut r = ChooserRegistry::default();
+        let p = r.open("window-1".into(), req("open"));
+
+        let parent_label = r
+            .get_by_window_label(&p.window_label)
+            .map(|entry| entry.request.parent_label.clone());
+        assert_eq!(parent_label.as_deref(), Some("window-1"));
+        let resolved = parent_label.and_then(|parent| r.take_pending(&parent));
+        assert_eq!(
+            resolved.map(|entry| entry.req_id),
+            Some(p.req_id),
+            "the live entry resolves through its chooser window's own label"
+        );
+        assert!(!r.contains_parent("window-1"));
+
+        // Second call, same window_label — as happens when `complete_chooser`
+        // closes the (already-destroyed) window and Tauri's Destroyed event
+        // re-enters the hook: the entry is gone, so the lookup finds nothing
+        // and there is nothing left to resolve a second time.
+        assert!(
+            r.get_by_window_label(&p.window_label).is_none(),
+            "a second destroy of the same window is a no-op, not a double-resolve"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -929,19 +962,56 @@ pub(crate) fn focus_file_chooser(
 // Lifecycle hooks — called from lib.rs's `on_window_event`
 // ---------------------------------------------------------------------------
 
-/// `WindowEvent::Destroyed`: if the destroyed window was some chooser's
-/// parent, resolve it as cancelled (the emit is a no-op — the parent is
-/// gone) and close the chooser window. The `.parent()` owner relationship
-/// (macOS/Windows) is not trusted alone to do this on every platform.
+/// `WindowEvent::Destroyed`: two unrelated cases share this hook, told apart
+/// by which side of the parent/chooser relationship the destroyed window was
+/// on.
+///
+/// 1. The destroyed window was some chooser's PARENT: resolve it as
+///    cancelled (the emit is a no-op — the parent is gone) and close the
+///    chooser window. The `.parent()` owner relationship (macOS/Windows) is
+///    not trusted alone to do this on every platform.
+/// 2. The destroyed window WAS a chooser (`chooser-*`) that went away without
+///    `CloseRequested` — an OS-level kill or a webview-process crash; no
+///    in-repo code path triggers this today, since `destroy()` is only ever
+///    called on an already-resolved, displaced chooser. Left unhandled this
+///    leaks the registry entry and leaves the parent permanently scrimmed.
+///    Resolved through the same `get_by_window_label` → take-the-parent's-
+///    entry path `on_chooser_close_requested` uses, so the parent gets the
+///    ordinary `chooser-resolved { choice: null }` and unscrims exactly as if
+///    the user had hit Cancel.
+///
+/// A window is never both, so at most one branch does anything. The second
+/// branch is naturally exactly-once and re-entry-safe: `complete_chooser`
+/// (called by either branch, and by `resolve_file_chooser`/
+/// `cancel_file_chooser`/`on_chooser_close_requested`) closes the chooser
+/// window as part of resolving it, which — when the window was still alive —
+/// queues its own `Destroyed` event and re-enters this hook for the same
+/// label after the entry is already gone; `get_by_window_label` then finds
+/// nothing and both branches are no-ops.
 pub(crate) fn on_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
     let app = window.app_handle();
     let label = window.label().to_string();
     let Some(registry) = app.try_state::<Mutex<ChooserRegistry>>() else {
         return;
     };
+
     let resolved = registry.lock().take_pending(&label);
     if let Some(pending) = resolved {
         complete_chooser(app, &pending, None);
+        return;
+    }
+
+    if label.starts_with("chooser-") {
+        let resolved = {
+            let mut guard = registry.lock();
+            let parent_label = guard
+                .get_by_window_label(&label)
+                .map(|p| p.request.parent_label.clone());
+            parent_label.and_then(|parent| guard.take_pending(&parent))
+        };
+        if let Some(pending) = resolved {
+            complete_chooser(app, &pending, None);
+        }
     }
 }
 
