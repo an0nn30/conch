@@ -4,7 +4,8 @@
 // (app/features/settings/theme-picker.js), and its wiring into the
 // Appearance section (app/features/settings/sections-appearance.js), which
 // this task made the sole consumer of list_terminal_themes()'s payload,
-// replacing the old plain <select> + preview_theme_colors round trip (see
+// replacing the old plain <select> + per-selection theme-color preview
+// round trip (see
 // test_appearance.mjs's "the settings preview round trip was retired, not
 // left half-removed" for that retirement's own pin).
 //

@@ -40,9 +40,10 @@
     // palette_preview so every candidate renders a swatch strip without a
     // per-entry round trip (list_terminal_themes returns them all at once).
     // This REPLACES the old plain <select> + single "current selection"
-    // preview panel (which called preview_theme_colors per selection) — see
-    // Task 3's report/review for why that stopgap existed and that it was
-    // always meant to be superseded here. Fully decoupled from app
+    // preview panel (which re-fetched a theme-color preview per selection)
+    // — see Task 3's report/review for why that stopgap existed and that it
+    // was always meant to be superseded here (Task 5 removed the stopgap's
+    // now-caller-less backend command entirely). Fully decoupled from app
     // appearance (product rule 1): this picks colors.theme, never
     // colors.appearance_mode below.
     const terminalThemeEntries = themePicker.normalizeThemeEntries(cachedTerminalThemes);

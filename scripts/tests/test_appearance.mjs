@@ -899,24 +899,26 @@ check('every get_theme_colors call site passes resolvedAppearance', () => {
 });
 
 // terminal-themes Task 4 retired this call site: the settings "Theme" row's
-// old single-selection preview (which re-fetched preview_theme_colors, and
-// so needed resolvedAppearance to render `auto` correctly) was replaced by
-// the "Terminal Theme" picker (app/features/settings/theme-picker.js),
-// which renders every entry's palette strip straight from
+// old single-selection preview (which re-fetched a per-selection theme-color
+// preview, and so needed resolvedAppearance to render `auto` correctly) was
+// replaced by the "Terminal Theme" picker (app/features/settings/
+// theme-picker.js), which renders every entry's palette strip straight from
 // list_terminal_themes()'s already-included palette_preview — no per-entry
 // round trip, so no appearance argument to get right or wrong here. (The
 // picker's Auto entry has no fixed palette to show at all — see
 // test_settings_terminal_theme_picker.mjs's "auto renders no palette
 // strip" — sidestepping the stale-preview failure mode this check used to
-// guard, rather than reproducing it.) This assertion now pins the
-// retirement itself, so the round trip cannot silently come back without
-// the resolvedAppearance plumbing this suite's other checks require.
+// guard, rather than reproducing it.) Task 5 then deleted the retired
+// command's Rust side entirely (it had gone caller-less), so this assertion
+// now pins the retirement at its strongest: sections-appearance.js must
+// make no backend `invoke()` call of its own at all, only route through
+// theme-picker.js, which already owns list_terminal_themes().
 check('the settings preview round trip was retired, not left half-removed', () => {
   const source = fs.readFileSync(
     path.join(FRONTEND, 'app/features/settings/sections-appearance.js'), 'utf8',
   );
-  assert.ok(!/invoke\(\s*['"]preview_theme_colors['"]/.test(source),
-    'sections-appearance.js must not call preview_theme_colors any more');
+  assert.ok(!/invoke\(/.test(source),
+    'sections-appearance.js must make no invoke() call of its own');
   assert.ok(/themePicker\.normalizeThemeEntries/.test(source),
     'sections-appearance.js must build its entries via theme-picker.js');
   assert.ok(/themePicker\.buildTerminalThemePicker/.test(source),

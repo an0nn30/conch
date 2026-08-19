@@ -791,8 +791,6 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::rebuild_menu,
             settings::get_all_settings,
             settings::save_settings,
-            settings::list_themes,
-            settings::preview_theme_colors,
             theme_catalog::list_terminal_themes,
             fonts::list_system_fonts,
             remote::ssh_commands::ssh_connect,
