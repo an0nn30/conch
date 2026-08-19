@@ -1,10 +1,17 @@
-// Terminal theme picker (Task 4 of the terminal-themes plan) — turns
-// list_terminal_themes()'s raw payload into the Appearance section's
-// "Terminal Theme" row: a normal <select> (the existing tl-combo half every
-// other settings row uses) paired with a visible list of palette-strip rows,
-// one per entry, so every candidate is comparable without opening the
-// dropdown. Both halves are built from the same ordered `entries` array so
-// they can never drift out of sync with each other.
+// Terminal theme picker — turns list_terminal_themes()'s raw payload into the
+// Appearance section's "Terminal Theme" row: ONE control, a normal <select>
+// (the existing tl-combo half every sibling settings row uses), plus a
+// fake-terminal preview box rendered below the row showing the currently
+// selected palette.
+//
+// The picker used to render a second, parallel half — a visible list of
+// palette-strip rows, one per entry. That duplicated the combo's own job,
+// made this row look unlike every other settings row, and showed sixteen
+// 10px swatches per candidate in place of anything resembling a terminal.
+// Entries that can't be picked (broken files, a reserved `auto.toml`, an
+// unmatched saved name) keep every bit of their old meaning — they are
+// disabled <option>s whose label carries the explanation the strip row's
+// note used to.
 //
 // Split into two functions on purpose:
 //   - normalizeThemeEntries: pure, DOM-free. Takes list_terminal_themes()'s
@@ -22,6 +29,12 @@
   // colors.theme's reserved-name contract, so a literal copy here is the
   // same trade every other cross-boundary constant in this codebase makes.
   const AUTO_VALUE = 'auto';
+
+  // Mirrors termlab_core::effective_theme::TERMLAB_{DARK,LIGHT}_THEME — the
+  // two built-ins `auto` picks between, and (for TermLab Dark) the palette
+  // ColorScheme::default() falls back to. Same literal-copy trade as above.
+  const TERMLAB_DARK_THEME = 'TermLab Dark';
+  const TERMLAB_LIGHT_THEME = 'TermLab Light';
 
   function isReservedName(name) {
     return typeof name === 'string' && name.trim().toLowerCase() === AUTO_VALUE;
@@ -164,107 +177,243 @@
     return out;
   }
 
-  // 'reserved' entries are excluded even when their value happens to equal
-  // the real Auto entry's value ("auto", for a file literally named
-  // auto.toml) — otherwise both rows would render as "currently selected"
-  // whenever colors.theme is "auto", the default.
-  function isCurrent(entry, currentValue) {
-    return entry.kind !== 'reserved' && entry.value === currentValue;
+  // Which entry `value` currently names. 'reserved' entries are excluded
+  // even when their value happens to equal the real Auto entry's value
+  // ("auto", for a file literally named auto.toml) — otherwise the picker
+  // would read the reserved file's palette as the current selection whenever
+  // colors.theme is "auto", the default. Finding the FIRST non-reserved
+  // match is exactly what a native <select>.value assignment does with the
+  // two same-valued options (the real Auto entry is always prepended).
+  function currentEntry(entries, value) {
+    return entries.find((entry) => entry.kind !== 'reserved' && entry.value === value) || null;
   }
 
-  function appendSwatch(parent, className, color) {
-    const el = document.createElement('span');
-    el.className = className;
-    // Data-driven color, not a design token: only inline style carries a
-    // parsed theme's actual colors (see the .tl-settings__theme-picker*
-    // rules' own comment in components/settings.css for the structural-only
-    // CSS this pairs with), so the boundary script's hex scan (which only
-    // checks stylesheets) has nothing to flag here.
-    if (color) el.style.background = color;
-    parent.appendChild(el);
-    return el;
+  /**
+   * The text an entry gets as a dropdown option. This is where the deleted
+   * palette-strip rows' per-entry note lived; folding it into the option
+   * label is what lets a single combo carry every kind's meaning:
+   *   - reserved: the "why this can never be picked" note (checked first, so
+   *     a broken `auto.toml` explains its reservation rather than its parse
+   *     error — the same precedence normalizeThemeEntries applies).
+   *   - broken:   the actual parse error, not a generic "invalid".
+   *   - missing:  the saved-but-unresolvable name, marked so it doesn't read
+   *     as a theme that exists.
+   *   - shadowsBuiltin: marked so a user file overriding a built-in is
+   *     visibly not the built-in.
+   */
+  function optionLabel(entry) {
+    if (entry.kind === 'reserved') {
+      return entry.note ? entry.label + ' — ' + entry.note : entry.label;
+    }
+    if (entry.error) return entry.label + ' — Parse error: ' + entry.error;
+    if (entry.kind === 'missing') return entry.label + ' (missing)';
+    if (entry.shadowsBuiltin) return entry.label + ' (overrides built-in)';
+    return entry.label;
+  }
+
+  // --- Theme preview ------------------------------------------------------
+  // Recovered from the pre-Task-4 renderers.js (buildThemePreview/
+  // updateThemePreview and their line/span helpers) and its
+  // .tl-settings__theme-preview* CSS. One deliberate change: it is driven
+  // entirely client-side from the picker entry's own `palettePreview`
+  // payload (bg + fg + ansi[16], already in list_terminal_themes()'s
+  // response), NOT from the retired `preview_theme_colors` Tauri command —
+  // no backend round trip per selection, and nothing to resurrect on the
+  // Rust side.
+  //
+  // Colors are DATA (an arbitrary user-supplied palette), so they cannot
+  // live in the design-system stylesheet. They are set as inline CUSTOM
+  // PROPERTIES on the box (--tp-*), which the structural CSS then reads via
+  // var() — so the stylesheet stays token-only and the boundary script's
+  // hex scan has nothing to flag, while the DOM below stays class-driven.
+
+  // ANSI slots 0-15 in payload order (normal 0-7, then bright 8-15), mapped
+  // onto the custom property each swatch/text class reads.
+  const TP_ANSI_VARS = [
+    '--tp-black', '--tp-red', '--tp-green', '--tp-yellow',
+    '--tp-blue', '--tp-magenta', '--tp-cyan', '--tp-white',
+    '--tp-bright-black', '--tp-bright-red', '--tp-bright-green', '--tp-bright-yellow',
+    '--tp-bright-blue', '--tp-bright-magenta', '--tp-bright-cyan', '--tp-bright-white',
+  ];
+
+  function span(cls, text) {
+    const s = document.createElement('span');
+    if (cls) s.className = cls;
+    s.textContent = text;
+    return s;
+  }
+
+  function line(...nodes) {
+    const d = document.createElement('div');
+    for (const n of nodes) {
+      if (typeof n === 'string') d.appendChild(document.createTextNode(n));
+      else d.appendChild(n);
+    }
+    return d;
+  }
+
+  function buildThemePreview() {
+    const box = document.createElement('div');
+    box.className = 'tl-settings__theme-preview';
+
+    const label = document.createElement('div');
+    label.textContent = 'PREVIEW';
+    label.className = 'tl-settings__theme-preview-label tp-dim';
+    box.appendChild(label);
+
+    const prompt = () => [
+      span('tp-green tp-bold', 'user@termlab'),
+      span('tp-fg', ':'),
+      span('tp-blue tp-bold', '~/projects'),
+      span('tp-fg', ' $ '),
+    ];
+
+    box.appendChild(line(...prompt(), span('tp-fg', 'ls -la')));
+    box.appendChild(line(span('tp-fg', 'total 42')));
+
+    // [permissions, links, user, group, size, date, name, nameClass]
+    const entries = [
+      ['drwxr-xr-x', '5', 'user', 'staff', '160', 'Mar 20 10:01', '.', 'tp-blue tp-bold'],
+      ['drwxr-xr-x', '8', 'user', 'staff', '256', 'Mar 19 09:00', '..', 'tp-blue tp-bold'],
+      ['-rw-r--r--', '1', 'user', 'staff', '1234', 'Mar 20 10:01', '.gitignore', 'tp-yellow'],
+      ['-rw-r--r--', '1', 'user', 'staff', '890', 'Mar 20 10:01', '.env', 'tp-yellow'],
+      ['drwxr-xr-x', '3', 'user', 'staff', '96', 'Mar 20 10:01', 'src', 'tp-blue tp-bold'],
+      ['-rwxr-xr-x', '1', 'user', 'staff', '8192', 'Mar 20 10:01', 'build.sh', 'tp-red tp-bold'],
+      ['-rw-r--r--', '1', 'user', 'staff', '512', 'Mar 20 10:01', 'config.toml', 'tp-green'],
+      ['-rw-r--r--', '1', 'user', 'staff', '256', 'Mar 20 10:01', 'README.md', 'tp-fg'],
+    ];
+    for (const [perm, links, user, group, size, date, name, nameClass] of entries) {
+      box.appendChild(line(
+        span('tp-dim', perm + ' '),
+        span('tp-cyan', links + ' '),
+        span('tp-dim', user + ' ' + group + ' '),
+        span('tp-cyan', size.padStart(6) + ' '),
+        span('tp-dim', date + ' '),
+        span(nameClass, name),
+      ));
+    }
+
+    box.appendChild(line(
+      ...prompt(),
+      span('tp-magenta', 'echo'),
+      span('tp-fg', ' '),
+      span('tp-yellow', '"hello world"'),
+    ));
+    box.appendChild(line(span('tp-fg', 'hello world')));
+
+    const cursorLine = line(...prompt());
+    const cursor = document.createElement('span');
+    cursor.className = 'tl-settings__theme-preview-cursor';
+    cursor.textContent = ' ';
+    cursorLine.appendChild(cursor);
+    box.appendChild(cursorLine);
+
+    const dividerEl = document.createElement('div');
+    dividerEl.className = 'tl-settings__theme-preview-divider';
+    box.appendChild(dividerEl);
+
+    const rows = [
+      ['tl-settings__theme-preview-swatches tl-settings__theme-preview-swatches--normal',
+        ['tp-sw-black', 'tp-sw-red', 'tp-sw-green', 'tp-sw-yellow',
+          'tp-sw-blue', 'tp-sw-magenta', 'tp-sw-cyan', 'tp-sw-white']],
+      ['tl-settings__theme-preview-swatches',
+        ['tp-sw-bright-black', 'tp-sw-bright-red', 'tp-sw-bright-green', 'tp-sw-bright-yellow',
+          'tp-sw-bright-blue', 'tp-sw-bright-magenta', 'tp-sw-bright-cyan', 'tp-sw-bright-white']],
+    ];
+    for (const [rowClass, swatchClasses] of rows) {
+      const row = document.createElement('div');
+      row.className = rowClass;
+      for (const cls of swatchClasses) {
+        const sw = document.createElement('div');
+        sw.className = cls + ' tl-settings__theme-preview-swatch';
+        row.appendChild(sw);
+      }
+      box.appendChild(row);
+    }
+
+    return box;
+  }
+
+  /**
+   * Paint `palette` (a list_terminal_themes palettePreview: {bg, fg,
+   * ansi[16]}) onto a box built by buildThemePreview, by setting the --tp-*
+   * custom properties its CSS reads.
+   */
+  function updateThemePreview(box, palette) {
+    if (!box || !palette) return;
+    const ansi = Array.isArray(palette.ansi) ? palette.ansi : [];
+    if (palette.bg) box.style.setProperty('--tp-bg', palette.bg);
+    if (palette.fg) box.style.setProperty('--tp-fg', palette.fg);
+    for (let i = 0; i < TP_ANSI_VARS.length; i += 1) {
+      if (ansi[i]) box.style.setProperty(TP_ANSI_VARS[i], ansi[i]);
+    }
+    // The payload carries no dim_foreground (PalettePreview is bg + fg + the
+    // 16 ANSI slots), so dim text, the container border and the swatch
+    // divider all key off bright black — the conventional stand-in, and the
+    // one palette entry guaranteed to sit between bg and fg in both a light
+    // and a dark theme.
+    const dim = ansi[8] || palette.fg;
+    if (dim) box.style.setProperty('--tp-dim', dim);
+  }
+
+  // The app's resolved appearance ('dark' | 'light'), which is what `auto`
+  // follows. Same convention as termlab_core::effective_theme: 'light' is
+  // the only affirmative light answer, anything unresolvable is dark.
+  function resolvedAppearance() {
+    const appearance = global.termlabAppearance;
+    if (appearance && typeof appearance.current === 'function') {
+      return String(appearance.current() || '').trim().toLowerCase() === 'light' ? 'light' : 'dark';
+    }
+    return 'dark';
+  }
+
+  /**
+   * The palette the preview box should show for `entry`.
+   *
+   * - `auto`: whichever built-in it would resolve to right now — both ship
+   *   in the frontend `themes/` dir, so both are already in `entries` with
+   *   their own palettePreview. No round trip, no second source of truth.
+   * - anything with its own palettePreview: that palette, verbatim.
+   * - the synthesized `missing` entry: TermLab Dark's palette, because that
+   *   is genuinely what the terminal is showing — resolve_theme falls back
+   *   to ColorScheme::default() for an unmatched name, and that Default impl
+   *   is pinned byte-identical to `themes/TermLab Dark.toml`
+   *   (color_scheme::tests::resolve_theme_termlab_dark_is_byte_identical_to_the_hardcoded_default).
+   *   Broken/reserved entries are disabled options and so can never be the
+   *   selection, but they take the same path if they somehow are.
+   */
+  function previewPaletteFor(entries, entry) {
+    const builtin = (name) => {
+      const found = entries.find((e) => e.value === name && e.palettePreview);
+      return found ? found.palettePreview : null;
+    };
+    if (!entry) return builtin(TERMLAB_DARK_THEME);
+    if (entry.kind === 'auto') {
+      return builtin(resolvedAppearance() === 'light' ? TERMLAB_LIGHT_THEME : TERMLAB_DARK_THEME)
+        || builtin(TERMLAB_DARK_THEME);
+    }
+    return entry.palettePreview || builtin(TERMLAB_DARK_THEME);
   }
 
   /**
    * Build the row's control (a <select>, meant for global.tlCombo.attach())
-   * and the palette-strip list that sits beside/under it in the DOM.
-   * `onChange(value)` fires once per committed selection, whether it came
-   * from clicking a row or a native <select> interaction — both paths route
-   * through the same select.value + dispatchEvent('change'), exactly how
-   * tl-combo.js's own popup selection commits (app/ui/tl-combo.js).
+   * and the preview box that sits under it in the section.
+   * `onChange(value)` fires once per committed selection.
    */
   function buildTerminalThemePicker(entries, currentValue, onChange) {
     const select = document.createElement('select');
-    const list = document.createElement('div');
-    list.className = 'tl-settings__theme-picker';
-    list.setAttribute('role', 'radiogroup');
-    list.setAttribute('aria-label', 'Terminal theme');
-
-    const rows = [];
+    const preview = buildThemePreview();
 
     for (const entry of entries) {
       const opt = document.createElement('option');
       opt.value = entry.value;
-      opt.textContent = entry.label;
+      opt.textContent = optionLabel(entry);
       opt.disabled = !entry.selectable;
       select.appendChild(opt);
-
-      const row = document.createElement('div');
-      row.className = 'tl-settings__theme-picker-row' + (entry.selectable ? '' : ' is-disabled');
-      row.dataset.themeName = entry.name;
-      row.dataset.themeKind = entry.kind;
-      row.setAttribute('role', 'radio');
-      if (entry.selectable) row.tabIndex = 0;
-
-      const info = document.createElement('div');
-      info.className = 'tl-settings__theme-picker-info';
-      const nameEl = document.createElement('span');
-      nameEl.className = 'tl-settings__theme-picker-name';
-      nameEl.textContent = entry.label;
-      info.appendChild(nameEl);
-      const noteText = entry.error ? ('Parse error: ' + entry.error) : entry.note;
-      if (noteText) {
-        const noteEl = document.createElement('span');
-        noteEl.className = 'tl-settings__theme-picker-note' + (entry.error ? ' is-error' : '');
-        noteEl.textContent = noteText;
-        info.appendChild(noteEl);
-      }
-      row.appendChild(info);
-
-      const swatches = document.createElement('div');
-      swatches.className = 'tl-settings__theme-picker-swatches';
-      if (entry.palettePreview) {
-        appendSwatch(swatches, 'tl-settings__theme-picker-chip', entry.palettePreview.bg);
-        appendSwatch(swatches, 'tl-settings__theme-picker-chip', entry.palettePreview.fg);
-        for (const color of entry.palettePreview.ansi) {
-          appendSwatch(swatches, 'tl-settings__theme-picker-swatch', color);
-        }
-      }
-      row.appendChild(swatches);
-
-      if (entry.selectable) {
-        const activate = () => {
-          select.value = entry.value;
-          select.dispatchEvent(new Event('change', { bubbles: true }));
-        };
-        row.addEventListener('click', activate);
-        row.addEventListener('keydown', (event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return;
-          event.preventDefault();
-          activate();
-        });
-      }
-
-      list.appendChild(row);
-      rows.push({ entry, row });
     }
 
     function refresh() {
-      for (const { entry, row } of rows) {
-        const current = isCurrent(entry, select.value);
-        row.classList.toggle('is-selected', current);
-        row.setAttribute('aria-checked', current ? 'true' : 'false');
-      }
+      updateThemePreview(preview, previewPaletteFor(entries, currentEntry(entries, select.value)));
     }
 
     // F4: a hand-edited config can spell the reserved name with any casing
@@ -286,11 +435,15 @@
     });
     refresh();
 
-    return { select, list, refresh };
+    return { select, preview, refresh };
   }
+
 
   global.termlabSettingsThemePicker = {
     normalizeThemeEntries,
     buildTerminalThemePicker,
+    optionLabel,
+    buildThemePreview,
+    updateThemePreview,
   };
 })(window);

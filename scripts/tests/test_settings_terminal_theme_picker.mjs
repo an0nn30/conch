@@ -1,13 +1,18 @@
 // Run: node scripts/tests/test_settings_terminal_theme_picker.mjs
 //
-// terminal-themes plan, Task 4: the settings "Terminal Theme" picker
-// (app/features/settings/theme-picker.js), and its wiring into the
-// Appearance section (app/features/settings/sections-appearance.js), which
-// this task made the sole consumer of list_terminal_themes()'s payload,
-// replacing the old plain <select> + per-selection theme-color preview
-// round trip (see
-// test_appearance.mjs's "the settings preview round trip was retired, not
-// left half-removed" for that retirement's own pin).
+// The settings "Terminal Theme" picker (app/features/settings/
+// theme-picker.js) and its wiring into the Appearance section
+// (app/features/settings/sections-appearance.js), which is the sole consumer
+// of list_terminal_themes()'s payload — no backend round trip per selection
+// (see test_appearance.mjs's "the settings preview round trip was retired,
+// not left half-removed" for that retirement's own pin).
+//
+// The picker is ONE control — a <select>/tl-combo like every sibling row —
+// plus a fake-terminal preview box below the row. It previously rendered a
+// second, parallel palette-strip list; the semantics that list carried
+// (which entries are pickable, and why an unpickable one isn't) now live in
+// the option labels, and the palette it showed is shown far better by the
+// preview box.
 //
 // No jsdom in this repo (see test_tl_combo.mjs/test_tl_dialog.mjs for the
 // precedent) — this stubs just enough of `window`/`document` for the real
@@ -17,16 +22,19 @@
 //     list_terminal_themes() can produce (builtin, plain user, a user theme
 //     shadowing a builtin, a broken file) plus the two ways a reserved
 //     `auto.toml` can show up (parses fine / also broken) — order asserted.
-//   - buildTerminalThemePicker: the <select> and the palette-strip list stay
-//     index-aligned with that order; broken entries are unselectable; a
-//     click round-trips into the value onChange receives; palette strips
-//     render the exact stubbed colors via inline style (not a CSS class);
-//     the synthetic Auto entry never collides with a same-valued reserved
-//     entry for "currently selected" purposes.
+//   - buildTerminalThemePicker: the <select>'s options mirror that order;
+//     broken/reserved/missing entries are disabled and labeled with their
+//     reason; a committed selection round-trips into the value onChange
+//     receives; the preview box paints the SELECTED entry's exact stubbed
+//     palette; the synthetic Auto entry never collides with a same-valued
+//     reserved entry, and resolves its preview by app appearance.
+//   - buildThemePreview/updateThemePreview: the fake-terminal DOM, and that
+//     palette colors reach it as inline --tp-* custom properties (so the
+//     design-system stylesheet stays token-only).
 //   - renderAppearance: end-to-end through the section renderer with a
-//     stubbed list_terminal_themes payload, confirming the row is wired
-//     into the same pendingSettings.colors.theme + addRow/setRowTarget path
-//     every sibling settings row uses.
+//     stubbed list_terminal_themes payload, confirming the row order and
+//     that the row is wired into the same pendingSettings.colors.theme +
+//     addRow/setRowTarget path every sibling settings row uses.
 import assert from 'node:assert';
 
 // --- minimal element stub --------------------------------------------------
@@ -46,7 +54,13 @@ function makeElement(tag) {
     children: [],
     options: tagName === 'SELECT' ? [] : undefined,
     dataset: {},
-    style: {},
+    // Plain properties still work (`el.style.background = ...`); the two
+    // methods are what theme-picker.js uses to set the preview's --tp-*
+    // custom properties, which is how a selected palette reaches the CSS.
+    style: {
+      setProperty(name, value) { this[name] = value; },
+      getPropertyValue(name) { return this[name] || ''; },
+    },
     disabled: false,
     tabIndex: -1,
     isConnected: false,
@@ -304,15 +318,36 @@ const RAW_ENTRIES = [
   console.log('normalizeThemeEntries: a cased "Auto" currentValue never synthesizes: ok');
 }
 
-// --- buildTerminalThemePicker: DOM shape + swatch colors + interaction ----
+// --- helpers for reading a preview box ------------------------------------
+const tp = (preview, name) => preview.style.getPropertyValue(name);
+const previewPalette = (preview) => ({
+  bg: tp(preview, '--tp-bg'),
+  fg: tp(preview, '--tp-fg'),
+  ansi: [
+    '--tp-black', '--tp-red', '--tp-green', '--tp-yellow',
+    '--tp-blue', '--tp-magenta', '--tp-cyan', '--tp-white',
+    '--tp-bright-black', '--tp-bright-red', '--tp-bright-green', '--tp-bright-yellow',
+    '--tp-bright-blue', '--tp-bright-magenta', '--tp-bright-cyan', '--tp-bright-white',
+  ].map((name) => tp(preview, name)),
+});
+
+// --- buildTerminalThemePicker: one combo, every entry kind, interaction ----
+// The picker renders ONE control now (the <select>/tl-combo half every
+// sibling settings row uses). The palette-strip list it used to render
+// alongside is gone; each kind's meaning — selectability and the note that
+// explained it — moved into the option's own label, asserted below.
 {
   const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES);
   let lastOnChangeValue = null;
   let onChangeCalls = 0;
-  const { select, list } = themePicker.buildTerminalThemePicker(entries, 'auto', (value) => {
+  const built = themePicker.buildTerminalThemePicker(entries, 'auto', (value) => {
     onChangeCalls += 1;
     lastOnChangeValue = value;
   });
+  const { select, preview } = built;
+
+  assert.equal(built.list, undefined, 'the parallel palette-strip list is gone');
+  assert.ok(preview, 'the picker returns a preview box');
 
   // --- <select> mirrors `entries` 1:1, in order --------------------------
   assert.equal(select.options.length, 6);
@@ -327,64 +362,106 @@ const RAW_ENTRIES = [
   assert.equal(select.value, 'auto');
   assert.equal(select.selectedIndex, 0);
 
-  // --- palette-strip list mirrors `entries` 1:1, in order ----------------
-  assert.equal(list.children.length, 6);
+  // --- option labels carry each kind's meaning ---------------------------
+  const labels = select.options.map((o) => o.textContent);
+  assert.equal(labels[0], 'Auto (follows appearance)');
+  assert.equal(labels[1], 'TermLab Dark', 'a plain entry is just its name');
+  assert.equal(labels[2], 'Gruvbox');
+  assert.equal(labels[3], 'TermLab Light (overrides built-in)',
+    'a user theme shadowing a built-in is marked in its own label');
+  assert.equal(labels[4], 'BrokenTheme — Parse error: missing field `colors`',
+    'a broken entry is labeled with the ACTUAL parse error, not a generic message');
+  assert.ok(/^auto — Reserved name, ignored/.test(labels[5]),
+    `the reserved entry's label explains why it can't be picked: ${labels[5]}`);
 
-  const rows = list.children;
-  const swatchColors = (row) => row.children[1].children.map((sw) => sw.style.background);
+  console.log('buildTerminalThemePicker: one combo, labels carry every kind\'s meaning: ok');
 
-  // Auto (index 0): no palette data to show, not disabled.
-  assert.equal(rows[0].classList.contains('is-disabled'), false);
-  assert.equal(rows[0].children[1].children.length, 0, 'Auto renders no swatches');
-  assert.equal(rows[0].classList.contains('is-selected'), true, 'currentValue "auto" selects the real Auto row');
+  // --- the preview shows the CURRENT selection's palette ------------------
+  // currentValue is "auto" and the stubbed appearance is dark, so this is
+  // TermLab Dark's stubbed palette — not the reserved auto.toml entry's,
+  // even though that entry's value is "auto" too.
+  assert.deepEqual(previewPalette(preview), RAW_ENTRIES[0].palettePreview,
+    'the preview paints the selected entry\'s exact palette into the --tp-* vars');
 
-  // TermLab Dark (index 1): 2 chips (bg, fg) + 16 ANSI swatches, EXACT colors.
-  assert.equal(swatchColors(rows[1]).length, 18);
-  assert.equal(swatchColors(rows[1])[0], '#1e1e2e', 'bg chip');
-  assert.equal(swatchColors(rows[1])[1], '#cdd6f4', 'fg chip');
-  assert.deepEqual(swatchColors(rows[1]).slice(2), ansiSet('1'), 'all 16 ANSI swatches, exact stubbed colors');
+  console.log('buildTerminalThemePicker: the preview paints the selected palette: ok');
 
-  // TermLab Light (index 3): shadowsBuiltin note, own (not the built-in's) colors.
-  assert.equal(rows[3].children[0].children[1].textContent, 'Overrides built-in');
-  assert.equal(swatchColors(rows[3])[0], '#ffffff');
-
-  // BrokenTheme (index 4): disabled, error text, no swatches.
-  assert.equal(rows[4].classList.contains('is-disabled'), true);
-  assert.equal(rows[4].children[0].children[1].textContent, 'Parse error: missing field `colors`');
-  assert.equal(rows[4].children[1].children.length, 0);
-
-  // reserved auto.toml (index 5): disabled but NOT "currently selected" even
-  // though currentValue is "auto" too — and it still shows its real palette
-  // (18 swatches), per the "surface, don't hide" decision.
-  assert.equal(rows[5].classList.contains('is-disabled'), true);
-  assert.equal(rows[5].classList.contains('is-selected'), false,
-    'the reserved entry must never appear selected, even when its value matches the current value');
-  assert.equal(swatchColors(rows[5]).length, 18, 'a reserved name that parses still shows its own colors');
-  assert.equal(swatchColors(rows[5])[0], '#000000');
-
-  console.log('buildTerminalThemePicker: DOM shape + exact swatch colors: ok');
-
-  // --- broken entry is not selectable -------------------------------------
-  rows[4].dispatchEvent({ type: 'click' });
-  assert.equal(select.value, 'auto', 'clicking the broken row must not change the selection');
-  assert.equal(onChangeCalls, 0, 'clicking the broken row must not fire onChange');
-
-  // --- the reserved entry is not selectable either ------------------------
-  rows[5].dispatchEvent({ type: 'click' });
-  assert.equal(select.value, 'auto');
-  assert.equal(onChangeCalls, 0);
-
-  console.log('buildTerminalThemePicker: broken and reserved rows are inert: ok');
-
-  // --- selection round-trips: click -> select.value -> onChange -----------
-  rows[2].dispatchEvent({ type: 'click' }); // Gruvbox
-  assert.equal(select.value, 'Gruvbox');
+  // --- selection round-trips: select.value -> change -> onChange + preview
+  select.value = 'Gruvbox';
+  select.dispatchEvent({ type: 'change' });
   assert.equal(onChangeCalls, 1);
   assert.equal(lastOnChangeValue, 'Gruvbox');
-  assert.equal(rows[2].classList.contains('is-selected'), true);
-  assert.equal(rows[0].classList.contains('is-selected'), false, 'the old selection (Auto) is cleared');
+  assert.deepEqual(previewPalette(preview), RAW_ENTRIES[1].palettePreview,
+    'switching selection repaints the preview live');
 
-  console.log('buildTerminalThemePicker: selection round-trips via click: ok');
+  select.value = 'TermLab Light';
+  select.dispatchEvent({ type: 'change' });
+  assert.equal(lastOnChangeValue, 'TermLab Light');
+  assert.deepEqual(previewPalette(preview), RAW_ENTRIES[2].palettePreview,
+    'a shadowing user theme previews ITS colors, not the built-in it overrides');
+
+  console.log('buildTerminalThemePicker: selection round-trips and repaints: ok');
+}
+
+// --- the preview box's own DOM (recovered fake-terminal shape) ------------
+{
+  const preview = themePicker.buildThemePreview();
+  assert.equal(preview.className, 'tl-settings__theme-preview');
+
+  const swatchRows = preview.children.filter(
+    (c) => c.classList.contains('tl-settings__theme-preview-swatches'),
+  );
+  assert.equal(swatchRows.length, 2, 'a normal row and a bright row');
+  assert.equal(swatchRows[0].children.length, 8);
+  assert.equal(swatchRows[1].children.length, 8);
+  assert.ok(preview.children.some(
+    (c) => c.classList.contains('tl-settings__theme-preview-divider')),
+    'the swatch divider is present');
+  assert.ok(preview.querySelectorAll('.tl-settings__theme-preview-cursor').length === 1,
+    'the block cursor is present');
+
+  // Colors reach the box as inline custom properties, never as inline
+  // per-element colors — that is what keeps the stylesheet token-only.
+  themePicker.updateThemePreview(preview, RAW_ENTRIES[1].palettePreview);
+  assert.equal(tp(preview, '--tp-bg'), '#282828');
+  assert.equal(tp(preview, '--tp-fg'), '#ebdbb2');
+  assert.equal(tp(preview, '--tp-black'), ansiSet('2')[0], 'ANSI 0 -> --tp-black');
+  assert.equal(tp(preview, '--tp-bright-white'), ansiSet('2')[15], 'ANSI 15 -> --tp-bright-white');
+  assert.equal(tp(preview, '--tp-dim'), ansiSet('2')[8],
+    'dim text/border key off bright black: the payload carries no dim_foreground');
+  for (const sw of swatchRows[0].children) {
+    assert.equal(sw.style.background, undefined,
+      'swatch colors come from the box\'s vars via CSS, not per-element inline styles');
+  }
+
+  console.log('buildThemePreview/updateThemePreview: fake-terminal DOM + --tp-* painting: ok');
+}
+
+// --- Auto previews the appearance-appropriate built-in --------------------
+// `auto` has no palette of its own; termlab_core::effective_theme maps it
+// onto TermLab Dark or TermLab Light by the app's RESOLVED appearance, and
+// both built-ins are already in the list payload — so the preview resolves
+// it client-side, with no round trip and no second source of truth.
+{
+  const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'auto');
+  const cases = [
+    ['dark', RAW_ENTRIES[0].palettePreview, 'TermLab Dark'],
+    ['light', RAW_ENTRIES[2].palettePreview, 'TermLab Light'],
+  ];
+  for (const [appearance, expected, name] of cases) {
+    window.termlabAppearance = { current: () => appearance };
+    const { preview } = themePicker.buildTerminalThemePicker(entries, 'auto', () => {});
+    assert.deepEqual(previewPalette(preview), expected,
+      `Auto under a ${appearance} appearance previews ${name}`);
+  }
+
+  // No appearance module at all (or an unresolvable answer) is dark, the
+  // same convention effective_theme::DEFAULT_RESOLVED_APPEARANCE uses.
+  delete window.termlabAppearance;
+  const { preview } = themePicker.buildTerminalThemePicker(entries, 'auto', () => {});
+  assert.deepEqual(previewPalette(preview), RAW_ENTRIES[0].palettePreview,
+    'an unresolvable appearance falls back to the dark built-in');
+
+  console.log('buildTerminalThemePicker: Auto previews the appearance-appropriate built-in: ok');
 }
 
 // --- F1b: an unmatched currentValue never renders a blank combo -----------
@@ -394,11 +471,11 @@ const RAW_ENTRIES = [
 // below would fail to find a match, select.selectedIndex would land on -1,
 // and tl-combo's currentLabel() (app/ui/tl-combo.js: `opt ? opt.textContent
 // : ''`) would render an empty button label — the exact regression F1
-// reported. Asserting selectedIndex/value/is-selected here reds immediately
-// if that synthesis is ever removed.
+// reported. Asserting selectedIndex/value/label here reds immediately if
+// that synthesis is ever removed.
 {
   const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'GoneTheme');
-  const { select, list } = themePicker.buildTerminalThemePicker(entries, 'GoneTheme', () => {});
+  const { select, preview } = themePicker.buildTerminalThemePicker(entries, 'GoneTheme', () => {});
 
   assert.notEqual(select.selectedIndex, -1, 'the combo must never land on no selection at all');
   assert.equal(select.value, 'GoneTheme', 'the select carries the saved value, not a blank one');
@@ -406,34 +483,34 @@ const RAW_ENTRIES = [
   const missingOption = select.options[select.options.length - 1];
   assert.equal(missingOption.value, 'GoneTheme');
   assert.equal(missingOption.disabled, true, 'the synthesized entry is not independently selectable');
+  assert.equal(missingOption.textContent, 'GoneTheme (missing)',
+    'the saved name is shown, marked so it does not read as a theme that exists');
 
-  const missingRow = list.children[list.children.length - 1];
-  assert.equal(missingRow.dataset.themeKind, 'missing');
-  assert.equal(missingRow.classList.contains('is-selected'), true,
-    'the synthesized row is marked as the current selection');
-  assert.equal(missingRow.classList.contains('is-disabled'), true, 'greyed, like broken/reserved rows');
-  assert.equal(missingRow.children[0].children[1].textContent, '(missing)');
-  assert.equal(missingRow.children[1].children.length, 0, 'greyed palette area: no swatches to show');
+  // The box still renders, showing TermLab Dark — which is what the terminal
+  // is ACTUALLY painted with for an unmatched name: resolve_theme falls back
+  // to ColorScheme::default(), pinned byte-identical to TermLab Dark.toml.
+  assert.deepEqual(previewPalette(preview), RAW_ENTRIES[0].palettePreview,
+    'a missing selection previews the real fallback palette, not a blank box');
 
-  console.log('buildTerminalThemePicker: an unmatched currentValue synthesizes a visible, selected entry (F1b): ok');
+  console.log('buildTerminalThemePicker: an unmatched currentValue stays visible and selected (F1b): ok');
 }
 
-// --- F4: a hand-edited "Auto" (any casing) selects the REAL Auto row ------
+// --- F4: a hand-edited "Auto" (any casing) selects the REAL Auto option ---
 {
   const entries = themePicker.normalizeThemeEntries(RAW_ENTRIES, 'Auto');
   assert.equal(entries.length, 6, 'no synthesis for a cased reserved name');
-  const { select, list } = themePicker.buildTerminalThemePicker(entries, 'Auto', () => {});
+  const { select, preview } = themePicker.buildTerminalThemePicker(entries, 'Auto', () => {});
 
   assert.equal(select.value, 'auto', 'the select lands on the real (lowercase) Auto option');
   assert.equal(select.selectedIndex, 0);
-  assert.equal(list.children[0].classList.contains('is-selected'), true,
-    'the real Auto row (index 0) is marked selected');
-  for (let i = 1; i < list.children.length; i += 1) {
-    assert.equal(list.children[i].classList.contains('is-selected'), false,
-      `row ${i} must not also read as selected`);
-  }
+  // And it resolves as the real Auto entry, not as the same-valued reserved
+  // auto.toml — whose own stubbed palette (bg #000000) would show here if
+  // the reserved entry were ever treated as the current selection.
+  assert.deepEqual(previewPalette(preview), RAW_ENTRIES[0].palettePreview,
+    'the reserved auto.toml never stands in for the real Auto entry');
+  assert.notEqual(tp(preview, '--tp-bg'), RAW_ENTRIES[4].palettePreview.bg);
 
-  console.log('buildTerminalThemePicker: a cased "Auto" currentValue selects the real Auto row (F4): ok');
+  console.log('buildTerminalThemePicker: a cased "Auto" currentValue selects the real Auto entry (F4): ok');
 }
 
 // --- renderAppearance: end-to-end through the section renderer -------------
@@ -543,20 +620,27 @@ const RAW_ENTRIES = [
   assert.equal(select.tagName, 'SELECT');
   assert.equal(select.options.length, 6, 'Auto + the 5 raw entries');
 
-  // The palette-strip list renders as a sibling of the row, in the section.
-  const pickerList = container.children.find((c) => c.className === 'tl-settings__theme-picker');
-  assert.ok(pickerList, 'the palette-strip list is appended to the section');
-  assert.equal(pickerList.children.length, 6);
+  // The preview box renders as a sibling of the row, right below it in the
+  // section — and no palette-strip list is left behind anywhere.
+  const rowIndex = container.children.indexOf(themeRow);
+  const preview = container.children[rowIndex + 1];
+  assert.ok(preview && preview.classList.contains('tl-settings__theme-preview'),
+    'the preview box is appended directly below the Terminal Theme row');
+  assert.equal(
+    container.querySelectorAll('.tl-settings__theme-picker').length, 0,
+    'the old palette-strip list is gone from the section',
+  );
 
   // --- selection round-trips into the saved settings payload --------------
   // (pendingSettings IS what actions.js's applySettings later serializes
   // and sends to save_settings — see store.js's isDirty()/
   // commitPendingAsOriginal() pair, which diff exactly this object.)
-  const gruvboxRow = pickerList.children[2];
-  assert.equal(gruvboxRow.children[0].children[0].textContent, 'Gruvbox');
-  gruvboxRow.dispatchEvent({ type: 'click' });
+  select.value = 'Gruvbox';
+  select.dispatchEvent({ type: 'change' });
   assert.equal(pendingSettings.colors.theme, 'Gruvbox',
     'selecting a theme writes colors.theme through the normal pendingSettings path');
+  assert.deepEqual(previewPalette(preview), RAW_ENTRIES[1].palettePreview,
+    'and the preview below the row follows the new selection');
 
   console.log('renderAppearance: wired end-to-end, selection round-trips into pendingSettings: ok');
 }

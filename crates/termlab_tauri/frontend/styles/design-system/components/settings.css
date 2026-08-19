@@ -306,49 +306,82 @@
 .tl-settings__plugin-badge--lua { background: var(--tl-FileColor-Green); }
 .tl-settings__plugin-badge--java { background: var(--tl-FileColor-Yellow); }
 
-/* Terminal theme picker (Task 4, app/features/settings/theme-picker.js) —
-   one row per list_terminal_themes() entry (plus the synthetic Auto entry),
-   each showing bg/fg chips + 16 ANSI swatches so every candidate is
-   comparable without opening the row's <select>/tl-combo dropdown. Colors
-   here are DATA (a parsed theme's actual palette, or nothing for a broken/
-   reserved entry), so only structural CSS lives in this file —
-   theme-picker.js sets each chip's/swatch's background via inline style
-   from palette_preview. */
-.tl-settings__theme-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+/* -- Appearance section: terminal theme preview
+   (app/features/settings/theme-picker.js's buildThemePreview/
+   updateThemePreview) -- a fake terminal rendered below the "Terminal Theme"
+   row, showing the selected palette in something shaped like a terminal
+   rather than as a strip of bare swatches.
+
+   The palette is DATA — an arbitrary user-supplied theme file's colors, not
+   a fixed set a design token could encode — so it cannot be written here.
+   theme-picker.js instead sets the --tp-* custom properties inline on the
+   box from list_terminal_themes()'s palette_preview payload, and every rule
+   below reads them through var(). That keeps this stylesheet token-only
+   (nothing for the boundary script's hex scan to flag) while leaving the
+   preview's DOM class-driven.
+
+   The fallbacks in the var() calls only ever apply before the first
+   updateThemePreview() call — the box is painted synchronously at build
+   time, so they are belt-and-braces, not a rendered state. */
+.tl-settings__theme-preview {
+  border-radius: var(--tl-radius);
+  padding: var(--tl-space-3);
   margin: var(--tl-space-2) 0 var(--tl-space-3);
-  max-height: 260px;
-  overflow-y: auto;
-  border: 1px solid var(--tl-border);
-  border-radius: var(--tl-radius);
-  padding: var(--tl-space-1);
+  font-family: var(--tl-font-mono);
+  font-size: var(--tl-font-size-ui);
+  line-height: 1.5;
+  overflow-x: auto;
+  background: var(--tp-bg, var(--tl-bg));
+  color: var(--tp-fg, var(--tl-fg));
+  border: 1px solid var(--tp-dim, var(--tl-border));
 }
-.tl-settings__theme-picker-row {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: var(--tl-space-3);
-  padding: var(--tl-space-1) var(--tl-space-2);
-  border-radius: var(--tl-radius);
-  cursor: pointer;
+.tl-settings__theme-preview-label {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  margin-bottom: var(--tl-space-2);
+  text-transform: uppercase;
 }
-.tl-settings__theme-picker-row:hover { background: var(--tl-row-hover); }
-.tl-settings__theme-picker-row:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
-.tl-settings__theme-picker-row.is-selected { background: var(--tl-row-hover); outline: 1px solid var(--tl-accent); outline-offset: -1px; }
-.tl-settings__theme-picker-row.is-disabled { cursor: default; opacity: 0.6; }
-.tl-settings__theme-picker-row.is-disabled:hover { background: transparent; }
-.tl-settings__theme-picker-info { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-.tl-settings__theme-picker-name {
-  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
-  color: var(--tl-fg);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.tl-settings__theme-preview-cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1em;
+  vertical-align: text-bottom;
+  background: var(--tp-fg, var(--tl-fg));
+  color: var(--tp-bg, var(--tl-bg));
 }
-.tl-settings__theme-picker-note {
-  font-size: 11px;
-  color: var(--tl-fg-muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.tl-settings__theme-preview-divider {
+  margin: var(--tl-space-2) 0 6px 0;
+  border-top: 1px solid var(--tp-dim, var(--tl-border));
 }
-.tl-settings__theme-picker-note.is-error { color: var(--tl-danger); }
-.tl-settings__theme-picker-swatches { display: flex; gap: 2px; flex-shrink: 0; }
-.tl-settings__theme-picker-chip { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 1px solid var(--tl-border); }
-.tl-settings__theme-picker-swatch { width: 10px; height: 14px; border-radius: 2px; flex-shrink: 0; }
+.tl-settings__theme-preview-swatches { display: flex; gap: 4px; }
+.tl-settings__theme-preview-swatches--normal { margin-bottom: 4px; }
+.tl-settings__theme-preview-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }
+
+/* Palette hooks. Scoped under the preview so these very short class names
+   can never leak onto anything else. */
+.tl-settings__theme-preview .tp-fg { color: var(--tp-fg); }
+.tl-settings__theme-preview .tp-dim { color: var(--tp-dim); }
+.tl-settings__theme-preview .tp-red { color: var(--tp-red); }
+.tl-settings__theme-preview .tp-green { color: var(--tp-green); }
+.tl-settings__theme-preview .tp-yellow { color: var(--tp-yellow); }
+.tl-settings__theme-preview .tp-blue { color: var(--tp-blue); }
+.tl-settings__theme-preview .tp-magenta { color: var(--tp-magenta); }
+.tl-settings__theme-preview .tp-cyan { color: var(--tp-cyan); }
+.tl-settings__theme-preview .tp-bold { font-weight: 700; }
+
+.tl-settings__theme-preview .tp-sw-black { background: var(--tp-black); }
+.tl-settings__theme-preview .tp-sw-red { background: var(--tp-red); }
+.tl-settings__theme-preview .tp-sw-green { background: var(--tp-green); }
+.tl-settings__theme-preview .tp-sw-yellow { background: var(--tp-yellow); }
+.tl-settings__theme-preview .tp-sw-blue { background: var(--tp-blue); }
+.tl-settings__theme-preview .tp-sw-magenta { background: var(--tp-magenta); }
+.tl-settings__theme-preview .tp-sw-cyan { background: var(--tp-cyan); }
+.tl-settings__theme-preview .tp-sw-white { background: var(--tp-white); }
+.tl-settings__theme-preview .tp-sw-bright-black { background: var(--tp-bright-black); }
+.tl-settings__theme-preview .tp-sw-bright-red { background: var(--tp-bright-red); }
+.tl-settings__theme-preview .tp-sw-bright-green { background: var(--tp-bright-green); }
+.tl-settings__theme-preview .tp-sw-bright-yellow { background: var(--tp-bright-yellow); }
+.tl-settings__theme-preview .tp-sw-bright-blue { background: var(--tp-bright-blue); }
+.tl-settings__theme-preview .tp-sw-bright-magenta { background: var(--tp-bright-magenta); }
+.tl-settings__theme-preview .tp-sw-bright-cyan { background: var(--tp-bright-cyan); }
+.tl-settings__theme-preview .tp-sw-bright-white { background: var(--tp-bright-white); }

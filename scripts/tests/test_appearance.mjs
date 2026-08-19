@@ -954,13 +954,16 @@ check('every get_theme_colors call site passes resolvedAppearance', () => {
 // old single-selection preview (which re-fetched a per-selection theme-color
 // preview, and so needed resolvedAppearance to render `auto` correctly) was
 // replaced by the "Terminal Theme" picker (app/features/settings/
-// theme-picker.js), which renders every entry's palette strip straight from
+// theme-picker.js), whose preview box renders straight from
 // list_terminal_themes()'s already-included palette_preview — no per-entry
 // round trip, so no appearance argument to get right or wrong here. (The
-// picker's Auto entry has no fixed palette to show at all — see
-// test_settings_terminal_theme_picker.mjs's "auto renders no palette
-// strip" — sidestepping the stale-preview failure mode this check used to
-// guard, rather than reproducing it.) Task 5 then deleted the retired
+// picker's Auto entry has no fixed palette of its own; it resolves to
+// whichever built-in the RESOLVED appearance selects, client-side, from
+// entries already in that same payload — see
+// test_settings_terminal_theme_picker.mjs's "Auto previews the
+// appearance-appropriate built-in" — sidestepping the stale-preview failure
+// mode this check used to guard, rather than reproducing it.) Task 5 then
+// deleted the retired
 // command's Rust side entirely (it had gone caller-less), so this assertion
 // now pins the retirement at its strongest: sections-appearance.js must
 // make no backend `invoke()` call of its own at all, only route through

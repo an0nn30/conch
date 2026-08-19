@@ -53,18 +53,17 @@
     setRowTarget(addRow(container, 'Appearance Mode', null, modeToggle), 'appearance:mode');
 
     // Terminal theme picker: Auto + built-ins + user themes
-    // (~/.config/termlab/themes/*.toml), each entry carrying its own
-    // palette_preview so every candidate renders a swatch strip without a
-    // per-entry round trip (list_terminal_themes returns them all at once).
-    // This REPLACES the old plain <select> + single "current selection"
-    // preview panel (which re-fetched a theme-color preview per selection)
-    // — see Task 3's report/review for why that stopgap existed and that it
-    // was always meant to be superseded here (Task 5 removed the stopgap's
-    // now-caller-less backend command entirely). Fully decoupled from app
+    // (~/.config/termlab/themes/*.toml). One control — a plain <select>/
+    // tl-combo, like every sibling row — plus the preview box appended
+    // below it, painted client-side from the selected entry's own
+    // palette_preview (list_terminal_themes returns them all at once, so
+    // switching selection costs no round trip). Fully decoupled from app
     // appearance (product rule 1): this picks colors.theme, never
-    // colors.appearance_mode above.
+    // colors.appearance_mode above — the Auto entry is the one place the
+    // two meet, and even there it only READS the resolved appearance to
+    // decide which built-in to preview.
     const terminalThemeEntries = themePicker.normalizeThemeEntries(cachedTerminalThemes, pendingSettings.colors.theme);
-    const { select: terminalThemeSelect, list: terminalThemeList } = themePicker.buildTerminalThemePicker(
+    const { select: terminalThemeSelect, preview: terminalThemePreview } = themePicker.buildTerminalThemePicker(
       terminalThemeEntries,
       pendingSettings.colors.theme,
       (value) => { pendingSettings.colors.theme = value; }
@@ -77,7 +76,7 @@
     );
     global.tlCombo.attach(terminalThemeSelect);
     setRowTarget(terminalThemeRow, 'appearance:terminal-theme');
-    container.appendChild(terminalThemeList);
+    container.appendChild(terminalThemePreview);
 
     addDivider(container);
 
