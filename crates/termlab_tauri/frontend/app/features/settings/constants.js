@@ -23,8 +23,12 @@
   ];
 
   const SETTINGS_SEARCH_INDEX = [
-    { section: 'appearance', label: 'Terminal Theme', keywords: 'terminal theme color palette auto built-in user scheme', targetId: 'appearance:terminal-theme' },
+    // Listed in the order the rows themselves render (sections-appearance.js:
+    // Appearance Mode first, Terminal Theme second) so search results read in
+    // the same order as the section. The targetIds are the section's own
+    // setRowTarget ids and are unaffected by the row order.
     { section: 'appearance', label: 'Appearance Mode', keywords: 'dark light system mode', targetId: 'appearance:mode' },
+    { section: 'appearance', label: 'Terminal Theme', keywords: 'terminal theme color palette auto built-in user scheme', targetId: 'appearance:terminal-theme' },
     { section: 'appearance', label: 'Notification Position', keywords: 'toast notifications top bottom', targetId: 'appearance:notification-position' },
     { section: 'appearance', label: 'Native Notifications', keywords: 'system notifications os notifications', targetId: 'appearance:native-notifications' },
     { section: 'appearance', label: 'Animations', keywords: 'animations motion transitions effects performance enable disable reduce motion', targetId: 'appearance:animations' },

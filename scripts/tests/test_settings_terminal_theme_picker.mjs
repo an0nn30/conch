@@ -509,6 +509,30 @@ const RAW_ENTRIES = [
   });
   assert.equal(handled, true, 'renderAppearance must report success given a complete deps object');
 
+  // Row order (Appearance rework): Appearance Mode renders FIRST, Terminal
+  // Theme second — the terminal row's Auto entry is defined in terms of the
+  // appearance above it, so the broader setting leads. Both rows keep their
+  // original setRowTarget ids, which is what the settings search index
+  // (app/features/settings/constants.js) jumps to.
+  const renderedRowIds = container
+    .querySelectorAll('.tl-settings__row')
+    .map((row) => row.dataset.settingId);
+  assert.deepEqual(
+    renderedRowIds.slice(0, 2),
+    ['appearance:mode', 'appearance:terminal-theme'],
+    'Appearance Mode is the first row, Terminal Theme the second',
+  );
+
+  eval(readFileSync('crates/termlab_tauri/frontend/app/features/settings/constants.js', 'utf8'));
+  const searchIndex = window.termlabSettingsFeatureConstants.SETTINGS_SEARCH_INDEX;
+  for (const targetId of ['appearance:mode', 'appearance:terminal-theme']) {
+    assert.ok(
+      searchIndex.some((item) => item.targetId === targetId),
+      `the settings search index still jumps to ${targetId}`,
+    );
+    assert.ok(renderedRowIds.includes(targetId), `${targetId} resolves to a rendered row`);
+  }
+
   // The row's control is the picker's own <select>, wired to the same
   // addRow/setRowTarget path every sibling settings row uses.
   const themeRow = container.querySelectorAll('.tl-settings__row').find(

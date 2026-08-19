@@ -35,33 +35,12 @@
 
     addSectionLabel(container, 'Theme & Color');
 
-    // Terminal theme picker: Auto + built-ins + user themes
-    // (~/.config/termlab/themes/*.toml), each entry carrying its own
-    // palette_preview so every candidate renders a swatch strip without a
-    // per-entry round trip (list_terminal_themes returns them all at once).
-    // This REPLACES the old plain <select> + single "current selection"
-    // preview panel (which re-fetched a theme-color preview per selection)
-    // — see Task 3's report/review for why that stopgap existed and that it
-    // was always meant to be superseded here (Task 5 removed the stopgap's
-    // now-caller-less backend command entirely). Fully decoupled from app
-    // appearance (product rule 1): this picks colors.theme, never
-    // colors.appearance_mode below.
-    const terminalThemeEntries = themePicker.normalizeThemeEntries(cachedTerminalThemes, pendingSettings.colors.theme);
-    const { select: terminalThemeSelect, list: terminalThemeList } = themePicker.buildTerminalThemePicker(
-      terminalThemeEntries,
-      pendingSettings.colors.theme,
-      (value) => { pendingSettings.colors.theme = value; }
-    );
-    const terminalThemeRow = addRow(
-      container,
-      'Terminal Theme',
-      'Color palette for the terminal. Auto follows the app appearance below.',
-      terminalThemeSelect
-    );
-    global.tlCombo.attach(terminalThemeSelect);
-    setRowTarget(terminalThemeRow, 'appearance:terminal-theme');
-    container.appendChild(terminalThemeList);
-
+    // Appearance Mode comes FIRST: it is the broader setting (it restyles the
+    // whole app), and the Terminal Theme row below reads as a refinement of
+    // it — its Auto entry is defined in terms of this row's value. Ordering
+    // only; the two remain fully decoupled (product rule 1), and the search
+    // index's jump targets (`appearance:mode`, `appearance:terminal-theme`)
+    // are unchanged.
     const modeToggle = makeToggleGroup(
       [
         { label: 'Dark', value: 'Dark' },
@@ -72,6 +51,33 @@
       (val) => { pendingSettings.colors.appearance_mode = val; }
     );
     setRowTarget(addRow(container, 'Appearance Mode', null, modeToggle), 'appearance:mode');
+
+    // Terminal theme picker: Auto + built-ins + user themes
+    // (~/.config/termlab/themes/*.toml), each entry carrying its own
+    // palette_preview so every candidate renders a swatch strip without a
+    // per-entry round trip (list_terminal_themes returns them all at once).
+    // This REPLACES the old plain <select> + single "current selection"
+    // preview panel (which re-fetched a theme-color preview per selection)
+    // — see Task 3's report/review for why that stopgap existed and that it
+    // was always meant to be superseded here (Task 5 removed the stopgap's
+    // now-caller-less backend command entirely). Fully decoupled from app
+    // appearance (product rule 1): this picks colors.theme, never
+    // colors.appearance_mode above.
+    const terminalThemeEntries = themePicker.normalizeThemeEntries(cachedTerminalThemes, pendingSettings.colors.theme);
+    const { select: terminalThemeSelect, list: terminalThemeList } = themePicker.buildTerminalThemePicker(
+      terminalThemeEntries,
+      pendingSettings.colors.theme,
+      (value) => { pendingSettings.colors.theme = value; }
+    );
+    const terminalThemeRow = addRow(
+      container,
+      'Terminal Theme',
+      'Color palette for the terminal. Auto follows the app appearance above.',
+      terminalThemeSelect
+    );
+    global.tlCombo.attach(terminalThemeSelect);
+    setRowTarget(terminalThemeRow, 'appearance:terminal-theme');
+    container.appendChild(terminalThemeList);
 
     addDivider(container);
 
