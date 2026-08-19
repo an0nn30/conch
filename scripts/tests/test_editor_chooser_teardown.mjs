@@ -39,6 +39,7 @@ const MODULES = [
   'app/features/editor/tab-label.js',
   'app/features/files/data-service.js',
   'app/features/editor/file-dialog-model.js',
+  'app/features/editor/file-dialog-view.js',
   'app/features/editor/file-dialog.js',
   'app/features/editor/editor-service.js',
   'app/layout/split-tree.js',

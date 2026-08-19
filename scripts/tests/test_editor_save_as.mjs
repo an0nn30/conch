@@ -904,6 +904,7 @@ function makeDialogHarness(options = {}) {
   // asking the one formula is that the two cannot drift.
   load(sandbox, 'features/editor/tab-label.js');
   load(sandbox, 'features/editor/file-dialog-model.js');
+  load(sandbox, 'features/editor/file-dialog-view.js');
   load(sandbox, 'features/editor/file-dialog.js');
 
   return { sandbox, doc, calls, toasts };

@@ -100,8 +100,8 @@
   // tabs on the same bytes, and a last-save-wins data loss.
   //
   // Its two callers are `remoteHostLabel` in panels/files-panel.js (open from
-  // the files tree) and `buildScopes` in features/editor/file-dialog.js (open
-  // from the ⌘O chooser). They used to hold byte-identical private copies;
+  // the files tree) and `buildScopes` in features/editor/file-dialog-view.js
+  // (open from the ⌘O chooser). They used to hold byte-identical private copies;
   // nothing connected them, so editing one would have silently split every
   // remote file across two tabs. Callers that want a disambiguated *display*
   // string (e.g. two panes on one host in the chooser's scope bar) must
