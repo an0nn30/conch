@@ -153,14 +153,23 @@ function makeHarness(options) {
           if (handled !== undefined) return handled;
         }
         if (command === 'open_file_chooser') {
-          // Rust's one-chooser-per-parent rule: a second request is handed the
-          // live entry's req_id instead of building a second window
-          // (chooser_window.rs:506-518).
-          if (live) return Promise.resolve(live.reqId);
+          // Cancel-and-recreate, at command receipt — the registry mutation
+          // happens before the window is built, exactly as it does in Rust
+          // (`take_pending` -> emit the old session's cancel -> `open`). An
+          // open against a live entry DISPLACES it: the displaced session is
+          // resolved null under its own id, and the new chooser gets an id of
+          // its own. It is never handed the live one's id.
+          if (live) {
+            const displaced = live.reqId;
+            live = null;
+            api.resolve(null, displaced);
+          }
           const reqId = nextReqId++;
-          const insert = () => { live = { reqId }; return reqId; };
-          if (opts.gateOpen) return new Promise((resolve) => { openGates.push(() => resolve(insert())); });
-          return Promise.resolve(insert());
+          live = { reqId };
+          // Only the REPLY is gated: the entry exists from here on, the window
+          // is what is still being built.
+          if (opts.gateOpen) return new Promise((resolve) => { openGates.push(() => resolve(reqId)); });
+          return Promise.resolve(reqId);
         }
         if (command === 'cancel_file_chooser') {
           // The registry's `cancel`, in miniature: `reqId` scopes it, and a
@@ -636,6 +645,43 @@ await checkAsync('a cancel names its OWN chooser, so a late one cannot kill the 
   await settle();
   assert.strictEqual(h.liveReqId(), null);
   assert.strictEqual(h.scrimUp(), false);
+});
+
+await checkAsync('an open against a live chooser REPLACES it instead of adopting it', async () => {
+  // Rust used to hand a second open the live entry's req_id and focus the
+  // existing window. That is an adoption: the caller ends up bound to a window
+  // built for a DIFFERENT question. A save-mode request adopting an open-mode
+  // window gets a chooser with no filename field and no overwrite confirm — and
+  // `openForSave` then writes the pick straight over whatever is there.
+  //
+  // The request below is delivered at the transport, not through the proxy, on
+  // purpose: `activeChoice` shares or refuses every legitimate duplicate, so an
+  // open reaching Rust while an entry is live is always an abnormal flow (the
+  // cancel/open IPC race, or a reloaded webview with a zombie chooser).
+  const h = makeHarness({});
+  const pane = { kind: 'editor', tabId: 1 };
+  const savingA = h.fd._chooseFile({ mode: 'save', filename: 'Untitled', pane });
+  await settle();
+  assert.strictEqual(h.liveReqId(), 1, 'precondition: chooser 1 is live');
+
+  const replacement = await h.wire('open_file_chooser', {
+    mode: 'open', filename: null, selectFilename: false,
+  });
+  await settle();
+
+  assert.notStrictEqual(replacement, 1,
+    'the second request gets a chooser of its OWN — never the live id reused');
+  assert.strictEqual(h.liveReqId(), replacement, 'and it is the one now registered');
+  assert.strictEqual(await settles(savingA, 'the displaced chooser'), null,
+    'the session it displaced was resolved as cancelled, not orphaned');
+  await settle();
+  assert.strictEqual(h.scrimUp(), false, 'so the displaced session let its parent go');
+
+  // And a cancel still naming the displaced chooser is a no-op: that id no
+  // longer refers to anything.
+  await h.wire('cancel_file_chooser', { reqId: 1 });
+  await settle();
+  assert.strictEqual(h.liveReqId(), replacement, 'the replacement survives it');
 });
 
 await checkAsync('a stale early event cannot crowd out this session\'s own answer', async () => {

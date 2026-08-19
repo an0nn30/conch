@@ -108,13 +108,6 @@ pub(crate) struct PendingChooser {
     pub request: ChooserRequest,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ChooserOpenError {
-    /// A chooser is already open for this parent. Carries its `req_id` so the
-    /// caller can hand back the same value instead of minting a new one.
-    AlreadyOpen { req_id: u64 },
-}
-
 /// One-per-parent registry of in-flight choosers, keyed by the *parent's*
 /// window label (never the chooser window's own label, which is derived from
 /// it: `chooser-<parent_label>`).
@@ -124,26 +117,25 @@ pub(crate) struct ChooserRegistry {
 }
 
 impl ChooserRegistry {
-    /// Register a new chooser for `parent_label`, or — if one is already
-    /// live — report its existing `req_id` instead of creating a second
-    /// entry. The registry assigns `req_id`, overwriting whatever the caller
-    /// put in `request.req_id`.
+    /// Register a new chooser for `parent_label` with a freshly minted
+    /// `req_id`, overwriting whatever the caller put in `request.req_id`.
+    ///
+    /// This never fails on an entry already being there — but the caller must
+    /// not simply overwrite one either. `open_file_chooser` runs the pair
+    /// `take_pending` → cancel what came back → `open`, so a displaced session
+    /// is always resolved rather than orphaned. See that command for why an
+    /// open against a live entry is abnormal in the first place.
     pub(crate) fn open(
         &mut self,
         parent_label: String,
         mut request: ChooserRequest,
-    ) -> Result<PendingChooser, ChooserOpenError> {
-        if let Some(existing) = self.pending.get(&parent_label) {
-            return Err(ChooserOpenError::AlreadyOpen {
-                req_id: existing.req_id,
-            });
-        }
+    ) -> PendingChooser {
         let req_id = NEXT_CHOOSER_REQ.fetch_add(1, Ordering::Relaxed);
         request.req_id = req_id;
         request.parent_label = parent_label.clone();
         let pending = PendingChooser { req_id, request };
         self.pending.insert(parent_label, pending.clone());
-        Ok(pending)
+        pending
     }
 
     /// Resolve the parent's chooser, but only if `req_id` matches the live
@@ -163,10 +155,12 @@ impl ChooserRegistry {
         }
     }
 
-    /// Force-remove the parent's entry regardless of `req_id`. Used whenever
-    /// there is no specific outcome to check against — the parent died, or the
-    /// chooser window's own close button.
-    pub(crate) fn resolve_for_parent_death(&mut self, parent_label: &str) -> Option<PendingChooser> {
+    /// Take the parent's entry out regardless of `req_id`, returning it so the
+    /// caller can resolve it. Used wherever there is no specific outcome to
+    /// check against: the parent died, the chooser window's own close button,
+    /// an unscoped cancel, the cleanup after a window that would not build, and
+    /// the displacement half of `open_file_chooser`'s cancel-and-recreate.
+    pub(crate) fn take_pending(&mut self, parent_label: &str) -> Option<PendingChooser> {
         self.pending.remove(parent_label)
     }
 
@@ -189,7 +183,7 @@ impl ChooserRegistry {
     ) -> Option<PendingChooser> {
         match req_id {
             Some(id) => self.resolve(parent_label, id),
-            None => self.resolve_for_parent_death(parent_label),
+            None => self.take_pending(parent_label),
         }
     }
 
@@ -207,7 +201,6 @@ impl ChooserRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::ChooserOpenError::AlreadyOpen;
     use super::*;
 
     fn req(mode: &str) -> ChooserRequest {
@@ -225,21 +218,85 @@ mod tests {
         let mut r = ChooserRegistry::default();
         let a = r.open("window-1".into(), req("open"));
         let b = r.open("window-2".into(), req("save"));
-        assert_ne!(a.unwrap().req_id, b.unwrap().req_id);
+        assert_ne!(a.req_id, b.req_id);
     }
 
     #[test]
-    fn duplicate_open_returns_existing_req_id_not_new_entry() {
+    fn a_second_open_displaces_the_first_and_mints_a_new_req_id() {
+        // Cancel-and-recreate, in the order `open_file_chooser` performs it:
+        // take the live entry OUT first — that is the one the command resolves
+        // as cancelled — and only then insert the replacement. Reusing the old
+        // entry (what this used to do) handed a save-mode request a window
+        // built for an open-mode one: no filename field, no overwrite confirm,
+        // and the pick written straight over an existing file.
         let mut r = ChooserRegistry::default();
-        let first = r.open("window-1".into(), req("open")).unwrap();
-        let dup = r.open("window-1".into(), req("open"));
-        assert!(matches!(dup, Err(AlreadyOpen { req_id }) if req_id == first.req_id));
+        let first = r.open("window-1".into(), req("open"));
+
+        let displaced = r.take_pending("window-1");
+        assert_eq!(
+            displaced.map(|d| d.req_id),
+            Some(first.req_id),
+            "the old entry comes back to the caller, to be cancelled"
+        );
+        assert!(
+            !r.contains_parent("window-1"),
+            "and it is out of the registry BEFORE the replacement goes in"
+        );
+
+        let second = r.open("window-1".into(), req("save"));
+        assert_ne!(
+            second.req_id, first.req_id,
+            "the replacement is a chooser of its own, never the old id reused"
+        );
+        assert_eq!(r.get("window-1").unwrap().req_id, second.req_id);
+        assert_eq!(
+            r.get("window-1").unwrap().request.mode,
+            "save",
+            "and it is the NEW request that is live, not the displaced one"
+        );
+    }
+
+    #[test]
+    fn open_never_reuses_a_live_entrys_req_id() {
+        // `open_file_chooser` takes the old entry out first, but `open` must
+        // not lean on that: handing back a live entry's id is the adoption bug
+        // itself, and it must not be reachable from this method at all. (The
+        // inverse of the old contract, where a duplicate open deliberately
+        // returned the existing entry untouched.)
+        let mut r = ChooserRegistry::default();
+        let first = r.open("window-1".into(), req("open"));
+        let second = r.open("window-1".into(), req("save"));
+        assert_ne!(second.req_id, first.req_id);
+        assert_eq!(r.get("window-1").unwrap().req_id, second.req_id);
+        assert_eq!(
+            r.get("window-1").unwrap().request.mode,
+            "save",
+            "the live entry is the NEW request, never the one it replaced"
+        );
+    }
+
+    #[test]
+    fn a_displaced_entry_can_no_longer_be_resolved_by_its_own_req_id() {
+        // The displaced session is settled by the command layer's emit; if its
+        // window somehow answered afterwards, the id no longer names anything.
+        let mut r = ChooserRegistry::default();
+        let first = r.open("window-1".into(), req("open"));
+        let _ = r.take_pending("window-1");
+        let second = r.open("window-1".into(), req("save"));
+
+        assert!(r.resolve("window-1", first.req_id).is_none());
+        assert!(r.cancel("window-1", Some(first.req_id)).is_none());
+        assert!(
+            r.contains_parent("window-1"),
+            "the replacement survives both"
+        );
+        assert!(r.resolve("window-1", second.req_id).is_some());
     }
 
     #[test]
     fn resolve_is_exactly_once() {
         let mut r = ChooserRegistry::default();
-        let p = r.open("window-1".into(), req("open")).unwrap();
+        let p = r.open("window-1".into(), req("open"));
         assert!(r.resolve("window-1", p.req_id).is_some()); // first wins, returns entry
         assert!(r.resolve("window-1", p.req_id).is_none()); // late resolver: no-op
     }
@@ -247,7 +304,7 @@ mod tests {
     #[test]
     fn resolve_with_stale_req_id_is_noop() {
         let mut r = ChooserRegistry::default();
-        let p = r.open("window-1".into(), req("open")).unwrap();
+        let p = r.open("window-1".into(), req("open"));
         assert!(r.resolve("window-1", p.req_id + 999).is_none());
         assert!(r.resolve("window-1", p.req_id).is_some()); // real one still live
     }
@@ -255,20 +312,10 @@ mod tests {
     #[test]
     fn parent_death_drains_only_that_parents_entry() {
         let mut r = ChooserRegistry::default();
-        r.open("window-1".into(), req("open")).unwrap();
-        let keep = r.open("window-2".into(), req("open")).unwrap();
-        assert!(r.resolve_for_parent_death("window-1").is_some());
+        r.open("window-1".into(), req("open"));
+        let keep = r.open("window-2".into(), req("open"));
+        assert!(r.take_pending("window-1").is_some());
         assert!(r.resolve("window-2", keep.req_id).is_some());
-    }
-
-    #[test]
-    fn duplicate_open_does_not_touch_the_existing_request() {
-        let mut r = ChooserRegistry::default();
-        r.open("window-1".into(), req("open")).unwrap();
-        let _ = r.open("window-1".into(), req("save"));
-        // The mode must still be the original request's — a duplicate open
-        // must not overwrite the live entry.
-        assert_eq!(r.get("window-1").unwrap().request.mode, "open");
     }
 
     #[test]
@@ -278,9 +325,9 @@ mod tests {
         // then does the cancel arrive. Unscoped it would resolve B null — a ⌘O
         // that silently does nothing.
         let mut r = ChooserRegistry::default();
-        let a = r.open("window-1".into(), req("save")).unwrap();
+        let a = r.open("window-1".into(), req("save"));
         assert!(r.resolve("window-1", a.req_id).is_some()); // A is answered
-        let b = r.open("window-1".into(), req("open")).unwrap();
+        let b = r.open("window-1".into(), req("open"));
         assert_ne!(a.req_id, b.req_id);
 
         assert!(
@@ -297,7 +344,7 @@ mod tests {
     #[test]
     fn cancel_with_the_matching_req_id_resolves_it() {
         let mut r = ChooserRegistry::default();
-        let p = r.open("window-1".into(), req("save")).unwrap();
+        let p = r.open("window-1".into(), req("save"));
         let cancelled = r.cancel("window-1", Some(p.req_id));
         assert_eq!(cancelled.map(|c| c.req_id), Some(p.req_id));
         assert!(!r.contains_parent("window-1"));
@@ -308,7 +355,7 @@ mod tests {
         // The parent has no id to name until `open_file_chooser` has returned
         // one, and a cancel in that window must still work.
         let mut r = ChooserRegistry::default();
-        let p = r.open("window-1".into(), req("save")).unwrap();
+        let p = r.open("window-1".into(), req("save"));
         assert_eq!(r.cancel("window-1", None).map(|c| c.req_id), Some(p.req_id));
         assert!(!r.contains_parent("window-1"));
         // And it is a no-op when there is nothing live, as the mid-build cancel
@@ -319,8 +366,8 @@ mod tests {
     #[test]
     fn cancel_never_reaches_another_parents_chooser() {
         let mut r = ChooserRegistry::default();
-        let mine = r.open("window-1".into(), req("save")).unwrap();
-        let theirs = r.open("window-2".into(), req("open")).unwrap();
+        let mine = r.open("window-1".into(), req("save"));
+        let theirs = r.open("window-2".into(), req("open"));
         assert!(r.cancel("window-1", Some(mine.req_id)).is_some());
         assert!(r.contains_parent("window-2"));
         assert_eq!(r.get("window-2").unwrap().req_id, theirs.req_id);
@@ -331,7 +378,7 @@ mod tests {
         let mut r = ChooserRegistry::default();
         assert!(!r.contains_parent("window-1"));
         assert!(r.get("window-1").is_none());
-        r.open("window-1".into(), req("open")).unwrap();
+        r.open("window-1".into(), req("open"));
         assert!(r.contains_parent("window-1"));
         assert!(r.get("window-1").is_some());
     }
@@ -507,6 +554,25 @@ fn complete_chooser<R: tauri::Runtime>(
     }
 }
 
+/// Tear down the chooser window that `open_file_chooser` is replacing.
+///
+/// `destroy()`, deliberately, not `close()`: `close()` raises CloseRequested,
+/// and `on_chooser_close_requested` answers that by taking THIS parent's
+/// registry entry — which by now belongs to the replacement — and resolving it
+/// null. The window being replaced has already been resolved by its own
+/// req_id; there is nothing left for that hook to do here.
+///
+/// Must run on the main thread immediately before the new window is built: the
+/// two share the `chooser-<parent>` label, and a build against a label that is
+/// still taken fails.
+fn destroy_displaced_chooser<R: tauri::Runtime>(app: &tauri::AppHandle<R>, parent_label: &str) {
+    let chooser_label = format!("chooser-{parent_label}");
+    if let Some(win) = app.get_webview_window(&chooser_label) {
+        persist_chooser_size_from(&win);
+        let _ = win.destroy();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -573,31 +639,55 @@ pub(crate) async fn open_file_chooser(
         parent_label: parent_label.clone(),
     };
 
-    let opened = {
+    // Cancel-and-recreate. A LEGITIMATE duplicate request never gets here: the
+    // frontend's `activeChoice` shares the one promise for a same-mode repeat
+    // (invoking only `focus_file_chooser`) and refuses a cross-mode one
+    // outright, so an open arriving while an entry is live is always an
+    // abnormal flow — the cancel/open IPC race, or a reloaded webview leaving a
+    // zombie chooser behind. Handing such a caller the existing chooser (what
+    // this used to do) reuses a window built for a DIFFERENT question: a
+    // save-mode request adopting an open-mode window gets a chooser with no
+    // filename field and no overwrite confirm, and the file it picks is then
+    // written straight over. Displacing the old one is the only answer that
+    // cannot silently destroy data.
+    //
+    // Both halves under one lock: nothing may observe this parent with two
+    // entries, or with none.
+    let (displaced, pending) = {
         let registry = app.state::<Mutex<ChooserRegistry>>();
-        registry.lock().open(parent_label.clone(), request)
+        let mut guard = registry.lock();
+        let displaced = guard.take_pending(&parent_label);
+        let pending = guard.open(parent_label.clone(), request);
+        (displaced, pending)
     };
 
-    let pending = match opened {
-        Ok(pending) => pending,
-        Err(ChooserOpenError::AlreadyOpen { req_id }) => {
-            let chooser_label = format!("chooser-{parent_label}");
-            if let Some(win) = app.get_webview_window(&chooser_label) {
-                let _ = win.set_focus();
-            }
-            return Ok(req_id);
-        }
-    };
+    // The displaced session is resolved through the ordinary path: the parent
+    // hears `chooser-resolved` with the OLD req_id and treats it as a cancel.
+    // If that session is already settled (the usual case — this is a race, not
+    // a second live chooser) its proxy drops the event on the req_id check, and
+    // if the webview was reloaded there is nobody listening at all. Both are
+    // harmless; what is not harmless is leaving it unresolved.
+    if let Some(old) = displaced.as_ref() {
+        let payload = ChooserResolvedEvent {
+            req_id: old.req_id,
+            choice: None,
+        };
+        let _ = app.emit_to(parent_label.as_str(), CHOOSER_RESOLVED_EVENT, &payload);
+    }
 
     // Window creation must happen on the main thread — same deadlock rule as
     // open_new_window/open_settings_window (windows.rs:42-51).
     let handle = app.clone();
     let build_parent_label = parent_label.clone();
     let build_request = pending.request.clone();
+    let had_displaced = displaced.is_some();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     handle
         .clone()
         .run_on_main_thread(move || {
+            if had_displaced {
+                destroy_displaced_chooser(&handle, &build_parent_label);
+            }
             let result = create_chooser_window(&handle, &build_parent_label, &build_request);
             let _ = tx.send(result);
         })
@@ -608,7 +698,7 @@ pub(crate) async fn open_file_chooser(
         // A registry entry with no window behind it is a permanently stuck
         // scrim on the parent — remove it before reporting the failure.
         let registry = app.state::<Mutex<ChooserRegistry>>();
-        registry.lock().resolve_for_parent_death(&parent_label);
+        registry.lock().take_pending(&parent_label);
         return Err(e);
     }
 
@@ -732,7 +822,7 @@ pub(crate) fn on_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) 
     let Some(registry) = app.try_state::<Mutex<ChooserRegistry>>() else {
         return;
     };
-    let resolved = registry.lock().resolve_for_parent_death(&label);
+    let resolved = registry.lock().take_pending(&label);
     if let Some(pending) = resolved {
         complete_chooser(app, &label, pending.req_id, None);
     }
@@ -753,7 +843,7 @@ pub(crate) fn on_chooser_close_requested<R: tauri::Runtime>(window: &tauri::Wind
     let Some(registry) = app.try_state::<Mutex<ChooserRegistry>>() else {
         return;
     };
-    let resolved = registry.lock().resolve_for_parent_death(parent_label);
+    let resolved = registry.lock().take_pending(parent_label);
     let Some(pending) = resolved else {
         return;
     };
