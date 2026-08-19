@@ -206,20 +206,35 @@
 
     let unlisten = null;
     let myReqId = null;
-    // One event, held for the length of the race described at the top of this
-    // file. One is enough: there is exactly one chooser per parent, so there
-    // is exactly one answer that can arrive this early.
-    let buffered = null;
+    // Events that arrived before `myReqId` was known — see the race note at the
+    // top of this file. An ARRAY, not one slot: a stale event can land in that
+    // window too (a previous session's late cancel echoing back), and if it
+    // took the only slot this session's own answer would be discarded, leaving
+    // the promise unsettled and `activeChoice` claimed forever. Every one of
+    // them is re-checked against the real id below; at most one can match.
+    const early = [];
+
+    // Releasing the listener is best effort. It must never be able to stop the
+    // answer landing: a throw out of `unlisten()` would skip `resolveChoice`
+    // and leave `activeChoice` claimed on a promise nobody will ever settle —
+    // every later same-mode ⌘O then shares that dead promise and hangs.
+    const releaseListener = () => {
+      const release = unlisten;
+      unlisten = null;
+      if (!release) return;
+      try { release(); } catch (_) { /* the event bus's problem, not the user's */ }
+    };
 
     // The latch. A pick, a cancel, a window that would not build and a
     // transport that is not there all arrive here, and whichever is first is
     // the answer. Everything that must happen exactly once — releasing the
     // listener, lowering the scrim, releasing `activeChoice` — happens here
-    // and nowhere else.
+    // and nowhere else, and nothing in the teardown may pre-empt the answer.
     const settle = (choice) => {
       if (session.settled) return;
       session.settled = true;
-      try { if (unlisten) unlisten(); } finally { lowerScrim(scrim); }
+      releaseListener();                                     // swallows its own throw
+      try { lowerScrim(scrim); } catch (_) { /* best effort */ }
       if (activeChoice === session) activeChoice = null;
       resolveChoice(choice || null);
     };
@@ -235,11 +250,10 @@
         unlisten = await listenOnCurrentWindow('chooser-resolved', (event) => {
           const p = event && event.payload;
           if (!p) return;
-          // The reqId is not known yet — see the buffer note above. Anything
-          // that arrives now is either this chooser's answer or nothing at
-          // all, and the re-check below decides which.
+          // The reqId is not known yet — see the buffer note above. Keep every
+          // one of them; the drain below decides which (if any) is ours.
           if (myReqId === null) {
-            if (!buffered) buffered = p;
+            early.push(p);
             return;
           }
           if (p.reqId !== myReqId) return;   // another chooser's answer, or a stale one
@@ -248,7 +262,7 @@
         // Cancelled while the listener was being attached: nothing was opened,
         // so there is nothing to close — just release the listener.
         if (session.settled) {
-          unlisten();
+          releaseListener();
           return;
         }
 
@@ -261,12 +275,25 @@
         if (session.settled) {
           // Cancelled while the window was being built. The cancel raced ahead
           // of the registry insert, so Rust's force-resolve found nothing —
-          // send it again now that there IS something, or the user is left
-          // with a chooser window nobody is listening to.
-          invoke('cancel_file_chooser').catch(() => {});
+          // send it again now that there IS something, or the user is left with
+          // a chooser window nobody is listening to.
+          //
+          // Only when no successor has claimed the chooser, though.
+          // `cancel_file_chooser` carries no reqId: it force-resolves whatever
+          // is live for THIS window (chooser_window.rs:590-604). A newer
+          // session's `open_file_chooser` can have been handed this dead
+          // session's req_id by the AlreadyOpen arm (chooser_window.rs:506-512)
+          // and adopted the very window we are about to close — so a blind
+          // re-send would answer someone else's question with a silent null.
+          // `activeChoice` is the successor's claim; if it is set, the window
+          // is no longer ours to cancel and the successor owns its lifetime.
+          if (activeChoice === null) invoke('cancel_file_chooser').catch(() => {});
           return;
         }
-        if (buffered && buffered.reqId === myReqId) settle(buffered.choice || null);
+        // Drain: at most one buffered event can carry our id, and any that do
+        // not belong to some other session and are none of our business.
+        const answer = early.find((p) => p.reqId === myReqId);
+        if (answer) settle(answer.choice || null);
       } catch (error) {
         // Every failure route lands here — including anything thrown by the
         // handler wiring itself. Leaving without settling would claim

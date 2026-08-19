@@ -132,6 +132,14 @@ function makeHarness(options) {
     saveAs: (pane, target) => { openCalls.push(['saveAs', target]); return Promise.resolve(); },
   };
 
+  // Gates. `gateListen` / `gateOpen` leave those two promises PENDING until
+  // the check releases them, which is the only way to stand inside the two
+  // windows the proxy's cancel guards exist for: cancelled while the listener
+  // is still attaching, and cancelled while the window is still being built.
+  // FIFO, because a check can have two sessions in flight at once.
+  const listenGates = [];
+  const openGates = [];
+
   let nextReqId = 1;
   sandbox.termlabServices = {
     tauriClient: {
@@ -142,7 +150,11 @@ function makeHarness(options) {
           const handled = opts.invoke(command, args, api);
           if (handled !== undefined) return handled;
         }
-        if (command === 'open_file_chooser') return Promise.resolve(nextReqId++);
+        if (command === 'open_file_chooser') {
+          const reqId = nextReqId++;
+          if (opts.gateOpen) return new Promise((resolve) => { openGates.push(() => resolve(reqId)); });
+          return Promise.resolve(reqId);
+        }
         return Promise.resolve(null);
       },
       listenOnCurrentWindow(name, handler) {
@@ -152,12 +164,20 @@ function makeHarness(options) {
           if (handled !== undefined) return handled;
         }
         const entry = { name, handler };
-        listeners.push(entry);
-        return Promise.resolve(() => {
+        const unlisten = () => {
           unlistenCount += 1;
           const i = listeners.indexOf(entry);
           if (i >= 0) listeners.splice(i, 1);
-        });
+        };
+        if (opts.gateListen) {
+          // Not live until released: a handler registered before the await
+          // resolves would make the guard untestable.
+          return new Promise((resolve) => {
+            listenGates.push(() => { listeners.push(entry); resolve(unlisten); });
+          });
+        }
+        listeners.push(entry);
+        return Promise.resolve(unlisten);
       },
     },
   };
@@ -181,6 +201,9 @@ function makeHarness(options) {
     argsFor: (command) => (invokes.find(([c]) => c === command) || [])[1],
     unlistenCount: () => unlistenCount,
     listenerCount: () => listeners.length,
+    // Release the oldest gated listen / open, in the order they were made.
+    releaseListen: () => { (listenGates.shift() || (() => {}))(); },
+    releaseOpen: () => { (openGates.shift() || (() => {}))(); },
     // The scrim, as the rest of the app would see it: an element on body.
     scrims: () => doc.body.children.filter((el) => el.className === 'tl-chooser-scrim'),
     scrimUp: () => doc.body.children.some((el) => el.className === 'tl-chooser-scrim'),
@@ -327,6 +350,38 @@ await checkAsync('the scrim comes down when open_file_chooser REJECTS', async ()
   await settles(again, 'the second chooser');
 });
 
+await checkAsync('an unlisten that THROWS still lets the answer land', async () => {
+  // Teardown is best effort; the answer is not. If releasing the listener could
+  // throw out of the latch it would skip `resolveChoice` and leave
+  // `activeChoice` claimed on a promise nobody will ever settle — and every
+  // later same-mode ⌘O takes the share branch and hangs on that dead promise.
+  const handlers = [];
+  const h = makeHarness({
+    listen: (name, handler) => {
+      handlers.push(handler);
+      return Promise.resolve(() => { throw new Error('event bus went away'); });
+    },
+  });
+  const first = h.fd._chooseFile();
+  await settle();
+  handlers[0]({ payload: { reqId: 1, choice: { scope: { kind: 'local' }, path: '/a.txt', entry: null } } });
+
+  const value = await settles(first, 'a chooser whose unlisten threw');
+  assert.ok(value, 'the pick still came back');
+  assert.strictEqual(value.path, '/a.txt');
+  await settle();
+  assert.strictEqual(h.scrimUp(), false, 'and the scrim still came down');
+
+  // The claim released: the next ⌘O opens a chooser instead of sharing a dead
+  // promise.
+  const second = h.fd._chooseFile();
+  assert.notStrictEqual(second, first, 'a new session, not the dead one');
+  await settle();
+  assert.strictEqual(h.commands().filter((c) => c === 'open_file_chooser').length, 2);
+  handlers[1]({ payload: { reqId: 2, choice: null } });
+  assert.strictEqual(await settles(second, 'the next chooser'), null);
+});
+
 await checkAsync('a listen that rejects settles null with the scrim down too', async () => {
   const h = makeHarness({
     listen: () => Promise.reject(new Error('event bus unavailable')),
@@ -417,6 +472,124 @@ await checkAsync('cancelForPane for a DIFFERENT pane does nothing at all', async
 
   h.resolve(null);
   await settles(saving, 'the untouched chooser');
+});
+
+// ---------------------------------------------------------------------------
+// 6b. Cancelling DURING setup — the two windows the checks above step over
+// ---------------------------------------------------------------------------
+//
+// Both checks above cancel a session that is fully set up. The proxy's two
+// setup guards live in the windows before that: between the listen and its
+// resolution, and between `open_file_chooser` and its return. The gated
+// transport is what lets a check stand inside them.
+
+console.log('file dialog proxy: cancelling mid-setup');
+
+await checkAsync('a cancel while the listener is still attaching opens no window', async () => {
+  const h = makeHarness({ gateListen: true });
+  const pane = { kind: 'editor', tabId: 1 };
+  const saving = h.fd._chooseFile({ mode: 'save', filename: 'Untitled', pane });
+  await settle();
+  assert.deepStrictEqual(h.commands(), [],
+    'precondition: the listen is still pending, so nothing has been opened');
+
+  assert.strictEqual(h.fd.cancelForPane(pane), true);
+  assert.strictEqual(await settles(saving, 'the chooser cancelled mid-attach'), null);
+  await settle();
+  assert.deepStrictEqual(h.commands(), ['cancel_file_chooser']);
+
+  h.releaseListen();          // the listener finally attaches, after the cancel
+  await settle();
+
+  assert.deepStrictEqual(h.commands(), ['cancel_file_chooser'],
+    'no window is built for a session that is already over');
+  assert.strictEqual(h.unlistenCount(), 1,
+    'and the listener that did attach was released rather than left running');
+  assert.strictEqual(h.listenerCount(), 0);
+  assert.strictEqual(h.scrimUp(), false);
+  assert.deepStrictEqual(h.toasts, [],
+    'a deliberate cancel is not a failure — nothing is reported to the user');
+});
+
+await checkAsync('a cancel while the window is being built re-sends the cancel', async () => {
+  // The first cancel raced ahead of the registry insert, so Rust force-resolved
+  // nothing (chooser_window.rs:598-604 returns Ok on None). Without the second
+  // one the user is left looking at a chooser window nobody is listening to.
+  const h = makeHarness({ gateOpen: true });
+  const pane = { kind: 'editor', tabId: 1 };
+  const saving = h.fd._chooseFile({ mode: 'save', filename: 'Untitled', pane });
+  await settle();
+  assert.deepStrictEqual(h.commands(), ['open_file_chooser'],
+    'precondition: the build is in flight');
+
+  assert.strictEqual(h.fd.cancelForPane(pane), true);
+  assert.strictEqual(await settles(saving, 'the chooser cancelled mid-build'), null);
+  await settle();
+  assert.deepStrictEqual(h.commands(), ['open_file_chooser', 'cancel_file_chooser']);
+
+  h.releaseOpen();            // the window finally exists
+  await settle();
+
+  assert.deepStrictEqual(h.commands(),
+    ['open_file_chooser', 'cancel_file_chooser', 'cancel_file_chooser'],
+    'the cancel goes again now that there IS a registry entry to force-resolve');
+  assert.strictEqual(h.scrimUp(), false);
+});
+
+await checkAsync('that late cancel never reaches the NEXT session\'s chooser', async () => {
+  // `cancel_file_chooser` carries no reqId — it force-resolves whatever is live
+  // for this window. Meanwhile Rust's AlreadyOpen arm hands a second request
+  // the FIRST request's req_id (chooser_window.rs:506-512), so a successor can
+  // legitimately adopt the very window the dead session is trying to close. An
+  // unscoped re-send would answer the successor's question with a silent null:
+  // a ⌘O that does nothing at all.
+  const h = makeHarness({ gateOpen: true });
+  const pane = { kind: 'editor', tabId: 1 };
+  const saving = h.fd._chooseFile({ mode: 'save', filename: 'Untitled', pane });
+  await settle();
+  h.fd.cancelForPane(pane);
+  assert.strictEqual(await settles(saving, 'the chooser cancelled mid-build'), null);
+  await settle();
+
+  // ⌘O, immediately — before the dead session's build has returned.
+  const opening = h.fd.openForOpen();
+  await settle();
+  const before = h.commands().slice();
+  assert.ok(before.includes('open_file_chooser'), 'precondition: a new session is up');
+  assert.strictEqual(h.scrimUp(), true, 'precondition: on its own scrim');
+
+  h.releaseOpen();            // the DEAD session's build returns (FIFO)
+  await settle();
+
+  assert.deepStrictEqual(h.commands(), before,
+    'the dead session sends nothing once a live one has claimed the chooser');
+  assert.strictEqual(h.scrimUp(), true, 'the new session is untouched');
+
+  h.releaseOpen();            // and the new session's own build
+  await settle();
+  h.resolve(null, 2);
+  assert.strictEqual(await settles(opening, 'the new session'), null);
+});
+
+await checkAsync('a stale early event cannot crowd out this session\'s own answer', async () => {
+  // The buffer holds every event that arrives before the reqId is known, not
+  // just the first. A previous session's late cancel echoing back can land in
+  // that window; if it took the only slot, the real answer behind it would be
+  // dropped and this session would wedge — scrim up, promise unsettled.
+  const h = makeHarness({ gateOpen: true });
+  const choice = h.fd._chooseFile();
+  await settle();
+
+  h.resolve({ scope: { kind: 'local' }, path: '/stale', entry: null }, 99);   // not ours
+  h.resolve({ scope: { kind: 'local' }, path: '/ours', entry: null }, 1);     // ours
+  await settle();
+  assert.strictEqual(h.scrimUp(), true, 'precondition: neither has been matched yet');
+
+  h.releaseOpen();
+  const value = await settles(choice, 'a chooser whose answer queued behind a stale event');
+  assert.strictEqual(value.path, '/ours');
+  await settle();
+  assert.strictEqual(h.scrimUp(), false);
 });
 
 // ---------------------------------------------------------------------------
