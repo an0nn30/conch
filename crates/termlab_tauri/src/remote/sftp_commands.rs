@@ -6,7 +6,18 @@ use parking_lot::Mutex;
 
 use termlab_remote::handler::TermLabSshHandler;
 
+use tauri::Manager;
+
 use super::{RemoteState, session_key};
+
+/// The label under which this caller's SSH sessions are keyed. A chooser
+/// window browses on behalf of its parent, so it resolves to the parent's
+/// label (sessions are keyed `<parent>:<pane>`; the chooser's own label
+/// matches nothing — that shipped as "No SSH session for chooser-…"). Every
+/// other window resolves to itself.
+fn session_caller_label(window: &tauri::WebviewWindow) -> String {
+    crate::chooser_window::effective_session_window_label(window.app_handle(), window.label())
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,7 +57,7 @@ pub(crate) async fn sftp_list_dir(
 ) -> Result<Vec<termlab_remote::sftp::FileEntry>, String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::list_dir(&ssh, &path)
         .await
@@ -62,7 +73,7 @@ pub(crate) async fn sftp_stat(
 ) -> Result<termlab_remote::sftp::FileEntry, String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::stat(&ssh, &path)
         .await
@@ -80,7 +91,7 @@ pub(crate) async fn sftp_read_file(
 ) -> Result<termlab_remote::sftp::ReadFileResult, String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::read_file(&ssh, &path, offset, length as usize)
         .await
@@ -97,7 +108,7 @@ pub(crate) async fn sftp_write_file(
 ) -> Result<u64, String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::write_file(&ssh, &path, &data)
         .await
@@ -113,7 +124,7 @@ pub(crate) async fn sftp_mkdir(
 ) -> Result<(), String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::mkdir(&ssh, &path)
         .await
@@ -130,7 +141,7 @@ pub(crate) async fn sftp_rename(
 ) -> Result<(), String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::rename(&ssh, &from, &to)
         .await
@@ -147,7 +158,7 @@ pub(crate) async fn sftp_remove(
 ) -> Result<(), String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::remove(&ssh, &path, is_dir)
         .await
@@ -163,7 +174,7 @@ pub(crate) async fn sftp_realpath(
 ) -> Result<String, String> {
     let ssh = {
         let state = remote.lock();
-        get_ssh_handle(&state, window.label(), pane_id)?
+        get_ssh_handle(&state, &session_caller_label(&window), pane_id)?
     };
     termlab_remote::sftp::realpath(&ssh, &path)
         .await

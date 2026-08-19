@@ -219,6 +219,31 @@ impl ChooserRegistry {
             .values()
             .find(|p| p.window_label == window_label)
     }
+
+    /// The window label whose SSH sessions a caller may use. A chooser
+    /// window browses ON BEHALF OF its parent — sessions in `RemoteState`
+    /// are keyed `<parent_label>:<pane_id>`, so an SFTP command invoked from
+    /// the chooser webview must look them up under the parent's label, not
+    /// its own (`chooser-main-2:3` matches nothing; that shipped as a bug).
+    /// Any other caller — including a stale chooser label whose entry is
+    /// gone — maps to itself, which for a stale chooser reproduces today's
+    /// clean "No SSH session" error rather than inventing a session.
+    pub(crate) fn session_label_for_caller(&self, caller_label: &str) -> String {
+        self.get_by_window_label(caller_label)
+            .map(|p| p.request.parent_label.clone())
+            .unwrap_or_else(|| caller_label.to_string())
+    }
+}
+
+/// App-handle convenience over [`ChooserRegistry::session_label_for_caller`]
+/// for command layers outside this module (the SFTP commands).
+pub(crate) fn effective_session_window_label<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    caller_label: &str,
+) -> String {
+    app.state::<Mutex<ChooserRegistry>>()
+        .lock()
+        .session_label_for_caller(caller_label)
 }
 
 #[cfg(test)]
@@ -301,6 +326,22 @@ mod tests {
             a.window_label.starts_with("chooser-"),
             "validate_chooser_caller and the CloseRequested filter key on this prefix"
         );
+    }
+
+    #[test]
+    fn session_label_for_caller_maps_a_live_chooser_to_its_parent_only() {
+        // The SFTP-session fix: a chooser window browses on behalf of its
+        // parent, so its label must resolve to the parent's for session-key
+        // purposes — while the parent itself, an unrelated window, and a
+        // STALE chooser label (entry gone) all map to themselves.
+        let mut r = ChooserRegistry::default();
+        let live = r.open("window-1".into(), req("open"));
+        assert_eq!(r.session_label_for_caller(&live.window_label), "window-1");
+        assert_eq!(r.session_label_for_caller("window-1"), "window-1");
+        assert_eq!(r.session_label_for_caller("window-2"), "window-2");
+        let stale = live.window_label.clone();
+        r.take_pending("window-1");
+        assert_eq!(r.session_label_for_caller(&stale), stale);
     }
 
     #[test]
