@@ -536,6 +536,10 @@ body.tl-chooser-body {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Inset the whole dialog body from the window edges — the tl-dialog host
+     used to provide this margin; a bare window does not, and the footer
+     buttons read as falling off the frame without it. */
+  padding: var(--tl-space-3) var(--tl-space-4) var(--tl-space-4);
 }
 
 body.tl-chooser-body .tl-filedlg__view {
