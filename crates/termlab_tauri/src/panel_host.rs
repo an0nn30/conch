@@ -79,6 +79,13 @@ pub(crate) const PANEL_HOST_DOCKED_EVENT: &str = "panel-host-docked";
 pub(crate) const PANEL_HOST_HIDDEN_EVENT: &str = "panel-host-hidden";
 pub(crate) const PANEL_HOST_SHOWN_EVENT: &str = "panel-host-shown";
 pub(crate) const PANEL_HOST_BROADCAST_EVENT: &str = "panel-host-event";
+/// Emitted to the parent by `abort_panel_host` — the boot's
+/// unknown-tool-window-id self-close path. Distinct from
+/// `panel-host-docked`: a dock-back means "remount this panel in its zone",
+/// while an abort means "this host never had a panel to remount at all" —
+/// the manager's response is to reset the tool window's view mode back to
+/// dock without expecting anything to remount (Task 3 consumes this).
+pub(crate) const PANEL_HOST_ABORTED_EVENT: &str = "panel-host-aborted";
 
 // ---------------------------------------------------------------------------
 // Registry (pure logic — no Tauri handles, so it is plain `cargo test`able)
@@ -396,6 +403,46 @@ mod tests {
             "hidden is not gone — summon must still find it"
         );
     }
+
+    #[test]
+    fn abort_via_window_label_resolves_the_entry_exactly_once() {
+        // Registry-level mirror of `abort_panel_host`'s own lookup-then-remove
+        // sequence (the boot's unknown-tool-window-id self-close path):
+        // resolve the caller's own window_label to its (parent, id), then
+        // remove by that key. A second call with the same window_label must
+        // find nothing — the entry is gone, not just its window.
+        let mut r = PanelHostRegistry::default();
+        let (_, p) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+
+        let key = r
+            .get_by_window_label(&p.window_label)
+            .map(|e| (e.parent_label.clone(), e.tool_window_id.clone()));
+        assert_eq!(key, Some(("window-1".to_string(), "ssh-sessions".to_string())));
+        let removed = key.and_then(|(parent, id)| r.remove(&parent, &id));
+        assert_eq!(
+            removed.map(|e| e.req_id),
+            Some(p.req_id),
+            "the live entry resolves through its own window label"
+        );
+
+        // Second abort attempt, same window_label: the lookup now finds
+        // nothing, so `abort_panel_host` returns Err rather than emitting or
+        // destroying a second time.
+        assert!(
+            r.get_by_window_label(&p.window_label).is_none(),
+            "a second abort of the same window is a no-op, not a double-teardown"
+        );
+    }
+
+    #[test]
+    fn aborted_event_name_and_payload_shape_are_pinned() {
+        assert_eq!(PANEL_HOST_ABORTED_EVENT, "panel-host-aborted");
+        let payload = PanelHostToolWindowEvent {
+            tool_window_id: "ssh-sessions".to_string(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json, serde_json::json!({ "toolWindowId": "ssh-sessions" }));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -419,9 +466,23 @@ fn validate_panel_host_caller(label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Which window labels may call `dock_panel_host` / `abort_panel_host`: the
+/// exact opposite restriction from `validate_panel_host_caller` above — here
+/// the caller MUST be a panel host, since both commands are a host's own
+/// self-teardown affordances, never something a parent or another window
+/// invokes on its behalf. Only the structural (label-shape) half of "must be
+/// a REGISTERED panelhost-*"; the registration half is the registry lookup
+/// each command layers on top of this.
+fn validate_panel_host_self_caller(label: &str) -> Result<(), String> {
+    if !label.starts_with("panelhost-") {
+        return Err("this command must be called by a panel host window".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod caller_validation_tests {
-    use super::validate_panel_host_caller;
+    use super::{validate_panel_host_caller, validate_panel_host_self_caller};
 
     #[test]
     fn rejects_panel_host_windows() {
@@ -443,6 +504,15 @@ mod caller_validation_tests {
     fn allows_ordinary_windows() {
         assert!(validate_panel_host_caller("main").is_ok());
         assert!(validate_panel_host_caller("window-1").is_ok());
+    }
+
+    #[test]
+    fn self_caller_allows_only_panel_host_windows() {
+        assert!(validate_panel_host_self_caller("panelhost-window-1-3").is_ok());
+        assert!(validate_panel_host_self_caller("main").is_err());
+        assert!(validate_panel_host_self_caller("window-1").is_err());
+        assert!(validate_panel_host_self_caller("chooser-window-1-2").is_err());
+        assert!(validate_panel_host_self_caller("settings").is_err());
     }
 }
 
@@ -641,6 +711,17 @@ static BOUNDS_SAVE_GENERATION: LazyLock<Mutex<HashMap<String, u64>>> =
 /// (`config/mod.rs:253,266`, same pattern as
 /// `chooser_window::persist_chooser_size`). Silently does nothing if reading
 /// the window fails (a closing window can race this).
+///
+/// **Keyed by `tool_window_id` alone, deliberately** — see the doc comment
+/// on `LayoutConfig::tool_window_bounds` (`persistent.rs`) for the full
+/// trade. In short: composite `(parent_label, tool_window_id)` keys were
+/// rejected because parent labels are launch-order-assigned and not stable
+/// across restarts, so they would only accumulate orphaned records. The
+/// consequence here is that this write is a plain last-writer-wins
+/// overwrite of one shared record — if the same tool window is popped out
+/// from two different main windows, saving from either one clobbers what
+/// the other remembers. The live windows themselves stay fully independent;
+/// only the persisted, remembered bounds are shared.
 fn persist_tool_window_bounds<R: tauri::Runtime>(
     win: &tauri::WebviewWindow<R>,
     tool_window_id: &str,
@@ -928,6 +1009,58 @@ pub(crate) fn dock_panel_host(
             .lock()
             .remove(&entry.parent_label, &entry.tool_window_id);
     }
+
+    let _ = window.destroy();
+    Ok(())
+}
+
+/// Self-close for a panel host that has nothing to host: the boot's
+/// unknown-tool-window-id path. `open_panel_host` always registers an entry
+/// before the window exists, so a plain `window.close()` from inside a host
+/// whose id matched no panel would otherwise hit
+/// `on_panel_host_close_requested`'s REGISTERED branch — intercepted and
+/// hidden forever, not actually closed — and `dock_panel_host` is the wrong
+/// tool too: it emits `panel-host-docked`, which tells the manager a panel
+/// is coming back to remount, when in fact none was ever mounted here.
+///
+/// Callable only by the host window itself, and only while it is still
+/// registered (`validate_panel_host_self_caller` plus the exact-label
+/// registry lookup below — together, "caller label must be a registered
+/// panelhost-*"). Removes the entry FIRST (remove-before-destroy: the same
+/// law `dock_panel_host` and every other teardown path in this module
+/// follow, which is what makes a second call see nothing and no-op rather
+/// than double-emit or double-destroy), then emits `panel-host-aborted` to
+/// the parent, then DESTROYS (not closes — this window's own teardown, no
+/// `CloseRequested` re-entry) the host window.
+#[tauri::command]
+pub(crate) fn abort_panel_host(window: tauri::WebviewWindow) -> Result<(), String> {
+    let caller_label = window.label().to_string();
+    validate_panel_host_self_caller(&caller_label)?;
+
+    let app = window.app_handle();
+    let entry = {
+        let registry = app.state::<Mutex<PanelHostRegistry>>();
+        let guard = registry.lock();
+        guard.get_by_window_label(&caller_label).cloned()
+    };
+    let Some(entry) = entry else {
+        return Err("no panel host entry for this window".to_string());
+    };
+
+    {
+        let registry = app.state::<Mutex<PanelHostRegistry>>();
+        registry
+            .lock()
+            .remove(&entry.parent_label, &entry.tool_window_id);
+    }
+
+    let _ = app.emit_to(
+        entry.parent_label.as_str(),
+        PANEL_HOST_ABORTED_EVENT,
+        &PanelHostToolWindowEvent {
+            tool_window_id: entry.tool_window_id.clone(),
+        },
+    );
 
     let _ = window.destroy();
     Ok(())

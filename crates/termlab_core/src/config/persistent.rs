@@ -133,11 +133,22 @@ pub struct LayoutConfig {
     pub left_split_ratio: f32,
     /// Right sidebar top/bottom split ratio (0.0–1.0, top portion).
     pub right_split_ratio: f32,
-    /// Popped-out tool windows' last known bounds, by tool-window id.
-    /// Absent keys (including the whole map, for state files written before
-    /// this field existed) mean "never popped out" — the panel host opens at
-    /// its default size, centered on the parent (see
-    /// `termlab_tauri::panel_host`).
+    /// Popped-out tool windows' last known bounds, keyed by tool-window id
+    /// ALONE — deliberately not `(parent_label, tool_window_id)`. Parent
+    /// labels (`window-2`, `window-3`, ...) are assigned by launch order and
+    /// are not stable across restarts, so a composite key would silently
+    /// orphan its record every time a window closed and a later session
+    /// opened windows in a different order — an ever-growing pile of dead
+    /// entries the id-only key structurally cannot accumulate. The traded-off
+    /// behavior: if the SAME tool window is popped out from two different
+    /// main windows at once, they remain fully independent live windows, but
+    /// they share one REMEMBERED bounds record — last save wins, and closing
+    /// either one overwrites what the other will reopen at. Absent keys
+    /// (including the whole map, for state files written before this field
+    /// existed) mean "never popped out" — the panel host opens at its
+    /// default size, centered on the parent (see
+    /// `termlab_tauri::panel_host::persist_tool_window_bounds`, the save
+    /// site this same trade is documented at).
     pub tool_window_bounds: HashMap<String, WindowBoundsRecord>,
 }
 
@@ -343,6 +354,47 @@ loaded_plugins = ["my-plugin"]
                 height: 480.0,
             })
         );
+    }
+
+    #[test]
+    fn tool_window_bounds_is_keyed_by_tool_window_id_alone_so_a_second_save_overwrites() {
+        // Pins the deliberate trade documented on the field above: two main
+        // windows popping the SAME tool-window id share one persisted
+        // record. There is no parent-scoped key to preserve here — the
+        // second save for an id is simply the new remembered bounds for
+        // that id, full stop.
+        let mut lc = LayoutConfig::default();
+        lc.tool_window_bounds.insert(
+            "ssh-sessions".to_string(),
+            WindowBoundsRecord {
+                x: 10.0,
+                y: 20.0,
+                width: 500.0,
+                height: 350.0,
+            },
+        );
+        // A later save for the same id, from any parent window at all —
+        // the key carries no parent information to disambiguate.
+        lc.tool_window_bounds.insert(
+            "ssh-sessions".to_string(),
+            WindowBoundsRecord {
+                x: 99.0,
+                y: 88.0,
+                width: 700.0,
+                height: 500.0,
+            },
+        );
+        assert_eq!(
+            lc.tool_window_bounds.get("ssh-sessions"),
+            Some(&WindowBoundsRecord {
+                x: 99.0,
+                y: 88.0,
+                width: 700.0,
+                height: 500.0,
+            }),
+            "the second save wins outright — there is only ever one record per id"
+        );
+        assert_eq!(lc.tool_window_bounds.len(), 1);
     }
 
     #[test]
