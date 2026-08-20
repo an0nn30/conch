@@ -70,6 +70,37 @@
     return pendingEvents.slice();
   }
 
+  // ---- The Task 5 consumer table --------------------------------------------
+  //
+  // The re-dispatch that makes a popped-out panel track its parent: an
+  // `{event, payload}` message off the seam above is routed through the SAME
+  // callback interface a docked panel gets from
+  // manager-compose-runtime.js's tabManager (`onTabChanged: (target) => {
+  // if (global.filesPanel) global.filesPanel.onTabChanged(target); }`) —
+  // `filesPanel.onTabChanged` neither knows nor cares whether it is being
+  // driven by the in-window tab manager or by this bridge.
+  //
+  // `BRIDGE_EVENTS` (app/core/panel-host-bridge.js) is read here rather than
+  // re-listing 'active-pane-changed' as a second literal, so the parent's
+  // publish-time validation and this table can never name different events.
+  // A message whose event is not in that list — a version-skewed parent, or
+  // simply nothing wired to it yet — is logged and dropped: a host window is
+  // not the place to throw over a parent's broadcast.
+  function dispatchPanelHostEvent(message) {
+    if (!message) return;
+    const bridge = global.termlabPanelHostBridge;
+    const knownEvents = bridge && Array.isArray(bridge.BRIDGE_EVENTS) ? bridge.BRIDGE_EVENTS : [];
+    if (!knownEvents.includes(message.event)) {
+      console.warn('panel host: ignoring unlisted panel-host-event', message.event);
+      return;
+    }
+    if (bridge && message.event === bridge.ACTIVE_PANE_CHANGED_EVENT) {
+      if (global.filesPanel && typeof global.filesPanel.onTabChanged === 'function') {
+        global.filesPanel.onTabChanged(message.payload);
+      }
+    }
+  }
+
   // ---- Self-close ----------------------------------------------------------
 
   // `abort_panel_host` is THE self-close for a REGISTERED host, not a
@@ -320,6 +351,15 @@
       }
     }
 
+    // Installed in the same tick as the subscription above, and before
+    // `panel_host_ready` tells the parent this window can be broadcast to —
+    // so in practice the pending-queue above is never the path a real boot
+    // takes. It stays as a defensive fallback (and stays independently
+    // testable) rather than being deleted, because `listenOnCurrentWindow`'s
+    // registration is itself async underneath Tauri's IPC and nothing here
+    // guarantees it has taken effect before this line runs.
+    setEventSink(dispatchPanelHostEvent);
+
     // Show + focus, only now that the panel is actually on screen — the
     // panel-host twin of `app_ready` (and of the chooser's `chooser_ready`).
     try {
@@ -346,6 +386,7 @@
     boot,
     setEventSink,
     getPendingEvents,
+    dispatchPanelHostEvent,
     HOST_BODY_CLASS,
   };
 })(window);

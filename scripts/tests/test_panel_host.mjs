@@ -34,6 +34,11 @@ const MANAGER_PATH = path.join(FRONTEND, 'layout/tool-window-manager.js');
 const RUNTIME_PATH = path.join(FRONTEND, 'tool-window-runtime.js');
 const MAIN_RUNTIME_PATH = path.join(FRONTEND, 'main-runtime.js');
 const HOST_RUNTIME_PATH = path.join(FRONTEND, 'panel-host-runtime.js');
+const BRIDGE_PATH = path.join(FRONTEND, 'core/panel-host-bridge.js');
+const MANAGER_COMPOSE_PATH = path.join(FRONTEND, 'manager-compose-runtime.js');
+const FILES_PANEL_PATH = path.join(FRONTEND, 'panels/files-panel.js');
+const FILES_DATA_SERVICE_PATH = path.join(FRONTEND, 'features/files/data-service.js');
+const FILES_PANE_STORE_PATH = path.join(FRONTEND, 'features/files/pane-store.js');
 
 // --- shared element stub ---------------------------------------------------
 
@@ -1133,8 +1138,9 @@ function makeHostSandbox(config) {
     ['bottom-zone-resize', makeElement('div')],
   ]);
 
+  const warnCalls = [];
   const sandbox = {
-    console: { log() {}, warn() {}, error() {} },
+    console: { log() {}, warn: (...args) => { warnCalls.push(args); }, error() {} },
     setTimeout,
     clearTimeout,
     Promise,
@@ -1164,6 +1170,7 @@ function makeHostSandbox(config) {
 
   // The four built-in panels, stubbed at their init boundary so a render is
   // observable without dragging the real panels into the harness.
+  const filesPanelOnTabChangedCalls = [];
   const panelStub = (name) => ({
     init: (opts) => {
       timeline.push('render:' + name);
@@ -1171,6 +1178,11 @@ function makeHostSandbox(config) {
     },
   });
   sandbox.filesPanel = panelStub('file-explorer');
+  // Task 5's dispatch target: a real filesPanel.onTabChanged is exercised
+  // end to end in Part 5 (against the real files-panel.js); here it is just
+  // a recorder, so Part 4's boot-focused scenarios don't have to care that
+  // every boot() now installs a live event sink (see scenario 26).
+  sandbox.filesPanel.onTabChanged = (payload) => { filesPanelOnTabChangedCalls.push(payload); };
   sandbox.sshPanel = panelStub('ssh-sessions');
   sandbox.tunnelsPanel = panelStub('tunnels');
   sandbox.notificationsPanel = panelStub('notifications');
@@ -1218,6 +1230,11 @@ function makeHostSandbox(config) {
   };
 
   vm.createContext(sandbox);
+  // Loaded for real, not stubbed: the host's dispatch table reads
+  // BRIDGE_EVENTS / ACTIVE_PANE_CHANGED_EVENT from this module rather than a
+  // second literal, so the harness has to supply the genuine article for
+  // that guard to mean anything.
+  vm.runInContext(fs.readFileSync(BRIDGE_PATH, 'utf8'), sandbox, { filename: BRIDGE_PATH });
   vm.runInContext(fs.readFileSync(MANAGER_PATH, 'utf8'), sandbox, { filename: MANAGER_PATH });
   vm.runInContext(fs.readFileSync(RUNTIME_PATH, 'utf8'), sandbox, { filename: RUNTIME_PATH });
   vm.runInContext(fs.readFileSync(HOST_RUNTIME_PATH, 'utf8'), sandbox, {
@@ -1282,6 +1299,8 @@ function makeHostSandbox(config) {
     panelInits,
     titlebarRefreshes,
     routerRegistrations,
+    warnCalls,
+    filesPanelOnTabChangedCalls,
     body,
     appEl,
     zoneEls,
@@ -1489,7 +1508,13 @@ function makeHostSandbox(config) {
   assert.strictEqual(host.body.classList.contains('tl-panelhost-window'), false);
 }
 
-// --- 26. panel-host-event is subscribed and queued for Task 5 ------------
+// --- 26. panel-host-event is subscribed, and boot() installs the real ------
+// dispatcher in the same tick (Task 5) — so in a genuine boot the pending
+// queue is never actually the path taken. The queue itself (receive-before-
+// a-sink-exists) is still real, general-purpose machinery: scenario 26b
+// exercises it directly, independent of boot's own wiring choice, so a
+// future boot that installs its sink later (or not at all) cannot silently
+// stop being covered.
 {
   const host = makeHostSandbox();
   await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
@@ -1497,20 +1522,304 @@ function makeHostSandbox(config) {
 
   assert.ok(host.listens.window.has('panel-host-event'),
     'the broadcast lands on THIS window (emit_to the host label), not app-wide');
+  assert.deepStrictEqual(plain(runtime.getPendingEvents()), [],
+    'boot() already installed a live sink — nothing is left pending after it resolves');
+
+  host.emitWindow('panel-host-event', { event: 'active-pane-changed', payload: { type: 'local', paneId: 3 } });
+  assert.deepStrictEqual(plain(host.filesPanelOnTabChangedCalls), [{ type: 'local', paneId: 3 }],
+    'a known event reaches filesPanel.onTabChanged immediately — no queuing needed once booted');
+  assert.deepStrictEqual(plain(runtime.getPendingEvents()), []);
+}
+
+// --- 26b. The raw seam (receive-before-a-sink-exists) still queues --------
+// Same mechanism scenario 26 used to exercise via boot() before Task 5
+// existed; pinned directly against the module now that boot() no longer
+// leaves the gap open in practice.
+{
+  const host = makeHostSandbox();
+  const runtime = host.sandbox.termlabPanelHostRuntime;
 
   host.emitWindow('panel-host-event', { event: 'config-changed', payload: { a: 1 } });
-  assert.deepStrictEqual(plain(runtime.getPendingEvents()), [
-    { event: 'config-changed', payload: { a: 1 } },
-  ], 'an event arriving before Task 5 installs a sink is QUEUED, not dropped');
+  assert.deepStrictEqual(plain(runtime.getPendingEvents()), [],
+    'nothing is listening yet — boot() has not even run, so this is a precondition check');
 
+  await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+  // boot() itself installs a sink synchronously, so by the time it resolves
+  // there is nothing left pending; the queue's drain-in-order behaviour is
+  // what scenario 26 already demonstrates for the real dispatcher. This
+  // scenario instead pins the primitive directly, bypassing boot(), so the
+  // seam stays covered even if boot's own wiring choice ever changes.
+  runtime.setEventSink(null);
   const seen = [];
+  host.emitWindow('panel-host-event', { event: 'queued-one', payload: { x: 1 } });
+  host.emitWindow('panel-host-event', { event: 'queued-two', payload: { x: 2 } });
+  assert.deepStrictEqual(plain(runtime.getPendingEvents()), [
+    { event: 'queued-one', payload: { x: 1 } },
+    { event: 'queued-two', payload: { x: 2 } },
+  ], 'events arriving with no sink installed are queued, not dropped');
+
   runtime.setEventSink((p) => seen.push(p));
-  assert.deepStrictEqual(plain(seen), [{ event: 'config-changed', payload: { a: 1 } }],
-    'installing a sink drains the queue in arrival order');
+  assert.deepStrictEqual(plain(seen), [
+    { event: 'queued-one', payload: { x: 1 } },
+    { event: 'queued-two', payload: { x: 2 } },
+  ], 'installing a sink drains the queue in arrival order');
   assert.deepStrictEqual(plain(runtime.getPendingEvents()), []);
 
-  host.emitWindow('panel-host-event', { event: 'later', payload: {} });
-  assert.strictEqual(seen.length, 2, 'and later events go straight through');
+  host.emitWindow('panel-host-event', { event: 'queued-three', payload: {} });
+  assert.strictEqual(seen.length, 3, 'and later events go straight through');
+}
+
+// ===========================================================================
+// Part 5 — the parent-state event bridge (Task 5)
+// ===========================================================================
+
+// --- 27. BRIDGE_EVENTS is the single source; publish relays a listed event
+{
+  const sandbox = { console };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(BRIDGE_PATH, 'utf8'), sandbox, { filename: BRIDGE_PATH });
+
+  assert.deepStrictEqual(Array.from(sandbox.termlabPanelHostBridge.BRIDGE_EVENTS), ['active-pane-changed']);
+  assert.strictEqual(sandbox.termlabPanelHostBridge.ACTIVE_PANE_CHANGED_EVENT, 'active-pane-changed');
+
+  const invokeCalls = [];
+  const bridge = sandbox.termlabPanelHostBridge.create({
+    invoke: (cmd, args) => { invokeCalls.push({ cmd, args }); return Promise.resolve(); },
+  });
+
+  bridge.publish('active-pane-changed', { type: 'ssh', spawned: true, paneId: 3 });
+  assert.deepStrictEqual(plain(invokeCalls), [
+    {
+      cmd: 'panel_host_broadcast',
+      args: { event: 'active-pane-changed', payload: { type: 'ssh', spawned: true, paneId: 3 } },
+    },
+  ], 'a listed event relays through panel_host_broadcast with the exact payload');
+}
+
+// --- 28. publish THROWS synchronously on an unlisted event name -----------
+{
+  const sandbox = { console };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(BRIDGE_PATH, 'utf8'), sandbox, { filename: BRIDGE_PATH });
+
+  const invokeCalls = [];
+  const bridge = sandbox.termlabPanelHostBridge.create({
+    invoke: (cmd, args) => { invokeCalls.push({ cmd, args }); return Promise.resolve(); },
+  });
+
+  assert.throws(() => bridge.publish('some-other-event', {}), /unlisted event/);
+  assert.deepStrictEqual(invokeCalls, [], 'a rejected publish must never reach invoke');
+}
+
+// --- 29/30. Both parent call sites in manager-compose-runtime.js publish --
+// Scenario 29 drives paneManager's onTerminalFocused (a PANE-shaped target:
+// paneId, type, spawned — pane-manager.js); scenario 30 drives tabManager's
+// onTabChanged (a TAB-shaped target: id, type, focusedPaneId —
+// tab-manager.js). Both must still call filesPanel.onTabChanged with the
+// RAW target (unchanged docked behaviour) and ALSO publish the primitives to
+// the bridge.
+function loadManagerComposeRuntime() {
+  const invokeCalls = [];
+  const filesPanelCalls = [];
+  let paneManagerDeps = null;
+  let tabManagerDeps = null;
+
+  const sandbox = { console, setTimeout, clearTimeout, Promise, Math };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+
+  sandbox.filesPanel = { onTabChanged: (target) => { filesPanelCalls.push(target); } };
+  // Stand-ins for the real pane/tab managers: manager-compose-runtime.js only
+  // needs to hand them an options bag and get something back with a truthy
+  // shape — the options bag itself is exactly what this harness is after.
+  sandbox.termlabPaneManager = { create: (deps) => { paneManagerDeps = deps; return {}; } };
+  sandbox.termlabTabManager = { create: (deps) => { tabManagerDeps = deps; return {}; } };
+
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(BRIDGE_PATH, 'utf8'), sandbox, { filename: BRIDGE_PATH });
+  vm.runInContext(fs.readFileSync(MANAGER_COMPOSE_PATH, 'utf8'), sandbox, { filename: MANAGER_COMPOSE_PATH });
+
+  const invoke = (cmd, args) => {
+    invokeCalls.push({ cmd, args });
+    return Promise.resolve(undefined);
+  };
+
+  sandbox.termlabManagerComposeRuntime.create({
+    invoke,
+    tabs: new Map(),
+    panes: new Map(),
+  });
+
+  return { paneManagerDeps, tabManagerDeps, invokeCalls, filesPanelCalls };
+}
+
+function broadcastCalls(invokeCalls) {
+  return plain(invokeCalls.filter((c) => c.cmd === 'panel_host_broadcast'));
+}
+
+{
+  const { paneManagerDeps, tabManagerDeps, invokeCalls, filesPanelCalls } = loadManagerComposeRuntime();
+  assert.strictEqual(typeof paneManagerDeps.onTerminalFocused, 'function');
+  assert.strictEqual(typeof tabManagerDeps.onTabChanged, 'function');
+
+  // Scenario 29: a PANE-shaped target.
+  const fakePane = {
+    paneId: 7, tabId: 't1', kind: 'terminal', type: 'local', spawned: true, term: { fake: true },
+  };
+  paneManagerDeps.onTerminalFocused(7, fakePane);
+
+  assert.deepStrictEqual(filesPanelCalls, [fakePane],
+    'filesPanel.onTabChanged must still receive the RAW pane object, unchanged');
+  assert.deepStrictEqual(broadcastCalls(invokeCalls), [
+    { cmd: 'panel_host_broadcast', args: { event: 'active-pane-changed', payload: { type: 'local', spawned: true, paneId: 7 } } },
+  ], 'onTerminalFocused must ALSO publish, extracting only the primitives the pane carries');
+
+  // Scenario 30: a TAB-shaped target.
+  invokeCalls.length = 0;
+  const fakeTab = {
+    id: 'tab-9', type: 'ssh', focusedPaneId: 42, label: 'demo', button: {}, containerEl: {},
+  };
+  tabManagerDeps.onTabChanged(fakeTab);
+
+  assert.deepStrictEqual(filesPanelCalls, [fakePane, fakeTab],
+    'the second call site must also still hand filesPanel the raw target');
+  assert.deepStrictEqual(broadcastCalls(invokeCalls), [
+    { cmd: 'panel_host_broadcast', args: { event: 'active-pane-changed', payload: { type: 'ssh', focusedPaneId: 42, id: 'tab-9' } } },
+  ], 'onTabChanged must publish the TAB shape\'s primitives (id/focusedPaneId, no paneId/spawned)');
+}
+
+// --- 31. Host re-dispatch: active-pane-changed reaches filesPanel.onTabChanged
+{
+  const host = makeHostSandbox();
+  await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  const payload = { type: 'ssh', spawned: true, paneId: 11 };
+  host.emitWindow('panel-host-event', { event: 'active-pane-changed', payload });
+
+  assert.deepStrictEqual(plain(host.filesPanelOnTabChangedCalls), [payload],
+    'the SAME callback interface a docked panel gets (filesPanel.onTabChanged) must fire in a host too');
+  assert.deepStrictEqual(host.warnCalls, [], 'a known event must not warn');
+}
+
+// --- 32. Host re-dispatch: an unlisted event warns and continues ----------
+{
+  const host = makeHostSandbox();
+  await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.doesNotThrow(() => {
+    host.emitWindow('panel-host-event', { event: 'some-future-event', payload: { x: 1 } });
+  }, 'a version-skewed parent broadcasting an unknown event must never throw in the host');
+
+  assert.deepStrictEqual(host.filesPanelOnTabChangedCalls, [],
+    'an unlisted event must not reach filesPanel');
+  assert.strictEqual(host.warnCalls.length, 1, 'exactly one warning for the one unlisted event');
+  assert.deepStrictEqual(host.warnCalls[0], ['panel host: ignoring unlisted panel-host-event', 'some-future-event']);
+}
+
+// --- 33. End-to-end chain: a popped SFTP panel issues sftp_* with the -----
+// PARENT's active pane id. Loads the REAL files-panel.js (plus its real
+// data-service.js and pane-store.js) — not a stub — so this is genuine
+// evidence that Task 5's payload reaches Task 1/2's session resolver with
+// the right pane identity, not just that a callback fired.
+//
+// crates/termlab_tauri/src/remote/sftp_commands.rs's sftp_list_dir (and
+// sftp_realpath) resolve the caller's session key from `window.label()`
+// through `session_caller_label` -> `effective_session_window_label`
+// (Task 2): a panelhost-* window's own `invoke` resolves to its PARENT's
+// label there. So all this harness has to prove on the frontend side is
+// that the paneId this payload carries is the one that ends up on the
+// sftp_realpath / sftp_list_dir invoke — Rust does the rest with the
+// caller's real (host) window label, which the parent-keyed session already
+// matches.
+{
+  const invokeCalls = [];
+  const invoke = (cmd, args) => {
+    invokeCalls.push({ cmd, args });
+    if (cmd === 'sftp_realpath') return Promise.resolve('/home/demo');
+    if (cmd === 'sftp_list_dir') return Promise.resolve([]);
+    if (cmd === 'get_home_dir') return Promise.resolve('/home/demo');
+    if (cmd === 'get_all_settings') return Promise.resolve({});
+    if (cmd === 'local_list_dir') return Promise.resolve([]);
+    return Promise.resolve(undefined);
+  };
+
+  const sandbox = {
+    console,
+    setTimeout,
+    clearTimeout,
+    // Stubbed, not real: files-panel.js's cwd polling would otherwise leave
+    // live intervals running against this sandbox after the assertions
+    // below finish, which is irrelevant to this test's question (does the
+    // right paneId reach sftp_realpath/sftp_list_dir?) and would keep the
+    // test process alive.
+    setInterval: () => 0,
+    clearInterval: () => {},
+    Promise,
+    Math,
+    Array,
+    JSON,
+    Object,
+    String,
+  };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  sandbox.utils = { formatSize: () => '' };
+  sandbox.toast = { error() {}, info() {} };
+  sandbox.toolWindowManager = { isVisible: () => true, activate() {}, deactivate() {} };
+  // The panel's own DOM rendering is irrelevant to whether the right
+  // sftp_* invoke fires, so it is stubbed out rather than faked with a real
+  // parser this harness does not have.
+  sandbox.termlabFilesPaneView = { renderPane: () => {}, showColumnMenu: () => {}, showRowContextMenu: () => {} };
+  sandbox.termlabFilesActions = {};
+  sandbox.termlabFilesTransfers = {};
+
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
+  vm.runInContext(fs.readFileSync(FILES_DATA_SERVICE_PATH, 'utf8'), sandbox, { filename: FILES_DATA_SERVICE_PATH });
+  vm.runInContext(fs.readFileSync(FILES_PANEL_PATH, 'utf8'), sandbox, { filename: FILES_PANEL_PATH });
+
+  const panelEl = makeElement('div');
+  const localRootEl = makeElement('div');
+  const remoteRootEl = makeElement('div');
+  panelEl.querySelector = (sel) => {
+    if (sel === '#fp-local') return localRootEl;
+    if (sel === '#fp-remote') return remoteRootEl;
+    return null;
+  };
+
+  sandbox.filesPanel.init({
+    invoke,
+    panelEl,
+    panelWrapEl: makeElement('div'),
+    resizeHandleEl: makeElement('div'),
+    layoutService: null,
+    fitActiveTab: () => {},
+    getActiveTab: () => null,
+  });
+  await tick();
+  invokeCalls.length = 0; // discard the local-pane boot traffic (getHomeDir, settings, local_list_dir)
+
+  // This IS the payload shape Task 5's bridge/host would deliver: a live SSH
+  // pane the parent just focused, spawned, carrying only paneId (the
+  // PANE-shaped call site — onTerminalFocused).
+  await sandbox.filesPanel.onTabChanged({ type: 'ssh', spawned: true, paneId: 11 });
+  await tick();
+
+  const realpathCall = invokeCalls.find((c) => c.cmd === 'sftp_realpath');
+  const listDirCall = invokeCalls.find((c) => c.cmd === 'sftp_list_dir');
+  assert.ok(realpathCall, 'onTabChanged must resolve the remote cwd via sftp_realpath');
+  assert.strictEqual(realpathCall.args.paneId, 11,
+    'sftp_realpath must carry the PARENT-supplied paneId from the bridge payload');
+  assert.ok(listDirCall, 'onTabChanged must then list the remote directory via sftp_list_dir');
+  assert.strictEqual(listDirCall.args.paneId, 11,
+    'sftp_list_dir must carry the same paneId — this is what a popped-out SFTP '
+    + 'panel needs so Rust\'s session_caller_label resolver (Task 2) finds the '
+    + 'PARENT\'s session for that pane, not a session keyed to the host window '
+    + 'itself (which has none)');
 }
 
 console.log('panel host: all assertions passed');

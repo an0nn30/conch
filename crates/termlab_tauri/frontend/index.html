@@ -112,6 +112,11 @@
        loading index.html gets that from app/config-runtime.js instead and
        never creates a sync. -->
   <script src="app/core/appearance-sync.js"></script>
+  <!-- The parent-state event bridge (app/manager-compose-runtime.js's
+       publish calls, app/panel-host-runtime.js's re-dispatch table). Loaded
+       everywhere index.html is, parent windows and panel hosts alike, since
+       both sides need BRIDGE_EVENTS as their one shared source of truth. -->
+  <script src="app/core/panel-host-bridge.js"></script>
   <script src="app/ui/tl-icon.js"></script>
   <script src="app/ui/tl-menu.js"></script>
   <script src="app/ui/tl-dialog.js"></script>

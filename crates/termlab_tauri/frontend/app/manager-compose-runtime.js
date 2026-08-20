@@ -27,6 +27,35 @@
     const setFocusedPaneId = deps.setFocusedPaneId;
     const getPaneDnd = deps.getPaneDnd;
 
+    // The parent half of the pop-out event bridge (app/core/panel-host-
+    // bridge.js): publishes the pane/tab the files panel just switched to so
+    // any live panel-host window can re-run the same onTabChanged a docked
+    // panel gets for free. Null when the bridge script has not loaded (a
+    // window that skipped index.html's normal script graph), in which case
+    // publishActivePaneChanged below is a no-op — a pop-out that can never
+    // exist has nothing to hear the broadcast anyway.
+    const panelHostBridge = global.termlabPanelHostBridge && global.termlabPanelHostBridge.create
+      ? global.termlabPanelHostBridge.create({ invoke })
+      : null;
+
+    // `target` is either a PANE object (paneId, type, spawned — see
+    // pane-manager.js) or a TAB object (id, type, focusedPaneId — see
+    // tab-manager.js); files-panel.js's onTabChanged already duck-types
+    // between the two (files-panel.js:177-213). Only the primitive fields it
+    // actually reads are serialized — target is a live object with methods,
+    // DOM refs and xterm instances, none of which survives (or should
+    // attempt to survive) an IPC hop to another window.
+    function publishActivePaneChanged(target) {
+      if (!panelHostBridge || !target) return;
+      panelHostBridge.publish(global.termlabPanelHostBridge.ACTIVE_PANE_CHANGED_EVENT, {
+        type: target.type,
+        spawned: target.spawned,
+        paneId: target.paneId,
+        focusedPaneId: target.focusedPaneId,
+        id: target.id,
+      });
+    }
+
     const rebuildTreeDOM = deps.rebuildTreeDOM;
     const fitAndResizePane = deps.fitAndResizePane;
     const fitAndResizeTab = deps.fitAndResizeTab;
@@ -55,6 +84,7 @@
           },
           onTerminalFocused: (paneId, pane) => {
             if (global.filesPanel) global.filesPanel.onTabChanged(pane);
+            publishActivePaneChanged(pane);
             invoke('set_active_pane', { paneId }).catch(() => {});
           },
           unregisterPaneDnd: (paneId) => {
@@ -141,6 +171,7 @@
           },
           onTabChanged: (target) => {
             if (global.filesPanel) global.filesPanel.onTabChanged(target);
+            publishActivePaneChanged(target);
           },
           allPanesInTab: (tabId) => allPanesInTab(tabId),
           rememberPluginViewSize: (pane) => rememberPluginViewSize(pane),
