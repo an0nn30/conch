@@ -1,11 +1,18 @@
 //! File transfer Tauri commands — download, upload, cancel.
+//!
+//! Both transfers resolve the calling window through `session_caller_label`
+//! for the same reason every SFTP command does: a popped-out panel host (or a
+//! chooser window) transfers on behalf of its PARENT, and sessions are keyed
+//! under the parent's label. Using `window.label()` raw here meant a
+//! popped-out panel's upload/download failed with "No SSH session for
+//! {own-label}:{pane}".
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use super::RemoteState;
-use super::sftp_commands::get_ssh_handle;
+use super::sftp_commands::{get_ssh_handle, session_caller_label};
 
 // ---------------------------------------------------------------------------
 // Tauri commands
@@ -21,7 +28,7 @@ pub(crate) async fn transfer_download(
 ) -> Result<String, String> {
     let (ssh, transfer_id, progress_tx, registry) = {
         let state = remote.lock();
-        let ssh = get_ssh_handle(&state, window.label(), pane_id)?;
+        let ssh = get_ssh_handle(&state, &session_caller_label(&window), pane_id)?;
         let tid = uuid::Uuid::new_v4().to_string();
         let ptx = state.transfer_progress_tx.clone();
         let reg = Arc::clone(&state.transfers);
@@ -48,7 +55,7 @@ pub(crate) async fn transfer_upload(
 ) -> Result<String, String> {
     let (ssh, transfer_id, progress_tx, registry) = {
         let state = remote.lock();
-        let ssh = get_ssh_handle(&state, window.label(), pane_id)?;
+        let ssh = get_ssh_handle(&state, &session_caller_label(&window), pane_id)?;
         let tid = uuid::Uuid::new_v4().to_string();
         let ptx = state.transfer_progress_tx.clone();
         let reg = Arc::clone(&state.transfers);

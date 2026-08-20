@@ -177,6 +177,12 @@ pub(crate) fn vault_add_account(
     vault: tauri::State<'_, VaultState>,
     request: AddAccountRequest,
 ) -> Result<Uuid, String> {
+    add_account(&vault, request)
+}
+
+/// `vault_add_account`'s body, callable from other backend code (which holds a
+/// `VaultState`, not a `tauri::State`) and from tests.
+pub(crate) fn add_account(vault: &VaultState, request: AddAccountRequest) -> Result<Uuid, String> {
     let auth = parse_auth_method(
         &request.auth_type,
         request.password.as_deref(),
@@ -194,6 +200,14 @@ pub(crate) fn vault_add_account(
 #[tauri::command]
 pub(crate) fn vault_update_account(
     vault: tauri::State<'_, VaultState>,
+    request: UpdateAccountRequest,
+) -> Result<(), String> {
+    update_account(&vault, request)
+}
+
+/// `vault_update_account`'s body — see `add_account`.
+pub(crate) fn update_account(
+    vault: &VaultState,
     request: UpdateAccountRequest,
 ) -> Result<(), String> {
     let auth = request

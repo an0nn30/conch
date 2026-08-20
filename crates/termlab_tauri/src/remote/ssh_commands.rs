@@ -388,6 +388,7 @@ pub(crate) async fn ssh_open_channel(
                 user,
                 port,
                 abort_handle: None,
+                server_entry_id: None,
             },
         );
     }

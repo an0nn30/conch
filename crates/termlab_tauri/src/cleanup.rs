@@ -215,6 +215,7 @@ mod tests {
                     user: "alice".to_string(),
                     port: 22,
                     abort_handle: None,
+                    server_entry_id: None,
                 },
             );
             state.sessions.insert(
@@ -226,6 +227,7 @@ mod tests {
                     user: "alice".to_string(),
                     port: 22,
                     abort_handle: None,
+                    server_entry_id: None,
                 },
             );
             state.sessions.insert(
@@ -237,6 +239,7 @@ mod tests {
                     user: "bob".to_string(),
                     port: 22,
                     abort_handle: None,
+                    server_entry_id: None,
                 },
             );
         }

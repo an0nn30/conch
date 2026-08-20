@@ -786,6 +786,7 @@ mod tests {
                 "tab.example.com".to_string(),
                 "alice".to_string(),
                 22,
+                "entry-tab".to_string(),
             ),
         );
         let detached_key = format!("main:{DETACHED_PANE_ID_BASE}");
@@ -796,6 +797,7 @@ mod tests {
                 "panel.example.com".to_string(),
                 "deploy".to_string(),
                 2222,
+                "entry-panel".to_string(),
             ),
         );
 

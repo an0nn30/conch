@@ -779,6 +779,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                     let ssh_count = cleanup::cleanup_ssh_sessions(&remote, &label);
                     if ssh_count > 0 {
                         log::info!("Cleaned up {ssh_count} SSH session(s) for window '{label}'");
+                        // Detached SFTP sessions are listed by EVERY window's
+                        // panel, so a window closing with any of them open
+                        // leaves the others showing sessions that are gone.
+                        remote::detached_commands::emit_sessions_changed(window.app_handle());
                     }
                 }
             }

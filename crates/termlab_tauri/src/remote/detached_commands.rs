@@ -40,7 +40,7 @@ use super::ssh_commands::{credentials_from_server, try_vault_credentials};
 use super::{
     RemoteState, SshConnection, SshSession, TauriRemoteCallbacks, connection_key, session_key,
 };
-use crate::vault_commands::{AddAccountRequest, VaultState};
+use crate::vault_commands::{AddAccountRequest, UpdateAccountRequest, VaultState};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -86,7 +86,7 @@ static NEXT_DETACHED_PANE_ID: AtomicU32 = AtomicU32::new(DETACHED_PANE_ID_BASE);
 
 /// Mint the next id from `counter`, never returning one in terminal-owned id
 /// space. The re-seed branch is only reachable if the counter wrapped past
-/// `u32::MAX` (≈3.29 billion detached connects in one process); it exists so
+/// `u32::MAX` (≈4.29 billion detached connects in one process); it exists so
 /// the reserved-range invariant is structural rather than merely probable.
 fn mint_pane_id(counter: &AtomicU32) -> u32 {
     let id = counter.fetch_add(1, Ordering::Relaxed);
@@ -200,6 +200,12 @@ fn has_usable_password(credentials: &SshCredentials) -> bool {
 
 /// Map a `connect_and_auth` failure onto the frontend's typed error.
 ///
+/// VALID FOR `connect_and_auth` ONLY. `connect_and_open_shell` wraps it and
+/// then emits `RemoteError::Connection` from three POST-auth channel steps
+/// (channel open, PTY request, shell request) — routing a detached connect
+/// through that function instead would silently report a post-auth failure as
+/// `Unreachable`.
+///
 /// The split is structural, not textual: `connect_and_auth` produces
 /// `RemoteError::Connection` ONLY while establishing the transport
 /// (`client::connect`, `connect_via_proxy`, the iOS no-proxy guard) and
@@ -258,6 +264,7 @@ pub(super) fn detached_session(
     host: String,
     user: String,
     port: u16,
+    server_entry_id: String,
 ) -> SshSession {
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     drop(input_rx);
@@ -268,7 +275,39 @@ pub(super) fn detached_session(
         user,
         port,
         abort_handle: None,
+        server_entry_id: Some(server_entry_id),
     }
+}
+
+/// The live detached session this window already holds for `entry_id`, if any.
+///
+/// The terminal path's duplicate guard is per-pane (`establish_ssh_session`
+/// rejects a pane that already has a session), which does not translate here:
+/// every detached connect mints a FRESH pane id, so without this the same host
+/// picked twice would open a second TCP+SSH connection and list twice in the
+/// chooser. The guard is per (window, entry) because that is the identity the
+/// dropdown offers — a different window is a genuinely independent connection
+/// (a stated product rule), and a terminal session on the same host is a
+/// different thing that must not be handed out here (its pane id is below the
+/// base, and it carries no `server_entry_id` at all).
+fn find_detached_session_for_entry(
+    state: &RemoteState,
+    window_label: &str,
+    entry_id: &str,
+) -> Option<ConnectedSession> {
+    state.sessions.iter().find_map(|(key, session)| {
+        if session.server_entry_id.as_deref() != Some(entry_id) {
+            return None;
+        }
+        let pane_id = detached_pane_id_for_window(key, window_label).ok()?;
+        Some(ConnectedSession {
+            session_key: key.clone(),
+            host: session.host.clone(),
+            user: session.user.clone(),
+            port: session.port,
+            pane_id,
+        })
+    })
 }
 
 /// The ref-count step every teardown path shares: returns the new count and
@@ -308,6 +347,7 @@ fn register_detached_session(
             server.host.clone(),
             credentials.username.clone(),
             server.port,
+            server.id.clone(),
         ),
     );
 
@@ -382,6 +422,63 @@ fn resolve_server(
     })
 }
 
+/// Every rung of the ladder that needs no socket, as a pure function of what
+/// `try_vault_credentials` answered and what the entry says.
+///
+/// Extracted from `sftp_connect_host` so each rung is testable with the vault
+/// fixture harness (a real `VaultManager` in a tempdir) instead of only being
+/// reachable through a `#[tauri::command]` that needs a live window and a live
+/// server. `Ok` means "there is an attempt worth making"; every `Err` is a
+/// decision the frontend must act on.
+fn resolve_credentials(
+    vault_result: Result<Option<SshCredentials>, String>,
+    server: &ServerEntry,
+) -> Result<SshCredentials, SftpConnectError> {
+    let has_vault_account = server.vault_account_id.is_some();
+
+    let credentials = match vault_result {
+        // A sealed vault stops the ladder here: unlocking is the user's
+        // decision, and falling through to key auth would silently connect as
+        // somebody other than the account they linked.
+        Err(e) if e == VAULT_LOCKED => return Err(SftpConnectError::VaultLocked),
+        Err(message) => return Err(SftpConnectError::Other { message }),
+        Ok(Some(credentials)) => credentials,
+        Ok(None) => credentials_from_server(server, None),
+    };
+
+    // Password auth with nothing to send is decided before any socket: there is
+    // no attempt that could succeed, and the frontend owns the prompt.
+    if credentials.auth_method == "password" && !has_usable_password(&credentials) {
+        return Err(SftpConnectError::NeedsPassword { has_vault_account });
+    }
+
+    Ok(credentials)
+}
+
+/// Which username a user-typed password should be tried against: the linked
+/// vault account's, when there is one, else the entry's (else `root`) — the
+/// same precedence `ssh_connect` applies. A vault error other than a sealed
+/// vault also lands on the entry's user: this path already has a password in
+/// hand, so the only thing a broken account link changes is the name to send.
+fn resolve_password_username(
+    vault_result: Result<Option<SshCredentials>, String>,
+    server: &ServerEntry,
+) -> String {
+    match vault_result {
+        Ok(Some(credentials)) => credentials.username.clone(),
+        _ => credentials_from_server(server, None).username.clone(),
+    }
+}
+
+/// Tell every window that the set of live sessions changed.
+///
+/// The one place the event name lives; `cleanup` calls it too, so a window
+/// closing with detached sessions refreshes the OTHER windows' dropdowns
+/// instead of leaving them listing sessions that are gone.
+pub(crate) fn emit_sessions_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let _ = app.emit(SESSIONS_CHANGED_EVENT, ());
+}
+
 /// Connect + authenticate without a PTY, then register the session and tell
 /// the app the session set changed.
 async fn connect_detached(
@@ -417,7 +514,7 @@ async fn connect_detached(
         register_detached_session(&mut state, window_label, server, credentials, ssh_handle)
     };
 
-    let _ = app.emit(SESSIONS_CHANGED_EVENT, ());
+    emit_sessions_changed(app);
     Ok(session)
 }
 
@@ -439,23 +536,18 @@ pub(crate) async fn sftp_connect_host(
     let window_label = session_caller_label(&window);
     let remote = Arc::clone(&remote);
     let server = resolve_server(&remote, &server_entry_id)?;
-    let has_vault_account = server.vault_account_id.is_some();
 
-    let credentials = match try_vault_credentials(&vault, &server) {
-        // A sealed vault stops the ladder here: unlocking is the user's
-        // decision, and falling through to key auth would silently connect as
-        // somebody other than the account they linked.
-        Err(e) if e == VAULT_LOCKED => return Err(SftpConnectError::VaultLocked),
-        Err(message) => return Err(SftpConnectError::Other { message }),
-        Ok(Some(credentials)) => credentials,
-        Ok(None) => credentials_from_server(&server, None),
-    };
-
-    // Password auth with nothing to send is decided before any socket: there
-    // is no attempt that could succeed, and the frontend owns the prompt.
-    if credentials.auth_method == "password" && !has_usable_password(&credentials) {
-        return Err(SftpConnectError::NeedsPassword { has_vault_account });
+    // Picking the same host twice hands back the session that is already open
+    // rather than opening a second connection to it.
+    if let Some(existing) = {
+        let state = remote.lock();
+        find_detached_session_for_entry(&state, &window_label, &server.id)
+    } {
+        return Ok(existing);
     }
+
+    let has_vault_account = server.vault_account_id.is_some();
+    let credentials = resolve_credentials(try_vault_credentials(&vault, &server), &server)?;
 
     connect_detached(
         &app,
@@ -489,13 +581,7 @@ pub(crate) async fn sftp_connect_host_with_password(
     let server = resolve_server(&remote_state, &server_entry_id)?;
     let has_vault_account = server.vault_account_id.is_some();
 
-    // Prefer the linked account's username (it can differ from the entry's
-    // legacy `user` field, and is what `ssh_connect` would have used); fall
-    // back to the entry, then to `root`, exactly as the terminal path does.
-    let username = match try_vault_credentials(&vault, &server) {
-        Ok(Some(credentials)) => credentials.username.clone(),
-        _ => credentials_from_server(&server, None).username.clone(),
-    };
+    let username = resolve_password_username(try_vault_credentials(&vault, &server), &server);
 
     let credentials = SshCredentials {
         username,
@@ -519,13 +605,8 @@ pub(crate) async fn sftp_connect_host_with_password(
     // `Some` here — the binding just avoids cloning it back out.
     if save_to_vault
         && let Some(pw) = credentials.password.as_deref()
-        && let Err(e) = link_password_account(
-            vault.clone(),
-            &remote_state,
-            &server,
-            &credentials.username,
-            pw,
-        )
+        && let Err(e) =
+            link_password_account(&vault, &remote_state, &server, &credentials.username, pw)
     {
         // The connection itself succeeded, which is what the user asked for; a
         // failed vault write (sealed vault, disk error) is reported as a
@@ -537,19 +618,42 @@ pub(crate) async fn sftp_connect_host_with_password(
     Ok(session)
 }
 
-/// Create a password account for `server` and point the server entry at it.
+/// Store `password` in the vault for `server`, and make sure the entry points
+/// at the account holding it.
 ///
-/// Goes through exactly the surfaces the Hosts UI uses — `vault_add_account`
-/// for the secret, then the `remote_save_server` upsert for the entry — so the
-/// link is persisted to the config file and survives a restart.
+/// Two paths, because the entry may already be linked — that is exactly the
+/// `NeedsPassword { hasVaultAccount: true }` rung, an account whose stored
+/// password is the eager-import `""` placeholder:
+///
+/// - **Already linked** → UPDATE that account (`vault_update_account`). Adding
+///   a second account and repointing the entry would orphan the first one in
+///   the vault with no UI affordance pointing at it, one per attempt.
+/// - **Not linked** → create one (`vault_add_account`) and persist the link
+///   through the same upsert `remote_save_server` uses, so it survives restart.
+///
+/// Both go through the vault commands' own bodies, so nothing about encryption
+/// or on-disk format is duplicated here.
 fn link_password_account(
-    vault: tauri::State<'_, VaultState>,
+    vault: &VaultState,
     remote: &Arc<Mutex<RemoteState>>,
     server: &ServerEntry,
     username: &str,
     password: &str,
 ) -> Result<uuid::Uuid, String> {
-    let account_id = crate::vault_commands::vault_add_account(
+    if let Some(account_id) = server.vault_account_id {
+        let account = {
+            let mgr = vault.lock();
+            mgr.get_account(account_id).map_err(|e| e.to_string())?
+        };
+        crate::vault_commands::update_account(
+            vault,
+            password_update_request(account_id, &account, username, password),
+        )?;
+        // The entry already points at this account — nothing to persist.
+        return Ok(account_id);
+    }
+
+    let account_id = crate::vault_commands::add_account(
         vault,
         AddAccountRequest {
             display_name: server.label.clone(),
@@ -570,6 +674,48 @@ fn link_password_account(
     // launch and could not otherwise carry a vault link.
     save_server_preserving_folder(&mut state, entry);
     Ok(account_id)
+}
+
+/// The update that stores `password` on an existing account WITHOUT discarding
+/// a key the account already carries.
+///
+/// `vault_update_account` replaces the whole `AuthMethod`, so an account that
+/// authenticates with a key plus a password (or with a key alone, whose owner
+/// has now typed a password) must be rewritten as `key_and_password` carrying
+/// the original key path and passphrase forward — writing a bare `password`
+/// would silently drop the key.
+fn password_update_request(
+    account_id: uuid::Uuid,
+    account: &termlab_vault::VaultAccount,
+    username: &str,
+    password: &str,
+) -> UpdateAccountRequest {
+    let (auth_type, key_path, passphrase) = match &account.auth {
+        termlab_vault::AuthMethod::Password(_) => ("password", None, None),
+        termlab_vault::AuthMethod::Key { path, passphrase } => (
+            "key_and_password",
+            Some(path.display().to_string()),
+            passphrase.clone(),
+        ),
+        termlab_vault::AuthMethod::KeyAndPassword {
+            key_path,
+            passphrase,
+            ..
+        } => (
+            "key_and_password",
+            Some(key_path.display().to_string()),
+            passphrase.clone(),
+        ),
+    };
+    crate::vault_commands::UpdateAccountRequest {
+        id: account_id,
+        display_name: None,
+        username: Some(username.to_string()),
+        auth_type: Some(auth_type.to_string()),
+        password: Some(password.to_string()),
+        key_path,
+        passphrase,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +739,7 @@ pub(crate) fn sftp_disconnect(
         remove_detached_session(&mut state, &session_key)
     };
     if removed {
-        let _ = app.emit(SESSIONS_CHANGED_EVENT, ());
+        emit_sessions_changed(&app);
     }
     Ok(())
 }
@@ -732,6 +878,152 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // The pre-socket ladder (rungs inside sftp_connect_host)
+    // -----------------------------------------------------------------
+
+    /// The fixture idiom the existing `try_vault_credentials_*` tests use: a
+    /// real `VaultManager` in a tempdir, no network.
+    /// The tempdir is returned, not dropped: the vault file must outlive the
+    /// manager for `save()` to keep working.
+    fn vault_with_account(
+        auth: termlab_vault::AuthMethod,
+    ) -> (VaultState, uuid::Uuid, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = termlab_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test-password").unwrap();
+        let id = mgr
+            .add_account("Deploy".into(), "deploy".into(), auth)
+            .unwrap();
+        (std::sync::Arc::new(Mutex::new(mgr)), id, dir)
+    }
+
+    fn server_entry(auth_method: Option<&str>) -> ServerEntry {
+        ServerEntry {
+            id: "entry-1".into(),
+            label: "build-box".into(),
+            host: "build.example.com".into(),
+            port: 22,
+            user: Some("ops".into()),
+            auth_method: auth_method.map(str::to_string),
+            key_path: None,
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        }
+    }
+
+    #[test]
+    fn a_sealed_vault_stops_the_ladder_before_anything_else() {
+        // Driven through the real `try_vault_credentials`, so the sentinel this
+        // depends on is pinned end to end, not just its literal.
+        let (vault, account_id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password("pw".into()));
+        vault.lock().seal();
+        let mut server = server_entry(Some("key"));
+        server.vault_account_id = Some(account_id);
+
+        let result = resolve_credentials(try_vault_credentials(&vault, &server), &server);
+        assert!(
+            matches!(result, Err(SftpConnectError::VaultLocked)),
+            "a sealed vault must not fall through to a key attempt"
+        );
+    }
+
+    #[test]
+    fn a_broken_account_link_is_other_not_a_connect_attempt() {
+        let (vault, _id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password("pw".into()));
+        let mut server = server_entry(Some("key"));
+        server.vault_account_id = Some(uuid::Uuid::new_v4()); // deleted account
+
+        match resolve_credentials(try_vault_credentials(&vault, &server), &server) {
+            Err(SftpConnectError::Other { message }) => assert!(message.contains("not found")),
+            Err(other) => panic!("expected Other, got {other:?}"),
+            Ok(_) => panic!("a broken account link must not produce a connect attempt"),
+        }
+    }
+
+    #[test]
+    fn a_stored_but_empty_password_needs_a_password_with_the_account_flag() {
+        // The eager-import `""` placeholder — an account exists, so the dialog
+        // should offer "Save to vault" checked.
+        let (vault, account_id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password(String::new()));
+        let mut server = server_entry(Some("password"));
+        server.vault_account_id = Some(account_id);
+
+        assert!(matches!(
+            resolve_credentials(try_vault_credentials(&vault, &server), &server),
+            Err(SftpConnectError::NeedsPassword {
+                has_vault_account: true
+            })
+        ));
+    }
+
+    #[test]
+    fn a_password_entry_with_no_account_needs_a_password_before_any_socket() {
+        let server = server_entry(Some("password"));
+        assert!(matches!(
+            resolve_credentials(Ok(None), &server),
+            Err(SftpConnectError::NeedsPassword {
+                has_vault_account: false
+            })
+        ));
+    }
+
+    #[test]
+    fn no_vault_account_falls_back_to_the_entrys_own_fields() {
+        let server = server_entry(Some("key"));
+        let credentials =
+            resolve_credentials(Ok(None), &server).expect("a key attempt is worth making");
+        assert_eq!(credentials.username, "ops");
+        assert_eq!(credentials.auth_method, "key");
+
+        // An entry with no auth_method at all defaults to key, and is attempted.
+        let bare = server_entry(None);
+        let credentials = resolve_credentials(Ok(None), &bare).unwrap();
+        assert_eq!(credentials.auth_method, "key");
+    }
+
+    #[test]
+    fn a_usable_vault_password_is_returned_for_the_attempt() {
+        let (vault, account_id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password("pw123".into()));
+        let mut server = server_entry(Some("key"));
+        server.vault_account_id = Some(account_id);
+
+        let credentials = resolve_credentials(try_vault_credentials(&vault, &server), &server)
+            .expect("a stored password is worth attempting");
+        assert_eq!(credentials.username, "deploy", "the account's user wins");
+        assert_eq!(credentials.auth_method, "password");
+    }
+
+    #[test]
+    fn the_password_path_prefers_the_linked_accounts_username() {
+        let (vault, account_id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password(String::new()));
+        let mut server = server_entry(Some("password"));
+        server.vault_account_id = Some(account_id);
+        assert_eq!(
+            resolve_password_username(try_vault_credentials(&vault, &server), &server),
+            "deploy"
+        );
+
+        // No account → the entry's user; no user either → root.
+        let server = server_entry(Some("password"));
+        assert_eq!(resolve_password_username(Ok(None), &server), "ops");
+        let mut bare = server_entry(Some("password"));
+        bare.user = None;
+        assert_eq!(resolve_password_username(Ok(None), &bare), "root");
+
+        // A sealed vault still yields a username to try the typed password with.
+        assert_eq!(
+            resolve_password_username(Err(VAULT_LOCKED.to_string()), &server),
+            "ops"
+        );
+    }
+
+    // -----------------------------------------------------------------
     // Usable-password rung
     // -----------------------------------------------------------------
 
@@ -865,6 +1157,200 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Duplicate-connect guard
+    // -----------------------------------------------------------------
+
+    fn insert_detached(state: &mut RemoteState, key: &str, entry_id: &str) {
+        state.sessions.insert(
+            key.to_string(),
+            detached_session(
+                format!("conn:{key}"),
+                "build.example.com".into(),
+                "deploy".into(),
+                22,
+                entry_id.to_string(),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_second_connect_finds_the_session_already_open() {
+        let mut state = super::super::test_remote_state();
+        let key = format!("main:{DETACHED_PANE_ID_BASE}");
+        insert_detached(&mut state, &key, "entry-1");
+
+        let found = find_detached_session_for_entry(&state, "main", "entry-1")
+            .expect("the live session for this entry must be reused");
+        assert_eq!(found.session_key, key);
+        assert_eq!(found.pane_id, DETACHED_PANE_ID_BASE);
+        assert_eq!(found.host, "build.example.com");
+        assert_eq!(found.user, "deploy");
+        assert_eq!(found.port, 22);
+    }
+
+    #[test]
+    fn the_guard_is_scoped_to_this_window_and_this_entry() {
+        let mut state = super::super::test_remote_state();
+        insert_detached(
+            &mut state,
+            &format!("main:{DETACHED_PANE_ID_BASE}"),
+            "entry-1",
+        );
+
+        assert!(
+            find_detached_session_for_entry(&state, "main", "entry-2").is_none(),
+            "a different host must open its own connection"
+        );
+        assert!(
+            find_detached_session_for_entry(&state, "window-2", "entry-1").is_none(),
+            "another window connects independently — a stated product rule"
+        );
+    }
+
+    #[test]
+    fn a_terminal_session_is_never_handed_out_as_a_detached_one() {
+        let mut state = super::super::test_remote_state();
+        // Same entry id, but a terminal-range pane id: must not be reused.
+        insert_detached(&mut state, "main:3", "entry-1");
+        assert!(find_detached_session_for_entry(&state, "main", "entry-1").is_none());
+
+        // And a real terminal session carries no entry id at all.
+        state.sessions.insert(
+            "main:4".into(),
+            SshSession {
+                input_tx: mpsc::unbounded_channel().0,
+                connection_id: "conn:main:4".into(),
+                host: "build.example.com".into(),
+                user: "deploy".into(),
+                port: 22,
+                abort_handle: None,
+                server_entry_id: None,
+            },
+        );
+        assert!(find_detached_session_for_entry(&state, "main", "entry-1").is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Vault linking: update in place, never orphan
+    // -----------------------------------------------------------------
+
+    fn account_by_id(vault: &VaultState, id: uuid::Uuid) -> termlab_vault::VaultAccount {
+        vault.lock().get_account(id).unwrap()
+    }
+
+    fn linked_state() -> (std::sync::Arc<Mutex<RemoteState>>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::super::test_remote_state();
+        state.paths.config_dir = dir.path().to_path_buf();
+        (std::sync::Arc::new(Mutex::new(state)), dir)
+    }
+
+    #[test]
+    fn saving_to_an_unlinked_host_creates_and_links_an_account() {
+        let (vault, _existing, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password("other".into()));
+        let (remote, _dir) = linked_state();
+        let server = server_entry(Some("password"));
+
+        let id = link_password_account(&vault, &remote, &server, "deploy", "hunter2").unwrap();
+
+        assert_eq!(
+            vault.lock().list_accounts().unwrap().len(),
+            2,
+            "one pre-existing unrelated account plus the new one"
+        );
+        assert!(
+            matches!(account_by_id(&vault, id).auth, termlab_vault::AuthMethod::Password(ref p) if p == "hunter2")
+        );
+        assert_eq!(
+            remote
+                .lock()
+                .config
+                .find_server("entry-1")
+                .unwrap()
+                .vault_account_id,
+            Some(id),
+            "the entry must be linked and persisted"
+        );
+    }
+
+    #[test]
+    fn saving_to_an_already_linked_host_updates_it_and_orphans_nothing() {
+        // The `hasVaultAccount: true` rung: an account whose stored password is
+        // the eager-import placeholder.
+        let (vault, account_id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password(String::new()));
+        let (remote, _dir) = linked_state();
+        let mut server = server_entry(Some("password"));
+        server.vault_account_id = Some(account_id);
+
+        for attempt in ["first", "second"] {
+            let id = link_password_account(&vault, &remote, &server, "deploy", attempt).unwrap();
+            assert_eq!(id, account_id, "the existing account must be reused");
+            assert_eq!(
+                vault.lock().list_accounts().unwrap().len(),
+                1,
+                "repeating the flow must not accumulate orphaned accounts"
+            );
+            assert!(
+                matches!(account_by_id(&vault, account_id).auth, termlab_vault::AuthMethod::Password(ref p) if p == attempt)
+            );
+        }
+    }
+
+    #[test]
+    fn updating_an_account_never_discards_its_key() {
+        let key_path = std::path::PathBuf::from("/home/deploy/.ssh/id_ed25519");
+        let (vault, account_id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::KeyAndPassword {
+                key_path: key_path.clone(),
+                passphrase: Some("kp".into()),
+                password: String::new(),
+            });
+        let (remote, _dir) = linked_state();
+        let mut server = server_entry(Some("key_and_password"));
+        server.vault_account_id = Some(account_id);
+
+        link_password_account(&vault, &remote, &server, "deploy", "hunter2").unwrap();
+
+        match &account_by_id(&vault, account_id).auth {
+            termlab_vault::AuthMethod::KeyAndPassword {
+                key_path: kp,
+                passphrase,
+                password,
+            } => {
+                assert_eq!(kp, &key_path);
+                assert_eq!(passphrase.as_deref(), Some("kp"));
+                assert_eq!(password, "hunter2");
+            }
+            other => panic!("the key must survive a password save, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_key_only_account_is_upgraded_rather_than_overwritten() {
+        let account = {
+            let (vault, id, _vault_dir) = vault_with_account(termlab_vault::AuthMethod::Key {
+                path: std::path::PathBuf::from("/home/deploy/.ssh/id_rsa"),
+                passphrase: None,
+            });
+            account_by_id(&vault, id)
+        };
+        let request = password_update_request(account.id, &account, "deploy", "hunter2");
+        assert_eq!(request.auth_type.as_deref(), Some("key_and_password"));
+        assert_eq!(
+            request.key_path.as_deref(),
+            Some("/home/deploy/.ssh/id_rsa")
+        );
+        assert_eq!(request.password.as_deref(), Some("hunter2"));
+        assert_eq!(request.username.as_deref(), Some("deploy"));
+        assert!(
+            request.display_name.is_none(),
+            "a background save must not rename the user's account"
+        );
+    }
+
+    // -----------------------------------------------------------------
     // Disconnect: key validation
     // -----------------------------------------------------------------
 
@@ -932,6 +1418,7 @@ mod tests {
                 "build.example.com".into(),
                 "deploy".into(),
                 22,
+                "entry-1".into(),
             ),
         );
         state.pane_cwds.insert(key.clone(), "/home/deploy".into());
@@ -958,7 +1445,7 @@ mod tests {
         for key in [&mine, &theirs] {
             state.sessions.insert(
                 key.clone(),
-                detached_session("conn:x".into(), "h".into(), "u".into(), 22),
+                detached_session("conn:x".into(), "h".into(), "u".into(), 22, "e".into()),
             );
         }
         assert!(remove_detached_session(&mut state, &mine));
@@ -976,7 +1463,13 @@ mod tests {
 
     #[test]
     fn a_detached_session_has_no_live_channel() {
-        let session = detached_session("conn:main:1000000".into(), "h".into(), "u".into(), 22);
+        let session = detached_session(
+            "conn:main:1000000".into(),
+            "h".into(),
+            "u".into(),
+            22,
+            "e".into(),
+        );
         assert!(session.abort_handle.is_none());
         assert!(
             session

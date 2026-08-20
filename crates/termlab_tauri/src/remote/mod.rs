@@ -492,6 +492,14 @@ pub(crate) struct SshSession {
     pub port: u16,
     /// Handle to abort the channel loop task on cleanup.
     pub abort_handle: Option<tokio::task::AbortHandle>,
+    /// The configured `ServerEntry` this session was opened from, for detached
+    /// (PTY-less) sessions only — it is what makes a second connect to the same
+    /// host reuse the session instead of minting another one
+    /// (`detached_commands::find_detached_session_for_entry`). Terminal panes
+    /// leave it `None`: their duplicate guard is the pane itself
+    /// (`establish_ssh_session` rejects a pane that already has a session), and
+    /// opening two tabs on one host is a normal thing to want.
+    pub server_entry_id: Option<String>,
 }
 
 /// Shared state for all remote operations.
@@ -805,6 +813,7 @@ async fn establish_ssh_session(
                 user: credentials.username.clone(),
                 port: server.port,
                 abort_handle: None,
+                server_entry_id: None,
             },
         );
     }
