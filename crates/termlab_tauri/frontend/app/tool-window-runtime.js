@@ -139,14 +139,40 @@
     // are — a panel host needs the registrations without any of the docked
     // wiring around them. Assumes `pluginWidgets.init` has already run (init()
     // calls it with the terminal callbacks, a host without them).
-    function initPluginToolWindows() {
+    //
+    // `opts.chrome === false` (what a panel host passes) suppresses the app
+    // titlebar refreshes below. A host has no titlebar — `titlebar.init` runs
+    // only from event-wiring-runtime.js, which is downstream of the host
+    // branch, and it inserts into `#app`, which a host hides — so refreshing
+    // one is not merely wasted work: `refresh()` on an UNINITIALIZED titlebar
+    // skips rendering (no `menuAreaEl`) but still runs `registerAccelerators`,
+    // publishing ~18 app-menu bindings (Cmd/Ctrl+W, +T, +N, +O, +comma, F2,
+    // +D …) into the keyboard router at priority 115 with a null
+    // `menuActionHandler`. They do nothing and the router still
+    // preventDefaults on a match, so every one of those combos becomes a DEAD
+    // key. A main window hides this because shortcut-runtime registers at
+    // priority 120 and outranks them; a host has no shortcut-runtime handler
+    // at all, so the dead table would win outright — squarely against this
+    // window's scoped-keys-only constraint.
+    //
+    // Suppressed at the call site rather than by guarding `titlebar.refresh`
+    // itself on initialization: that guard would ALSO stop the same dead
+    // (but masked) table being registered in every macOS main window, which
+    // is a change to shared chrome behaviour with no bearing on panel hosts.
+    // Worth doing — as its own change, with its own blast-radius review.
+    function initPluginToolWindows(opts) {
       if (!global.pluginWidgets) return;
-
-      const registerPluginToolWindow = async (panelInfo) => {
-        const { handle, plugin, name, location } = panelInfo || {};
+      const withChrome = !opts || opts.chrome !== false;
+      const refreshTitlebar = () => {
+        if (!withChrome) return;
         if (global.titlebar && typeof global.titlebar.refresh === 'function') {
           global.titlebar.refresh().catch(() => {});
         }
+      };
+
+      const registerPluginToolWindow = async (panelInfo) => {
+        const { handle, plugin, name, location } = panelInfo || {};
+        refreshTitlebar();
         const zoneMap = { left: 'left-top', right: 'right-top', bottom: 'bottom' };
         const defaultZone = zoneMap[location] || 'right-bottom';
         const twmId = 'plugin:' + plugin;
@@ -179,9 +205,7 @@
       });
 
       listen('plugin-panels-removed', (event) => {
-        if (global.titlebar && typeof global.titlebar.refresh === 'function') {
-          global.titlebar.refresh().catch(() => {});
-        }
+        refreshTitlebar();
         const { plugin, handles } = event.payload;
         if (global.toolWindowManager) {
           registeredPluginToolWindows.delete('plugin:' + plugin);
@@ -228,7 +252,10 @@
       if (!global.toolWindowManager) return;
       registerBuiltInToolWindows();
       refreshShortcutFallbacks();
-      await initPluginToolWindows();
+      // `chrome: false` — a host has no app titlebar to refresh, and asking
+      // for one would install a dead accelerator table. See the long comment
+      // on initPluginToolWindows.
+      await initPluginToolWindows({ chrome: false });
     }
 
     async function init() {
@@ -340,9 +367,13 @@
           const id = event && event.payload ? event.payload.toolWindowId : null;
           if (id) global.toolWindowManager.notifyHostHidden(id);
         });
+        // The only one of the four carrying a generation token: `reqId`
+        // identifies WHICH host docked, so an echo from a host that has
+        // already been replaced can be told apart from a current dock-back.
         listenOnCurrentWindow('panel-host-docked', (event) => {
-          const id = event && event.payload ? event.payload.toolWindowId : null;
-          if (id) global.toolWindowManager.notifyHostDocked(id);
+          const payload = (event && event.payload) || null;
+          const id = payload ? payload.toolWindowId : null;
+          if (id) global.toolWindowManager.notifyHostDocked(id, payload.reqId);
         });
         // A host that self-aborted (its boot found no registration for the id)
         // is not coming back with a panel — the manager resets the trait

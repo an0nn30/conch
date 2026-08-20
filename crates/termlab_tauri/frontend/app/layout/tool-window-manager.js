@@ -58,6 +58,13 @@
   // button's lit state and the toggle routing; kept in sync by the
   // panel-host-shown/hidden events the parent receives from Rust.
   const hostVisible = new Map(); // id → boolean
+  // Generation token per popped-out id: the `req_id` Rust minted for the host
+  // currently live for that id (`open_panel_host`'s return value), or
+  // PENDING_HOST_REQ while an open is in flight. Its only job is to let
+  // notifyHostDocked tell a CURRENT dock-back from a STALE echo — see the
+  // comment there for the sequence that made this necessary.
+  const hostReqIds = new Map(); // id → number | PENDING_HOST_REQ
+  const PENDING_HOST_REQ = { pending: true };
   let savedViewModes = null;     // populated from backend before registration
   // Window-mode ids whose host was open when the layout was saved, waiting to
   // be summoned. Drained once registrations finish; a plugin that registers
@@ -274,12 +281,24 @@
 
     if (tw.el && tw.el.parentNode) tw.el.parentNode.removeChild(tw.el);
     // A popped-out window whose plugin was just removed would otherwise leave
-    // its host on screen with nothing to host.
+    // its host on screen with nothing to host. DESTROY it rather than hide it:
+    // the tool window is going away for good — every line below deletes the
+    // bookkeeping that could ever bring it back — so a hide would strand a
+    // live, invisible webview still running the removed plugin's panel, with
+    // no rail entry and no summon path left to reach it. `dock_panel_host`
+    // takes a parent caller now (src/panel_host.rs's `resolve_dock_target`)
+    // and destroys the window AND drops the registry entry.
+    //
+    // The `panel-host-docked` echo it emits back is inert here, doubly so: by
+    // the time it lands this id fails notifyHostDocked's `toolWindows.has(id)`
+    // guard, and getRegistration(id) is null, so there is no renderFn to
+    // remount even in principle.
     if (getViewMode(id) === VIEW_MODE_WINDOW) {
-      panelHostInvoke('hide_panel_host', { toolWindowId: id }).catch(() => {});
+      panelHostInvoke('dock_panel_host', { toolWindowId: id }).catch(() => {});
     }
     viewModes.delete(id);
     hostVisible.delete(id);
+    hostReqIds.delete(id);
     pendingWindowSummons.delete(id);
     toolWindows.delete(id);
 
@@ -455,15 +474,33 @@
     if (fitActiveTabFn) fitActiveTabFn();
   }
 
+  // Remember which host generation is live for `id`. Called at REQUEST time
+  // with PENDING_HOST_REQ and again with the minted req_id once Rust answers,
+  // so the window between the two is never mistaken for "no host being built".
+  function markHostRequested(id) {
+    hostReqIds.set(id, PENDING_HOST_REQ);
+  }
+
+  function markHostOpened(id, reqId) {
+    // Only overwrite while this id is still in window mode: a dock-back that
+    // landed while the open was in flight already cleared the entry, and
+    // re-adding it here would resurrect a generation for a host nobody is
+    // showing.
+    if (getViewMode(id) !== VIEW_MODE_WINDOW) return;
+    hostReqIds.set(id, typeof reqId === 'number' ? reqId : undefined);
+  }
+
   function enterWindowMode(tw) {
     const id = tw.id;
     detachFromZone(tw);
     viewModes.set(id, VIEW_MODE_WINDOW);
     hostVisible.set(id, true);
     tw.active = true;
+    markHostRequested(id);
     refreshZoneChrome(tw.zone);
     triggerSave();
     panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
+      .then((reqId) => markHostOpened(id, reqId))
       .catch(() => {
         // The pop-out never happened, so put back what the user was looking
         // at rather than leaving them staring at an empty zone.
@@ -503,6 +540,9 @@
     const tw = toolWindows.get(id);
     viewModes.set(id, VIEW_MODE_DOCK);
     hostVisible.delete(id);
+    // The generation goes with it: whatever host was live for this id is on
+    // its way out, so a later echo naming it must not match anything.
+    hostReqIds.delete(id);
     pendingWindowSummons.delete(id);
     if (tw) tw.active = false;
   }
@@ -530,7 +570,13 @@
     updateStrips();
     triggerSave();
     panelHostInvoke('focus_panel_host', { toolWindowId: id })
-      .catch(() => panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title }))
+      .catch(() => {
+        // No host in this session (a mode restored from the saved layout, say):
+        // building one mints a NEW generation, so claim the slot before asking.
+        markHostRequested(id);
+        return panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
+          .then((reqId) => markHostOpened(id, reqId));
+      })
       .catch(() => {
         resetToDock(id);
         refreshZoneChrome(tw.zone);
@@ -564,10 +610,45 @@
     triggerSave();
   }
 
+  // Is a `panel-host-docked` echo naming a host that is no longer the one live
+  // for this id?
+  //
+  // The sequence this exists for: pick Dock, then immediately pick Window
+  // again, both inside one IPC round trip. The first dock's echo then lands
+  // while the SECOND host is being built — the mode is back to 'window', so
+  // the mode guard waves it through, and the remount puts a live panel in the
+  // zone while a live host window shows the same panel. Exactly the "two live
+  // instances of one stateful panel" the parent-dock ruling set out to kill.
+  //
+  // Rust stamps the event with the entry's `req_id`
+  // (`PanelHostDockedEvent`), which is the same token `open_panel_host`
+  // returned, so the comparison is against a generation both sides agree on.
+  // Three deliberate accept-anyway cases:
+  //   * no entry at all — this id was never opened through this manager in
+  //     this session (a mode seeded from the saved layout and summoned by a
+  //     successful focus), so there is no generation to disagree with;
+  //   * the echo carries no reqId — an older Rust, or a direct call from a
+  //     test; fall back to the pre-generation behaviour rather than dropping
+  //     a legitimate dock-back;
+  //   * the stored generation is not a number — `open_panel_host` answered
+  //     with something unexpected; same fallback.
+  // The one REJECT that matters is PENDING_HOST_REQ: a newer host has been
+  // requested and has not been minted yet, so any echo arriving with a
+  // generation necessarily names an older one.
+  function dockedEchoIsStale(id, reqId) {
+    if (!hostReqIds.has(id)) return false;
+    if (reqId == null) return false;
+    const current = hostReqIds.get(id);
+    if (current === PENDING_HOST_REQ) return true;
+    if (typeof current !== 'number') return false;
+    return current !== reqId;
+  }
+
   // The host asked to come home. It destroys itself, so there is nothing to
   // hide from this side — just remount.
-  function notifyHostDocked(id) {
+  function notifyHostDocked(id, reqId) {
     if (!toolWindows.has(id) || getViewMode(id) !== VIEW_MODE_WINDOW) return;
+    if (dockedEchoIsStale(id, reqId)) return;
     dockFromWindowMode(id, { teardownHost: false });
   }
 

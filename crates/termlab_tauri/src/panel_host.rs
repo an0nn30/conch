@@ -59,11 +59,31 @@ pub(crate) struct PanelHostRequest {
 }
 
 /// Event payload for every panel-host event that names a single tool window:
-/// `panel-host-docked`, `panel-host-hidden`, `panel-host-shown`.
+/// `panel-host-hidden`, `panel-host-shown`, `panel-host-aborted`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PanelHostToolWindowEvent {
     pub tool_window_id: String,
+}
+
+/// Event payload for `panel-host-docked`, which carries one field the others
+/// do not: the departing host's `req_id`.
+///
+/// It is a GENERATION TOKEN, and the parent needs it because a dock-back is
+/// the one panel-host event that makes the parent rebuild DOM. Pick "Dock"
+/// and then immediately "Window" again — both inside one IPC round trip — and
+/// the first dock's echo arrives while the second host is being built: the
+/// tool window is back in window mode, so a `tool_window_id` alone cannot tell
+/// the parent that this message is about a host that no longer exists, and it
+/// remounts the panel into its zone underneath a live host window showing the
+/// same panel. `req_id` is the same value `open_panel_host` returned to the
+/// parent for that host, so the two sides compare generations rather than
+/// guessing (`tool-window-manager.js`'s `dockedEchoIsStale`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PanelHostDockedEvent {
+    pub tool_window_id: String,
+    pub req_id: u64,
 }
 
 /// Event payload for `panel_host_broadcast`'s re-dispatch to every live host
@@ -466,6 +486,31 @@ mod tests {
         let stale = live.window_label.clone();
         r.remove("window-1", "ssh-sessions");
         assert_eq!(r.session_label_for_caller(&stale), stale);
+    }
+
+    #[test]
+    fn docked_event_carries_the_departing_hosts_generation() {
+        // The parent compares this against the req_id `open_panel_host`
+        // handed it, so the field must be there and must be the entry's own
+        // — see PanelHostDockedEvent's doc comment for the race it closes.
+        let mut r = PanelHostRegistry::default();
+        let (_, first) = r.open("window-1".into(), "tunnels".into(), "Tunnels".into());
+        let payload = PanelHostDockedEvent {
+            tool_window_id: first.tool_window_id.clone(),
+            req_id: first.req_id,
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({ "toolWindowId": "tunnels", "reqId": first.req_id }),
+            "camelCase `reqId`, alongside the `toolWindowId` the other events carry"
+        );
+
+        // A re-open for the same key mints a new generation, so the two
+        // events a dock-then-re-pop produces are distinguishable — which is
+        // the whole point of the field.
+        let (_, second) = r.open("window-1".into(), "tunnels".into(), "Tunnels".into());
+        assert_ne!(second.req_id, first.req_id);
     }
 
     #[test]
@@ -1150,8 +1195,9 @@ pub(crate) fn dock_panel_host(
     let _ = app.emit_to(
         entry.parent_label.as_str(),
         PANEL_HOST_DOCKED_EVENT,
-        &PanelHostToolWindowEvent {
+        &PanelHostDockedEvent {
             tool_window_id: entry.tool_window_id.clone(),
+            req_id: entry.req_id,
         },
     );
 

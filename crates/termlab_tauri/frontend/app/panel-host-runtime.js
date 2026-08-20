@@ -104,6 +104,18 @@
       });
   }
 
+  // Why the no-request path still calls the above, when the abort is expected
+  // to FAIL: `get_panel_host_request` rejects only when the registry has no
+  // entry for this window's label, and `abort_panel_host` requires exactly
+  // that entry — so on today's Rust the abort always fails and the close
+  // fallback is what does the work. It is called anyway because the two
+  // commands do not have to keep failing for the same reason forever: should
+  // `get_panel_host_request` ever reject for anything else (a transient IPC
+  // or deserialization failure, say), the entry WOULD still exist, and a
+  // plain `close()` on a REGISTERED host is intercepted into a hide — a
+  // permanently invisible window with nothing in it. One failed IPC on a path
+  // that is already terminal buys immunity from that.
+
   // ---- Appearance / theme --------------------------------------------------
 
   // A mirror of settings.html:104-141, not a re-invention: appearance first
@@ -224,9 +236,9 @@
 
     // "A host with no request must not linger", the panel-host twin of the
     // chooser's rule: a rejection means Rust has no entry for THIS window's
-    // label — displaced out from under it, or already torn down. Abort first
-    // (best effort — there is most likely nothing to abort, which is exactly
-    // why it may fail), then close.
+    // label — displaced out from under it, or already torn down. Abort, then
+    // close; see abortThisHost's second comment for why the abort is issued
+    // even though this particular path expects it to fail.
     let request;
     try {
       request = await invoke('get_panel_host_request');

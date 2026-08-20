@@ -626,25 +626,100 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
   assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 0);
 }
 
-// --- 14d. Unregistering a popped-out window takes its host with it ---------
-// What a plugin removal does: the host would otherwise stay on screen with
-// nothing to host.
+// --- 14d. Unregistering a popped-out window DESTROYS its host --------------
+// What a plugin removal does. Destroy, not hide: every line of unregister()
+// deletes the bookkeeping that could bring this window back, so a hide would
+// strand a live, invisible webview still running the removed plugin's panel,
+// with no rail entry and no summon path left to reach it.
 {
-  const { twm, invoke, invokeCalls } = loadManager();
+  const { twm, invoke, invokeCalls, zoneEls } = loadManager();
+  let renders = 0;
   twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
-  twm.register('plugin:fake', { title: 'Fake', renderFn: () => {} });
+  twm.register('plugin:fake', { title: 'Fake', renderFn: () => { renders += 1; } });
   twm.setViewMode('plugin:fake', 'window');
+  renders = 0;
   invokeCalls.length = 0;
 
   twm.unregister('plugin:fake');
 
   assert.deepStrictEqual(plain(invokeCalls), [
-    { cmd: 'hide_panel_host', args: { toolWindowId: 'plugin:fake' } },
-  ], 'an orphaned host must not be left on screen');
+    { cmd: 'dock_panel_host', args: { toolWindowId: 'plugin:fake' } },
+  ], 'an orphaned host must be destroyed, not hidden');
   assert.strictEqual(twm.getRegistration('plugin:fake'), null);
   assert.deepStrictEqual(plain(twm.getViewModes()), {},
     'the id\'s view-mode bookkeeping goes with the registration');
   assert.deepStrictEqual(Array.from(twm.getWindowsInZone('right-bottom')), []);
+
+  // The docked echo Rust sends back is doubly inert: the id fails
+  // notifyHostDocked's toolWindows.has() guard, and there is no registration
+  // left to supply a renderFn even in principle.
+  twm.notifyHostDocked('plugin:fake', 1);
+  assert.strictEqual(renders, 0, 'an unregistered id has nothing to remount');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 0);
+}
+
+// --- 14e. A STALE docked echo must not remount over a live second host -----
+// The reachable sequence: pick Dock, then pick Window again before the first
+// dock's IPC has round-tripped. The echo then lands with the tool window back
+// in window mode, so the mode guard alone waves it through and the panel is
+// remounted into the zone while the SECOND host window is showing it — the
+// exact "two live instances of one stateful panel" the parent-dock ruling set
+// out to kill. The generation token (`reqId`, minted by Rust and returned by
+// open_panel_host) is what tells the two apart.
+{
+  let nextReqId = 1;
+  const { twm, invoke, invokeCalls, zoneEls } = loadManager({
+    invokeHandlers: { open_panel_host: () => Promise.resolve(nextReqId++) },
+  });
+  let renders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('tunnels', { ...TUNNELS, renderFn: () => { renders += 1; } });
+
+  twm.setViewMode('tunnels', 'window');   // host generation 1
+  await tick();
+  renders = 0;
+  invokeCalls.length = 0;
+
+  viewModeItems(twm.buildContextMenuItems('tunnels'))[0].onSelect(); // Dock
+  assert.strictEqual(renders, 1, 'the dock remounts once');
+  twm.setViewMode('tunnels', 'window');   // re-pop, generation 2 still in flight
+
+  twm.notifyHostDocked('tunnels', 1);     // generation 1's echo, arriving late
+
+  assert.strictEqual(renders, 1, 'the stale echo must NOT remount a second time');
+  assert.strictEqual(twm.getViewModes().tunnels, 'window',
+    'and must not drag the window out of the mode the user just re-picked');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 0,
+    'nothing is in the zone while a host is live');
+
+  await tick();                            // generation 2 is minted
+  twm.notifyHostDocked('tunnels', 2);      // the genuine dock-back
+
+  assert.strictEqual(renders, 2, 'the CURRENT generation still docks normally');
+  assert.strictEqual(twm.getViewModes().tunnels, 'dock');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 1);
+}
+
+// --- 14f. An echo with no generation still docks (pre-reqId fallback) ------
+// Rust always stamps the event now, but a manager that dropped a legitimate
+// dock-back because a payload lacked the field would be worse than the race
+// it guards. Scenarios 8/9 exercise the same fallback implicitly; this states
+// it.
+{
+  const { twm, invoke, zoneEls } = loadManager({
+    invokeHandlers: { open_panel_host: () => Promise.resolve(41) },
+  });
+  let renders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('tunnels', { ...TUNNELS, renderFn: () => { renders += 1; } });
+  twm.setViewMode('tunnels', 'window');
+  await tick();
+  renders = 0;
+
+  twm.notifyHostDocked('tunnels');
+
+  assert.strictEqual(renders, 1, 'no generation to compare — dock as before');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 1);
 }
 
 // ===========================================================================
@@ -784,6 +859,16 @@ async function loadRuntime(savedLayout) {
   assert.deepStrictEqual(named('notifyHostHidden'), ['b']);
   assert.deepStrictEqual(named('notifyHostDocked'), ['c']);
   assert.deepStrictEqual(named('notifyHostAborted'), ['d']);
+}
+
+// --- 17b. The docked event forwards its generation token ------------------
+{
+  const { twm, emit } = await loadRuntime({});
+  emit('panel-host-docked', { toolWindowId: 'tunnels', reqId: 12 });
+
+  const call = twm.calls.find((c) => c.name === 'notifyHostDocked');
+  assert.deepStrictEqual(plain(call.args), ['tunnels', 12],
+    'reqId must reach the manager, or the stale-echo guard has nothing to compare');
 }
 
 // ===========================================================================
@@ -1032,6 +1117,29 @@ function makeHostSandbox(config) {
     },
   };
 
+  // titlebar.js IS loaded by index.html, so it is reachable from a host — and
+  // an UNINITIALIZED `refresh()` skips rendering but still publishes the
+  // app-menu accelerator table into the keyboard router. These two stubs make
+  // both halves observable: the refresh call itself, and any router handler it
+  // would have registered.
+  const titlebarRefreshes = [];
+  const routerRegistrations = [];
+  sandbox.titlebar = {
+    refresh: () => {
+      titlebarRefreshes.push(1);
+      // What the real one does at this point (titlebar.js's
+      // registerAccelerators): ~18 dead bindings at priority 115.
+      sandbox.termlabKeyboardRouter.register('titlebar-accelerators', () => true, 115);
+      return Promise.resolve();
+    },
+  };
+  sandbox.termlabKeyboardRouter = {
+    register: (id, handler, priority) => {
+      routerRegistrations.push({ id, priority });
+      return () => {};
+    },
+  };
+
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(MANAGER_PATH, 'utf8'), sandbox, { filename: MANAGER_PATH });
   vm.runInContext(fs.readFileSync(RUNTIME_PATH, 'utf8'), sandbox, { filename: RUNTIME_PATH });
@@ -1095,6 +1203,8 @@ function makeHostSandbox(config) {
     uiConfigApplies,
     appearanceSyncs,
     panelInits,
+    titlebarRefreshes,
+    routerRegistrations,
     body,
     appEl,
     zoneEls,
@@ -1229,6 +1339,33 @@ function makeHostSandbox(config) {
     'the replay must finish BEFORE the registration lookup, or a plugin host aborts');
   assert.strictEqual(result.titleEl.textContent, 'Demo');
   assert.strictEqual(result.panelEl.dataset.toolWindow, 'plugin:demo');
+}
+
+// --- 23b. A host registers NO keyboard handlers, plugins or not ----------
+// The brief's scoped-keys constraint, pinned where it actually leaked: the
+// plugin registration path refreshes the app titlebar, and an uninitialized
+// titlebar's refresh() still publishes ~18 app-menu accelerators (Cmd/Ctrl+W
+// among them) at router priority 115 with a null action handler. In a main
+// window shortcut-runtime outranks them at 120; a host has no shortcut-runtime
+// at all, so they would win outright and turn those combos into dead keys.
+{
+  const host = makeHostSandbox({
+    answers: {
+      get_plugin_panels: () => Promise.resolve([
+        { handle: 'h1', plugin_name: 'demo', panel_name: 'Demo', location: 'right' },
+      ]),
+      request_plugin_render: () => Promise.resolve('[]'),
+    },
+  });
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.status, 'mounted');
+  assert.ok(host.sandbox.toolWindowManager.getRegistration('plugin:demo'),
+    'precondition: the plugin panel really did register, so the path was taken');
+  assert.deepStrictEqual(host.titlebarRefreshes, [],
+    'a host has no app titlebar — refreshing one only installs a dead menu table');
+  assert.deepStrictEqual(plain(host.routerRegistrations), [],
+    'ZERO keyboard-router handlers in a panel host');
 }
 
 // --- 24. Unknown tool-window id: abort, do not close ---------------------
