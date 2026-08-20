@@ -69,6 +69,14 @@ pub(crate) fn remote_save_server(
     folder_id: Option<String>,
 ) {
     let mut state = remote.lock();
+    upsert_server(&mut state, entry, folder_id);
+}
+
+/// Insert-or-replace a server entry at `folder_id` (ungrouped when `None`) and
+/// persist the config. The body of `remote_save_server`, extracted so callers
+/// that already hold the state lock — or that must not move an entry between
+/// folders — go through the exact same path.
+fn upsert_server(state: &mut RemoteState, entry: ServerEntry, folder_id: Option<String>) {
     // Remove existing if updating.
     state.config.remove_server(&entry.id);
     if let Some(fid) = folder_id {
@@ -77,6 +85,21 @@ pub(crate) fn remote_save_server(
         state.config.add_server(entry);
     }
     termlab_remote::config::save_config(&state.paths.config_dir, &state.config);
+}
+
+/// Persist a modified server entry, leaving it in whatever folder it already
+/// occupies.
+///
+/// `remote_save_server` takes the folder as an explicit argument because its
+/// caller is a form with a folder picker; a background edit (the SFTP connect
+/// path linking a vault account, say) has no such intent and must not silently
+/// move a foldered host to the ungrouped list.
+pub(super) fn save_server_preserving_folder(state: &mut RemoteState, entry: ServerEntry) {
+    let folder_id = state
+        .config
+        .find_server_folder(&entry.id)
+        .map(str::to_string);
+    upsert_server(state, entry, folder_id);
 }
 
 #[tauri::command]
@@ -286,6 +309,13 @@ pub(crate) fn remote_get_sessions(
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
 ) -> Vec<ActiveSession> {
     let state = remote.lock();
+    active_sessions(&state)
+}
+
+/// Every live session, terminal-owned and detached alike — they live in the
+/// same map, so a detached SFTP connection is visible to the chooser sidebar
+/// and the panel without any special case here.
+fn active_sessions(state: &RemoteState) -> Vec<ActiveSession> {
     state
         .sessions
         .iter()
@@ -738,6 +768,119 @@ mod tests {
             state.config.tunnels[0].session_key,
             "admin@bastion.example.com:22",
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Session listing + background entry saves
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn active_sessions_include_detached_sftp_sessions() {
+        use super::super::detached_commands::{DETACHED_PANE_ID_BASE, detached_session};
+
+        let mut state = test_state_with(SshConfig::default(), vec![]);
+        state.sessions.insert(
+            "main:1".to_string(),
+            detached_session(
+                "conn:main:1".to_string(),
+                "tab.example.com".to_string(),
+                "alice".to_string(),
+                22,
+            ),
+        );
+        let detached_key = format!("main:{DETACHED_PANE_ID_BASE}");
+        state.sessions.insert(
+            detached_key.clone(),
+            detached_session(
+                format!("conn:main:{DETACHED_PANE_ID_BASE}"),
+                "panel.example.com".to_string(),
+                "deploy".to_string(),
+                2222,
+            ),
+        );
+
+        let sessions = active_sessions(&state);
+        assert_eq!(sessions.len(), 2);
+        let detached = sessions
+            .iter()
+            .find(|s| s.key == detached_key)
+            .expect("detached session must be listed like any other");
+        assert_eq!(detached.host, "panel.example.com");
+        assert_eq!(detached.user, "deploy");
+        assert_eq!(detached.port, 2222);
+    }
+
+    #[test]
+    fn saving_preserves_the_entrys_folder_and_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SshConfig::default();
+        cfg.add_folder("Work");
+        let folder_id = cfg.folders[0].id.clone();
+        let mut entry = make_server("build-box", "build.example.com", "deploy", 22);
+        entry.id = "entry-1".to_string();
+        cfg.add_server_to_folder(entry.clone(), &folder_id);
+
+        let mut state = test_state_with(cfg, vec![]);
+        state.paths.config_dir = dir.path().to_path_buf();
+
+        let account_id = uuid::Uuid::new_v4();
+        entry.vault_account_id = Some(account_id);
+        save_server_preserving_folder(&mut state, entry);
+
+        assert!(
+            state.config.ungrouped.is_empty(),
+            "a background save must not move the host out of its folder"
+        );
+        assert_eq!(state.config.folders[0].entries.len(), 1);
+        assert_eq!(
+            state.config.folders[0].entries[0].vault_account_id,
+            Some(account_id)
+        );
+
+        // The link must outlive the process, not just the session.
+        let reloaded = termlab_remote::config::load_config(dir.path());
+        assert_eq!(
+            reloaded.find_server("entry-1").unwrap().vault_account_id,
+            Some(account_id)
+        );
+        assert_eq!(reloaded.find_server_folder("entry-1"), Some(&*folder_id));
+    }
+
+    #[test]
+    fn saving_an_ungrouped_entry_keeps_it_ungrouped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SshConfig::default();
+        cfg.add_folder("Work");
+        let mut entry = make_server("solo", "solo.example.com", "root", 22);
+        entry.id = "entry-2".to_string();
+        cfg.add_server(entry.clone());
+
+        let mut state = test_state_with(cfg, vec![]);
+        state.paths.config_dir = dir.path().to_path_buf();
+
+        entry.vault_account_id = Some(uuid::Uuid::new_v4());
+        save_server_preserving_folder(&mut state, entry);
+
+        assert_eq!(state.config.ungrouped.len(), 1);
+        assert!(state.config.folders[0].entries.is_empty());
+    }
+
+    #[test]
+    fn saving_an_unknown_entry_adds_it_ungrouped() {
+        // An `~/.ssh/config` host has no config-owned home yet; linking one
+        // promotes it into the config file as an ungrouped entry.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state_with(SshConfig::default(), vec![]);
+        state.paths.config_dir = dir.path().to_path_buf();
+
+        let mut entry = make_server("imported", "imported.example.com", "admin", 22);
+        entry.vault_account_id = Some(uuid::Uuid::new_v4());
+        let entry_id = entry.id.clone();
+        save_server_preserving_folder(&mut state, entry);
+
+        assert_eq!(state.config.ungrouped.len(), 1);
+        let reloaded = termlab_remote::config::load_config(dir.path());
+        assert!(reloaded.find_server(&entry_id).is_some());
     }
 
     // ---------------------------------------------------------------------------

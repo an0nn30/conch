@@ -10,6 +10,7 @@
 //! to Tauri events + oneshot prompt channels.
 
 pub(crate) mod auth;
+pub(crate) mod detached_commands;
 pub(crate) mod local_fs;
 pub(crate) mod server_commands;
 pub(crate) mod sftp_commands;
@@ -550,6 +551,34 @@ impl RemoteState {
             pane_cwd_needs_sync: HashMap::new(),
             pane_home_dirs: HashMap::new(),
         }
+    }
+}
+
+/// A `RemoteState` with no config files, no SSH config, and paths pointing
+/// nowhere — for registry-level tests that never touch the network or disk.
+#[cfg(test)]
+pub(crate) fn test_remote_state() -> RemoteState {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    RemoteState {
+        sessions: HashMap::new(),
+        connections: HashMap::new(),
+        config: SshConfig::default(),
+        ssh_config_entries: Vec::new(),
+        pending_prompts: Arc::new(Mutex::new(PendingPrompts::new())),
+        tunnel_manager: TunnelManager::new(),
+        transfers: Arc::new(Mutex::new(TransferRegistry::new())),
+        transfer_progress_tx: tx,
+        paths: RemotePaths {
+            known_hosts_file: std::path::PathBuf::from("/nonexistent/known_hosts"),
+            config_dir: std::path::PathBuf::from("/nonexistent/config"),
+            default_key_paths: Vec::new(),
+        },
+        pane_cwds: HashMap::new(),
+        pane_cwd_buffers: HashMap::new(),
+        pane_input_buffers: HashMap::new(),
+        pane_prev_cwds: HashMap::new(),
+        pane_cwd_needs_sync: HashMap::new(),
+        pane_home_dirs: HashMap::new(),
     }
 }
 

@@ -18,7 +18,7 @@ use super::{RemoteState, session_key};
 /// other window resolves to itself. See
 /// `window_registry_resolver::effective_session_window_label` for the shared
 /// resolution this delegates to.
-fn session_caller_label(window: &tauri::WebviewWindow) -> String {
+pub(super) fn session_caller_label(window: &tauri::WebviewWindow) -> String {
     crate::window_registry_resolver::effective_session_window_label(
         window.app_handle(),
         window.label(),
