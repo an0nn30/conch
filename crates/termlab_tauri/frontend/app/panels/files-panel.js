@@ -766,7 +766,57 @@
     }
   }
 
+  // Lazily created instance of the parent-state event bridge's REVERSE half
+  // (app/core/panel-host-bridge.js's publishAction) — the escape hatch this
+  // window uses to hand a file open to its PARENT's editor when this window
+  // has none of its own. Created once, on first need (`invoke` must already
+  // be set, i.e. after init()), same laziness as windowLabelPromise above.
+  let hostActionBridge;
+  function getHostActionBridge() {
+    if (hostActionBridge !== undefined) return hostActionBridge;
+    hostActionBridge = (window.termlabPanelHostBridge && typeof window.termlabPanelHostBridge.create === 'function')
+      ? window.termlabPanelHostBridge.create({ invoke })
+      : null;
+    return hostActionBridge;
+  }
+
   async function openInEditor(pane, entry, path) {
+    // A popped-out panel host has no editor of its own: editor-service.js's
+    // createEditorTab throws unless manager-compose-runtime.js has run in
+    // THIS window, and that module only ever composes for a real main
+    // window (a host boot skips it entirely — app/panel-host-runtime.js's
+    // module doc). `__termlabCreateEditorTab` is exactly the global
+    // createEditorTab itself gates on, so it is the true test of whether
+    // opening locally would even work. `window.termlabEditorService` is NOT
+    // that signal — editor-service.js's <script> tag loads in every window
+    // index.html serves, host or not, so the object it publishes always
+    // exists even where none of its methods can succeed.
+    if (typeof window.__termlabCreateEditorTab !== 'function') {
+      const bridge = getHostActionBridge();
+      if (bridge && typeof bridge.publishAction === 'function') {
+        if (pane.isLocal) {
+          bridge.publishAction('open-in-editor', { kind: 'local', path });
+          return;
+        }
+        if (!activeRemotePaneId) return;
+        // Read the pane id once: the user can switch tabs while the host
+        // label is being resolved, and the download has to go to the
+        // session this row was actually listed from.
+        const paneId = activeRemotePaneId;
+        const hostLabel = await remoteHostLabel(paneId);
+        bridge.publishAction('open-in-editor', {
+          kind: 'remote',
+          paneId,
+          remotePath: path,
+          hostLabel,
+          size: entry.size,
+        });
+        return;
+      }
+      // No bridge either (script graph missing it, or invoke never set) —
+      // fall through to the ordinary "no editor" toast below.
+    }
+
     const editor = window.termlabEditorService;
     if (!editor) {
       window.toast.error('Editor Unavailable', 'The editor service is not loaded.');

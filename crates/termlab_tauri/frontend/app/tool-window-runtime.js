@@ -25,6 +25,48 @@
       }
     }
 
+    // ---- panel-host-action routing (the reverse bridge, host -> parent) ----
+    //
+    // The mirror of dispatchPanelHostEvent in app/panel-host-runtime.js: an
+    // `{event, payload}` message off `panel_host_action`
+    // (crates/termlab_tauri/src/panel_host.rs), checked against
+    // HOST_ACTION_EVENTS (app/core/panel-host-bridge.js) — the single source
+    // of truth both this table and the host's publishAction validation read
+    // from. An event not in that list is a version-skewed host, or simply
+    // nothing wired to it yet: logged and dropped, never thrown, exactly
+    // like the forward direction's rule.
+    //
+    // `open-in-editor` replays the SAME calls files-panel.js's own
+    // openInEditor makes when it has a real editor in-window
+    // (openLocalFile(path) / openRemoteFile({paneId, remotePath, hostLabel,
+    // size})) — read straight off `global.termlabEditorService`, the same
+    // global every other in-window caller (vim-mode's :w, the ⌘O chooser)
+    // uses, since this parent IS a composed main window and always has one.
+    function routePanelHostAction(message) {
+      if (!message) return;
+      const bridge = global.termlabPanelHostBridge;
+      const knownEvents = bridge && Array.isArray(bridge.HOST_ACTION_EVENTS) ? bridge.HOST_ACTION_EVENTS : [];
+      if (!knownEvents.includes(message.event)) {
+        console.warn('panel host: ignoring unlisted panel-host-action', message.event);
+        return;
+      }
+      const editor = global.termlabEditorService;
+      if (!editor) return;
+      const payload = message.payload || {};
+      if (payload.kind === 'local') {
+        editor.openLocalFile(payload.path);
+        return;
+      }
+      if (payload.kind === 'remote') {
+        editor.openRemoteFile({
+          paneId: payload.paneId,
+          remotePath: payload.remotePath,
+          hostLabel: payload.hostLabel,
+          size: payload.size,
+        });
+      }
+    }
+
     function beginResizeDrag() {
       resizeDragDepth += 1;
       document.body.classList.add('panel-resize-dragging');
@@ -381,6 +423,12 @@
         listenOnCurrentWindow('panel-host-aborted', (event) => {
           const id = event && event.payload ? event.payload.toolWindowId : null;
           if (id) global.toolWindowManager.notifyHostAborted(id);
+        });
+        // Rust emits this to the PARENT too (emit_to(entry.parent_label) in
+        // panel_host_action) — a host asking this window to do something it
+        // has no local means to do itself. See routePanelHostAction above.
+        listenOnCurrentWindow('panel-host-action', (event) => {
+          routePanelHostAction(event && event.payload ? event.payload : null);
         });
 
         try {

@@ -39,6 +39,7 @@ const MANAGER_COMPOSE_PATH = path.join(FRONTEND, 'manager-compose-runtime.js');
 const FILES_PANEL_PATH = path.join(FRONTEND, 'panels/files-panel.js');
 const FILES_DATA_SERVICE_PATH = path.join(FRONTEND, 'features/files/data-service.js');
 const FILES_PANE_STORE_PATH = path.join(FRONTEND, 'features/files/pane-store.js');
+const FILES_ACTIONS_PATH = path.join(FRONTEND, 'features/files/actions.js');
 
 // --- shared element stub ---------------------------------------------------
 
@@ -1986,6 +1987,414 @@ function broadcastCalls(invokeCalls) {
     + 'panel needs so Rust\'s session_caller_label resolver (Task 2) finds the '
     + 'PARENT\'s session for that pane, not a session keyed to the host window '
     + 'itself (which has none)');
+}
+
+// ===========================================================================
+// Part 6 — open-in-editor from a popped-out host
+//
+// The bug this closes: double-clicking a file in a POPPED-OUT SFTP/Files
+// panel used to reach files-panel.js's openInEditor exactly as if the panel
+// were docked, but a host window has no editor of its own —
+// editor-service.js's createEditorTab throws unless manager-compose-
+// runtime.js has composed THIS window, which it never does for a host (see
+// files-panel.js's own comment on the new `__termlabCreateEditorTab` gate).
+//
+// Six scenarios: a host with no editor publishes instead of calling a
+// nonexistent one, for both arg shapes (34 local, 35 remote); a composed
+// (main) window's existing direct-call path stays byte-identical and NEVER
+// publishes (36); the parent's `panel-host-action` router replays those
+// SAME editor calls, fixture-compared against scenario 36's direct calls so
+// the two paths cannot silently drift apart (37 local, 38 remote); and an
+// unlisted action warns and is dropped at the parent, mirroring the forward
+// bridge's own rule (39). Scenario 40 pins publishAction's own contract
+// (HOST_ACTION_EVENTS is the source of truth; throws synchronously on an
+// unlisted name) — the reverse-direction twin of scenarios 27/28.
+// ===========================================================================
+
+const settle6 = async (times = 4) => { for (let i = 0; i < times; i += 1) await tick(); };
+
+// Builds a sandbox with the REAL pane-store/data-service/actions/bridge/
+// panel modules — no reimplementation, same idiom as scenario 33 — with
+// `composed` controlling whether this window looks like a main window
+// (`window.__termlabCreateEditorTab` set, standing in for manager-compose-
+// runtime.js having run in it) or a panel host (left unset).
+// `editorSpies`, when given, stands in for window.termlabEditorService.
+function makeOpenInEditorSandbox({ composed, editorSpies } = {}) {
+  const invokeCalls = [];
+  const toastErrors = [];
+  const invoke = (cmd, args) => {
+    invokeCalls.push({ cmd, args });
+    if (cmd === 'get_home_dir') return Promise.resolve('/home/demo');
+    if (cmd === 'get_all_settings') return Promise.resolve({});
+    if (cmd === 'local_list_dir') return Promise.resolve([]);
+    if (cmd === 'sftp_realpath') return Promise.resolve('/home/demo');
+    if (cmd === 'sftp_list_dir') return Promise.resolve([]);
+    if (cmd === 'current_window_label') return Promise.resolve('main');
+    if (cmd === 'remote_get_sessions') {
+      return Promise.resolve([
+        { key: 'main:1000007', host: 'build.example.com', user: 'alice', port: 22 },
+      ]);
+    }
+    if (cmd === 'panel_host_action') return Promise.resolve();
+    return Promise.resolve(undefined);
+  };
+
+  const renderCalls = [];
+  const sandbox = {
+    console,
+    setTimeout,
+    clearTimeout,
+    setInterval: () => 0,
+    clearInterval: () => {},
+    Promise,
+    Math,
+    Array,
+    JSON,
+    Object,
+    String,
+    Number,
+  };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  sandbox.utils = { formatSize: () => '', formatDate: () => '', esc: (v) => String(v == null ? '' : v), attr: (v) => String(v == null ? '' : v) };
+  sandbox.toast = { error: (...args) => { toastErrors.push(args); }, info() {}, warn() {}, success() {} };
+  sandbox.toolWindowManager = { isVisible: () => true, activate() {}, deactivate() {} };
+  sandbox.termlabFilesPaneView = {
+    renderPane: (pane, el, deps) => { renderCalls.push({ pane, el, deps }); },
+    showColumnMenu: () => {},
+    showRowContextMenu: () => {},
+  };
+  sandbox.termlabFilesTransfers = {};
+  if (composed) {
+    sandbox.__termlabCreateEditorTab = () => {};
+  }
+  if (editorSpies) {
+    sandbox.termlabEditorService = editorSpies;
+  }
+
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
+  vm.runInContext(fs.readFileSync(FILES_DATA_SERVICE_PATH, 'utf8'), sandbox, { filename: FILES_DATA_SERVICE_PATH });
+  vm.runInContext(fs.readFileSync(FILES_ACTIONS_PATH, 'utf8'), sandbox, { filename: FILES_ACTIONS_PATH });
+  vm.runInContext(fs.readFileSync(BRIDGE_PATH, 'utf8'), sandbox, { filename: BRIDGE_PATH });
+  vm.runInContext(fs.readFileSync(FILES_PANEL_PATH, 'utf8'), sandbox, { filename: FILES_PANEL_PATH });
+
+  const panelEl = makeElement('div');
+  const localRootEl = makeElement('div');
+  const remoteRootEl = makeElement('div');
+  panelEl.querySelector = (sel) => {
+    if (sel === '#fp-local') return localRootEl;
+    if (sel === '#fp-remote') return remoteRootEl;
+    return null;
+  };
+
+  return { sandbox, invoke, invokeCalls, toastErrors, renderCalls, panelEl };
+}
+
+function lastPaneCall6(renderCalls, prefix) {
+  for (let i = renderCalls.length - 1; i >= 0; i -= 1) {
+    if (renderCalls[i].pane.prefix === prefix) return renderCalls[i];
+  }
+  throw new Error(`no ${prefix}-pane renderPane call recorded yet`);
+}
+
+function publishActionCalls(invokeCalls) {
+  return plain(invokeCalls.filter((c) => c.cmd === 'panel_host_action'));
+}
+
+// --- 34. Host mode, LOCAL file: openInEditor publishes instead of calling --
+// a nonexistent editor, and the "editor unavailable" toast never fires. ----
+let directLocalArgs = null; // filled in by scenario 36, fixture-compared by 37
+{
+  const h = makeOpenInEditorSandbox({ composed: false });
+  h.sandbox.filesPanel.init({
+    invoke: h.invoke,
+    panelEl: h.panelEl,
+    panelWrapEl: makeElement('div'),
+    resizeHandleEl: makeElement('div'),
+    layoutService: null,
+    fitActiveTab: () => {},
+    getActiveTab: () => null,
+  });
+  await tick();
+  h.invokeCalls.length = 0;
+
+  const { deps } = lastPaneCall6(h.renderCalls, 'local');
+  await deps.onActivateEntry({ name: 'notes.txt', is_dir: false, size: 42 });
+  await settle6();
+
+  assert.deepStrictEqual(publishActionCalls(h.invokeCalls), [
+    { cmd: 'panel_host_action', args: { event: 'open-in-editor', payload: { kind: 'local', path: '/home/demo/notes.txt' } } },
+  ], 'a host with no editor must publish open-in-editor with the local path');
+  assert.deepStrictEqual(h.toastErrors, [], 'the "editor unavailable" toast must never fire on the publish path');
+}
+
+// --- 35. Host mode, REMOTE file: publishes with the full session-derived --
+// field set (paneId, remotePath, hostLabel, size) — the same fields
+// editor.openRemoteFile takes directly in scenario 36. ----------------------
+let directRemoteArgs = null; // filled in by scenario 36, fixture-compared by 38
+{
+  const h = makeOpenInEditorSandbox({ composed: false });
+  h.sandbox.filesPanel.init({
+    invoke: h.invoke,
+    panelEl: h.panelEl,
+    panelWrapEl: makeElement('div'),
+    resizeHandleEl: makeElement('div'),
+    layoutService: null,
+    fitActiveTab: () => {},
+    getActiveTab: () => null,
+  });
+  await tick();
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle6();
+  h.invokeCalls.length = 0;
+
+  const { deps } = lastPaneCall6(h.renderCalls, 'remote');
+  await deps.onActivateEntry({ name: 'config.yml', is_dir: false, size: 777 });
+  await settle6();
+
+  assert.deepStrictEqual(publishActionCalls(h.invokeCalls), [
+    {
+      cmd: 'panel_host_action',
+      args: {
+        event: 'open-in-editor',
+        payload: {
+          kind: 'remote',
+          paneId: 1000007,
+          remotePath: '/home/demo/config.yml',
+          hostLabel: 'alice@build.example.com',
+          size: 777,
+        },
+      },
+    },
+  ], 'a host with no editor must publish open-in-editor with the full remote descriptor');
+}
+
+// --- 36. Main-window mode: the existing direct-call path is byte-unchanged
+// (editor.openLocalFile/openRemoteFile called with today's args) and NEVER
+// publishes — zero panel_host_action invokes, for both local and remote. ---
+{
+  const openLocalCalls = [];
+  const openRemoteCalls = [];
+  const h = makeOpenInEditorSandbox({
+    composed: true,
+    editorSpies: {
+      openLocalFile: (p) => { openLocalCalls.push(p); },
+      openRemoteFile: (descriptor) => { openRemoteCalls.push(descriptor); },
+    },
+  });
+  h.sandbox.filesPanel.init({
+    invoke: h.invoke,
+    panelEl: h.panelEl,
+    panelWrapEl: makeElement('div'),
+    resizeHandleEl: makeElement('div'),
+    layoutService: null,
+    fitActiveTab: () => {},
+    getActiveTab: () => null,
+  });
+  await tick();
+
+  const { deps: localDeps } = lastPaneCall6(h.renderCalls, 'local');
+  await localDeps.onActivateEntry({ name: 'notes.txt', is_dir: false, size: 42 });
+  await settle6();
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle6();
+
+  const { deps: remoteDeps } = lastPaneCall6(h.renderCalls, 'remote');
+  await remoteDeps.onActivateEntry({ name: 'config.yml', is_dir: false, size: 777 });
+  await settle6();
+
+  assert.deepStrictEqual(plain(openLocalCalls), ['/home/demo/notes.txt'],
+    'a composed (main) window must still call editor.openLocalFile directly, unchanged');
+  assert.deepStrictEqual(plain(openRemoteCalls), [
+    { paneId: 1000007, remotePath: '/home/demo/config.yml', hostLabel: 'alice@build.example.com', size: 777 },
+  ], "a composed (main) window must still call editor.openRemoteFile directly, with today's exact fields");
+  assert.deepStrictEqual(publishActionCalls(h.invokeCalls), [],
+    'the main-window path must never publish — zero panel_host_action calls');
+
+  directLocalArgs = plain(openLocalCalls[0]);
+  directRemoteArgs = plain(openRemoteCalls[0]);
+}
+
+// --- Part 6b — the parent's panel-host-action router (tool-window-runtime.js)
+function makeFakeManager6() {
+  return {
+    isPanelOpen: () => true,
+    isPanelVisible: () => true,
+    getZoneAssignments: () => ({}),
+    getActiveZoneAssignments: () => ({}),
+    getViewModes: () => ({}),
+    getSplitRatios: () => ({ left: 0.5, right: 0.5 }),
+    getSidebarWidths: () => ({ left: 240, right: 300 }),
+    init: () => {},
+    setPersistedZones: () => {},
+    setPersistedActiveZoneWindows: () => {},
+    setPersistedPanelVisibility: () => {},
+    setPersistedViewModes: () => {},
+    setSidebarWidth: () => {},
+    setSplitRatio: () => {},
+    setPanelVisibility: () => {},
+    register: () => {},
+    summonPendingWindowHosts: () => {},
+    notifyHostShown: () => {},
+    notifyHostHidden: () => {},
+    notifyHostDocked: () => {},
+    notifyHostAborted: () => {},
+  };
+}
+
+// Loads the REAL app/core/panel-host-bridge.js + app/tool-window-runtime.js,
+// with `editorSpies` standing in for window.termlabEditorService — this is
+// the PARENT half of the reverse bridge, so it is the module that reads
+// that global directly (routePanelHostAction), same as every other in-window
+// caller (vim-mode's :w, the (cmd)O chooser).
+async function loadRuntimeWithEditor(editorSpies) {
+  const listeners = new Map();
+  const warnCalls = [];
+  const elements = new Map([
+    ['bottom-zone-wrap', makeElement('div')],
+    ['bottom-zone-resize', makeElement('div')],
+  ]);
+
+  const sandbox = {
+    console: { ...console, warn: (...args) => { warnCalls.push(args); } },
+    setTimeout,
+    clearTimeout,
+    Promise,
+    Math,
+    Number,
+    document: {
+      body: makeElement('body'),
+      createElement: (t) => makeElement(t),
+      getElementById: (id) => elements.get(id) || null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener() {},
+    },
+    addEventListener() {},
+  };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  sandbox.toolWindowManager = makeFakeManager6();
+  sandbox.termlabEditorService = editorSpies;
+
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(BRIDGE_PATH, 'utf8'), sandbox, { filename: BRIDGE_PATH });
+  vm.runInContext(fs.readFileSync(RUNTIME_PATH, 'utf8'), sandbox, { filename: RUNTIME_PATH });
+
+  const runtime = sandbox.termlabToolWindowRuntime.create({
+    invoke: () => Promise.resolve(undefined),
+    listen: () => Promise.resolve(() => {}),
+    listenOnCurrentWindow: (name, fn) => {
+      if (!listeners.has(name)) listeners.set(name, []);
+      listeners.get(name).push(fn);
+      return Promise.resolve(() => {});
+    },
+    layoutService: {
+      getSavedLayout: () => Promise.resolve({}),
+      saveLayout: () => {},
+    },
+    debouncedFitAndResize: () => {},
+    getCurrentTab: () => null,
+    getCurrentPane: () => null,
+  });
+  await runtime.init();
+
+  const emit = (name, payload) => {
+    for (const fn of listeners.get(name) || []) fn({ payload });
+  };
+  return { emit, warnCalls };
+}
+
+// --- 37. Parent router: open-in-editor (local) reaches termlabEditorService
+// with EXACTLY the args files-panel.js's OWN direct call used (scenario 36).
+{
+  assert.ok(directLocalArgs, 'scenario 36 must have run first and captured its direct-call fixture');
+  const openLocalCalls = [];
+  const { emit } = await loadRuntimeWithEditor({
+    openLocalFile: (p) => { openLocalCalls.push(p); },
+    openRemoteFile: () => {},
+  });
+
+  emit('panel-host-action', {
+    toolWindowId: 'file-explorer',
+    event: 'open-in-editor',
+    payload: { kind: 'local', path: directLocalArgs },
+  });
+
+  assert.deepStrictEqual(plain(openLocalCalls), [directLocalArgs],
+    'the parent route must call openLocalFile with EXACTLY the path the direct path used');
+}
+
+// --- 38. Parent router: open-in-editor (remote) fixture-compares byte-for- -
+// byte against scenario 36's direct editor.openRemoteFile call. ------------
+{
+  assert.ok(directRemoteArgs, 'scenario 36 must have run first and captured its direct-call fixture');
+  const openRemoteCalls = [];
+  const { emit } = await loadRuntimeWithEditor({
+    openLocalFile: () => {},
+    openRemoteFile: (descriptor) => { openRemoteCalls.push(descriptor); },
+  });
+
+  emit('panel-host-action', {
+    toolWindowId: 'file-explorer',
+    event: 'open-in-editor',
+    payload: { kind: 'remote', ...directRemoteArgs },
+  });
+
+  assert.deepStrictEqual(plain(openRemoteCalls), [directRemoteArgs],
+    'the parent route must call openRemoteFile with EXACTLY the object the direct path used');
+}
+
+// --- 39. An unlisted panel-host-action warns and is dropped at the parent —
+// never reaches the editor service (mirrors the forward bridge's own rule,
+// scenario 32). ---------------------------------------------------------------
+{
+  const openLocalCalls = [];
+  const openRemoteCalls = [];
+  const { emit, warnCalls } = await loadRuntimeWithEditor({
+    openLocalFile: (p) => { openLocalCalls.push(p); },
+    openRemoteFile: (d) => { openRemoteCalls.push(d); },
+  });
+
+  assert.doesNotThrow(() => {
+    emit('panel-host-action', { toolWindowId: 'file-explorer', event: 'some-future-action', payload: { x: 1 } });
+  }, 'a version-skewed host asking for an unknown action must never throw in the parent');
+
+  assert.deepStrictEqual(openLocalCalls, []);
+  assert.deepStrictEqual(openRemoteCalls, []);
+  assert.strictEqual(warnCalls.length, 1, 'exactly one warning for the one unlisted action');
+  assert.deepStrictEqual(warnCalls[0], ['panel host: ignoring unlisted panel-host-action', 'some-future-action']);
+}
+
+// --- 40. HOST_ACTION_EVENTS is the single source; publishAction relays a --
+// listed action with the exact payload, and throws synchronously on an
+// unlisted one (the reverse-direction twin of scenarios 27/28). ------------
+{
+  const sandbox = { console };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(BRIDGE_PATH, 'utf8'), sandbox, { filename: BRIDGE_PATH });
+
+  assert.deepStrictEqual(Array.from(sandbox.termlabPanelHostBridge.HOST_ACTION_EVENTS), ['open-in-editor']);
+
+  const invokeCalls = [];
+  const bridge = sandbox.termlabPanelHostBridge.create({
+    invoke: (cmd, args) => { invokeCalls.push({ cmd, args }); return Promise.resolve(); },
+  });
+
+  bridge.publishAction('open-in-editor', { kind: 'local', path: '/tmp/x.txt' });
+  assert.deepStrictEqual(plain(invokeCalls), [
+    { cmd: 'panel_host_action', args: { event: 'open-in-editor', payload: { kind: 'local', path: '/tmp/x.txt' } } },
+  ], 'a listed action relays through panel_host_action with the exact payload');
+
+  assert.throws(() => bridge.publishAction('some-future-action', {}), /unlisted action/);
+  assert.deepStrictEqual(publishActionCalls(invokeCalls), [
+    { cmd: 'panel_host_action', args: { event: 'open-in-editor', payload: { kind: 'local', path: '/tmp/x.txt' } } },
+  ], 'the rejected publishAction call must never reach invoke a second time');
 }
 
 console.log('panel host: all assertions passed');

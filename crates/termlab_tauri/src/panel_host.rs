@@ -95,10 +95,27 @@ pub(crate) struct PanelHostBroadcastEvent {
     pub payload: serde_json::Value,
 }
 
+/// Event payload for `panel_host_action`'s hand-off from a popped-out host to
+/// its PARENT window — the mirror of [`PanelHostBroadcastEvent`], but
+/// travelling the opposite direction (host -> parent) and carrying
+/// `tool_window_id` so a parent with more than one live host can tell which
+/// one is asking. See `panel_host_action`'s doc comment for why a host ever
+/// needs this: it has none of the parent's owned singletons (no editor, no
+/// tab manager), so an action a docked panel would just perform locally has
+/// to cross back over IPC instead.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PanelHostActionEvent {
+    pub tool_window_id: String,
+    pub event: String,
+    pub payload: serde_json::Value,
+}
+
 pub(crate) const PANEL_HOST_DOCKED_EVENT: &str = "panel-host-docked";
 pub(crate) const PANEL_HOST_HIDDEN_EVENT: &str = "panel-host-hidden";
 pub(crate) const PANEL_HOST_SHOWN_EVENT: &str = "panel-host-shown";
 pub(crate) const PANEL_HOST_BROADCAST_EVENT: &str = "panel-host-event";
+pub(crate) const PANEL_HOST_ACTION_EVENT: &str = "panel-host-action";
 /// Emitted to the parent by `abort_panel_host` — the boot's
 /// unknown-tool-window-id self-close path. Distinct from
 /// `panel-host-docked`: a dock-back means "remount this panel in its zone",
@@ -731,6 +748,94 @@ mod dock_target_tests {
     }
 }
 
+/// Which entry `panel_host_action` may act through, given a raw caller
+/// `window_label`. Pulled out as a pure function, the same way
+/// [`resolve_dock_target`] is, so the "caller must be a REGISTERED host
+/// window" rule is unit-tested directly rather than only through the command
+/// itself (which needs a real `tauri::WebviewWindow` this module cannot
+/// construct in a plain `cargo test`).
+///
+/// Unlike `resolve_dock_target`, there is only ONE legal caller shape here:
+/// the host itself, resolved by exact match on its own stored
+/// `window_label` — never the parent, and never by parsing a parent out of
+/// the label. A parent already has its own editor; only a host, which has
+/// none, ever needs to ask its parent to act on its behalf.
+fn resolve_action_caller(
+    registry: &PanelHostRegistry,
+    caller_label: &str,
+) -> Result<PanelHostEntry, String> {
+    registry
+        .get_by_window_label(caller_label)
+        .cloned()
+        .ok_or_else(|| "this command must be called by a registered panel host window".to_string())
+}
+
+#[cfg(test)]
+mod action_target_tests {
+    use super::{resolve_action_caller, PanelHostActionEvent, PanelHostRegistry};
+
+    #[test]
+    fn a_registered_host_resolves_to_its_own_entry() {
+        let mut r = PanelHostRegistry::default();
+        let (_, host) = r.open("window-1".into(), "file-explorer".into(), "Files".into());
+
+        let entry = resolve_action_caller(&r, &host.window_label)
+            .expect("a registered host's own label resolves");
+        assert_eq!(entry.parent_label, "window-1");
+        assert_eq!(entry.tool_window_id, "file-explorer");
+    }
+
+    #[test]
+    fn non_host_and_stale_callers_are_rejected() {
+        let mut r = PanelHostRegistry::default();
+        let (_, host) = r.open("window-1".into(), "file-explorer".into(), "Files".into());
+
+        assert!(
+            resolve_action_caller(&r, "window-1").is_err(),
+            "the PARENT itself may not call this — only its own host may act on its behalf"
+        );
+        assert!(resolve_action_caller(&r, "chooser-window-1-2").is_err());
+        assert!(resolve_action_caller(&r, "settings").is_err());
+        assert!(
+            resolve_action_caller(&r, "panelhost-window-1-999999").is_err(),
+            "a panelhost-shaped label with no registry entry names nothing"
+        );
+
+        let stale = host.window_label.clone();
+        r.remove("window-1", "file-explorer");
+        assert!(
+            resolve_action_caller(&r, &stale).is_err(),
+            "a displaced/torn-down host's stale label names nothing"
+        );
+    }
+
+    #[test]
+    fn action_event_payload_shape_is_camelcase_and_carries_the_hosts_tool_window_id() {
+        // Pins the exact wire shape `panel_host_action` emits to the parent:
+        // this, together with `a_registered_host_resolves_to_its_own_entry`
+        // above (which proves the command resolves the right `parent_label`
+        // to emit_to and the right `tool_window_id` to stamp on the payload),
+        // is the unit-level evidence for "a host-caller emits to parent with
+        // the payload" — `emit_to`/`set_focus` themselves are Tauri window
+        // APIs this module cannot exercise outside a running app.
+        let payload = PanelHostActionEvent {
+            tool_window_id: "file-explorer".to_string(),
+            event: "open-in-editor".to_string(),
+            payload: serde_json::json!({ "kind": "local", "path": "/tmp/x.txt" }),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "toolWindowId": "file-explorer",
+                "event": "open-in-editor",
+                "payload": { "kind": "local", "path": "/tmp/x.txt" },
+            }),
+            "camelCase toolWindowId, alongside the raw event name and payload the host sent"
+        );
+    }
+}
+
 #[cfg(test)]
 mod caller_validation_tests {
     use super::{validate_panel_host_caller, validate_panel_host_self_caller};
@@ -1349,6 +1454,62 @@ pub(crate) fn panel_host_broadcast(
     let out = PanelHostBroadcastEvent { event, payload };
     for host in hosts {
         let _ = app.emit_to(host.window_label.as_str(), PANEL_HOST_BROADCAST_EVENT, &out);
+    }
+    Ok(())
+}
+
+/// Hand an action off from a popped-out host to its PARENT window — the
+/// reverse of `panel_host_broadcast`. A host has none of the parent's owned
+/// singletons (no editor, no tab manager: `manager-compose-runtime.js`,
+/// which publishes the escape hatches those need, only ever runs for a
+/// composed main window — see `app/panel-host-runtime.js`'s module doc), so
+/// an action a docked panel would just perform locally has to cross back
+/// over IPC instead. Double-clicking a file in a popped-out Files panel is
+/// the first user of this (`open-in-editor`,
+/// `app/core/panel-host-bridge.js`'s `HOST_ACTION_EVENTS`).
+///
+/// Callers MUST be a REGISTERED host window — `resolve_action_caller`'s
+/// exact `window_label` lookup, never a shape check alone, so a stale or
+/// displaced host's label (or any ordinary/chooser/settings window, none of
+/// which is ever inserted as a `window_label`) is rejected outright.
+///
+/// Emits `panel-host-action` to the parent, then focuses it: a user-
+/// initiated navigation (the file they just double-clicked is about to
+/// appear there), the same as summoning a docked panel's window would be.
+/// The registry lock is released (via the cloned `entry`) BEFORE either
+/// window API call — the same law every other command in this module
+/// follows: never hold the mutex across a window API, which can reenter or
+/// block on the event loop.
+#[tauri::command]
+pub(crate) fn panel_host_action(
+    window: tauri::WebviewWindow,
+    event: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let caller_label = window.label().to_string();
+
+    let app = window.app_handle();
+    let entry = {
+        let registry = app.state::<Mutex<PanelHostRegistry>>();
+        let guard = registry.lock();
+        resolve_action_caller(&guard, &caller_label)?
+    };
+
+    let _ = app.emit_to(
+        entry.parent_label.as_str(),
+        PANEL_HOST_ACTION_EVENT,
+        &PanelHostActionEvent {
+            tool_window_id: entry.tool_window_id.clone(),
+            event,
+            payload,
+        },
+    );
+
+    // Focus is a window API this module cannot exercise in a plain `cargo
+    // test` (no running app / event loop) — see action_target_tests above
+    // for what IS unit-tested here.
+    if let Some(parent_win) = app.get_webview_window(entry.parent_label.as_str()) {
+        let _ = parent_win.set_focus();
     }
     Ok(())
 }

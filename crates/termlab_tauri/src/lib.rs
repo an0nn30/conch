@@ -830,6 +830,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             panel_host::dock_panel_host,
             panel_host::abort_panel_host,
             panel_host::panel_host_broadcast,
+            panel_host::panel_host_action,
             commands::rebuild_menu,
             settings::get_all_settings,
             settings::save_settings,
