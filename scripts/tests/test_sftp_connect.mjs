@@ -940,7 +940,7 @@ function authFixtureWithVaultAccount(user) {
 
 const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await tick(); };
 
-// --- 11. vaultLocked: wrong password re-prompts with an error line, then --
+// --- 13. vaultLocked: wrong password re-prompts with an error line, then --
 // the correct password unlocks and retries sftp_connect_host EXACTLY ONCE. -
 {
   const session = { sessionKey: 'main:1000200', host: 'build.example.com', user: 'alice', port: 22, paneId: 1000200 };
@@ -987,10 +987,10 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   assert.deepEqual(connectHostCalls[0].args, { serverEntryId: 'e-build' });
   const unlockCalls = h.invokeCalls.filter((c) => c.cmd === 'vault_unlock');
   assert.equal(unlockCalls.length, 2, 'one rejected attempt, one accepted attempt');
-  console.log('11. vaultLocked: wrong-password re-prompt then unlock+retry-once: ok');
+  console.log('13. vaultLocked: wrong-password re-prompt then unlock+retry-once: ok');
 }
 
-// --- 12. Cancel at the master-password rung: null, no further invokes, ----
+// --- 14. Cancel at the master-password rung: null, no further invokes, ----
 // DOM field cleared. --------------------------------------------------------
 {
   const h = setupAuthHarness(() => Promise.reject(new Error('must not be invoked after cancel')));
@@ -1008,10 +1008,10 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   assert.equal(result, null, 'cancelling the master-password dialog resolves null');
   assert.equal(input.value, '', 'the DOM field is cleared even when cancelling');
   assert.equal(h.invokeCalls.length, 0, 'no invoke call must happen after Cancel');
-  console.log('12. vaultLocked cancel: null, no further invokes: ok');
+  console.log('14. vaultLocked cancel: null, no further invokes: ok');
 }
 
-// --- 13. needsPassword: title is "user@host", checkbox defaults CHECKED ---
+// --- 15. needsPassword: title is "user@host", checkbox defaults CHECKED ---
 // when hasVaultAccount is true, and saveToVault passes through as typed. ---
 {
   const session = { sessionKey: 'main:1000201', host: 'build.example.com', user: 'alice', port: 22, paneId: 1000201 };
@@ -1043,10 +1043,10 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   assert.equal(input.value, '', 'the DOM password field must be cleared on close');
   const call = h.invokeCalls.find((c) => c.cmd === 'sftp_connect_host_with_password');
   assert.deepEqual(call.args, { serverEntryId: 'e-build', password: 'hunter2', saveToVault: true }, 'saveToVault passes through the checkbox state as typed');
-  console.log('13. needsPassword: title, checkbox default true, saveToVault passthrough: ok');
+  console.log('15. needsPassword: title, checkbox default true, saveToVault passthrough: ok');
 }
 
-// --- 14. needsPassword with hasVaultAccount=false: checkbox defaults ------
+// --- 16. needsPassword with hasVaultAccount=false: checkbox defaults ------
 // UNCHECKED, and toggling it on still passes saveToVault=true through -------
 // (proves the value isn't hardcoded to the default). -------------------------
 {
@@ -1073,10 +1073,10 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
 
   const call = h.invokeCalls.find((c) => c.cmd === 'sftp_connect_host_with_password');
   assert.equal(call.args.saveToVault, true, 'the checkbox toggle, not the default, decides saveToVault');
-  console.log('14. needsPassword: checkbox default false, user toggle honored: ok');
+  console.log('16. needsPassword: checkbox default false, user toggle honored: ok');
 }
 
-// --- 15. Wrong host password re-prompts with an error line; the attempt ---
+// --- 17. Wrong host password re-prompts with an error line; the attempt ---
 // counter only appears once two attempts have already failed (i.e. on the --
 // dialog for the 3rd try). --------------------------------------------------
 {
@@ -1120,10 +1120,59 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
 
   const result = await resultPromise;
   assert.deepEqual(result, session);
-  console.log('15. needsPassword: wrong-password re-prompt + counter at attempt 3: ok');
+  console.log('17. needsPassword: wrong-password re-prompt + counter at attempt 3: ok');
 }
 
-// --- 16. Cancel at the host-password rung: null, no further invokes, ------
+// --- 18 (L3). Empty-password submit: sftp_connect_host_with_password -----
+// round-trips to needsPassword (connect_and_auth treats "" as missing, the
+// suppressed prompt maps it back). The chain must re-prompt with a plain
+// "Password required" line, never fall through to onError with the raw
+// "needsPassword" variant tag — and must NOT count as a failed auth attempt
+// (failedAttempts stays put, so no attempt counter appears yet).
+{
+  const session = { sessionKey: 'main:1000205', host: 'build.example.com', user: 'alice', port: 22, paneId: 1000205 };
+  let call = 0;
+  const h = setupAuthHarness((cmd) => {
+    if (cmd === 'sftp_connect_host_with_password') {
+      call += 1;
+      if (call === 1) return Promise.reject({ kind: 'needsPassword', hasVaultAccount: true });
+      return Promise.resolve(session);
+    }
+    return undefined;
+  });
+  h.setServersFixture(authFixtureWithVaultAccount('alice'));
+  let reported = null;
+
+  const resultPromise = h.sandbox.termlabConnectAuth.run(
+    'e-build',
+    { kind: 'needsPassword', hasVaultAccount: true },
+    { invoke: h.invoke, data: h.data, onError: (m) => { reported = m; } },
+  );
+  await settle2();
+  assert.equal(h.dialogOpens.length, 1);
+  // Empty submit — the DOM input's default value is '' already; click
+  // Connect without typing anything.
+  findButton(h.dialogOpens[0].handle.el, 'Connect').click();
+  await settle2();
+
+  assert.equal(reported, null, 'a needsPassword round-trip must never reach onError with the raw variant tag');
+  assert.equal(h.dialogOpens.length, 2, 'an empty-password round-trip must re-prompt, not dead-end the chain');
+  const errLine = findByClass(h.dialogOpens[1].handle.el, 'ca-error-line');
+  assert.ok(errLine, 'the re-prompt must show an error line');
+  assert.equal(errLine.textContent, 'Password required', 'the error line must be plain prose, not the raw "needsPassword" tag');
+  assert.equal(
+    findByClass(h.dialogOpens[1].handle.el, 'ca-attempt-line'), null,
+    'an empty-password round-trip must not count as a failed auth attempt',
+  );
+
+  findByClass(h.dialogOpens[1].handle.el, 'ca-host-password').value = 'hunter2';
+  findButton(h.dialogOpens[1].handle.el, 'Connect').click();
+  const result = await resultPromise;
+  assert.deepEqual(result, session, 'a real password on the re-prompt must still complete the chain');
+  console.log('18. needsPassword round-trip (empty submit): re-prompts with "Password required", no raw tag: ok');
+}
+
+// --- 19. Cancel at the host-password rung: null, no further invokes, ------
 // DOM field cleared. --------------------------------------------------------
 {
   const h = setupAuthHarness(() => Promise.reject(new Error('must not be invoked after cancel')));
@@ -1143,10 +1192,10 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   assert.equal(input.value, '', 'the DOM field is cleared even when cancelling');
   // getServers is expected (for the title); nothing else must fire.
   assert.ok(!h.invokeCalls.some((c) => c.cmd === 'sftp_connect_host_with_password'), 'no connect attempt after Cancel');
-  console.log('16. needsPassword cancel: null, no further invokes: ok');
+  console.log('19. needsPassword cancel: null, no further invokes: ok');
 }
 
-// --- 17. unreachable/other at the password rung: no re-prompt, the -------
+// --- 20. unreachable/other at the password rung: no re-prompt, the -------
 // message is routed to onError, and the chain resolves null. ---------------
 {
   const h = setupAuthHarness((cmd) => {
@@ -1168,10 +1217,10 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   assert.equal(result, null);
   assert.equal(h.dialogOpens.length, 1, 'unreachable must not re-prompt');
   assert.equal(reported, 'DNS failure', 'the message must be routed to the caller error surface');
-  console.log('17. needsPassword unreachable: routed to onError, resolves null, no re-prompt: ok');
+  console.log('20. needsPassword unreachable: routed to onError, resolves null, no re-prompt: ok');
 }
 
-// --- 18. connectInProgress reaching run() directly (defensive — the ------
+// --- 21. connectInProgress reaching run() directly (defensive — the ------
 // production caller filters this out before calling run(), see files-panel)
 // is a quiet no-op: no dialog, no onError, resolves null. -------------------
 {
@@ -1185,10 +1234,10 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   assert.equal(result, null);
   assert.equal(h.dialogOpens.length, 0, 'connectInProgress must never raise a dialog');
   assert.equal(errorCalled, false, 'connectInProgress must never surface as an error');
-  console.log('18. connectInProgress reaching run() directly: quiet no-op: ok');
+  console.log('21. connectInProgress reaching run() directly: quiet no-op: ok');
 }
 
-// --- 19. authFailed as the starting error (defensive — not expected from -
+// --- 22. authFailed as the starting error (defensive — not expected from -
 // a first sftp_connect_host today, but the type allows it): routed to -----
 // onError, resolves null, no dialog. -----------------------------------------
 {
@@ -1202,19 +1251,19 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   assert.equal(result, null);
   assert.equal(h.dialogOpens.length, 0);
   assert.equal(reported, 'Authentication failed: bad key');
-  console.log('19. authFailed as starting error: routed to onError, no dialog: ok');
+  console.log('22. authFailed as starting error: routed to onError, no dialog: ok');
 }
 
-// --- 20. The bridge is gone: files-panel.js no longer describes typed -----
+// --- 23. The bridge is gone: files-panel.js no longer describes typed -----
 // errors as a static string itself; it routes them through connectAuth.run.
 {
   const filesPanelSrc = fs.readFileSync(FILES_PANEL_PATH, 'utf8');
   assert.ok(!filesPanelSrc.includes('describeSftpConnectError'), 'describeSftpConnectError must be fully removed, not just unused');
   assert.ok(filesPanelSrc.includes('connectAuth.run'), 'connectToHost must route non-Ok kinds through connectAuth.run');
-  console.log('20. bridge removed, chain wired in: ok');
+  console.log('23. bridge removed, chain wired in: ok');
 }
 
-// --- 21. Integration: files-panel.js's connectToHost end to end through ---
+// --- 24. Integration: files-panel.js's connectToHost end to end through ---
 // the real connect-auth.js chain — vaultLocked -> unlock dialog -> retried
 // sftp_connect_host -> pin. Proves the wiring (not just connect-auth.js in
 // isolation): hostConnectBusyEntryId clears and the remote pane pins once
@@ -1286,7 +1335,7 @@ const settle2 = async (times = 6) => { for (let i = 0; i < times; i += 1) await 
   const after = lastRemoteAuthCall(h.renderCalls).deps;
   assert.equal(after.hostComboBusy, false, 'busy clears once the chain resolves');
   assert.equal(after.hostComboValue, 'main:1000204', 'a chain that eventually succeeds pins to the won session');
-  console.log('21. integration: files-panel connectToHost drives the real chain to a pin: ok');
+  console.log('24. integration: files-panel connectToHost drives the real chain to a pin: ok');
 }
 
 console.log('sftp connect part 2 (auth dialog chain): all assertions passed');

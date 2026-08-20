@@ -276,6 +276,18 @@
           errorMessage = `Authentication failed: ${err.message}`;
           continue; // re-prompt, same host, same hasVaultAccount default
         }
+        if (err && err.kind === 'needsPassword') {
+          // An empty submit round-trips here: connect_and_auth treats ""
+          // as missing, and the suppressed prompt maps that back to
+          // NeedsPassword rather than AuthFailed. Without this branch that
+          // fell through to onError below, dead-ending the chain with the
+          // raw "needsPassword" variant tag rendered in the .fp-error strip
+          // (L3) — re-prompt instead, same as a wrong password, but with a
+          // message that says what actually happened. Not counted as a
+          // failed auth attempt: failedAttempts is left alone.
+          errorMessage = 'Password required';
+          continue; // re-prompt, same host, same hasVaultAccount default
+        }
         // unreachable/other/connectInProgress/unknown — the ruling covers
         // this "at any rung": route the message to the caller's error
         // surface and stop, no further invokes.
