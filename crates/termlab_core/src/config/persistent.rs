@@ -40,6 +40,18 @@ pub struct ChooserWindowSize {
     pub height: f64,
 }
 
+/// A popped-out tool window's last known position and size, in logical
+/// pixels. Unlike the chooser (which is always re-centered), a panel host
+/// keeps whatever bounds the user left it at, so both position AND size are
+/// persisted here — see `termlab_tauri::panel_host`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowBoundsRecord {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// The two numbers that turn "columns x lines" into window pixels: how big a
 /// terminal cell really is (depends on the font, which only the webview can
 /// measure), and how much of the window is not terminal (titlebar, tab bar,
@@ -121,6 +133,12 @@ pub struct LayoutConfig {
     pub left_split_ratio: f32,
     /// Right sidebar top/bottom split ratio (0.0–1.0, top portion).
     pub right_split_ratio: f32,
+    /// Popped-out tool windows' last known bounds, by tool-window id.
+    /// Absent keys (including the whole map, for state files written before
+    /// this field existed) mean "never popped out" — the panel host opens at
+    /// its default size, centered on the parent (see
+    /// `termlab_tauri::panel_host`).
+    pub tool_window_bounds: HashMap<String, WindowBoundsRecord>,
 }
 
 impl Default for LayoutConfig {
@@ -141,6 +159,7 @@ impl Default for LayoutConfig {
             active_tool_windows: HashMap::new(),
             left_split_ratio: 0.5,
             right_split_ratio: 0.5,
+            tool_window_bounds: HashMap::new(),
         }
     }
 }
@@ -204,6 +223,7 @@ mod tests {
                 active_tool_windows: active,
                 left_split_ratio: 0.6,
                 right_split_ratio: 0.4,
+                tool_window_bounds: HashMap::new(),
             },
             loaded_plugins: vec!["ssh-manager".into(), "git-status".into()],
             window_metrics: WindowMetrics {
@@ -291,6 +311,52 @@ loaded_plugins = ["my-plugin"]
 "#;
         let ps: PersistentState = toml::from_str(toml_str).expect("deserialize");
         assert_eq!(ps.chooser_window, None);
+    }
+
+    #[test]
+    fn tool_window_bounds_round_trips_toml() {
+        let mut bounds = HashMap::new();
+        bounds.insert(
+            "ssh-sessions".to_string(),
+            WindowBoundsRecord {
+                x: 120.0,
+                y: 80.0,
+                width: 640.0,
+                height: 480.0,
+            },
+        );
+        let original = PersistentState {
+            layout: LayoutConfig {
+                tool_window_bounds: bounds,
+                ..LayoutConfig::default()
+            },
+            ..PersistentState::default()
+        };
+        let toml_str = toml::to_string(&original).expect("serialize");
+        let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(
+            restored.layout.tool_window_bounds.get("ssh-sessions"),
+            Some(&WindowBoundsRecord {
+                x: 120.0,
+                y: 80.0,
+                width: 640.0,
+                height: 480.0,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_window_bounds_defaults_to_empty_map_when_key_absent() {
+        // Backward compat: every state.toml written before this field existed
+        // has no [layout.tool_window_bounds] table at all.
+        let toml_str = r#"
+loaded_plugins = ["my-plugin"]
+
+[layout]
+zoom_factor = 1.5
+"#;
+        let ps: PersistentState = toml::from_str(toml_str).expect("deserialize");
+        assert!(ps.layout.tool_window_bounds.is_empty());
     }
 
     #[test]

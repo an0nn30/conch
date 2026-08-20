@@ -15,6 +15,7 @@ pub(crate) mod font_metrics;
 pub(crate) mod fonts;
 mod ipc;
 pub(crate) mod menu;
+pub(crate) mod panel_host;
 pub mod platform;
 pub(crate) mod plugins;
 pub(crate) mod pty;
@@ -317,6 +318,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(updater::PendingUpdate::new())
         .manage(close_guard::CloseGuard::default())
         .manage(Mutex::new(chooser_window::ChooserRegistry::default()))
+        .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
 
@@ -696,6 +698,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 // registry cleanup, the emit, and the size persistence while
                 // the window is still alive to read from.
                 chooser_window::on_chooser_close_requested(window);
+
+                // A REGISTERED panel host's close button hides instead of
+                // closing (the entry — and the webview's panel state — is
+                // meant to survive; see panel_host.rs's module doc for the
+                // deliberate divergence from the chooser). An unregistered
+                // one (the boot's unknown-tool-window-id self-close) is left
+                // to close normally.
+                if panel_host::on_panel_host_close_requested(window) {
+                    api.prevent_close();
+                }
             }
 
             // IntelliJ-style modal focus: clicking the main window while
@@ -713,6 +725,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 chooser_window::on_window_focused(window);
             }
 
+            // A popped-out tool window's user-driven move/resize is
+            // debounce-persisted per tool-window id, so the next pop-out (or
+            // restart) reopens at the same bounds.
+            if matches!(
+                event,
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+            ) {
+                panel_host::on_panel_host_bounds_changed(window);
+            }
+
             if let tauri::WindowEvent::Destroyed = event {
                 let label = window.label().to_string();
                 log::info!("Window '{label}' destroyed — starting cleanup");
@@ -727,6 +749,13 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 // `.parent()` owner relationship (macOS/Windows) is not
                 // trusted alone to do this on every platform.
                 chooser_window::on_window_destroyed(window);
+
+                // Same idea for panel hosts: if this window was some host's
+                // parent, destroy every live host of it and drain their
+                // registry entries. Also drops a stale entry if THIS window
+                // was itself a panel host that died without CloseRequested
+                // (OS kill / crash) — see panel_host::on_window_destroyed.
+                panel_host::on_window_destroyed(window);
 
                 // When the main window closes, also close child windows
                 // (settings, etc.) so they don't linger as orphans.
@@ -788,6 +817,13 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             chooser_window::cancel_file_chooser,
             chooser_window::chooser_ready,
             chooser_window::focus_file_chooser,
+            panel_host::open_panel_host,
+            panel_host::get_panel_host_request,
+            panel_host::panel_host_ready,
+            panel_host::focus_panel_host,
+            panel_host::hide_panel_host,
+            panel_host::dock_panel_host,
+            panel_host::panel_host_broadcast,
             commands::rebuild_menu,
             settings::get_all_settings,
             settings::save_settings,
