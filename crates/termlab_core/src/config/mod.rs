@@ -22,6 +22,8 @@ pub use window::*;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,27 @@ use serde::{Deserialize, Serialize};
 // Atomic write utility
 // ---------------------------------------------------------------------------
 
+/// Build a temp path for `path` that no concurrent writer of the same target
+/// can collide on: a fixed name (the old `path.with_extension("tmp")`) is
+/// shared by every caller, so two writers racing `atomic_write` for the same
+/// target can interleave one's truncate with the other's `write_all` and
+/// publish a torn file on rename. `state.toml` now has cross-thread writers
+/// (the panel-host bounds debounce thread alongside main-thread saves — see
+/// the branch review's F2), so belt-and-braces this alongside the
+/// `update_persistent_state` lock: a process id + monotonic counter suffix
+/// makes every call's temp file its own, even for two writers targeting the
+/// same path in the same process.
+fn unique_temp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("state.toml");
+    path.with_file_name(format!(".{file_name}.{pid}.{n}.tmp"))
+}
+
 /// Write data to a file atomically: write to a temporary file first,
 /// then rename to the target path. This prevents corruption from
 /// partial writes due to crashes or power loss.
@@ -37,8 +60,14 @@ use serde::{Deserialize, Serialize};
 /// If the target file already exists, its permissions are copied to the
 /// temporary file before the rename so that restricted modes (e.g. 0600)
 /// are preserved.
+///
+/// The temp file's name is unique per call (see [`unique_temp_path`]) so
+/// concurrent writers targeting the same `path` never share one temp file.
+/// That is a hardening measure, not the primary fix for state.toml's
+/// load-mutate-save race — [`update_persistent_state`] serializing the
+/// whole span is.
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = unique_temp_path(path);
     fs::write(&tmp, data)?;
 
     // Preserve permissions from the existing file if present.
@@ -250,28 +279,85 @@ pub fn save_user_config(config: &UserConfig) -> Result<()> {
 // Load / Save — PersistentState
 // ---------------------------------------------------------------------------
 
+/// Guards the load-mutate-save critical section for `state.toml`. Every
+/// writer of persisted state — `save_window_layout`, `save_window_metrics`,
+/// `set_zoom_level`, `persist_enabled_plugins`, `persist_chooser_size`, and
+/// the panel-host bounds debounce thread's `persist_tool_window_bounds` — go
+/// through [`update_persistent_state`], which holds this lock across its own
+/// load + mutate + save. Without it, two writers on different threads (the
+/// bounds debounce thread is the new one) can each load a stale snapshot and
+/// have one's mutation silently dropped when the other's save lands after,
+/// or — combined with `atomic_write`'s old fixed temp-file name — publish a
+/// torn file that fails to parse, which every call site's
+/// `unwrap_or_default()` then turns into a silent full-state wipe. See the
+/// branch review's F2.
+///
+/// A plain `Mutex<()>` guards the *file*, not any in-memory value, so `()`
+/// is the right payload. Poisoning is recovered rather than propagated: a
+/// panic mid-save should not brick every later save in the process.
+static STATE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn load_persistent_state() -> Result<PersistentState> {
-    let path = state_path();
+    load_persistent_state_at(&state_path())
+}
+
+fn load_persistent_state_at(path: &Path) -> Result<PersistentState> {
     if !path.exists() {
         log::info!("No state.toml at {}, using defaults", path.display());
         return Ok(PersistentState::default());
     }
     let contents =
-        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let state: PersistentState =
         toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(state)
 }
 
 pub fn save_persistent_state(state: &PersistentState) -> Result<()> {
-    let dir = config_dir();
-    if !dir.exists() {
-        fs::create_dir_all(&dir)?;
+    save_persistent_state_at(&state_path(), state)
+}
+
+fn save_persistent_state_at(path: &Path, state: &PersistentState) -> Result<()> {
+    if let Some(dir) = path.parent()
+        && !dir.exists()
+    {
+        fs::create_dir_all(dir)?;
     }
     let contents = toml::to_string_pretty(state).context("Failed to serialize state")?;
-    atomic_write(&state_path(), contents.as_bytes())
+    atomic_write(path, contents.as_bytes())
         .context("Failed to write state.toml atomically")?;
     Ok(())
+}
+
+/// Load the current persistent state, apply `mutator` to it, and save the
+/// result — all under [`STATE_WRITE_LOCK`] so no other writer's
+/// load-mutate-save can interleave with this one. This is THE way to modify
+/// `state.toml`; a hand-rolled `load_persistent_state()` + mutate +
+/// `save_persistent_state()` at a call site is exactly the unlocked race
+/// F2 describes.
+///
+/// `mutator` returns whether the state actually changed. Returning `false`
+/// skips the save entirely (e.g. `save_window_metrics`'s "steady state — no
+/// write on every launch" check) — that decision now happens *inside* the
+/// lock, against the freshest load, rather than against a pre-lock read that
+/// could itself be stale.
+pub fn update_persistent_state<F>(mutator: F) -> Result<()>
+where
+    F: FnOnce(&mut PersistentState) -> bool,
+{
+    update_persistent_state_at(&state_path(), mutator)
+}
+
+fn update_persistent_state_at<F>(path: &Path, mutator: F) -> Result<()>
+where
+    F: FnOnce(&mut PersistentState) -> bool,
+{
+    let _guard = STATE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = load_persistent_state_at(path).unwrap_or_default();
+    if !mutator(&mut state) {
+        return Ok(());
+    }
+    save_persistent_state_at(path, &state)
 }
 
 #[cfg(test)]
@@ -415,6 +501,133 @@ mod tests {
         atomic_write(&path, b"").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         assert!(!path.with_extension("tmp").exists());
+    }
+
+    // -------------------------------------------------------------------
+    // F2 (branch review, 2026-08-19-popout-tool-windows): state.toml
+    // concurrent load-mutate-save. `unique_temp_path` is the belt
+    // (atomic_write's own hardening); `update_persistent_state` is the
+    // braces (the actual fix — one lock around the whole load-mutate-save
+    // span for every writer).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn unique_temp_path_differs_across_calls_for_the_same_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        let a = unique_temp_path(&path);
+        let b = unique_temp_path(&path);
+        assert_ne!(
+            a, b,
+            "two calls targeting the same file must not collide on one shared tmp path \
+             (the old path.with_extension(\"tmp\") did exactly that)"
+        );
+        assert_eq!(
+            a.parent(),
+            Some(dir.path()),
+            "the temp file lives alongside its target, same as before"
+        );
+    }
+
+    #[test]
+    fn atomic_write_concurrent_writers_never_produce_a_torn_file() {
+        // Below update_persistent_state's lock: this isolates the
+        // unique-temp-name hardening in atomic_write itself. Many threads
+        // hammer the SAME target path with distinct, non-overlapping
+        // contents; every rename must publish one writer's complete
+        // content, never a mix of two.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.toml");
+        let payloads: Vec<String> = (0..8).map(|i| format!("{}\n", "x".repeat(37 + i))).collect();
+
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|payload| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        atomic_write(&path, payload.as_bytes()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            payloads.contains(&final_contents),
+            "the published file must be exactly one writer's complete payload, never a torn mix"
+        );
+    }
+
+    #[test]
+    fn update_persistent_state_serializes_concurrent_writers() {
+        // Above the lock: many threads on distinct OS threads (the shape
+        // introduced by the panel-host bounds debounce thread) each run a
+        // full load-mutate-save through update_persistent_state_at. If the
+        // lock did not span the whole load-mutate-save, this drops entries
+        // (lost update) whenever two threads' loads race each other.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        const WRITERS: usize = 12;
+        const WRITES_EACH: usize = 8;
+
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for j in 0..WRITES_EACH {
+                        let tag = format!("writer-{i}-{j}");
+                        update_persistent_state_at(&path, move |state| {
+                            state.loaded_plugins.push(tag);
+                            true
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // A torn write would fail to parse here at all; a lost update would
+        // parse fine but come up short.
+        let final_state = load_persistent_state_at(&path).unwrap();
+        assert_eq!(
+            final_state.loaded_plugins.len(),
+            WRITERS * WRITES_EACH,
+            "every writer's mutation must survive — a lost update silently drops entries"
+        );
+        let unique: std::collections::HashSet<_> = final_state.loaded_plugins.iter().collect();
+        assert_eq!(
+            unique.len(),
+            WRITERS * WRITES_EACH,
+            "no entry was duplicated or corrupted into another's"
+        );
+    }
+
+    #[test]
+    fn update_persistent_state_skips_save_when_mutator_reports_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        // Seed a file, then run a no-op mutator (returns false) and confirm
+        // nothing was rewritten — the save_window_metrics "steady state, no
+        // write on every launch" path this preserves.
+        update_persistent_state_at(&path, |state| {
+            state.loaded_plugins.push("seed".into());
+            true
+        })
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        update_persistent_state_at(&path, |_state| false).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after, "mutator returning false must skip the save entirely");
     }
 
     #[test]

@@ -426,12 +426,15 @@ impl PluginState {
         names
     }
 
-    /// Save the list of currently enabled plugins to state.toml.
+    /// Save the list of currently enabled plugins to state.toml, via
+    /// `update_persistent_state` so this load-mutate-save serializes against
+    /// every other state.toml writer (branch review F2).
     fn persist_enabled_plugins(&self) {
         let names = self.loaded_plugin_names();
-        let mut state = termlab_core::config::load_persistent_state().unwrap_or_default();
-        state.loaded_plugins = names;
-        let _ = termlab_core::config::save_persistent_state(&state);
+        let _ = termlab_core::config::update_persistent_state(|state| {
+            state.loaded_plugins = names;
+            true
+        });
     }
 
     /// Remove plugin-owned UI/runtime resources.

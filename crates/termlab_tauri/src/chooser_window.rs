@@ -656,12 +656,14 @@ fn create_chooser_window<R: tauri::Runtime>(
 // ---------------------------------------------------------------------------
 
 /// Persist the chooser window's current inner size (logical px) into
-/// `PersistentState.chooser_window`, load-mutate-save since that is the only
-/// API `termlab_core::config` offers (`config/mod.rs:253,266`).
+/// `PersistentState.chooser_window` via `config::update_persistent_state`,
+/// which serializes this load-mutate-save against every other state.toml
+/// writer (panel-host bounds, layout, zoom) — see the branch review's F2.
 fn persist_chooser_size(width: f64, height: f64) {
-    let mut state = config::load_persistent_state().unwrap_or_default();
-    state.chooser_window = Some(ChooserWindowSize { width, height });
-    if let Err(e) = config::save_persistent_state(&state) {
+    if let Err(e) = config::update_persistent_state(|state| {
+        state.chooser_window = Some(ChooserWindowSize { width, height });
+        true
+    }) {
         log::warn!("failed to persist chooser window size: {e}");
     }
 }

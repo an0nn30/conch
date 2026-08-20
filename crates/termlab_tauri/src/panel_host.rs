@@ -392,6 +392,53 @@ mod tests {
         );
     }
 
+    // F3 (branch review, 2026-08-19-popout-tool-windows): `dock_panel_host`
+    // used to resolve-clone under one lock acquisition, then remove under a
+    // SECOND one. In the gap, a concurrent `open_panel_host` for the same
+    // (parent, id) can displace-and-reinsert a fresh entry, which the dock's
+    // key-based remove then takes out — orphaning the entry open() just
+    // built. This test pins the registry-level mechanics that make that gap
+    // dangerous: `remove` is a blind key lookup with no notion of "the entry
+    // I resolved earlier is still the live one", so whatever the caller
+    // does between resolve and remove matters. The actual fix
+    // (panel_host.rs's `dock_panel_host`) closes the gap by resolving and
+    // removing under ONE lock acquisition, so no open() can land between
+    // them; this test demonstrates why that discipline is required.
+    #[test]
+    fn a_racing_open_between_a_dock_resolve_and_its_remove_would_orphan_the_fresh_entry() {
+        let mut r = PanelHostRegistry::default();
+        let (_, dock_target) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+
+        // The gap dock_panel_host's OLD shape left open: a concurrent open()
+        // for the SAME key lands before the dock's remove, displacing the
+        // entry dock resolved and installing a fresh one in its place.
+        let (displaced, fresh) =
+            r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into());
+        assert_eq!(
+            displaced.map(|d| d.req_id),
+            Some(dock_target.req_id),
+            "precondition: the racing open displaced the entry dock resolved"
+        );
+
+        // A key-based remove (the old dock_panel_host's tail, run after the
+        // gap) takes out whichever entry is CURRENTLY live at the key — the
+        // fresh one — with no way to tell it apart from the one dock
+        // actually resolved.
+        let removed = r.remove("window-1", "ssh-sessions");
+        assert_eq!(
+            removed.map(|e| e.req_id),
+            Some(fresh.req_id),
+            "a blind key-based remove cannot distinguish the resolved entry \
+             from a fresher one that raced it in — proving the gap is real"
+        );
+        assert!(
+            r.get("window-1", "ssh-sessions").is_none(),
+            "the fresh entry open() just built is gone: orphaned by a dock \
+             tail that resolved a DIFFERENT (now-stale) entry. Closing the \
+             gap (one lock across resolve+remove) is what prevents this."
+        );
+    }
+
     #[test]
     fn drain_parent_leaves_other_parents_entries_alone() {
         let mut r = PanelHostRegistry::default();
@@ -944,12 +991,19 @@ fn persist_tool_window_bounds<R: tauri::Runtime>(
         width: inner.width as f64 / scale,
         height: inner.height as f64 / scale,
     };
-    let mut state = config::load_persistent_state().unwrap_or_default();
-    state
-        .layout
-        .tool_window_bounds
-        .insert(tool_window_id.to_string(), record);
-    if let Err(e) = config::save_persistent_state(&state) {
+    // Loaded, mutated, and saved as one locked span (config::
+    // update_persistent_state): this runs on the debounce background
+    // thread, so an unlocked load-mutate-save here is exactly the
+    // cross-thread race the branch review's F2 flags — it can interleave
+    // with a main-thread save (layout, zoom, chooser) and drop one side's
+    // mutation, or race it in `atomic_write`.
+    if let Err(e) = config::update_persistent_state(|state| {
+        state
+            .layout
+            .tool_window_bounds
+            .insert(tool_window_id.to_string(), record);
+        true
+    }) {
         log::warn!("failed to persist panel host bounds for '{tool_window_id}': {e}");
     }
 }
@@ -1188,8 +1242,19 @@ pub(crate) fn dock_panel_host(
     let app = window.app_handle();
     let entry = {
         let registry = app.state::<Mutex<PanelHostRegistry>>();
-        let guard = registry.lock();
-        resolve_dock_target(&guard, &caller_label, &tool_window_id)?
+        let mut guard = registry.lock();
+        let entry = resolve_dock_target(&guard, &caller_label, &tool_window_id)?;
+        // Resolve AND remove under the one lock acquisition (F3, branch
+        // review): the old shape released the lock between them, leaving a
+        // gap where a concurrent open_panel_host for this same (parent, id)
+        // could insert a fresh entry that this remove would then take out
+        // from under it, orphaning the new host. Removing before emitting
+        // also unifies this with abort_panel_host's ordering, erasing the
+        // dock-emits-before-remove vs abort-removes-before-emit asymmetry
+        // T6 noted (verified inert for reachable orderings, but a needless
+        // asymmetry to leave standing).
+        guard.remove(&entry.parent_label, &entry.tool_window_id);
+        entry
     };
 
     let _ = app.emit_to(
@@ -1200,13 +1265,6 @@ pub(crate) fn dock_panel_host(
             req_id: entry.req_id,
         },
     );
-
-    {
-        let registry = app.state::<Mutex<PanelHostRegistry>>();
-        registry
-            .lock()
-            .remove(&entry.parent_label, &entry.tool_window_id);
-    }
 
     // The host-caller path destroys the very window that invoked this, exactly
     // as it always did; the parent-caller path has to look its host up by the

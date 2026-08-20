@@ -374,16 +374,22 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     let logical_w = size.width as f64 / scale;
     let logical_h = size.height as f64 / scale;
 
-    let mut state = config::load_persistent_state().unwrap_or_default();
-    // Recorded for diagnostics only. Nothing reads these back for sizing any
-    // more: windows open at the configured columns x lines (see
-    // estimate_window_px and app/core/window-size.js), so restoring the last
-    // session's pixels would defeat that setting — and made a window spawned
-    // from a full-screen one open full-screen.
-    state.layout.window_width = logical_w as f32;
-    state.layout.window_height = logical_h as f32;
-    merge_window_layout(&mut state.layout, layout);
-    let _ = config::save_persistent_state(&state);
+    // Loaded, mutated, and saved as one locked span (config::
+    // update_persistent_state) — this command runs on the main thread, but
+    // the panel-host bounds debounce thread also writes state.toml now, so
+    // an unlocked load-mutate-save here could interleave with it and drop
+    // one side's mutation (branch review F2).
+    let _ = config::update_persistent_state(|state| {
+        // Recorded for diagnostics only. Nothing reads these back for sizing
+        // any more: windows open at the configured columns x lines (see
+        // estimate_window_px and app/core/window-size.js), so restoring the
+        // last session's pixels would defeat that setting — and made a
+        // window spawned from a full-screen one open full-screen.
+        state.layout.window_width = logical_w as f32;
+        state.layout.window_height = logical_h as f32;
+        merge_window_layout(&mut state.layout, layout);
+        true
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -411,28 +417,30 @@ pub(crate) fn save_window_metrics(
         let font = cfg.resolved_terminal_font();
         (font.normal.family.clone(), font.size)
     };
-    let zoom = config::load_persistent_state()
-        .unwrap_or_default()
-        .layout
-        .zoom_factor;
-    let metrics = termlab_core::config::WindowMetrics {
-        cell_width: cell_width as f32,
-        cell_height: cell_height as f32,
-        chrome_width: chrome_width as f32,
-        chrome_height: chrome_height as f32,
-        font_family: family,
-        font_size: size,
-        zoom: if zoom > 0.0 { zoom } else { 1.0 },
-    };
-    if !metrics.is_usable() {
-        return;
-    }
-    let mut state = config::load_persistent_state().unwrap_or_default();
-    if state.window_metrics == metrics {
-        return; // steady state — no write on every launch
-    }
-    state.window_metrics = metrics;
-    let _ = config::save_persistent_state(&state);
+    // Reading zoom_factor and deciding "is this a no-op" both happen inside
+    // the lock now, against the freshest load, instead of a pre-lock read
+    // that a concurrent writer (the panel-host bounds debounce thread) could
+    // make stale.
+    let _ = config::update_persistent_state(|state| {
+        let zoom = state.layout.zoom_factor;
+        let metrics = termlab_core::config::WindowMetrics {
+            cell_width: cell_width as f32,
+            cell_height: cell_height as f32,
+            chrome_width: chrome_width as f32,
+            chrome_height: chrome_height as f32,
+            font_family: family,
+            font_size: size,
+            zoom: if zoom > 0.0 { zoom } else { 1.0 },
+        };
+        if !metrics.is_usable() {
+            return false;
+        }
+        if state.window_metrics == metrics {
+            return false; // steady state — no write on every launch
+        }
+        state.window_metrics = metrics;
+        true
+    });
 }
 
 #[tauri::command]
@@ -441,9 +449,10 @@ pub(crate) fn set_zoom_level(
     scale_factor: f64,
 ) -> Result<(), String> {
     window.set_zoom(scale_factor).map_err(|e| e.to_string())?;
-    let mut state = config::load_persistent_state().unwrap_or_default();
-    state.layout.zoom_factor = scale_factor as f32;
-    let _ = config::save_persistent_state(&state);
+    let _ = config::update_persistent_state(|state| {
+        state.layout.zoom_factor = scale_factor as f32;
+        true
+    });
     Ok(())
 }
 
