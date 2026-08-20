@@ -62,26 +62,20 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 // Connection
 // ---------------------------------------------------------------------------
 
-/// Establish an SSH connection, authenticate, open a shell channel.
+/// Establish an SSH connection and authenticate, without opening a channel.
 ///
-/// Returns the client handle and the shell channel. Auth prompts are sent
-/// through the `callbacks` trait implementation.
+/// Returns the authenticated client handle. Auth prompts are sent through
+/// the `callbacks` trait implementation.
 ///
 /// `credentials` provides the username, auth method, and optionally a
 /// pre-supplied password or key path. The caller resolves these from the
 /// vault or from legacy `ServerEntry` fields before calling this function.
-pub async fn connect_and_open_shell(
+pub async fn connect_and_auth(
     server: &ServerEntry,
     credentials: &SshCredentials,
     callbacks: Arc<dyn RemoteCallbacks>,
     paths: &RemotePaths,
-) -> Result<
-    (
-        client::Handle<TermLabSshHandler>,
-        russh::Channel<russh::client::Msg>,
-    ),
-    RemoteError,
-> {
+) -> Result<client::Handle<TermLabSshHandler>, RemoteError> {
     let config = Arc::new(client::Config::default());
     let handler = TermLabSshHandler {
         host: server.host.clone(),
@@ -192,6 +186,31 @@ pub async fn connect_and_open_shell(
     if !authenticated {
         return Err(RemoteError::Auth("Authentication failed".into()));
     }
+
+    Ok(session)
+}
+
+/// Establish an SSH connection, authenticate, open a shell channel.
+///
+/// Returns the client handle and the shell channel. Auth prompts are sent
+/// through the `callbacks` trait implementation.
+///
+/// `credentials` provides the username, auth method, and optionally a
+/// pre-supplied password or key path. The caller resolves these from the
+/// vault or from legacy `ServerEntry` fields before calling this function.
+pub async fn connect_and_open_shell(
+    server: &ServerEntry,
+    credentials: &SshCredentials,
+    callbacks: Arc<dyn RemoteCallbacks>,
+    paths: &RemotePaths,
+) -> Result<
+    (
+        client::Handle<TermLabSshHandler>,
+        russh::Channel<russh::client::Msg>,
+    ),
+    RemoteError,
+> {
+    let session = connect_and_auth(server, credentials, callbacks, paths).await?;
 
     // Open shell channel.
     let channel = session
