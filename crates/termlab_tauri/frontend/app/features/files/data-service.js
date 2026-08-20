@@ -146,6 +146,16 @@
     return invoke('sftp_connect_host', { serverEntryId });
   }
 
+  // Retry a detached connect with a password the user just typed (Task 4's
+  // auth dialog chain, features/files/connect-auth.js). `saveToVault` mirrors
+  // the "Save to vault" checkbox: true also links the server entry to a new
+  // vault account (detached_commands.rs's sftp_connect_host_with_password
+  // doc comment), so a host connected this way authenticates silently next
+  // time. Same resolve/reject shape as connectHost above.
+  async function connectHostWithPassword(invoke, serverEntryId, password, saveToVault) {
+    return invoke('sftp_connect_host_with_password', { serverEntryId, password, saveToVault });
+  }
+
   // Tear down a detached (panel-only, not terminal-owned) session.
   async function disconnectSession(invoke, sessionKey) {
     return invoke('sftp_disconnect', { sessionKey });
@@ -176,6 +186,7 @@
     getCurrentWindowLabel,
     getServers,
     connectHost,
+    connectHostWithPassword,
     disconnectSession,
   };
 })(window);

@@ -13,6 +13,10 @@
   const filesActions = exports.termlabFilesActions || {};
   const filesPaneView = exports.termlabFilesPaneView || {};
   const filesTransfers = exports.termlabFilesTransfers || {};
+  // Captured at module-load time, same as the deps above — connect-auth.js's
+  // <script> tag MUST precede this one in index.html, or this permanently
+  // binds to the {} fallback (see connect-auth.js's header comment).
+  const connectAuth = exports.termlabConnectAuth || {};
   let fitActiveTabFn = null;
   let getActiveTabFn = null;
   let transferController = null;
@@ -157,22 +161,6 @@
     };
   }
 
-  // Bridge only — Task 4 owns the full SftpConnectError -> UI chain (vault
-  // unlock, password prompt, retry). Until it lands, every non-Ok variant
-  // just surfaces its message in the remote pane's .fp-error strip.
-  function describeSftpConnectError(err) {
-    if (!err) return 'Could not connect.';
-    if (typeof err === 'string') return err;
-    switch (err.kind) {
-      case 'vaultLocked': return 'The vault is locked.';
-      case 'needsPassword': return 'This host needs a password to connect.';
-      case 'authFailed': return `Authentication failed: ${err.message}`;
-      case 'unreachable': return `Host unreachable: ${err.message}`;
-      case 'other': return err.message || 'Could not connect.';
-      default: return String(err.message || err.kind || err);
-    }
-  }
-
   // Pin the remote pane to a specific session (sessionKey), or pass null to
   // return to follow mode. This is filesPanel.pinRemotePane, the entry
   // point Task 4's connect dialogs call on a successful connect/pick — it
@@ -239,13 +227,35 @@
         // Not an error — a connect for this host is already in flight
         // (Rust's duplicate-connect guard). The busy state persists; the
         // in-flight connect's own completion fires remote-sessions-changed,
-        // which refreshes the combo and clears it.
+        // which refreshes the combo and clears it. Handled inline, here,
+        // rather than by connectAuth.run below: run() has no access to
+        // hostConnectBusyEntryId (a private closure var of this module) to
+        // leave it alone, and this check already existed before Task 4 — see
+        // connect-auth.js's run() doc comment for the full reasoning.
         renderPane(remotePane, getPaneRoot('#fp-remote'));
         return;
       }
+      // Task 4: every other non-Ok variant (vaultLocked, needsPassword,
+      // authFailed, unreachable, other) drives the auth dialog chain — vault
+      // unlock and/or a host-password prompt, possibly retrying
+      // sftp_connect_host/sftp_connect_host_with_password — rather than just
+      // being described as a static string. connectAuth.run never rejects:
+      // it resolves the ConnectedSession the chain eventually won, or null
+      // if the user cancelled or the chain ended in an error it already
+      // routed to onError below.
+      const session = connectAuth && typeof connectAuth.run === 'function'
+        ? await connectAuth.run(entryId, err, {
+          invoke,
+          data: filesDataService,
+          onError: (message) => { remotePane.error = message; },
+        })
+        : null;
       hostConnectBusyEntryId = null;
-      remotePane.error = describeSftpConnectError(err);
-      renderPane(remotePane, getPaneRoot('#fp-remote'));
+      if (session) {
+        await pinRemotePane(session.sessionKey);
+      } else {
+        renderPane(remotePane, getPaneRoot('#fp-remote'));
+      }
     }
   }
 
