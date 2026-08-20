@@ -106,6 +106,12 @@
   <script src="app/core/layout-service.js"></script>
   <script src="app/core/config-service.js"></script>
   <script src="app/core/appearance.js"></script>
+  <!-- Only a PANEL HOST boot uses this (app/panel-host-runtime.js): a host is
+       a chrome-only secondary window, so it needs the same `config-changed`
+       re-apply settings.html and chooser.html do. An ordinary main window
+       loading index.html gets that from app/config-runtime.js instead and
+       never creates a sync. -->
+  <script src="app/core/appearance-sync.js"></script>
   <script src="app/ui/tl-icon.js"></script>
   <script src="app/ui/tl-menu.js"></script>
   <script src="app/ui/tl-dialog.js"></script>
@@ -196,6 +202,13 @@
   <script src="app/command-palette-runtime.js"></script>
   <script src="app/terminal-runtime.js"></script>
   <script src="app/startup-runtime.js"></script>
+  <!-- Must precede main-runtime.js, which hands off to it synchronously the
+       moment it learns this window's label is a `panelhost-*` one. A plain
+       classic script, deliberately, for the reason chooser.html spells out at
+       length: a `type="module"` script is deferred until the whole document
+       has parsed regardless of where it sits, so the global would not exist
+       yet when main-runtime.js looked for it. -->
+  <script src="app/panel-host-runtime.js"></script>
   <script src="app/main-runtime.js"></script>
 </body>
 </html>

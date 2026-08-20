@@ -19,6 +19,12 @@
     const registeredPluginToolWindows = new Set();
     let resizeDragDepth = 0;
 
+    function refreshShortcutFallbacks() {
+      if (typeof global.__termlabRefreshKeyboardShortcutFallbacks === 'function') {
+        global.__termlabRefreshKeyboardShortcutFallbacks().catch(() => {});
+      }
+    }
+
     function beginResizeDrag() {
       resizeDragDepth += 1;
       document.body.classList.add('panel-resize-dragging');
@@ -31,15 +37,204 @@
       }
     }
 
+    // The four built-in tool windows, in registration order (the order is
+    // load-bearing — see the comment on 'notifications'). Shared verbatim
+    // between the main window's init() and a panel host's registrationsOnly
+    // boot: a host mounts a panel through the SAME renderFn the docked panel
+    // would have used, so there is exactly one definition of each.
+    function registerBuiltInToolWindows() {
+      global.toolWindowManager.register('file-explorer', {
+        title: 'SFTP',
+        icon: 'sftp',
+        type: 'built-in',
+        defaultZone: 'bottom',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'files-panel';
+          container.appendChild(panelEl);
+          if (global.filesPanel) {
+            global.filesPanel.init({
+              invoke,
+              listen: listenOnCurrentWindow,
+              panelEl,
+              panelWrapEl: document.getElementById('left-sidebar'),
+              resizeHandleEl: null,
+              layoutService,
+              fitActiveTab: debouncedFitAndResize,
+              getActiveTab: () => getCurrentTab(),
+            });
+          }
+        },
+      });
+
+      global.toolWindowManager.register('ssh-sessions', {
+        title: 'Hosts',
+        icon: 'web',
+        type: 'built-in',
+        defaultZone: 'right-top',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'ssh-panel';
+          container.appendChild(panelEl);
+          if (global.sshPanel) {
+            global.sshPanel.init({
+              invoke,
+              listen: listenOnCurrentWindow,
+              createSshTab,
+              panelEl,
+              panelWrapEl: document.getElementById('right-sidebar'),
+              resizeHandleEl: null,
+              layoutService,
+              fitActiveTab: debouncedFitAndResize,
+              refocusTerminal: () => {
+                const pane = getCurrentPane();
+                if (pane && pane.term) pane.term.focus();
+              },
+            });
+          }
+        },
+      });
+
+      global.toolWindowManager.register('tunnels', {
+        title: 'Tunnels',
+        icon: null, // no vendored plug-like icon yet; label suffices — Phase 2 known gap
+        type: 'built-in',
+        defaultZone: 'right-bottom',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'tunnels-panel';
+          container.appendChild(panelEl);
+          if (global.tunnelsPanel) {
+            global.tunnelsPanel.init({
+              invoke,
+              listen: listenOnCurrentWindow,
+              panelEl,
+            });
+          }
+        },
+      });
+
+      // Registered after 'tunnels' so tunnels stays the right-bottom zone's
+      // auto-activated window on first boot; notifications starts inactive
+      // with a strip button (per tool-window-manager.js's first-registrant-
+      // activates-the-zone rule).
+      global.toolWindowManager.register('notifications', {
+        title: 'Notifications',
+        icon: 'notifications',
+        type: 'built-in',
+        defaultZone: 'right-bottom',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'notifications-panel';
+          container.appendChild(panelEl);
+          if (global.notificationsPanel) {
+            global.notificationsPanel.init({ panelEl });
+          }
+        },
+      });
+    }
+
+    // Plugin tool windows: the live subscriptions plus the replay of whatever
+    // is already loaded. Split out of init() for the same reason the built-ins
+    // are — a panel host needs the registrations without any of the docked
+    // wiring around them. Assumes `pluginWidgets.init` has already run (init()
+    // calls it with the terminal callbacks, a host without them).
+    function initPluginToolWindows() {
+      if (!global.pluginWidgets) return;
+
+      const registerPluginToolWindow = async (panelInfo) => {
+        const { handle, plugin, name, location } = panelInfo || {};
+        if (global.titlebar && typeof global.titlebar.refresh === 'function') {
+          global.titlebar.refresh().catch(() => {});
+        }
+        const zoneMap = { left: 'left-top', right: 'right-top', bottom: 'bottom' };
+        const defaultZone = zoneMap[location] || 'right-bottom';
+        const twmId = 'plugin:' + plugin;
+        if (global.toolWindowManager && plugin && !registeredPluginToolWindows.has(twmId)) {
+          registeredPluginToolWindows.add(twmId);
+          global.toolWindowManager.register(twmId, {
+            title: name || plugin,
+            type: 'plugin',
+            defaultZone,
+            renderFn: async (container) => {
+              const inner = document.createElement('div');
+              inner.className = 'plugin-panel-content';
+              inner.dataset.pluginHandle = handle;
+              inner.dataset.pluginName = plugin;
+              container.appendChild(inner);
+              try {
+                const result = await invoke('request_plugin_render', { pluginName: plugin });
+                if (result) global.pluginWidgets.renderWidgets(inner, result, plugin);
+              } catch (error) {
+                console.error('Initial plugin render failed:', error);
+              }
+            },
+          });
+          refreshShortcutFallbacks();
+        }
+      };
+
+      listen('plugin-panel-registered', async (event) => {
+        await registerPluginToolWindow(event.payload);
+      });
+
+      listen('plugin-panels-removed', (event) => {
+        if (global.titlebar && typeof global.titlebar.refresh === 'function') {
+          global.titlebar.refresh().catch(() => {});
+        }
+        const { plugin, handles } = event.payload;
+        if (global.toolWindowManager) {
+          registeredPluginToolWindows.delete('plugin:' + plugin);
+          global.toolWindowManager.unregister('plugin:' + plugin);
+          refreshShortcutFallbacks();
+        }
+        for (const handle of handles) {
+          const container = document.querySelector(`[data-plugin-handle="${handle}"]`);
+          if (container) container.remove();
+        }
+      });
+
+      return invoke('get_plugin_panels').then(async (panels) => {
+        if (!Array.isArray(panels)) return;
+        for (const panel of panels) {
+          await registerPluginToolWindow({
+            handle: panel.handle,
+            plugin: panel.plugin_name,
+            name: panel.panel_name,
+            location: panel.location,
+          });
+        }
+      }).catch(() => {});
+    }
+
+    // The panel-host boot's entry point: REGISTRATIONS ONLY — the four
+    // built-ins, the plugin subscriptions, and the plugin replay, and nothing
+    // else. No `toolWindowManager.init()`, so the manager never binds a zone,
+    // sidebar, strip or bottom-zone element and every zone/strip update inside
+    // register() is an inherent no-op rather than a flag someone has to
+    // remember to thread through. No layout read-back or save wiring either
+    // (a host owns no layout), no panel-host event subscriptions (those are
+    // the PARENT's), and none of init()'s neighbouring inits — vault, keygen,
+    // tunnel manager, settings — which belong to a terminal window.
+    //
+    // `registrationsOnly` is required rather than assumed: this is the only
+    // mode registerAll() has today, and naming it at the call site keeps a
+    // future "register into a live layout" caller from silently getting the
+    // stripped-down one.
+    async function registerAll(opts) {
+      if (!opts || opts.registrationsOnly !== true) {
+        throw new Error('registerAll requires { registrationsOnly: true }');
+      }
+      if (!global.toolWindowManager) return;
+      registerBuiltInToolWindows();
+      refreshShortcutFallbacks();
+      await initPluginToolWindows();
+    }
+
     async function init() {
       const bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
       const bottomZoneResizeEl = document.getElementById('bottom-zone-resize');
       let initialLayoutData = null;
-      const refreshShortcutFallbacks = () => {
-        if (typeof global.__termlabRefreshKeyboardShortcutFallbacks === 'function') {
-          global.__termlabRefreshKeyboardShortcutFallbacks().catch(() => {});
-        }
-      };
 
       // A collapsed sidebar measures ~0-1px wide. Persisting that would wipe
       // the user's real width — and a side with no tool windows (as left is
@@ -270,95 +465,7 @@
           }
         }
 
-        global.toolWindowManager.register('file-explorer', {
-          title: 'SFTP',
-          icon: 'sftp',
-          type: 'built-in',
-          defaultZone: 'bottom',
-          renderFn: (container) => {
-            const panelEl = document.createElement('div');
-            panelEl.id = 'files-panel';
-            container.appendChild(panelEl);
-            if (global.filesPanel) {
-              global.filesPanel.init({
-                invoke,
-                listen: listenOnCurrentWindow,
-                panelEl,
-                panelWrapEl: document.getElementById('left-sidebar'),
-                resizeHandleEl: null,
-                layoutService,
-                fitActiveTab: debouncedFitAndResize,
-                getActiveTab: () => getCurrentTab(),
-              });
-            }
-          },
-        });
-
-        global.toolWindowManager.register('ssh-sessions', {
-          title: 'Hosts',
-          icon: 'web',
-          type: 'built-in',
-          defaultZone: 'right-top',
-          renderFn: (container) => {
-            const panelEl = document.createElement('div');
-            panelEl.id = 'ssh-panel';
-            container.appendChild(panelEl);
-            if (global.sshPanel) {
-              global.sshPanel.init({
-                invoke,
-                listen: listenOnCurrentWindow,
-                createSshTab,
-                panelEl,
-                panelWrapEl: document.getElementById('right-sidebar'),
-                resizeHandleEl: null,
-                layoutService,
-                fitActiveTab: debouncedFitAndResize,
-                refocusTerminal: () => {
-                  const pane = getCurrentPane();
-                  if (pane && pane.term) pane.term.focus();
-                },
-              });
-            }
-          },
-        });
-
-        global.toolWindowManager.register('tunnels', {
-          title: 'Tunnels',
-          icon: null, // no vendored plug-like icon yet; label suffices — Phase 2 known gap
-          type: 'built-in',
-          defaultZone: 'right-bottom',
-          renderFn: (container) => {
-            const panelEl = document.createElement('div');
-            panelEl.id = 'tunnels-panel';
-            container.appendChild(panelEl);
-            if (global.tunnelsPanel) {
-              global.tunnelsPanel.init({
-                invoke,
-                listen: listenOnCurrentWindow,
-                panelEl,
-              });
-            }
-          },
-        });
-
-        // Registered after 'tunnels' so tunnels stays the right-bottom zone's
-        // auto-activated window on first boot; notifications starts inactive
-        // with a strip button (per tool-window-manager.js's first-registrant-
-        // activates-the-zone rule).
-        global.toolWindowManager.register('notifications', {
-          title: 'Notifications',
-          icon: 'notifications',
-          type: 'built-in',
-          defaultZone: 'right-bottom',
-          renderFn: (container) => {
-            const panelEl = document.createElement('div');
-            panelEl.id = 'notifications-panel';
-            container.appendChild(panelEl);
-            if (global.notificationsPanel) {
-              global.notificationsPanel.init({ panelEl });
-            }
-          },
-        });
+        registerBuiltInToolWindows();
 
         if (initialLayoutData && initialLayoutData.zen_mode === true) {
           global.toolWindowManager.setPanelVisibility('left', false, { save: false });
@@ -544,70 +651,7 @@
           },
         });
 
-        const registerPluginToolWindow = async (panelInfo) => {
-          const { handle, plugin, name, location } = panelInfo || {};
-          if (global.titlebar && typeof global.titlebar.refresh === 'function') {
-            global.titlebar.refresh().catch(() => {});
-          }
-          const zoneMap = { left: 'left-top', right: 'right-top', bottom: 'bottom' };
-          const defaultZone = zoneMap[location] || 'right-bottom';
-          const twmId = 'plugin:' + plugin;
-          if (global.toolWindowManager && plugin && !registeredPluginToolWindows.has(twmId)) {
-            registeredPluginToolWindows.add(twmId);
-            global.toolWindowManager.register(twmId, {
-              title: name || plugin,
-              type: 'plugin',
-              defaultZone,
-              renderFn: async (container) => {
-                const inner = document.createElement('div');
-                inner.className = 'plugin-panel-content';
-                inner.dataset.pluginHandle = handle;
-                inner.dataset.pluginName = plugin;
-                container.appendChild(inner);
-                try {
-                  const result = await invoke('request_plugin_render', { pluginName: plugin });
-                  if (result) global.pluginWidgets.renderWidgets(inner, result, plugin);
-                } catch (error) {
-                  console.error('Initial plugin render failed:', error);
-                }
-              },
-            });
-            refreshShortcutFallbacks();
-          }
-        };
-
-        listen('plugin-panel-registered', async (event) => {
-          await registerPluginToolWindow(event.payload);
-        });
-
-        listen('plugin-panels-removed', (event) => {
-          if (global.titlebar && typeof global.titlebar.refresh === 'function') {
-            global.titlebar.refresh().catch(() => {});
-          }
-          const { plugin, handles } = event.payload;
-          if (global.toolWindowManager) {
-            registeredPluginToolWindows.delete('plugin:' + plugin);
-            global.toolWindowManager.unregister('plugin:' + plugin);
-            refreshShortcutFallbacks();
-          }
-          for (const handle of handles) {
-            const container = document.querySelector(`[data-plugin-handle="${handle}"]`);
-            if (container) container.remove();
-          }
-        });
-
-        invoke('get_plugin_panels').then(async (panels) => {
-          if (!Array.isArray(panels)) return;
-          for (const panel of panels) {
-            await registerPluginToolWindow({
-              handle: panel.handle,
-              plugin: panel.plugin_name,
-              name: panel.panel_name,
-              location: panel.location,
-            });
-          }
-        }).catch(() => {});
-
+        initPluginToolWindows();
       }
 
       return {
@@ -617,6 +661,7 @@
 
     return {
       init,
+      registerAll,
     };
   }
 

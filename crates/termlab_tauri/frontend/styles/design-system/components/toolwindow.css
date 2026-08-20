@@ -23,6 +23,61 @@
   padding: 0 var(--tl-space-1);
   border-bottom: 1px solid var(--tl-border);
 }
+/* Panel host — one tool window living in its own OS window
+   (app/panel-host-runtime.js, src/panel_host.rs). The host loads the same
+   index.html a main window does, so the first rule's job is to stand the
+   terminal shell down: #app is still in the document, just never shown. */
+body.tl-panelhost-window #app { display: none; }
+body.tl-panelhost-window { background: var(--tl-panel-bg); }
+.tl-panelhost {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  background: var(--tl-panel-bg);
+}
+/* Same band as .tl-toolwindow__header, and deliberately the same height: a
+   popped-out panel should read as the panel it was, not as a new kind of
+   window. It carries a title and the dock-back action, and nothing else —
+   the zone affordances (split, move, hide) mean nothing to a window that IS
+   the panel. */
+.tl-panelhost__header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--tl-space-2);
+  flex: 0 0 auto;
+  height: var(--tl-header-h);
+  padding: 0 var(--tl-space-2);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg);
+  background: var(--tl-ToolWindow-Header-background);
+  border-bottom: 1px solid var(--tl-border);
+}
+.tl-panelhost__title {
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.tl-panelhost__actions { display: inline-flex; gap: var(--tl-space-1); flex: 0 0 auto; }
+.tl-panelhost__action {
+  display: inline-flex; align-items: center;
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+  color: var(--tl-fg-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--tl-radius);
+  cursor: pointer;
+}
+.tl-panelhost__action:hover {
+  color: var(--tl-fg);
+  background: var(--tl-row-hover);
+}
+.tl-panelhost__action:focus-visible {
+  outline: none;
+  border-color: var(--tl-accent);
+}
+.tl-panelhost__content {
+  flex: 1; display: flex; flex-direction: column;
+  min-height: 0; min-width: 0;
+  overflow: hidden;
+}
 .tl-empty-state {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--tl-fg-muted);

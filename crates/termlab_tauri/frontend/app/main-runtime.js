@@ -55,6 +55,34 @@
       });
       const currentWindowLabel = await invoke('current_window_label');
 
+      // A PANEL HOST window (one tool window popped out into its own OS
+      // window) loads this same index.html — Rust builds it with
+      // `WebviewUrl::App("index.html")`, so there is one script graph to keep
+      // in step rather than two — and is told apart at runtime by its label
+      // (`panelhost-<parent>-<reqId>`, minted in src/panel_host.rs).
+      //
+      // The branch sits HERE, immediately after the label is known and before
+      // anything else is built, because everything below belongs to a terminal
+      // window: the compose runtime, the pane/tab managers, the event wiring,
+      // the first createTab, the shortcut table. A host has no terminal, no
+      // tabs and no zones, so none of that may run — app/panel-host-runtime.js
+      // owns this window from here on.
+      if (typeof currentWindowLabel === 'string' && currentWindowLabel.startsWith('panelhost-')) {
+        const panelHostRuntime = window.termlabPanelHostRuntime;
+        if (!panelHostRuntime || typeof panelHostRuntime.boot !== 'function') {
+          showStatus('Panel host runtime is unavailable.');
+          return;
+        }
+        await panelHostRuntime.boot({
+          invoke,
+          listen,
+          listenOnCurrentWindow,
+          currentWindow,
+          tauriClient,
+        });
+        return;
+      }
+
       const FONT_FALLBACKS = ', "Symbols Nerd Font Mono", "Symbols Nerd Font", "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace';
       // The editor theme reads this global so editor and terminal share one font source.
       let termFontFamily = '"JetBrains Mono", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
