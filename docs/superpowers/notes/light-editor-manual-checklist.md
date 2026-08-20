@@ -879,3 +879,122 @@ stop and report at the first mismatch.
      verify it on macOS: confirm the ABSENCE of the cluster there instead
      (native traffic lights only, nothing extra in the header) with the same
      care presence would get elsewhere.
+
+## M. SFTP panel — independent host connections
+
+Added by the sftp-connect-host plan: the SFTP tool window's remote pane
+gains a host dropdown in its toolbar — **Follow active tab** (the default,
+today's implicit behaviour made visible) → live sessions → a separator →
+configured hosts, folder-prefixed (e.g. "Work / build-box") — that connects
+to any configured host on demand, no terminal tab required, chaining
+vault-unlock and one-shot password prompts where credentials need them. A
+connected dropdown session is a first-class session: the chooser sidebar
+lists it, the editor saves through it, and an eject (⏏) button beside the
+combo tears it down. Every scenario below was verified against real modules
+through vm-harnesses (828 cargo tests, 35 frontend suites) but **nothing ran
+in the real GUI and no remote path touched a real SSH host** — this is that
+human pass. Every step in this section needs a real host, so `[SSH]` is
+marked throughout. Run in order; stop and report at the first mismatch.
+
+147. [SSH] **Fresh launch, locked vault, dropdown connect.** Quit and
+     relaunch so the vault is locked, open the SFTP panel's remote pane, and
+     pick a password-auth host from the combo whose vault account already
+     has a stored password. A vault-unlock dialog appears (field labelled
+     "Master password"); type the correct master password and Unlock — the
+     pane connects with no second prompt. (A host with no stored password is
+     148's case, not this one — picking the wrong kind of host here will
+     chain straight into a password dialog, which is 148's flow, not a bug.)
+148. [SSH] **Wrong master password re-prompts.** From the same locked-vault
+     state, pick a host and type the WRONG master password at the unlock
+     dialog. Expect an inline error line and a fresh dialog reappearing
+     immediately for another attempt (a new dialog each time, not one
+     patched in place). Cancel here must abort the whole connect cleanly —
+     covered again, more broadly, in 152.
+149. [SSH] **No-stored-password host: prompt → save-to-vault → disconnect →
+     reconnect silently (the vault round-trip in anger).** Pick a host whose
+     vault account has never had a password saved (or has no vault account
+     at all). Once the vault is unlocked, a host-password dialog appears
+     titled `user@host` with a "Save to vault" checkbox. **Judgment call:
+     confirm the checkbox's default matches the host** — checked when the
+     host already has a vault account, unchecked when it doesn't; both are
+     the "correct" default, just for different hosts. Type the real
+     password, leave the checkbox as you want it, Connect — the pane
+     connects. Click the eject (⏏) button beside the combo to disconnect,
+     then pick the SAME host again from the combo: it must connect silently,
+     no password dialog, because the save landed in the vault.
+150. [SSH] **A KEY-auth host connects with no prompt.** Pick a host
+     configured for key (or key-and-password with a working key) auth whose
+     identity file is valid. It connects immediately — no vault-unlock
+     dialog, no password dialog, nothing to click through.
+151. [SSH] **A key-only host with bad keys shows an error, never a password
+     dialog.** Point a key-only host at an identity file that will be
+     rejected and connect. The pane's error strip must show an
+     authentication failure — and confirm NO password dialog ever appears.
+     Key-only auth failing is terminal; there is no credential left to
+     prompt for.
+152. [SSH] **Cancel at each rung leaves the pane on its prior state.**
+     Repeat 148 and 149, but press Cancel instead of submitting — at the
+     master-password dialog, and again at the host-password dialog. Each
+     cancel must abort the connect cleanly: the combo returns to whatever it
+     showed before you picked the host (its previous pin, or "Follow active
+     tab"), no error strip appears, and no partial session shows up in the
+     combo or the chooser.
+153. [SSH] Editor saves through a dropdown session. With a host connected
+     via the dropdown (not a terminal tab), double-click a remote text file,
+     edit it, ⌘S. Expect the same "Uploaded" toast and `cat`-confirmed edit
+     as a terminal-backed session (section B) — the editor does not know or
+     care that this session has no PTY.
+154. [SSH] Chooser sidebar lists it. With a dropdown session connected, open
+     the file chooser (⌘O) — the HOSTS row for that session appears exactly
+     as it would for a terminal-backed one.
+155. [SSH] **Popped-out panel runs the whole flow.** Pop the SFTP tool
+     window out to its own OS window (View Mode: Window), then run the
+     dropdown connect flow from inside it: the vault-unlock and
+     host-password dialogs must appear IN THE POPPED-OUT WINDOW, not the
+     parent. Confirm uploads AND downloads both work against the resulting
+     session — this is the transfer-resolver fix in anger: a popped-out
+     panel's transfers used to look for "no SSH session" under its own
+     window label instead of its parent's.
+156. [SSH] Two windows connect to the same host independently. Open a
+     second main window, and from each window's SFTP panel dropdown, connect
+     to the SAME host. Both must succeed as independent sessions — each
+     window's combo shows its own connection, and disconnecting one leaves
+     the other alone.
+157. [SSH] **Double-click a host fast — no second connection.** In the
+     combo, pick a not-yet-connected host and pick it again before it
+     finishes connecting, as fast as you can manage. Only one connection
+     should result: no duplicate entry in the combo's session group, no
+     duplicate chooser row, no second handshake to the host. This is the
+     in-flight guard doing its job.
+158. [SSH] **ssh-config host: connect → save-to-vault → appears ONCE in the
+     combo.** Pick a host that was auto-discovered from `~/.ssh/config` (it
+     shows up in the combo's configured-hosts group without ever having been
+     added through the Hosts UI), connect with a password, and check "Save
+     to vault." After the save, reopen the combo: the host must appear
+     EXACTLY ONCE, not twice. Saving promotes the ssh-config entry into a
+     config-owned copy, and the combo's dedupe must prefer that copy over
+     the ssh-config original rather than listing both.
+159. [SSH] Pin survives tab switching. Pick a host from the combo (pinning
+     the pane to it), then switch the terminal's active tab across a couple
+     of unrelated sessions and back. The remote pane must stay on the pinned
+     host throughout — it does not silently follow the active tab the way an
+     unpinned pane would. Then pick "Follow active tab" from the combo: the
+     pane must start following the active tab again on the next tab switch.
+160. [SSH] Dead-network host → Unreachable in the error strip. Pick a host
+     that fails at the network layer (wrong port, host down, no route) —
+     not an auth failure. Expect the error strip to show an
+     unreachable/connection-failure message, not a password dialog: the
+     chain treats a transport failure as terminal, the same as a key-only
+     auth failure in 151.
+161. **Judgment call: combo grouping/labels/density, dialog copy, and
+     attempt-counter tone.** Open the combo cold and look at its groups —
+     "Follow active tab", live sessions (labelled `user@host`, with a
+     `(pane N)` disambiguator when more than one session shares a host), a
+     separator, then configured hosts grouped by folder prefix. Decide
+     whether the grouping reads clearly and the density feels right next to
+     the rest of the toolbar. Separately, read the two auth dialogs' copy
+     (titles, field labels, the "Save to vault" checkbox text, the error
+     line) and the attempt counter that appears on a host-password dialog's
+     third try ("Attempt 3") — say whether the wording sits at house voice
+     or reads as a stray placeholder, and whether the attempt counter should
+     appear earlier or later than the third try.
