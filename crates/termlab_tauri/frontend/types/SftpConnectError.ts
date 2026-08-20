@@ -9,4 +9,4 @@
  * credential: `termlab_remote` builds its auth errors from russh's error
  * Display, and no call site in this module formats a password into anything.
  */
-export type SftpConnectError = { "kind": "vaultLocked" } | { "kind": "needsPassword", hasVaultAccount: boolean, } | { "kind": "authFailed", message: string, } | { "kind": "unreachable", message: string, } | { "kind": "other", message: string, };
+export type SftpConnectError = { "kind": "vaultLocked" } | { "kind": "needsPassword", hasVaultAccount: boolean, } | { "kind": "connectInProgress" } | { "kind": "authFailed", message: string, } | { "kind": "unreachable", message: string, } | { "kind": "other", message: string, };

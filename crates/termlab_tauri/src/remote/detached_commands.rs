@@ -102,6 +102,53 @@ fn next_detached_pane_id() -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// In-flight connects
+// ---------------------------------------------------------------------------
+
+/// Connects currently running, keyed `(resolved window label, server entry id)`.
+///
+/// The duplicate guard (`find_detached_session_for_entry`) can only see a
+/// session that already EXISTS; between a connect starting and its session
+/// being registered there is a window — the whole network round-trip, plus a
+/// password dialog on the with-password path — in which a second submit sees
+/// nothing and races. This closes that window for both connect commands at
+/// once, so a password submit cannot race a plain connect either.
+static IN_FLIGHT_CONNECTS: Mutex<Option<std::collections::HashSet<(String, String)>>> =
+    Mutex::new(None);
+
+/// Releases its key when dropped, so every exit from a connect command —
+/// success, typed error, or an early `?` — clears the entry.
+struct InFlightGuard<'a> {
+    registry: &'a Mutex<Option<std::collections::HashSet<(String, String)>>>,
+    key: (String, String),
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(set) = self.registry.lock().as_mut() {
+            set.remove(&self.key);
+        }
+    }
+}
+
+/// Claim `(window_label, entry_id)`, or `None` if a connect for it is already
+/// running.
+fn begin_connect<'a>(
+    registry: &'a Mutex<Option<std::collections::HashSet<(String, String)>>>,
+    window_label: &str,
+    entry_id: &str,
+) -> Option<InFlightGuard<'a>> {
+    let key = (window_label.to_string(), entry_id.to_string());
+    let mut guard = registry.lock();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if !set.insert(key.clone()) {
+        return None;
+    }
+    drop(guard);
+    Some(InFlightGuard { registry, key })
+}
+
+// ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
 
@@ -138,6 +185,11 @@ pub(crate) enum SftpConnectError {
     NeedsPassword {
         has_vault_account: bool,
     },
+    /// A connect for this same host, in this same window, is already running.
+    /// Retry once the one in flight settles: it will either have produced the
+    /// session (which the next `sftp_connect_host` hands straight back) or
+    /// failed with a variant of its own.
+    ConnectInProgress,
     /// Credentials were supplied and rejected.
     AuthFailed {
         message: String,
@@ -546,6 +598,11 @@ pub(crate) async fn sftp_connect_host(
         return Ok(existing);
     }
 
+    // Nothing registered yet — but a connect for this host may still be in
+    // flight, with its session not yet inserted for the check above to find.
+    let _in_flight = begin_connect(&IN_FLIGHT_CONNECTS, &window_label, &server.id)
+        .ok_or(SftpConnectError::ConnectInProgress)?;
+
     let has_vault_account = server.vault_account_id.is_some();
     let credentials = resolve_credentials(try_vault_credentials(&vault, &server), &server)?;
 
@@ -579,8 +636,15 @@ pub(crate) async fn sftp_connect_host_with_password(
     let window_label = session_caller_label(&window);
     let remote_state = Arc::clone(&remote);
     let server = resolve_server(&remote_state, &server_entry_id)?;
-    let has_vault_account = server.vault_account_id.is_some();
 
+    // Shares the plain connect's key, so a double-submitted password dialog —
+    // or a password submit racing a plain connect for the same host — is told
+    // to wait rather than opening a second connection and, with
+    // `save_to_vault`, racing the vault link.
+    let _in_flight = begin_connect(&IN_FLIGHT_CONNECTS, &window_label, &server.id)
+        .ok_or(SftpConnectError::ConnectInProgress)?;
+
+    let has_vault_account = server.vault_account_id.is_some();
     let username = resolve_password_username(try_vault_credentials(&vault, &server), &server);
 
     let credentials = SshCredentials {
@@ -640,7 +704,23 @@ fn link_password_account(
     username: &str,
     password: &str,
 ) -> Result<uuid::Uuid, String> {
-    if let Some(account_id) = server.vault_account_id {
+    // ONE acquisition covers re-read → decide → write. The `server` this
+    // command captured at `resolve_server` time is a SNAPSHOT: by the time a
+    // password has been typed and a connection made, another call (or the Hosts
+    // UI) may have linked the entry already. Branching on the snapshot's
+    // `vault_account_id` would send both racers down the create path, and the
+    // second `save_server_preserving_folder` — a full remove-and-re-add, not a
+    // merge — would drop the first one's link, orphaning its account. Reading
+    // the live entry under the same lock that publishes the write makes the
+    // decision and the write atomic with respect to each other.
+    let mut state = remote.lock();
+    let current = find_server_by_entry_id(&state, Some(&server.id)).unwrap_or_else(|| {
+        // Only reachable if the entry was deleted mid-connect; the snapshot is
+        // still the best description of what the user connected to.
+        server.clone()
+    });
+
+    if let Some(account_id) = current.vault_account_id {
         let account = {
             let mgr = vault.lock();
             mgr.get_account(account_id).map_err(|e| e.to_string())?
@@ -656,7 +736,7 @@ fn link_password_account(
     let account_id = crate::vault_commands::add_account(
         vault,
         AddAccountRequest {
-            display_name: server.label.clone(),
+            display_name: current.label.clone(),
             username: username.to_string(),
             auth_type: "password".to_string(),
             password: Some(password.to_string()),
@@ -665,9 +745,10 @@ fn link_password_account(
         },
     )?;
 
-    let mut entry = server.clone();
+    // Written from `current`, not from the snapshot, so an unrelated edit made
+    // while this connect was in flight (a rename, a new proxy) is not reverted.
+    let mut entry = current;
     entry.vault_account_id = Some(account_id);
-    let mut state = remote.lock();
     // Note: for a host that came from `~/.ssh/config` this writes a config-owned
     // copy of the entry, which is the same promotion the Hosts UI performs when
     // an imported host is saved — an ssh-config entry is re-parsed on every
@@ -1154,6 +1235,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(other["kind"], "other");
+
+        let in_flight = serde_json::to_value(SftpConnectError::ConnectInProgress).unwrap();
+        assert_eq!(in_flight["kind"], "connectInProgress");
     }
 
     // -----------------------------------------------------------------
@@ -1299,6 +1383,144 @@ mod tests {
     }
 
     #[test]
+    fn two_racing_saves_link_one_account_and_orphan_nothing() {
+        // Both callers hold the SNAPSHOT they resolved before connecting, in
+        // which the entry is still unlinked — exactly what two concurrent
+        // `sftp_connect_host_with_password(save_to_vault: true)` calls have.
+        // Running them one after the other with that stale value reproduces the
+        // interleaving without threads: the second must observe the first's
+        // link through live state, not through its own snapshot.
+        let (vault, _existing, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password("unrelated".into()));
+        let (remote, _dir) = linked_state();
+        let stale = server_entry(Some("password"));
+        assert!(stale.vault_account_id.is_none());
+        remote.lock().config.add_server(stale.clone());
+
+        let first = link_password_account(&vault, &remote, &stale, "deploy", "first").unwrap();
+        let second = link_password_account(&vault, &remote, &stale, "deploy", "second").unwrap();
+
+        assert_eq!(
+            first, second,
+            "the second save must find and update the first's account"
+        );
+        assert_eq!(
+            vault.lock().list_accounts().unwrap().len(),
+            2,
+            "one unrelated account plus ONE linked account — no orphan"
+        );
+        assert!(
+            matches!(account_by_id(&vault, first).auth, termlab_vault::AuthMethod::Password(ref p) if p == "second")
+        );
+        assert_eq!(
+            remote
+                .lock()
+                .config
+                .find_server("entry-1")
+                .unwrap()
+                .vault_account_id,
+            Some(first),
+            "the surviving link must be the account that actually holds the password"
+        );
+    }
+
+    #[test]
+    fn racing_saves_from_two_threads_still_link_one_account() {
+        let (vault, _existing, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password("unrelated".into()));
+        let (remote, _dir) = linked_state();
+        let stale = server_entry(Some("password"));
+        remote.lock().config.add_server(stale.clone());
+
+        let handles: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|pw| {
+                let vault = std::sync::Arc::clone(&vault);
+                let remote = std::sync::Arc::clone(&remote);
+                let server = stale.clone();
+                std::thread::spawn(move || {
+                    link_password_account(&vault, &remote, &server, "deploy", pw).unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<uuid::Uuid> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert_eq!(ids[0], ids[1], "both threads must converge on one account");
+        assert_eq!(vault.lock().list_accounts().unwrap().len(), 2);
+        assert_eq!(
+            remote
+                .lock()
+                .config
+                .find_server("entry-1")
+                .unwrap()
+                .vault_account_id,
+            Some(ids[0])
+        );
+    }
+
+    #[test]
+    fn a_link_written_after_the_snapshot_is_respected() {
+        // The Hosts UI (or another window) links the entry while this connect
+        // is in flight: the save must update that account, not create a rival.
+        let (vault, account_id, _vault_dir) =
+            vault_with_account(termlab_vault::AuthMethod::Password(String::new()));
+        let (remote, _dir) = linked_state();
+        let stale = server_entry(Some("password"));
+
+        let mut linked = stale.clone();
+        linked.vault_account_id = Some(account_id);
+        linked.label = "renamed by someone else".into();
+        remote.lock().config.add_server(linked);
+
+        let id = link_password_account(&vault, &remote, &stale, "deploy", "hunter2").unwrap();
+
+        assert_eq!(id, account_id);
+        assert_eq!(vault.lock().list_accounts().unwrap().len(), 1);
+        assert_eq!(
+            remote.lock().config.find_server("entry-1").unwrap().label,
+            "renamed by someone else",
+            "a concurrent edit must not be reverted by this save"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // In-flight guard
+    // -----------------------------------------------------------------
+
+    fn empty_registry() -> Mutex<Option<std::collections::HashSet<(String, String)>>> {
+        Mutex::new(None)
+    }
+
+    #[test]
+    fn a_connect_already_running_blocks_a_second_one_until_it_finishes() {
+        let registry = empty_registry();
+        let first = begin_connect(&registry, "main", "entry-1").expect("first claim");
+        assert!(
+            begin_connect(&registry, "main", "entry-1").is_none(),
+            "a second connect for the same host must be told one is in flight"
+        );
+        drop(first);
+        assert!(
+            begin_connect(&registry, "main", "entry-1").is_some(),
+            "the key must be released however the first call exits"
+        );
+    }
+
+    #[test]
+    fn in_flight_connects_are_scoped_to_window_and_entry() {
+        let registry = empty_registry();
+        let _first = begin_connect(&registry, "main", "entry-1").unwrap();
+        assert!(
+            begin_connect(&registry, "main", "entry-2").is_some(),
+            "a different host connects freely"
+        );
+        assert!(
+            begin_connect(&registry, "window-2", "entry-1").is_some(),
+            "another window connects independently"
+        );
+    }
+
+    #[test]
     fn updating_an_account_never_discards_its_key() {
         let key_path = std::path::PathBuf::from("/home/deploy/.ssh/id_ed25519");
         let (vault, account_id, _vault_dir) =
@@ -1323,7 +1545,9 @@ mod tests {
                 assert_eq!(passphrase.as_deref(), Some("kp"));
                 assert_eq!(password, "hunter2");
             }
-            other => panic!("the key must survive a password save, got {other:?}"),
+            // Deliberately not interpolating the auth method: its Debug would
+            // render the stored password, even in a test failure message.
+            _ => panic!("the key must survive a password save"),
         }
     }
 
