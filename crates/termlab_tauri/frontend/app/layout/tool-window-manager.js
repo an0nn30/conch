@@ -467,19 +467,34 @@
       .catch(() => {
         // The pop-out never happened, so put back what the user was looking
         // at rather than leaving them staring at an empty zone.
-        dockFromWindowMode(id, { hideHost: false });
+        dockFromWindowMode(id, { teardownHost: false });
       });
   }
 
   // Back into the zone: mode flips first so activate() takes its normal path,
   // and the render goes through the same lazy ensureWindowElement() a first
   // activation uses — a fresh element, a fresh renderFn call.
+  //
+  // `teardownHost` (the default) DESTROYS the host window via
+  // `dock_panel_host`, which now accepts a parent caller naming one of its own
+  // popped-out ids (src/panel_host.rs's `resolve_dock_target`). Merely hiding
+  // it would be wrong: the panel is mounted and stateful inside that host, so
+  // a hide would leave two live instances of one panel — the hidden host's,
+  // and the one activate() re-renders into the zone below. Rust answers the
+  // destroy by emitting `panel-host-docked` back to this window; by then the
+  // mode is already 'dock', so notifyHostDocked's mode guard makes that echo
+  // inert rather than a second remount.
+  //
+  // The remount is deliberately NOT deferred until that event arrives: the
+  // command fails whenever no host is live for the id (a mode restored from
+  // the saved layout whose host was never summoned, say), and waiting on an
+  // event that will never come would strand the panel nowhere.
   function dockFromWindowMode(id, opts) {
     const tw = toolWindows.get(id);
     if (!tw) return;
-    const hideHost = !opts || opts.hideHost !== false;
+    const teardownHost = !opts || opts.teardownHost !== false;
     resetToDock(id);
-    if (hideHost) panelHostInvoke('hide_panel_host', { toolWindowId: id }).catch(() => {});
+    if (teardownHost) panelHostInvoke('dock_panel_host', { toolWindowId: id }).catch(() => {});
     activate(id);
   }
 
@@ -553,7 +568,7 @@
   // hide from this side — just remount.
   function notifyHostDocked(id) {
     if (!toolWindows.has(id) || getViewMode(id) !== VIEW_MODE_WINDOW) return;
-    dockFromWindowMode(id, { hideHost: false });
+    dockFromWindowMode(id, { teardownHost: false });
   }
 
   // The host self-aborted before mounting anything (its boot found no

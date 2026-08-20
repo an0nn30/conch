@@ -380,7 +380,11 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
     'the host destroys itself on dock — the parent must not command it');
 }
 
-// --- 9. Choosing "View Mode: Dock" from the menu hides the live host -------
+// --- 9. Choosing "View Mode: Dock" DESTROYS the live host ------------------
+// Not a hide: the panel is mounted and stateful inside the host, so hiding
+// would leave two live instances of one panel (the hidden host's, plus the one
+// remounted below). dock_panel_host now takes a parent caller naming its own
+// id — see src/panel_host.rs's resolve_dock_target.
 {
   const { twm, invoke, invokeCalls, zoneEls } = loadManager();
   let renders = 0;
@@ -392,11 +396,20 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
 
   viewModeItems(twm.buildContextMenuItems('tunnels'))[0].onSelect();
   assert.deepStrictEqual(plain(invokeCalls), [
-    { cmd: 'hide_panel_host', args: { toolWindowId: 'tunnels' } },
-  ], 'the parent can only hide its host; dock_panel_host is host-only');
+    { cmd: 'dock_panel_host', args: { toolWindowId: 'tunnels' } },
+  ], 'the parent must destroy its host, not hide it');
   assert.strictEqual(twm.getViewModes().tunnels, 'dock');
   assert.strictEqual(renders, 1);
   assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 1);
+
+  // Rust answers the destroy by emitting panel-host-docked back to this
+  // window. The mode is already 'dock', so notifyHostDocked's guard makes the
+  // echo inert — no second remount, no second render.
+  invokeCalls.length = 0;
+  twm.notifyHostDocked('tunnels');
+  assert.strictEqual(renders, 1, 'the docked echo must not remount a second time');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 1);
+  assert.deepStrictEqual(plain(invokeCalls), []);
 }
 
 // --- 10. panel-host-aborted resets the mode without remounting ------------

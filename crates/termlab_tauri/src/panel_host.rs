@@ -500,18 +500,143 @@ fn validate_panel_host_caller(label: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Which window labels may call `dock_panel_host` / `abort_panel_host`: the
-/// exact opposite restriction from `validate_panel_host_caller` above — here
-/// the caller MUST be a panel host, since both commands are a host's own
-/// self-teardown affordances, never something a parent or another window
-/// invokes on its behalf. Only the structural (label-shape) half of "must be
-/// a REGISTERED panelhost-*"; the registration half is the registry lookup
-/// each command layers on top of this.
+/// Which window labels may call `abort_panel_host`: the exact opposite
+/// restriction from `validate_panel_host_caller` above — here the caller MUST
+/// be a panel host, since an abort is a host's own self-teardown affordance,
+/// never something a parent or another window invokes on its behalf. Only the
+/// structural (label-shape) half of "must be a REGISTERED panelhost-*"; the
+/// registration half is the registry lookup the command layers on top of this.
+///
+/// `dock_panel_host` deliberately does NOT use this — see
+/// [`resolve_dock_target`] for why docking accepts a parent caller too.
 fn validate_panel_host_self_caller(label: &str) -> Result<(), String> {
     if !label.starts_with("panelhost-") {
         return Err("this command must be called by a panel host window".to_string());
     }
     Ok(())
+}
+
+/// Which entry `dock_panel_host` must tear down, for a given caller.
+///
+/// TWO legal callers, told apart by the caller's own label shape:
+///
+/// 1. **The HOST itself** (`panelhost-*`), pressing its own dock-back button.
+///    Resolved by exact match on the caller's stored `window_label` — never by
+///    parsing a parent out of it — and the `tool_window_id` it names must be
+///    the one it was built for. This path is unchanged from when docking was
+///    host-only.
+/// 2. **The PARENT**, choosing "View Mode: Dock" for one of its own popped-out
+///    tool windows. Resolved by the `(parent_label, tool_window_id)` registry
+///    key, so a parent can only ever dock ITS OWN host. Docking (destroy) is
+///    the right verb here rather than hiding: once the panel is mounted in a
+///    host, a parent-side dock that merely hid the window would leave TWO live
+///    instances of one stateful panel — the hidden host's, plus the one the
+///    parent re-renders into its zone.
+///
+/// Anything else is rejected: a chooser or the settings window fails
+/// `validate_panel_host_caller`, and an ordinary window that owns no host for
+/// this id finds nothing in the registry.
+fn resolve_dock_target(
+    registry: &PanelHostRegistry,
+    caller_label: &str,
+    tool_window_id: &str,
+) -> Result<PanelHostEntry, String> {
+    if caller_label.starts_with("panelhost-") {
+        let entry = registry
+            .get_by_window_label(caller_label)
+            .ok_or_else(|| "no panel host entry for this window".to_string())?;
+        if entry.tool_window_id != tool_window_id {
+            return Err("tool_window_id does not match this panel host".to_string());
+        }
+        return Ok(entry.clone());
+    }
+
+    validate_panel_host_caller(caller_label)?;
+    registry
+        .get(caller_label, tool_window_id)
+        .cloned()
+        .ok_or_else(|| "no panel host for this tool window".to_string())
+}
+
+#[cfg(test)]
+mod dock_target_tests {
+    use super::{resolve_dock_target, PanelHostRegistry};
+
+    #[test]
+    fn a_host_docks_itself_by_its_own_window_label() {
+        let mut r = PanelHostRegistry::default();
+        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+
+        let target = resolve_dock_target(&r, &host.window_label, "ssh-sessions")
+            .expect("the host's own label resolves its entry");
+        assert_eq!(target.req_id, host.req_id);
+        assert_eq!(
+            target.window_label, host.window_label,
+            "the window the command destroys is the caller itself"
+        );
+    }
+
+    #[test]
+    fn a_host_may_not_dock_under_a_different_id_or_while_unregistered() {
+        let mut r = PanelHostRegistry::default();
+        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+
+        assert!(
+            resolve_dock_target(&r, &host.window_label, "file-explorer").is_err(),
+            "the id must match the one this host was built for"
+        );
+
+        let stale = host.window_label.clone();
+        r.remove("window-1", "ssh-sessions");
+        assert!(
+            resolve_dock_target(&r, &stale, "ssh-sessions").is_err(),
+            "a stale host label names nothing — a second dock is a no-op, not a \
+             double-teardown"
+        );
+    }
+
+    #[test]
+    fn a_parent_docks_its_own_host_by_tool_window_id() {
+        let mut r = PanelHostRegistry::default();
+        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+
+        let target = resolve_dock_target(&r, "window-1", "ssh-sessions")
+            .expect("the parent resolves through the (parent, id) key");
+        assert_eq!(target.req_id, host.req_id);
+        assert_eq!(
+            target.window_label, host.window_label,
+            "the parent path destroys the HOST window, not the caller"
+        );
+        assert_eq!(target.parent_label, "window-1");
+    }
+
+    #[test]
+    fn a_parent_may_not_dock_another_parents_host() {
+        let mut r = PanelHostRegistry::default();
+        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+
+        assert!(
+            resolve_dock_target(&r, "window-2", "ssh-sessions").is_err(),
+            "the (parent, id) key confines a parent to its OWN hosts"
+        );
+        assert!(
+            resolve_dock_target(&r, "window-1", "file-explorer").is_err(),
+            "a tool window this parent never popped out has no host to dock"
+        );
+    }
+
+    #[test]
+    fn choosers_and_the_settings_window_are_rejected_outright() {
+        let mut r = PanelHostRegistry::default();
+        r.open("chooser-window-1-2".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("settings".into(), "ssh-sessions".into(), "SSH".into());
+
+        // Even with an entry keyed to them, these callers never get past
+        // validate_panel_host_caller — the same windows that may not OPEN a
+        // panel host may not dock one either.
+        assert!(resolve_dock_target(&r, "chooser-window-1-2", "ssh-sessions").is_err());
+        assert!(resolve_dock_target(&r, "settings", "ssh-sessions").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1001,33 +1126,26 @@ pub(crate) fn hide_panel_host(
     Ok(())
 }
 
-/// Dock a panel host back into its parent's zone: called by the HOST window
-/// itself (its own dock-back affordance), not the parent. Emits
+/// Dock a panel host back into its parent's zone. Callable by the HOST window
+/// itself (its own dock-back affordance) OR by the host's PARENT naming one of
+/// its own popped-out tool windows — see [`resolve_dock_target`] for the two
+/// resolutions and why the parent needs this rather than a hide. Emits
 /// `panel-host-docked` to the parent, removes the registry entry, then
-/// DESTROYS (not closes — this window's own teardown, no CloseRequested
-/// re-entry) the host window.
+/// DESTROYS (not closes — a deliberate teardown, no CloseRequested re-entry)
+/// the host window.
 #[tauri::command]
 pub(crate) fn dock_panel_host(
     window: tauri::WebviewWindow,
     tool_window_id: String,
 ) -> Result<(), String> {
     let caller_label = window.label().to_string();
-    if !caller_label.starts_with("panelhost-") {
-        return Err("dock_panel_host must be called by a panel host window".to_string());
-    }
 
     let app = window.app_handle();
     let entry = {
         let registry = app.state::<Mutex<PanelHostRegistry>>();
         let guard = registry.lock();
-        guard.get_by_window_label(&caller_label).cloned()
+        resolve_dock_target(&guard, &caller_label, &tool_window_id)?
     };
-    let Some(entry) = entry else {
-        return Err("no panel host entry for this window".to_string());
-    };
-    if entry.tool_window_id != tool_window_id {
-        return Err("tool_window_id does not match this panel host".to_string());
-    }
 
     let _ = app.emit_to(
         entry.parent_label.as_str(),
@@ -1044,7 +1162,14 @@ pub(crate) fn dock_panel_host(
             .remove(&entry.parent_label, &entry.tool_window_id);
     }
 
-    let _ = window.destroy();
+    // The host-caller path destroys the very window that invoked this, exactly
+    // as it always did; the parent-caller path has to look its host up by the
+    // stored (request-unique) label first.
+    if caller_label == entry.window_label {
+        let _ = window.destroy();
+    } else if let Some(host_win) = app.get_webview_window(&entry.window_label) {
+        let _ = host_win.destroy();
+    }
     Ok(())
 }
 
