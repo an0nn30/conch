@@ -804,6 +804,76 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
   assert.strictEqual(zoneEls.get('right-top')._contentEl.children.length, 1);
 }
 
+// --- 14h. moveTo's OLD-zone fallback must not promote a popped sibling -----
+// F1 (branch review): a zone holding A (docked, active) and B (docked).
+// B pops out — it keeps its slot in the zone's window list (that IS its
+// remembered dock target) but has no DOM and no claim on activeId. Moving A
+// to a different zone empties the old activeId slot; the fallback used to
+// grab zone.windows[0] raw, which is now B, and rendered+activated it into a
+// zone whose host window (B's) is simultaneously live on screen — two live
+// instances of B, plus a rail/persisted-slot mismatch. It must instead skip
+// B and land on nothing (there is no other dockable window left).
+{
+  const { twm, invoke, zoneEls } = loadManager();
+  let aRenders = 0;
+  let bRenders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('a', { ...HOSTS, defaultZone: 'right-top', renderFn: () => { aRenders += 1; } });
+  twm.register('b', { ...TUNNELS, defaultZone: 'right-top', renderFn: () => { bRenders += 1; } });
+  assert.strictEqual(twm.getActiveZoneAssignments()['right-top'], 'a',
+    'precondition: a is docked and active, b is docked but not active');
+
+  twm.setViewMode('b', 'window');
+  aRenders = 0;
+  bRenders = 0;
+
+  twm.moveTo('a', 'left-top');
+
+  assert.strictEqual(bRenders, 0,
+    'the popped-out sibling left behind in the old zone must NOT be rendered');
+  assert.strictEqual(zoneEls.get('right-top')._contentEl.children.length, 0,
+    'nothing was mounted into the vacated zone');
+  assert.strictEqual(twm.getViewModes().b, 'window',
+    'and it must not be dragged back into dock mode by the fallback');
+  assert.ok(Array.from(twm.getWindowsInZone('right-top')).includes('b'),
+    'b keeps its remembered dock target — moveTo only re-aimed a, not b');
+  assert.strictEqual(aRenders, 0,
+    'a is reparented, not re-rendered — it already had a live element from registration');
+  assert.strictEqual(zoneEls.get('left-top')._contentEl.children.length, 1,
+    'a landed in its new zone as an ordinary docked move does');
+}
+
+// --- 14i. unregister's fallback must not promote a popped sibling ----------
+// F1's second call site: same zone shape as 14h, but the docked-active
+// window (a) is REMOVED (a plugin uninstall) instead of moved. The raw
+// zone.windows[0] fallback would again pick the popped sibling b and render
+// it into the zone while its host window is still showing it live.
+{
+  const { twm, invoke, zoneEls } = loadManager();
+  let aRenders = 0;
+  let bRenders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('a', { ...HOSTS, defaultZone: 'right-top', renderFn: () => { aRenders += 1; } });
+  twm.register('b', { ...TUNNELS, defaultZone: 'right-top', renderFn: () => { bRenders += 1; } });
+  assert.strictEqual(twm.getActiveZoneAssignments()['right-top'], 'a',
+    'precondition: a is docked and active, b is docked but not active');
+
+  twm.setViewMode('b', 'window');
+  aRenders = 0;
+  bRenders = 0;
+
+  twm.unregister('a');
+
+  assert.strictEqual(bRenders, 0,
+    'the popped-out sibling must NOT be promoted/rendered when its docked-active sibling is unregistered');
+  assert.strictEqual(zoneEls.get('right-top')._contentEl.children.length, 0,
+    'nothing was mounted into the zone a vacated');
+  assert.strictEqual(twm.getViewModes().b, 'window',
+    'b\'s view mode is untouched by a\'s removal');
+  assert.ok(Array.from(twm.getWindowsInZone('right-top')).includes('b'),
+    'b is still registered in the zone, just not promoted to active');
+}
+
 // ===========================================================================
 // Part 2 — tool-window-runtime.js wiring (fake toolWindowManager)
 // ===========================================================================

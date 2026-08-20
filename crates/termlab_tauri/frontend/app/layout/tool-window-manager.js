@@ -286,7 +286,10 @@
     zone.windows = zone.windows.filter(w => w !== id);
 
     if (zone.activeId === id) {
-      zone.activeId = zone.windows.length > 0 ? zone.windows[0] : null;
+      // A popped-out sibling must never be promoted into the zone's active
+      // slot — it has no DOM to activate and its host window is already
+      // showing it live (see firstDockableIn, and F1 in the branch review).
+      zone.activeId = firstDockableIn(zone.windows);
       if (zone.activeId) {
         const next = toolWindows.get(zone.activeId);
         if (next && next.el) { next.active = true; next.el.style.display = ''; }
@@ -723,7 +726,9 @@
     // Remove from old zone
     oldZone.windows = oldZone.windows.filter(w => w !== id);
     if (oldZone.activeId === id) {
-      oldZone.activeId = oldZone.windows.length > 0 ? oldZone.windows[0] : null;
+      // Same guard as unregister(): a popped-out sibling left behind in the
+      // old zone must not be picked as the new active/rendered occupant.
+      oldZone.activeId = firstDockableIn(oldZone.windows);
       if (oldZone.activeId) {
         const n = toolWindows.get(oldZone.activeId);
         if (n) { n.active = true; if (n.el) n.el.style.display = ''; }
