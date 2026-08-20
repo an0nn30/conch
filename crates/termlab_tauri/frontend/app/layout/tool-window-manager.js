@@ -38,8 +38,36 @@
   // Last user-set split ratios per side (preserved across toggle cycles)
   const lastSplitRatios = { left: 0.5, right: 0.5 };
 
+  // ---- View mode ------------------------------------------------------------
+  // Every tool window — built-in or plugin, no special cases — carries a view
+  // mode: docked in one of the five zones, or popped out into its own OS
+  // window (a "panel host", see src/panel_host.rs). The mode is a property of
+  // the tool window itself, which is why it persists id-keyed alongside
+  // tool_window_zones rather than per parent window.
+  //
+  // While a window is popped out the manager keeps the registration and the
+  // zone assignment (that IS the remembered dock target) but owns no DOM for
+  // it: `renderFn` is render-once, so the element is dropped on the way out
+  // and the HOST renders a fresh one. Dock-back re-renders through the same
+  // lazy `ensureWindowElement` path any first activation uses. Nothing is ever
+  // moved between documents.
+  const VIEW_MODE_DOCK = 'dock';
+  const VIEW_MODE_WINDOW = 'window';
+  const viewModes = new Map();   // id → 'dock' | 'window'
+  // Last known panel-host visibility per popped-out id. Drives the rail
+  // button's lit state and the toggle routing; kept in sync by the
+  // panel-host-shown/hidden events the parent receives from Rust.
+  const hostVisible = new Map(); // id → boolean
+  let savedViewModes = null;     // populated from backend before registration
+  // Window-mode ids whose host was open when the layout was saved, waiting to
+  // be summoned. Drained once registrations finish; a plugin that registers
+  // later than that (they arrive asynchronously) is summoned on the spot.
+  const pendingWindowSummons = new Set();
+  let summonImmediately = false;
+
   let fitActiveTabFn = null;
   let saveLayoutFn = null;
+  let invokeFn = null;
   let bottomZoneWrapEl = null;
   let savedZoneAssignments = null; // populated from backend before registration
   let savedActiveZoneWindows = null; // populated from backend before registration
@@ -70,6 +98,10 @@
   function init(opts) {
     fitActiveTabFn = opts.fitActiveTab || null;
     saveLayoutFn   = opts.saveLayout   || null;
+    // The only backend the manager talks to: the panel-host commands. Injected
+    // rather than reached for, so the module stays loadable (and testable)
+    // without a Tauri context, like every other dependency here.
+    invokeFn       = typeof opts.invoke === 'function' ? opts.invoke : null;
 
     for (const z of ZONE_IDS) {
       const el = document.querySelector(`[data-zone="${z}"]`);
@@ -110,6 +142,12 @@
   // Provide persisted active window map so register() can restore active window per zone.
   function setPersistedActiveZoneWindows(map) {
     savedActiveZoneWindows = map || {};
+  }
+
+  // Provide persisted view modes so register() knows which windows are popped
+  // out rather than docked. Must be called before any register().
+  function setPersistedViewModes(map) {
+    savedViewModes = map || {};
   }
 
   // Provide persisted panel visibility so boot activation can respect hidden panels.
@@ -169,6 +207,28 @@
       ? savedActiveZoneWindows[zone]
       : null;
 
+    // A window the user had popped out never mounts into its zone on boot: it
+    // keeps its place in the zone's window list (so the rail button is there
+    // to summon it with) but the zone stays closed as far as the DOM is
+    // concerned. Whether its host is re-summoned is decided by whether the
+    // saved layout recorded it as its zone's open window — the same bit that
+    // records a docked window as open, so "closed while popped out" survives a
+    // restart the same way "closed while docked" does.
+    if (savedViewModes && savedViewModes[id] === VIEW_MODE_WINDOW) {
+      viewModes.set(id, VIEW_MODE_WINDOW);
+      if (savedActiveId && savedActiveId === id) {
+        hostVisible.set(id, true);
+        tw.active = true;
+        if (summonImmediately) summonWindowHost(id);
+        else pendingWindowSummons.add(id);
+      }
+      updateZone(zone);
+      updateSidebar(side);
+      updateBottomZone();
+      updateStrips();
+      return;
+    }
+
     if (savedActiveId && savedActiveId === id) {
       if (shouldAutoActivate) {
         activate(id);
@@ -213,6 +273,14 @@
     }
 
     if (tw.el && tw.el.parentNode) tw.el.parentNode.removeChild(tw.el);
+    // A popped-out window whose plugin was just removed would otherwise leave
+    // its host on screen with nothing to host.
+    if (getViewMode(id) === VIEW_MODE_WINDOW) {
+      panelHostInvoke('hide_panel_host', { toolWindowId: id }).catch(() => {});
+    }
+    viewModes.delete(id);
+    hostVisible.delete(id);
+    pendingWindowSummons.delete(id);
     toolWindows.delete(id);
 
     updateZone(tw.zone);
@@ -249,6 +317,10 @@
   function activate(id) {
     const tw = toolWindows.get(id);
     if (!tw) return;
+    // A popped-out window has no docked presence to activate. Callers that
+    // want it on screen go through summonWindowHost() (the rail toggle does);
+    // the zone-fallback callers below just skip it.
+    if (getViewMode(id) === VIEW_MODE_WINDOW) return;
 
     const zone = zones[tw.zone];
 
@@ -281,6 +353,9 @@
   function deactivate(id) {
     const tw = toolWindows.get(id);
     if (!tw) return;
+    // "Hide" on a popped-out window means hide its host window, not close a
+    // zone that isn't showing it. Reachable from the rail's context menu.
+    if (getViewMode(id) === VIEW_MODE_WINDOW) { hideWindowHost(id); return; }
 
     tw.active = false;
     if (tw.el) tw.el.style.display = 'none';
@@ -299,6 +374,13 @@
   function toggle(id) {
     const tw = toolWindows.get(id);
     if (!tw) return;
+    // Window mode routes to the host and returns; everything below this line
+    // is the unchanged docked path.
+    if (getViewMode(id) === VIEW_MODE_WINDOW) {
+      if (hostVisible.get(id) === true) hideWindowHost(id);
+      else summonWindowHost(id);
+      return;
+    }
     const side = sideForZone(tw.zone);
     if (tw.active && (side === 'left' || side === 'right') && !isPanelVisible(side)) {
       setPanelVisibility(side, true);
@@ -311,6 +393,180 @@
     if (tw.active) deactivate(id); else activate(id);
   }
 
+  // ---- View mode (dock <-> own window) --------------------------------------
+
+  function getViewMode(id) {
+    return viewModes.get(id) === VIEW_MODE_WINDOW ? VIEW_MODE_WINDOW : VIEW_MODE_DOCK;
+  }
+
+  // One entry per registered id, exactly like getZoneAssignments() — an
+  // explicit 'dock' rather than an omission, so the persisted map is a full
+  // picture rather than a diff against a default nobody wrote down.
+  function getViewModes() {
+    const map = {};
+    for (const id of toolWindows.keys()) { map[id] = getViewMode(id); }
+    return map;
+  }
+
+  // What Task 4's host needs to mount a panel: identity plus the render
+  // function. Deliberately not the live `el`/`zone`/`active` bookkeeping —
+  // a host owns its own DOM.
+  function getRegistration(id) {
+    const tw = toolWindows.get(id);
+    if (!tw) return null;
+    return { id: tw.id, title: tw.title, icon: tw.icon, type: tw.type, renderFn: tw.renderFn };
+  }
+
+  function panelHostInvoke(cmd, args) {
+    if (typeof invokeFn !== 'function') {
+      return Promise.reject(new Error('tool-window-manager: no invoke available'));
+    }
+    try {
+      return Promise.resolve(invokeFn(cmd, args));
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  function setViewMode(id, mode) {
+    const tw = toolWindows.get(id);
+    if (!tw) return;
+    const next = mode === VIEW_MODE_WINDOW ? VIEW_MODE_WINDOW : VIEW_MODE_DOCK;
+    if (next === getViewMode(id)) return;
+    if (next === VIEW_MODE_WINDOW) enterWindowMode(tw);
+    else dockFromWindowMode(id);
+  }
+
+  // Drop the manager's DOM for a window without touching its zone assignment:
+  // the zone it is in stays the zone it docks back into.
+  function detachFromZone(tw) {
+    const zone = zones[tw.zone];
+    if (zone && zone.activeId === tw.id) zone.activeId = null;
+    if (tw.el && tw.el.parentNode) tw.el.parentNode.removeChild(tw.el);
+    tw.el = null;
+    tw.renderRootEl = null;
+  }
+
+  function refreshZoneChrome(zoneName) {
+    updateZone(zoneName);
+    updateSidebar(sideForZone(zoneName));
+    updateBottomZone();
+    updateStrips();
+    if (fitActiveTabFn) fitActiveTabFn();
+  }
+
+  function enterWindowMode(tw) {
+    const id = tw.id;
+    detachFromZone(tw);
+    viewModes.set(id, VIEW_MODE_WINDOW);
+    hostVisible.set(id, true);
+    tw.active = true;
+    refreshZoneChrome(tw.zone);
+    triggerSave();
+    panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
+      .catch(() => {
+        // The pop-out never happened, so put back what the user was looking
+        // at rather than leaving them staring at an empty zone.
+        dockFromWindowMode(id, { hideHost: false });
+      });
+  }
+
+  // Back into the zone: mode flips first so activate() takes its normal path,
+  // and the render goes through the same lazy ensureWindowElement() a first
+  // activation uses — a fresh element, a fresh renderFn call.
+  function dockFromWindowMode(id, opts) {
+    const tw = toolWindows.get(id);
+    if (!tw) return;
+    const hideHost = !opts || opts.hideHost !== false;
+    resetToDock(id);
+    if (hideHost) panelHostInvoke('hide_panel_host', { toolWindowId: id }).catch(() => {});
+    activate(id);
+  }
+
+  // Forget everything about a window's popped-out state without remounting it.
+  function resetToDock(id) {
+    const tw = toolWindows.get(id);
+    viewModes.set(id, VIEW_MODE_DOCK);
+    hostVisible.delete(id);
+    pendingWindowSummons.delete(id);
+    if (tw) tw.active = false;
+  }
+
+  function hideWindowHost(id) {
+    const tw = toolWindows.get(id);
+    if (!tw) return;
+    hostVisible.set(id, false);
+    tw.active = false;
+    updateStrips();
+    triggerSave();
+    panelHostInvoke('hide_panel_host', { toolWindowId: id }).catch(() => {});
+  }
+
+  // Show a popped-out window's host. focus_panel_host answers Err when no host
+  // exists for this id in this session — after an app relaunch the mode
+  // survived in the saved layout but the window did not — so the summon falls
+  // back to building one.
+  function summonWindowHost(id) {
+    const tw = toolWindows.get(id);
+    if (!tw) return;
+    pendingWindowSummons.delete(id);
+    hostVisible.set(id, true);
+    tw.active = true;
+    updateStrips();
+    triggerSave();
+    panelHostInvoke('focus_panel_host', { toolWindowId: id })
+      .catch(() => panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title }))
+      .catch(() => {
+        resetToDock(id);
+        refreshZoneChrome(tw.zone);
+      });
+  }
+
+  // Called once registrations are done. Anything registering later (plugin
+  // tool windows arrive asynchronously) is summoned as it registers instead.
+  function summonPendingWindowHosts() {
+    summonImmediately = true;
+    for (const id of Array.from(pendingWindowSummons)) summonWindowHost(id);
+  }
+
+  // ---- Panel-host events (emitted by Rust to this, the parent, window) -------
+
+  function notifyHostShown(id) {
+    if (!toolWindows.has(id) || getViewMode(id) !== VIEW_MODE_WINDOW) return;
+    const tw = toolWindows.get(id);
+    hostVisible.set(id, true);
+    tw.active = true;
+    updateStrips();
+    triggerSave();
+  }
+
+  function notifyHostHidden(id) {
+    if (!toolWindows.has(id) || getViewMode(id) !== VIEW_MODE_WINDOW) return;
+    const tw = toolWindows.get(id);
+    hostVisible.set(id, false);
+    tw.active = false;
+    updateStrips();
+    triggerSave();
+  }
+
+  // The host asked to come home. It destroys itself, so there is nothing to
+  // hide from this side — just remount.
+  function notifyHostDocked(id) {
+    if (!toolWindows.has(id) || getViewMode(id) !== VIEW_MODE_WINDOW) return;
+    dockFromWindowMode(id, { hideHost: false });
+  }
+
+  // The host self-aborted before mounting anything (its boot found no
+  // registration for the id). Nothing is coming back, so reset the trait and
+  // leave the window closed in its zone for the rail to reopen.
+  function notifyHostAborted(id) {
+    const tw = toolWindows.get(id);
+    if (!tw) return;
+    resetToDock(id);
+    refreshZoneChrome(tw.zone);
+    triggerSave();
+  }
+
   // ---- Moving ---------------------------------------------------------------
 
   function moveTo(id, targetZone) {
@@ -320,6 +576,23 @@
 
     const oldZoneName = tw.zone;
     const oldZone = zones[oldZoneName];
+
+    // Moving a popped-out window re-aims its dock target only: there is no
+    // element to reparent and nothing to activate, so it must not take over
+    // the destination zone the way a docked move does.
+    if (getViewMode(id) === VIEW_MODE_WINDOW) {
+      oldZone.windows = oldZone.windows.filter(w => w !== id);
+      tw.zone = targetZone;
+      zones[targetZone].windows.push(id);
+      updateZone(oldZoneName);
+      updateZone(targetZone);
+      updateSidebar(sideForZone(oldZoneName));
+      updateSidebar(sideForZone(targetZone));
+      updateBottomZone();
+      updateStrips();
+      triggerSave();
+      return;
+    }
 
     // Remove from old zone
     oldZone.windows = oldZone.windows.filter(w => w !== id);
@@ -826,7 +1099,11 @@
     const tw = toolWindows.get(windowId);
     if (!tw) return document.createTextNode('');
 
-    const isActive = tw.active && isPanelVisible(side);
+    // A popped-out window's rail button reflects its HOST window's visibility,
+    // which is independent of whether this window's docked panel is showing.
+    const isActive = getViewMode(windowId) === VIEW_MODE_WINDOW
+      ? hostVisible.get(windowId) === true
+      : (tw.active && isPanelVisible(side));
     const btn = document.createElement('button');
     btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '') + (isActive ? ' active' : '');
     if (tw.icon && window.tlIcon) {
@@ -851,21 +1128,25 @@
     return btn;
   }
 
-  // ---- Context menu ("Move to <zone>" + Hide) --------------------------------
+  // ---- Context menu ("Move to <zone>" + View Mode + Hide) --------------------
   // Renders through the shared window.tlMenu component
   // (styles/design-system/components/menu.css, app/ui/tl-menu.js). The
   // current zone is included in the target list (rather than omitted, as the
   // old hand-rolled menu did) so it can carry a checked/current indicator via
   // tlMenu's `checked` item property; it's also disabled since moving a
   // window to the zone it's already in is a no-op.
-  function showContextMenu(x, y, windowId) {
-    if (!window.tlMenu || typeof window.tlMenu.open !== 'function') {
-      console.error('tool-window-manager: window.tlMenu is unavailable');
-      return;
-    }
-
+  //
+  // The View Mode choice is TWO FLATTENED items rather than a submenu: tl-menu
+  // has no submenu support, and the trait is not worth growing the shared
+  // component for. The current mode gets the same checked+disabled treatment
+  // the current zone gets, for the same reason.
+  //
+  // Split out from showContextMenu() as pure item-building (no tlMenu, no DOM)
+  // for scripts/tests/test_panel_host.mjs — the trait check is "every
+  // registered id, built-in or plugin, gets both entries".
+  function buildContextMenuItems(windowId) {
     const tw = toolWindows.get(windowId);
-    if (!tw) return;
+    if (!tw) return null;
 
     const targets = [
       { zone: 'left-top',     label: 'Left (Top)' },
@@ -885,8 +1166,35 @@
       };
     });
 
+    const mode = getViewMode(windowId);
+    items.push({ separator: true });
+    items.push({
+      label: 'View Mode: Dock',
+      checked: mode === VIEW_MODE_DOCK,
+      disabled: mode === VIEW_MODE_DOCK,
+      onSelect: () => setViewMode(windowId, VIEW_MODE_DOCK),
+    });
+    items.push({
+      label: 'View Mode: Window',
+      checked: mode === VIEW_MODE_WINDOW,
+      disabled: mode === VIEW_MODE_WINDOW,
+      onSelect: () => setViewMode(windowId, VIEW_MODE_WINDOW),
+    });
+
     items.push({ separator: true });
     items.push({ label: 'Hide', onSelect: () => deactivate(windowId) });
+
+    return items;
+  }
+
+  function showContextMenu(x, y, windowId) {
+    if (!window.tlMenu || typeof window.tlMenu.open !== 'function') {
+      console.error('tool-window-manager: window.tlMenu is unavailable');
+      return;
+    }
+
+    const items = buildContextMenuItems(windowId);
+    if (!items) return;
 
     window.tlMenu.open({
       x,
@@ -1025,6 +1333,25 @@
     return !!(panelState[side] && panelState[side].visible);
   }
 
+  function openWindowModeIdInZone(zone) {
+    if (!zone) return null;
+    for (const wid of zone.windows) {
+      if (getViewMode(wid) === VIEW_MODE_WINDOW && hostVisible.get(wid) === true) return wid;
+    }
+    return null;
+  }
+
+  // A zone's fallback pick when a panel is revealed with nothing active in it.
+  // Popped-out windows are skipped: revealing a sidebar must never yank an OS
+  // window onto the screen.
+  function firstDockableIn(list) {
+    if (!list) return null;
+    for (const wid of list) {
+      if (getViewMode(wid) === VIEW_MODE_DOCK) return wid;
+    }
+    return null;
+  }
+
   function hasActiveWindowOnSide(side) {
     if (side !== 'left' && side !== 'right') return false;
     const topZone = zones[side + '-top'];
@@ -1042,7 +1369,7 @@
 
     if (side === 'bottom') {
       if (panelState.bottom.visible && zones.bottom.activeId === null) {
-        const candidate = (zones.bottom.windows && zones.bottom.windows[0]) || null;
+        const candidate = firstDockableIn(zones.bottom.windows);
         if (candidate) activate(candidate);
       }
       updateZone('bottom');
@@ -1056,7 +1383,7 @@
       const topZone = zones[side + '-top'];
       const botZone = zones[side + '-bottom'];
       if (topZone && botZone && topZone.activeId === null && botZone.activeId === null) {
-        const candidate = (topZone.windows && topZone.windows[0]) || (botZone.windows && botZone.windows[0]) || null;
+        const candidate = firstDockableIn(topZone.windows) || firstDockableIn(botZone.windows);
         if (candidate) activate(candidate);
       }
     }
@@ -1114,7 +1441,12 @@
       if (typeof activeId === 'string' && activeId.length > 0) {
         map[zoneName] = activeId;
       } else if (zone.windows.length > 0) {
-        map[zoneName] = '';
+        // A popped-out window is open, it is just open somewhere else. Record
+        // it here (the zone has no docked window competing for the slot) so
+        // the next boot can tell "was showing, summon it" from "was closed,
+        // wait for the rail" — the same distinction an empty string draws for
+        // a docked window.
+        map[zoneName] = openWindowModeIdInZone(zone) || '';
       }
     }
     return map;
@@ -1179,6 +1511,7 @@
     setPersistedZones,
     setPersistedActiveZoneWindows,
     setPersistedPanelVisibility,
+    setPersistedViewModes,
     register,
     unregister,
     activate,
@@ -1200,5 +1533,20 @@
     setSidebarWidth,
     getContentElement,
     listWindows,
+    // View mode (pop-out) trait
+    getViewMode,
+    getViewModes,
+    setViewMode,
+    getRegistration,
+    summonPendingWindowHosts,
+    notifyHostShown,
+    notifyHostHidden,
+    notifyHostDocked,
+    notifyHostAborted,
+    // Exposed for scripts/tests/test_panel_host.mjs: showContextMenu's pure
+    // item list, so the "every registered id carries the trait" check needs no
+    // popup DOM.
+    buildContextMenuItems,
+    showContextMenu,
   };
 })(window);

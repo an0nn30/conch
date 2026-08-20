@@ -263,6 +263,11 @@ pub(crate) struct SavedLayout {
     zen_mode: bool,
     tool_window_zones: std::collections::HashMap<String, String>,
     active_tool_windows: std::collections::HashMap<String, String>,
+    /// The read-back twin of [`WindowLayout::tool_window_view_modes`], mirroring
+    /// `tool_window_zones` above exactly. Without it the frontend could write a
+    /// view mode but never learn it again, so a popped-out tool window would
+    /// silently come back docked on the next launch.
+    tool_window_view_modes: std::collections::HashMap<String, String>,
     left_split_ratio: f64,
     right_split_ratio: f64,
 }
@@ -286,24 +291,33 @@ pub(crate) fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> 
     }
 }
 
+/// Project a persisted [`config::LayoutConfig`] onto the [`SavedLayout`] the
+/// frontend loads. Pulled out as a pure function (no config I/O) for the same
+/// reason [`merge_window_layout`] below was: the save and load sides of every
+/// persisted layout field are then unit-testable as a matched pair.
+fn saved_layout_from_state(layout: &config::LayoutConfig) -> SavedLayout {
+    SavedLayout {
+        window_width: layout.window_width as f64,
+        window_height: layout.window_height as f64,
+        ssh_panel_width: layout.right_panel_width as f64,
+        ssh_panel_visible: layout.right_panel_visible,
+        files_panel_width: layout.left_panel_width as f64,
+        files_panel_visible: layout.left_panel_visible,
+        bottom_panel_visible: layout.bottom_panel_visible,
+        bottom_panel_height: layout.bottom_panel_height as f64,
+        zen_mode: layout.zen_mode,
+        tool_window_zones: layout.tool_window_zones.clone(),
+        active_tool_windows: layout.active_tool_windows.clone(),
+        tool_window_view_modes: layout.tool_window_view_modes.clone(),
+        left_split_ratio: layout.left_split_ratio as f64,
+        right_split_ratio: layout.right_split_ratio as f64,
+    }
+}
+
 #[tauri::command]
 pub(crate) fn get_saved_layout() -> SavedLayout {
     let state = config::load_persistent_state().unwrap_or_default();
-    SavedLayout {
-        window_width: state.layout.window_width as f64,
-        window_height: state.layout.window_height as f64,
-        ssh_panel_width: state.layout.right_panel_width as f64,
-        ssh_panel_visible: state.layout.right_panel_visible,
-        files_panel_width: state.layout.left_panel_width as f64,
-        files_panel_visible: state.layout.left_panel_visible,
-        bottom_panel_visible: state.layout.bottom_panel_visible,
-        bottom_panel_height: state.layout.bottom_panel_height as f64,
-        zen_mode: state.layout.zen_mode,
-        tool_window_zones: state.layout.tool_window_zones.clone(),
-        active_tool_windows: state.layout.active_tool_windows.clone(),
-        left_split_ratio: state.layout.left_split_ratio as f64,
-        right_split_ratio: state.layout.right_split_ratio as f64,
-    }
+    saved_layout_from_state(&state.layout)
 }
 
 /// Merge a frontend-sent [`WindowLayout`] into `state` — every field is
@@ -545,6 +559,42 @@ mod window_layout_merge_tests {
         merge_window_layout(&mut state, empty_layout());
 
         assert_eq!(state.tool_window_view_modes, before);
+    }
+
+    /// The read-back mirror, asserted the same way the save side above is:
+    /// what `save_window_layout` merged in must come back out of
+    /// `get_saved_layout`. Mirrors `tool_window_zones`, checked alongside it
+    /// so the two can never drift apart unnoticed.
+    #[test]
+    fn view_modes_survive_the_round_trip_back_to_the_frontend() {
+        let mut state = config::LayoutConfig::default();
+
+        let mut incoming = std::collections::HashMap::new();
+        incoming.insert("ssh-sessions".to_string(), "window".to_string());
+        incoming.insert("tunnels".to_string(), "dock".to_string());
+        let mut zones = std::collections::HashMap::new();
+        zones.insert("ssh-sessions".to_string(), "right-top".to_string());
+        let layout = WindowLayout {
+            tool_window_zones: Some(zones.clone()),
+            tool_window_view_modes: Some(incoming.clone()),
+            ..empty_layout()
+        };
+        merge_window_layout(&mut state, layout);
+
+        let saved = saved_layout_from_state(&state);
+        assert_eq!(
+            saved.tool_window_view_modes, incoming,
+            "a view mode the frontend saved must be readable again on the next \
+             load, or a popped-out tool window comes back docked"
+        );
+        assert_eq!(saved.tool_window_zones, zones);
+    }
+
+    #[test]
+    fn a_state_that_never_recorded_view_modes_reads_back_as_an_empty_map() {
+        // Every state.toml written before this field existed.
+        let saved = saved_layout_from_state(&config::LayoutConfig::default());
+        assert!(saved.tool_window_view_modes.is_empty());
     }
 
     #[test]

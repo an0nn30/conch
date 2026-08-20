@@ -103,6 +103,12 @@
           active_tool_windows: typeof twm.getActiveZoneAssignments === 'function'
             ? twm.getActiveZoneAssignments()
             : {},
+          // Which tool windows are popped out into their own OS window. Keyed
+          // by tool-window id, exactly like tool_window_zones — a view mode
+          // belongs to the tool window, not to the main window showing it.
+          tool_window_view_modes: typeof twm.getViewModes === 'function'
+            ? twm.getViewModes()
+            : {},
           split_ratios: twm.getSplitRatios(),
         };
         if (layoutService && typeof layoutService.saveLayout === 'function') {
@@ -124,6 +130,31 @@
         global.toolWindowManager.init({
           fitActiveTab: debouncedFitAndResize,
           saveLayout: saveLayoutNow,
+          // The manager's only backend calls: the panel-host commands behind
+          // the View Mode trait (open/focus/hide a popped-out tool window).
+          invoke,
+        });
+
+        // Rust emits these to the PARENT window (emit_to(parent_label)), so
+        // they must be listened for on this window specifically, not app-wide.
+        listenOnCurrentWindow('panel-host-shown', (event) => {
+          const id = event && event.payload ? event.payload.toolWindowId : null;
+          if (id) global.toolWindowManager.notifyHostShown(id);
+        });
+        listenOnCurrentWindow('panel-host-hidden', (event) => {
+          const id = event && event.payload ? event.payload.toolWindowId : null;
+          if (id) global.toolWindowManager.notifyHostHidden(id);
+        });
+        listenOnCurrentWindow('panel-host-docked', (event) => {
+          const id = event && event.payload ? event.payload.toolWindowId : null;
+          if (id) global.toolWindowManager.notifyHostDocked(id);
+        });
+        // A host that self-aborted (its boot found no registration for the id)
+        // is not coming back with a panel — the manager resets the trait
+        // rather than waiting for a remount that will never arrive.
+        listenOnCurrentWindow('panel-host-aborted', (event) => {
+          const id = event && event.payload ? event.payload.toolWindowId : null;
+          if (id) global.toolWindowManager.notifyHostAborted(id);
         });
 
         try {
@@ -207,6 +238,12 @@
           }
           if (initialLayoutData.active_tool_windows && Object.keys(initialLayoutData.active_tool_windows).length > 0) {
             global.toolWindowManager.setPersistedActiveZoneWindows(initialLayoutData.active_tool_windows);
+          }
+          // Seeded before any register() below: a window the user had popped
+          // out must never mount into its zone on the way past.
+          if (initialLayoutData.tool_window_view_modes
+            && typeof global.toolWindowManager.setPersistedViewModes === 'function') {
+            global.toolWindowManager.setPersistedViewModes(initialLayoutData.tool_window_view_modes);
           }
           if (typeof global.toolWindowManager.setPersistedPanelVisibility === 'function') {
             global.toolWindowManager.setPersistedPanelVisibility({
@@ -329,6 +366,14 @@
           global.toolWindowManager.setPanelVisibility('bottom', false, { save: false });
         }
         refreshShortcutFallbacks();
+
+        // Every built-in is registered by now, so the restored view modes are
+        // known: re-open the hosts that were on screen when the layout was
+        // saved. Plugin tool windows register later (asynchronously, below) —
+        // the manager summons those as they arrive instead.
+        if (typeof global.toolWindowManager.summonPendingWindowHosts === 'function') {
+          global.toolWindowManager.summonPendingWindowHosts();
+        }
       }
 
       global.addEventListener('resize', debouncedSaveLayout);
