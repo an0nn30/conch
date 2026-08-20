@@ -700,6 +700,51 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
   assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 1);
 }
 
+// --- 14e2. An open resolving OUT OF ORDER must not resurrect its generation -
+// The three-toggle variant of 14e, and the reason the pending marker carries a
+// per-attempt issue number rather than being one shared sentinel: Window (open
+// A, unanswered) → Dock → Window again (open B, unanswered) → A answers LATE.
+// A guard that only asked "is this id still in window mode?" would say yes —
+// open B put it there — and write generation 1 over B's pending marker, at
+// which point generation 1's stale echo matches and remounts a panel that is
+// live inside B's host window.
+{
+  const openResolvers = [];
+  const { twm, invoke, zoneEls } = loadManager({
+    invokeHandlers: {
+      open_panel_host: () => new Promise((resolve) => { openResolvers.push(resolve); }),
+    },
+  });
+  let renders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('tunnels', { ...TUNNELS, renderFn: () => { renders += 1; } });
+
+  twm.setViewMode('tunnels', 'window');                              // open A
+  renders = 0; // discount the render registration into a visible zone did
+  viewModeItems(twm.buildContextMenuItems('tunnels'))[0].onSelect(); // Dock
+  assert.strictEqual(renders, 1, 'the dock remounts once');
+  twm.setViewMode('tunnels', 'window');                              // open B
+  assert.strictEqual(openResolvers.length, 2, 'two opens are genuinely in flight');
+
+  openResolvers[0](1); // A answers, out of order, long after B was issued
+  await tick();
+
+  twm.notifyHostDocked('tunnels', 1); // generation 1's echo
+
+  assert.strictEqual(renders, 1,
+    "an abandoned attempt's generation must not be resurrected for a stale echo to match");
+  assert.strictEqual(twm.getViewModes().tunnels, 'window');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 0);
+
+  // B is still the live attempt, and still docks normally when it answers.
+  openResolvers[1](2);
+  await tick();
+  twm.notifyHostDocked('tunnels', 2);
+  assert.strictEqual(renders, 2, 'the attempt that actually owns the slot still docks');
+  assert.strictEqual(twm.getViewModes().tunnels, 'dock');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 1);
+}
+
 // --- 14f. An echo with no generation still docks (pre-reqId fallback) ------
 // Rust always stamps the event now, but a manager that dropped a legitimate
 // dock-back because a payload lacked the field would be worse than the race
@@ -720,6 +765,38 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
 
   assert.strictEqual(renders, 1, 'no generation to compare — dock as before');
   assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 1);
+}
+
+// --- 14g. A dock-back with NO stored generation is accepted ---------------
+// The other accept branch of dockedEchoIsStale, and the one real path that
+// reaches it: after a relaunch the view mode is restored from the saved
+// layout and summonWindowHost's focus_panel_host SUCCEEDS, so no open attempt
+// is ever issued and the id has no entry in the generation map at all. A
+// genuine dock-back from that host must still be honoured — there is nothing
+// to disagree with, and dropping it would strand the panel in no window.
+{
+  const { twm, invoke, invokeCalls, zoneEls } = loadManager({
+    invokeHandlers: { focus_panel_host: () => Promise.resolve() },
+  });
+  let renders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.setPersistedZones({ 'ssh-sessions': 'right-top' });
+  twm.setPersistedViewModes({ 'ssh-sessions': 'window' });
+  twm.setPersistedActiveZoneWindows({ 'right-top': 'ssh-sessions' });
+  twm.setPersistedPanelVisibility({ left: true, right: true, bottom: true });
+  twm.register('ssh-sessions', { ...HOSTS, renderFn: () => { renders += 1; } });
+  twm.summonPendingWindowHosts();
+  await tick();
+
+  assert.deepStrictEqual(invokeCalls.map((c) => c.cmd), ['focus_panel_host'],
+    'precondition: the host was summoned by focus alone — no open, so no generation');
+  assert.strictEqual(renders, 0);
+
+  twm.notifyHostDocked('ssh-sessions', 7);
+
+  assert.strictEqual(renders, 1, 'a dock-back with nothing to compare against is accepted');
+  assert.strictEqual(twm.getViewModes()['ssh-sessions'], 'dock');
+  assert.strictEqual(zoneEls.get('right-top')._contentEl.children.length, 1);
 }
 
 // ===========================================================================

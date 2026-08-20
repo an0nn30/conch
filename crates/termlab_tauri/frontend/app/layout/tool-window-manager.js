@@ -59,12 +59,26 @@
   // panel-host-shown/hidden events the parent receives from Rust.
   const hostVisible = new Map(); // id → boolean
   // Generation token per popped-out id: the `req_id` Rust minted for the host
-  // currently live for that id (`open_panel_host`'s return value), or
-  // PENDING_HOST_REQ while an open is in flight. Its only job is to let
-  // notifyHostDocked tell a CURRENT dock-back from a STALE echo — see the
+  // currently live for that id (`open_panel_host`'s return value), or a
+  // `{ pendingIssue }` marker while an open is in flight. Its only job is to
+  // let notifyHostDocked tell a CURRENT dock-back from a STALE echo — see the
   // comment there for the sequence that made this necessary.
-  const hostReqIds = new Map(); // id → number | PENDING_HOST_REQ
-  const PENDING_HOST_REQ = { pending: true };
+  const hostReqIds = new Map(); // id → number | { pendingIssue: number }
+  // Monotonic issue number, incremented synchronously per open ATTEMPT and
+  // captured in that attempt's own closure — the same discipline as
+  // `themeColorsFetchToken` in app/config-runtime.js:67-88, and for the same
+  // reason: two `open_panel_host` calls for one id can be in flight at once
+  // (pop out, dock, pop out again), and Tauri gives no guarantee that they
+  // resolve in the order they were issued. Without a per-attempt identity,
+  // "is this the host we are waiting for?" degrades to "is this id popped out
+  // at all?", and an older call resolving last would overwrite the newer
+  // attempt's marker with a dead generation. Last-INITIATED-wins, not
+  // last-resolved-wins.
+  let nextHostRequestIssue = 0;
+
+  function isPendingHostRequest(value) {
+    return !!value && typeof value === 'object' && typeof value.pendingIssue === 'number';
+  }
   let savedViewModes = null;     // populated from backend before registration
   // Window-mode ids whose host was open when the layout was saved, waiting to
   // be summoned. Drained once registrations finish; a plugin that registers
@@ -474,19 +488,28 @@
     if (fitActiveTabFn) fitActiveTabFn();
   }
 
-  // Remember which host generation is live for `id`. Called at REQUEST time
-  // with PENDING_HOST_REQ and again with the minted req_id once Rust answers,
-  // so the window between the two is never mistaken for "no host being built".
+  // Claim the generation slot for `id` on behalf of ONE open attempt, and
+  // return that attempt's issue number for the caller to hand back on
+  // resolution. Called at REQUEST time — synchronously, before the invoke —
+  // so the window between asking and being answered is never mistaken for
+  // "no host is being built".
   function markHostRequested(id) {
-    hostReqIds.set(id, PENDING_HOST_REQ);
+    nextHostRequestIssue += 1;
+    hostReqIds.set(id, { pendingIssue: nextHostRequestIssue });
+    return nextHostRequestIssue;
   }
 
-  function markHostOpened(id, reqId) {
-    // Only overwrite while this id is still in window mode: a dock-back that
-    // landed while the open was in flight already cleared the entry, and
-    // re-adding it here would resurrect a generation for a host nobody is
-    // showing.
-    if (getViewMode(id) !== VIEW_MODE_WINDOW) return;
+  // Record the req_id Rust minted — but only if THIS attempt still owns the
+  // slot. Identity, not view mode: an attempt that has been superseded (the
+  // user docked and popped out again while it was in flight) or abandoned (a
+  // dock-back cleared the slot) must discard its answer, however late it
+  // arrives. Checking "is this id still in window mode" instead would accept
+  // an older call's generation whenever a NEWER pop-out had put the id back
+  // into window mode — resurrecting a dead generation for a stale echo to
+  // match.
+  function markHostOpened(id, issue, reqId) {
+    const current = hostReqIds.get(id);
+    if (!isPendingHostRequest(current) || current.pendingIssue !== issue) return;
     hostReqIds.set(id, typeof reqId === 'number' ? reqId : undefined);
   }
 
@@ -496,11 +519,11 @@
     viewModes.set(id, VIEW_MODE_WINDOW);
     hostVisible.set(id, true);
     tw.active = true;
-    markHostRequested(id);
+    const issue = markHostRequested(id);
     refreshZoneChrome(tw.zone);
     triggerSave();
     panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
-      .then((reqId) => markHostOpened(id, reqId))
+      .then((reqId) => markHostOpened(id, issue, reqId))
       .catch(() => {
         // The pop-out never happened, so put back what the user was looking
         // at rather than leaving them staring at an empty zone.
@@ -573,9 +596,9 @@
       .catch(() => {
         // No host in this session (a mode restored from the saved layout, say):
         // building one mints a NEW generation, so claim the slot before asking.
-        markHostRequested(id);
+        const issue = markHostRequested(id);
         return panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
-          .then((reqId) => markHostOpened(id, reqId));
+          .then((reqId) => markHostOpened(id, issue, reqId));
       })
       .catch(() => {
         resetToDock(id);
@@ -632,14 +655,14 @@
   //     a legitimate dock-back;
   //   * the stored generation is not a number — `open_panel_host` answered
   //     with something unexpected; same fallback.
-  // The one REJECT that matters is PENDING_HOST_REQ: a newer host has been
+  // The one REJECT that matters is a PENDING slot: a newer host has been
   // requested and has not been minted yet, so any echo arriving with a
   // generation necessarily names an older one.
   function dockedEchoIsStale(id, reqId) {
     if (!hostReqIds.has(id)) return false;
     if (reqId == null) return false;
     const current = hostReqIds.get(id);
-    if (current === PENDING_HOST_REQ) return true;
+    if (isPendingHostRequest(current)) return true;
     if (typeof current !== 'number') return false;
     return current !== reqId;
   }
