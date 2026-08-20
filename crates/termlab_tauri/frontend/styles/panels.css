@@ -15,6 +15,13 @@
     .fp-tb-btn:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
     .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
     .fp-tb-btn.active { color: var(--green); }
+    /* Remote pane's host dropdown + disconnect — mounted into this slot by
+       pane-view.js after every toolbar rebuild (app/ui/tl-combo.js wraps the
+       hidden .fp-host-select; see files-panel.js's onComboMount). Sized down
+       from tl-combo's 26px default to match this toolbar's 24px controls. */
+    .fp-host-combo-slot { display: flex; align-items: center; gap: 4px; margin-left: 4px; min-width: 0; max-width: 220px; }
+    .fp-host-combo-slot .tl-combo { height: 24px; font-size: var(--ui-font-small); max-width: 200px; }
+    .fp-host-disconnect { flex-shrink: 0; }
     .fp-path-input {
       flex: 1; min-width: 0; height: 24px; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
       border-radius: 3px; color: var(--fg); font: 11px "JetBrains Mono", monospace; outline: none;

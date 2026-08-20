@@ -41,6 +41,282 @@
   let remoteCwdPollInFlight = false;
   let lastRemoteCwdByPaneId = new Map();
 
+  // ---------------------------------------------------------------------------
+  // Remote host dropdown + pinning
+  //
+  // Follow mode (default): the remote pane tracks whichever SSH tab is
+  // focused, via onTabChanged below. Pinning breaks that link — the pane
+  // stays bound to one session (tab-owned or a detached SFTP-only
+  // connection) regardless of what tab the user switches to.
+  //
+  // pinnedSessionKey is null in follow mode, else the "{window_label}:
+  // {pane_id}" key (remote_get_sessions' ActiveSession.key) of the session
+  // the remote pane is pinned to. It is the flag onTabChanged checks to
+  // suppress its own rebinding while pinned — see the guard just above its
+  // existing `tab.type !== 'ssh'` gate, which stays untouched.
+  // ---------------------------------------------------------------------------
+
+  let pinnedSessionKey = null;
+  // Set to the server-entry id currently mid-connect, else null. Distinct
+  // from pinnedSessionKey: a busy connect has no session yet (that is what
+  // it is waiting for), so it cannot be represented as a pin.
+  let hostConnectBusyEntryId = null;
+  let cachedServers = { folders: [], ungrouped: [], ssh_config: [] };
+  let cachedSessions = [];
+
+  const HOST_COMBO_FOLLOW_VALUE = '';
+  const HOST_COMBO_SEPARATOR_VALUE = '__separator__';
+  // Mirrors crates/termlab_tauri/src/remote/detached_commands.rs's
+  // DETACHED_PANE_ID_BASE. Detached (panel-only) sessions mint pane ids at
+  // and above this value so they can never collide with a real terminal
+  // pane's id; the frontend has no way to import the Rust constant, so this
+  // is a deliberate duplicate — keep it in sync if that base ever moves.
+  const DETACHED_PANE_ID_BASE = 1_000_000;
+
+  // A session key's pane-id tail, or null if it doesn't parse as one.
+  // Window labels are not expected to contain ':', matching how the backend
+  // itself splits the key (detached_pane_id_for_window in
+  // detached_commands.rs strips an exact "{window_label}:" prefix).
+  function paneIdFromSessionKey(key) {
+    if (typeof key !== 'string') return null;
+    const idx = key.lastIndexOf(':');
+    if (idx < 0) return null;
+    const n = Number(key.slice(idx + 1));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function isDetachedSessionKey(key) {
+    const paneId = paneIdFromSessionKey(key);
+    return paneId != null && paneId >= DETACHED_PANE_ID_BASE;
+  }
+
+  // Flattens configured hosts (folders + ungrouped + ssh_config) into combo
+  // options, folder entries prefixed "FolderName / label". Vault-linking a
+  // password connect promotes an ssh-config host into a config-owned copy
+  // that SHARES THE SAME ID (T2 review finding F5) — so a host must appear
+  // once, deduped by id, with the config-owned copy (folders/ungrouped)
+  // always preferred over its ssh_config source.
+  function buildConfiguredHostOptions(servers) {
+    const data = servers && typeof servers === 'object'
+      ? servers
+      : { folders: [], ungrouped: [], ssh_config: [] };
+    const seenIds = new Set();
+    const options = [];
+
+    (Array.isArray(data.folders) ? data.folders : []).forEach((folder) => {
+      (Array.isArray(folder.entries) ? folder.entries : []).forEach((entry) => {
+        if (!entry || seenIds.has(entry.id)) return;
+        seenIds.add(entry.id);
+        options.push({ value: entry.id, label: `${folder.name} / ${entry.label}`, kind: 'host' });
+      });
+    });
+    (Array.isArray(data.ungrouped) ? data.ungrouped : []).forEach((entry) => {
+      if (!entry || seenIds.has(entry.id)) return;
+      seenIds.add(entry.id);
+      options.push({ value: entry.id, label: entry.label, kind: 'host' });
+    });
+    // ssh_config entries only surface here when nothing config-owned has
+    // claimed their id yet — i.e. they have not been vault-linked/promoted.
+    (Array.isArray(data.ssh_config) ? data.ssh_config : []).forEach((entry) => {
+      if (!entry || seenIds.has(entry.id)) return;
+      seenIds.add(entry.id);
+      options.push({ value: entry.id, label: entry.label, kind: 'host' });
+    });
+
+    return options;
+  }
+
+  // Combo composition: "Follow active tab" -> live sessions -> separator ->
+  // configured hosts.
+  function buildHostComboOptions(sessions, servers) {
+    const options = [
+      { value: HOST_COMBO_FOLLOW_VALUE, label: 'Follow active tab', kind: 'follow' },
+    ];
+    (Array.isArray(sessions) ? sessions : []).forEach((session) => {
+      if (!session) return;
+      const label = filesDataService && typeof filesDataService.sessionHostLabel === 'function'
+        ? filesDataService.sessionHostLabel(session, paneIdFromSessionKey(session.key))
+        : String(session.key);
+      options.push({ value: session.key, label, kind: 'session' });
+    });
+    options.push({
+      value: HOST_COMBO_SEPARATOR_VALUE,
+      label: '──────────',
+      kind: 'separator',
+      disabled: true,
+    });
+    return options.concat(buildConfiguredHostOptions(servers));
+  }
+
+  function computeHostComboState() {
+    return {
+      hostOptions: buildHostComboOptions(cachedSessions, cachedServers),
+      hostComboValue: hostConnectBusyEntryId || pinnedSessionKey || HOST_COMBO_FOLLOW_VALUE,
+      hostComboBusy: !!hostConnectBusyEntryId,
+      showDisconnect: !hostConnectBusyEntryId && !!pinnedSessionKey && isDetachedSessionKey(pinnedSessionKey),
+    };
+  }
+
+  // Bridge only — Task 4 owns the full SftpConnectError -> UI chain (vault
+  // unlock, password prompt, retry). Until it lands, every non-Ok variant
+  // just surfaces its message in the remote pane's .fp-error strip.
+  function describeSftpConnectError(err) {
+    if (!err) return 'Could not connect.';
+    if (typeof err === 'string') return err;
+    switch (err.kind) {
+      case 'vaultLocked': return 'The vault is locked.';
+      case 'needsPassword': return 'This host needs a password to connect.';
+      case 'authFailed': return `Authentication failed: ${err.message}`;
+      case 'unreachable': return `Host unreachable: ${err.message}`;
+      case 'other': return err.message || 'Could not connect.';
+      default: return String(err.message || err.kind || err);
+    }
+  }
+
+  // Pin the remote pane to a specific session (sessionKey), or pass null to
+  // return to follow mode. This is filesPanel.pinRemotePane, the entry
+  // point Task 4's connect dialogs call on a successful connect/pick — it
+  // binds the pane directly, bypassing tabs entirely, and sets the flag
+  // that suppresses onTabChanged's own rebinding while pinned.
+  async function pinRemotePane(sessionKey) {
+    if (!hasPanelDom()) return;
+
+    if (sessionKey == null) {
+      pinnedSessionKey = null;
+      renderPane(remotePane, getPaneRoot('#fp-remote'));
+      return;
+    }
+
+    pinnedSessionKey = sessionKey;
+    const paneId = paneIdFromSessionKey(sessionKey);
+    if (paneId == null) {
+      remotePane.error = `Not a valid session key: ${sessionKey}`;
+      renderPane(remotePane, getPaneRoot('#fp-remote'));
+      return;
+    }
+    activeRemotePaneId = paneId;
+    remotePane.error = null;
+    remotePane.backStack = [];
+    remotePane.forwardStack = [];
+    renderPane(remotePane, getPaneRoot('#fp-remote'));
+
+    try {
+      // Directory seeding for a pinned pane goes through sftp_realpath('.')
+      // directly (getRemoteRealPath) — NOT ssh_get_pane_cwd/
+      // pollActiveRemotePaneCwd, which assume the bound pane is the
+      // currently-focused TAB and lack the caller->parent resolver a
+      // detached session's synthetic pane id would need (pre-existing gap,
+      // ledgered — see task-3-brief.md).
+      const path = filesDataService && typeof filesDataService.getRemoteRealPath === 'function'
+        ? await filesDataService.getRemoteRealPath(invoke, paneId, '.')
+        : await Promise.reject(new Error('Files data service unavailable: getRemoteRealPath'));
+      remotePane.currentPath = path;
+      remotePane.pathInput = path;
+      await loadEntries(remotePane);
+    } catch (e) {
+      remotePane.error = String(e);
+      renderPane(remotePane, getPaneRoot('#fp-remote'));
+    }
+  }
+
+  // Picking a configured host from the combo: busy state -> sftp_connect_host
+  // -> pin on success. Rust already guards duplicate connects (same
+  // window+entry returns the existing session), so this needn't debounce
+  // picks itself.
+  async function connectToHost(entryId) {
+    hostConnectBusyEntryId = entryId;
+    remotePane.error = null;
+    renderPane(remotePane, getPaneRoot('#fp-remote'));
+
+    try {
+      const session = filesDataService && typeof filesDataService.connectHost === 'function'
+        ? await filesDataService.connectHost(invoke, entryId)
+        : await Promise.reject(new Error('Files data service unavailable: connectHost'));
+      hostConnectBusyEntryId = null;
+      await pinRemotePane(session.sessionKey);
+    } catch (err) {
+      if (err && err.kind === 'connectInProgress') {
+        // Not an error — a connect for this host is already in flight
+        // (Rust's duplicate-connect guard). The busy state persists; the
+        // in-flight connect's own completion fires remote-sessions-changed,
+        // which refreshes the combo and clears it.
+        renderPane(remotePane, getPaneRoot('#fp-remote'));
+        return;
+      }
+      hostConnectBusyEntryId = null;
+      remotePane.error = describeSftpConnectError(err);
+      renderPane(remotePane, getPaneRoot('#fp-remote'));
+    }
+  }
+
+  function onHostComboChange(value) {
+    if (!value || value === HOST_COMBO_FOLLOW_VALUE) {
+      pinRemotePane(null);
+      return;
+    }
+    if (value === HOST_COMBO_SEPARATOR_VALUE) return;
+    const session = cachedSessions.find((s) => s && s.key === value);
+    if (session) {
+      pinRemotePane(value);
+      return;
+    }
+    connectToHost(value);
+  }
+
+  // Disconnect (⏏) — only rendered for a pinned DETACHED session (see
+  // computeHostComboState's showDisconnect). Terminal-owned sessions have no
+  // disconnect affordance here: they die with their tab.
+  function onDisconnectPinnedSession() {
+    if (!pinnedSessionKey) return;
+    const key = pinnedSessionKey;
+    const disconnectPromise = filesDataService && typeof filesDataService.disconnectSession === 'function'
+      ? filesDataService.disconnectSession(invoke, key)
+      : Promise.reject(new Error('Files data service unavailable: disconnectSession'));
+    disconnectPromise
+      .then(() => pinRemotePane(null))
+      .catch((e) => {
+        remotePane.error = String(e);
+        renderPane(remotePane, getPaneRoot('#fp-remote'));
+      });
+  }
+
+  // Refetch servers + sessions and rebuild the combo. Runs at init and on
+  // every remote-sessions-changed event (connect/disconnect/window-cleanup
+  // — see detached_commands.rs's emit_sessions_changed). A pin whose session
+  // vanished (the host disconnected out from under it) drops back to follow
+  // mode with an error note; a still-in-flight busy connect clears here too,
+  // since a sessions-changed event is exactly what a resolved in-flight
+  // connect (success OR the caller giving up) produces.
+  async function refreshHostCombo() {
+    if (!hasPanelDom()) return;
+    try {
+      const [servers, sessions] = await Promise.all([
+        filesDataService && typeof filesDataService.getServers === 'function'
+          ? filesDataService.getServers(invoke)
+          : Promise.resolve({ folders: [], ungrouped: [], ssh_config: [] }),
+        filesDataService && typeof filesDataService.getSessions === 'function'
+          ? filesDataService.getSessions(invoke)
+          : Promise.resolve([]),
+      ]);
+      cachedServers = servers;
+      cachedSessions = sessions;
+    } catch (_) {
+      // Keep the previous cache; the next event retries.
+    }
+
+    hostConnectBusyEntryId = null;
+
+    if (pinnedSessionKey && !cachedSessions.some((s) => s && s.key === pinnedSessionKey)) {
+      pinnedSessionKey = null;
+      activeRemotePaneId = null;
+      remotePane.entries = [];
+      remotePane.currentPath = '';
+      remotePane.error = 'The connected host disconnected.';
+    }
+
+    renderPane(remotePane, getPaneRoot('#fp-remote'));
+  }
+
   function applyFollowPathSetting(enabled) {
     if (!filesPaneStore || typeof filesPaneStore.applyFollowPathSetting !== 'function') {
       console.error('files-pane-store missing applyFollowPathSetting');
@@ -129,9 +405,13 @@
       opts.listen('config-changed', () => {
         loadFollowPathSetting();
       });
+      opts.listen('remote-sessions-changed', () => {
+        refreshHostCombo();
+      });
     }
 
     loadFollowPathSetting();
+    refreshHostCombo();
     startLocalCwdPolling();
     startRemoteCwdPolling();
   }
@@ -182,6 +462,12 @@
         pollActiveLocalPaneCwd(paneId);
       }
     }
+    // Pinning bypasses tabs entirely: pinRemotePane binds the remote pane's
+    // id directly, and this flag suppresses onTabChanged's own rebinding
+    // below for as long as the pin holds. Unpinning (pinRemotePane(null))
+    // just clears the flag — normal follow behavior resumes on the NEXT tab
+    // event, not by this call retroactively re-running the gate below.
+    if (pinnedSessionKey) return;
     if (!tab || tab.type !== 'ssh' || !tab.spawned) {
       activeRemotePaneId = null;
       remotePane.entries = [];
@@ -482,6 +768,7 @@
       el.innerHTML = '<div class="fp-error">Files pane view module unavailable.</div>';
       return;
     }
+    const comboState = computeHostComboState();
     filesPaneView.renderPane(pane, el, {
       activeRemotePaneId,
       iconBack: ICON_BACK,
@@ -511,6 +798,22 @@
       },
       onOpenColumnMenu: (event) => showColumnMenu(event, pane, el),
       onOpenRowMenu: (event, entry) => showRowContextMenu(event, pane, entry),
+      hostOptions: comboState.hostOptions,
+      hostComboValue: comboState.hostComboValue,
+      hostComboBusy: comboState.hostComboBusy,
+      showDisconnect: comboState.showDisconnect,
+      onHostComboChange: (value) => onHostComboChange(value),
+      onDisconnect: () => onDisconnectPinnedSession(),
+      // tlCombo.attach must re-run after EVERY toolbar rebuild — pane-view's
+      // renderPane rebuilds the toolbar via innerHTML on every call
+      // (pane-view.js:28), which discards whatever <select>/button the
+      // previous render attached. This callback is that re-attach: invoked
+      // with the fresh <select> pane-view just built, every single render.
+      onComboMount: (selectEl) => {
+        if (window.tlCombo && typeof window.tlCombo.attach === 'function') {
+          window.tlCombo.attach(selectEl);
+        }
+      },
     });
   }
 
@@ -915,5 +1218,5 @@
   const esc = window.utils.esc;
   const attr = window.utils.attr;
 
-  exports.filesPanel = { init, togglePanel, isHidden, onTabChanged };
+  exports.filesPanel = { init, togglePanel, isHidden, onTabChanged, pinRemotePane };
 })(window);

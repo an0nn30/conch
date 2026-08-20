@@ -124,6 +124,33 @@
     return invoke('current_window_label');
   }
 
+  // Configured hosts, tree-shaped: folders (each carrying its own entries),
+  // ungrouped entries, and ssh_config-derived entries. The host dropdown
+  // flattens this with folder prefixes; see files-panel.js's
+  // buildConfiguredHostOptions.
+  async function getServers(invoke) {
+    const data = await invoke('remote_get_servers');
+    return data && typeof data === 'object'
+      ? data
+      : { folders: [], ungrouped: [], ssh_config: [] };
+  }
+
+  // Connect the SFTP panel directly to a configured host, no user
+  // interaction (crates/termlab_tauri/src/remote/detached_commands.rs's
+  // sftp_connect_host). Resolves to a ConnectedSession on success; rejects
+  // with a typed SftpConnectError (frontend/types/SftpConnectError.ts) on
+  // anything the caller must decide how to handle — including
+  // `{kind: 'connectInProgress'}`, which is not a failure, just a
+  // retry-after-current signal (see files-panel.js's connectToHost).
+  async function connectHost(invoke, serverEntryId) {
+    return invoke('sftp_connect_host', { serverEntryId });
+  }
+
+  // Tear down a detached (panel-only, not terminal-owned) session.
+  async function disconnectSession(invoke, sessionKey) {
+    return invoke('sftp_disconnect', { sessionKey });
+  }
+
   global.termlabFilesFeatureDataService = {
     getAllSettings,
     getHomeDir,
@@ -147,5 +174,8 @@
     getSessions,
     sessionHostLabel,
     getCurrentWindowLabel,
+    getServers,
+    connectHost,
+    disconnectSession,
   };
 })(window);

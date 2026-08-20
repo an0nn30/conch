@@ -33,6 +33,7 @@
         <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${d.iconHome || ''}</button>
         <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${d.iconRefresh || ''}</button>
         <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
+        ${isRemote ? '<span class="fp-host-combo-slot"></span>' : ''}
       </div>
       ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}
       <div class="fp-table-wrap">
@@ -146,6 +147,48 @@
         }
       });
     });
+
+    // Host combo (remote pane only) — built with the DOM API rather than
+    // interpolated into the innerHTML template above, because the
+    // <select>'s live identity matters: tlCombo.attach() below must run
+    // against THIS render's element, and el.innerHTML just wiped whatever
+    // combo the previous render attached. Every renderPane call is a fresh
+    // trap for a one-time attach() — see files-panel.js's onComboMount,
+    // which is invoked here, every time, for exactly this reason.
+    if (isRemote) {
+      const slot = el.querySelector('.fp-host-combo-slot');
+      if (slot) {
+        const select = document.createElement('select');
+        select.className = 'fp-host-select';
+        (Array.isArray(d.hostOptions) ? d.hostOptions : []).forEach((opt) => {
+          const optionEl = document.createElement('option');
+          optionEl.value = opt.value;
+          optionEl.textContent = opt.label;
+          if (opt.disabled) optionEl.disabled = true;
+          select.appendChild(optionEl);
+        });
+        select.value = d.hostComboValue || '';
+        select.disabled = !!d.hostComboBusy;
+        select.addEventListener('change', () => {
+          if (typeof d.onHostComboChange === 'function') d.onHostComboChange(select.value);
+        });
+        slot.appendChild(select);
+
+        if (d.showDisconnect) {
+          const eject = document.createElement('button');
+          eject.type = 'button';
+          eject.className = 'fp-tb-btn fp-host-disconnect';
+          eject.title = 'Disconnect';
+          eject.textContent = '⏏';
+          eject.addEventListener('click', () => {
+            if (typeof d.onDisconnect === 'function') d.onDisconnect();
+          });
+          slot.appendChild(eject);
+        }
+
+        if (typeof d.onComboMount === 'function') d.onComboMount(select);
+      }
+    }
   }
 
   // Column-visibility toggle menu — renders through the shared window.tlMenu
