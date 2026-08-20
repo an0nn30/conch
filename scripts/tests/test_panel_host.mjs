@@ -1274,7 +1274,15 @@ function makeHostSandbox(config) {
     table.get(name).push(fn);
     return Promise.resolve(() => {});
   };
-  const currentWindow = { close: () => { closeCalls.push(1); timeline.push('close'); } };
+  const windowControlCalls = [];
+  let maximizedState = false;
+  const currentWindow = {
+    close: () => { closeCalls.push(1); timeline.push('close'); },
+    minimize: () => { windowControlCalls.push('minimize'); },
+    maximize: () => { windowControlCalls.push('maximize'); maximizedState = true; },
+    unmaximize: () => { windowControlCalls.push('unmaximize'); maximizedState = false; },
+    isMaximized: () => Promise.resolve(maximizedState),
+  };
 
   const bootDeps = {
     invoke,
@@ -1301,6 +1309,7 @@ function makeHostSandbox(config) {
     routerRegistrations,
     warnCalls,
     filesPanelOnTabChangedCalls,
+    windowControlCalls,
     body,
     appEl,
     zoneEls,
@@ -1364,6 +1373,68 @@ function makeHostSandbox(config) {
   assert.strictEqual(host.appearanceSyncs[0].applyUiConfig, true);
   assert.strictEqual(host.appearanceSyncs[0].listen, host.bootDeps.listenOnCurrentWindow,
     'the sync listens on THIS window, like every other secondary window');
+}
+
+// --- 20b. macOS: no window-controls cluster is built at all ---------------
+// The default `GET_APP_CONFIG` answer in makeHostSandbox already reports
+// `platform: 'macos'` (native traffic lights), so scenario 20's result is
+// reused here to pin the gate's negative side explicitly rather than only
+// implying it.
+{
+  const host = makeHostSandbox();
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.windowControlsEl, null,
+    'macOS must never get the cluster — native decorations already cover it');
+  assert.strictEqual(result.minimizeButtonEl, null);
+  assert.strictEqual(result.maximizeButtonEl, null);
+  assert.strictEqual(result.closeButtonEl, null);
+}
+
+// --- 20c. Windows: the cluster renders, and each button is wired ----------
+{
+  const host = makeHostSandbox({
+    answers: { GET_APP_CONFIG: () => Promise.resolve({ appearance_mode: 'light', platform: 'windows' }) },
+  });
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.ok(result.windowControlsEl, 'Windows must get the custom cluster (no native decorations there)');
+  assert.ok(host.body.children.includes(result.rootEl), 'the cluster ships inside the same chrome root');
+  assert.ok(result.headerEl.children.includes(result.windowControlsEl),
+    'the cluster lives in the header, alongside the dock action');
+
+  result.minimizeButtonEl._fire('click');
+  assert.deepStrictEqual(host.windowControlCalls, ['minimize']);
+
+  result.maximizeButtonEl._fire('click');
+  await tick();
+  assert.deepStrictEqual(host.windowControlCalls, ['minimize', 'maximize'],
+    'not maximized yet, so the maximize button maximizes');
+
+  result.maximizeButtonEl._fire('click');
+  await tick();
+  assert.deepStrictEqual(host.windowControlCalls, ['minimize', 'maximize', 'unmaximize'],
+    'maximized already, so the same button un-maximizes — the settings.html toggle pattern');
+
+  // Close does NOT call the host's own close/abort helpers — it goes through
+  // `currentWindow.close()`, the SAME path a native close button would take,
+  // which src/panel_host.rs's CloseRequested hook converts into a hide.
+  const closeCallsBefore = host.closeCalls.length;
+  result.closeButtonEl._fire('click');
+  assert.strictEqual(host.closeCalls.length, closeCallsBefore + 1,
+    'the cluster close button routes through the normal window-close path, not a host-specific one');
+  assert.deepStrictEqual(host.invokeCalls.filter((c) => c.cmd === 'dock_panel_host'), [],
+    'closing via the cluster must not also dock — those are two different affordances');
+}
+
+// --- 20d. Linux gets the same cluster as Windows ---------------------------
+{
+  const host = makeHostSandbox({
+    answers: { GET_APP_CONFIG: () => Promise.resolve({ appearance_mode: 'light', platform: 'linux' }) },
+  });
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.ok(result.windowControlsEl, 'Linux must get the cluster too — same custom-titlebar gate as Windows');
 }
 
 // --- 21. plugin-widgets is initialized WITHOUT terminal callbacks --------
@@ -1615,13 +1686,20 @@ function makeHostSandbox(config) {
   assert.deepStrictEqual(invokeCalls, [], 'a rejected publish must never reach invoke');
 }
 
-// --- 29/30. Both parent call sites in manager-compose-runtime.js publish --
-// Scenario 29 drives paneManager's onTerminalFocused (a PANE-shaped target:
-// paneId, type, spawned — pane-manager.js); scenario 30 drives tabManager's
-// onTabChanged (a TAB-shaped target: id, type, focusedPaneId —
-// tab-manager.js). Both must still call filesPanel.onTabChanged with the
-// RAW target (unchanged docked behaviour) and ALSO publish the primitives to
-// the bridge.
+// --- 29/30/30b. Both parent call sites in manager-compose-runtime.js publish
+// Scenario 29 drives paneManager's onTerminalFocused (always a PANE-shaped
+// target: paneId, type, spawned — pane-manager.js). Scenario 30 drives
+// tabManager's onTabChanged with a PANE-shaped target too — this is the
+// COMMON case reaching that delegate: tab-manager.js:384's
+// `onTabChanged(pane || tab)` resolves a real pane on every ordinary tab
+// switch, and tab-manager.js:848 (post-SSH-connect) always passes a pane.
+// Scenario 30b drives the same delegate with a TAB-shaped target, the
+// narrower fallback tab-manager.js:384 takes only when a tab has no live
+// focused pane (e.g. an empty tab) — this used to be the ONLY shape tested
+// here, mischaracterized as tabManager's shape rather than its fallback.
+// All three must still call filesPanel.onTabChanged with the RAW target
+// (unchanged docked behaviour) and ALSO publish the primitives to the
+// bridge.
 function loadManagerComposeRuntime() {
   const invokeCalls = [];
   const filesPanelCalls = [];
@@ -1678,18 +1756,36 @@ function broadcastCalls(invokeCalls) {
     { cmd: 'panel_host_broadcast', args: { event: 'active-pane-changed', payload: { type: 'local', spawned: true, paneId: 7 } } },
   ], 'onTerminalFocused must ALSO publish, extracting only the primitives the pane carries');
 
-  // Scenario 30: a TAB-shaped target.
+  // Scenario 30: tabManager's onTabChanged, PANE-shaped target — the common
+  // case (tab-manager.js:384's `pane || tab` when the tab has a live focused
+  // pane, and tab-manager.js:848 which is always a pane).
+  invokeCalls.length = 0;
+  const fakeTabPane = {
+    paneId: 21, tabId: 't2', kind: 'terminal', type: 'ssh', spawned: true, term: { fake: true },
+  };
+  tabManagerDeps.onTabChanged(fakeTabPane);
+
+  assert.deepStrictEqual(filesPanelCalls, [fakePane, fakeTabPane],
+    'the second call site must also still hand filesPanel the raw target');
+  assert.deepStrictEqual(broadcastCalls(invokeCalls), [
+    { cmd: 'panel_host_broadcast', args: { event: 'active-pane-changed', payload: { type: 'ssh', spawned: true, paneId: 21 } } },
+  ], 'onTabChanged must publish a PANE target\'s primitives the same way onTerminalFocused does '
+    + '(type/spawned/paneId, no id/focusedPaneId)');
+
+  // Scenario 30b: tabManager's onTabChanged, TAB-shaped target — the
+  // narrower fallback tab-manager.js:384 takes only when a tab has no live
+  // focused pane.
   invokeCalls.length = 0;
   const fakeTab = {
     id: 'tab-9', type: 'ssh', focusedPaneId: 42, label: 'demo', button: {}, containerEl: {},
   };
   tabManagerDeps.onTabChanged(fakeTab);
 
-  assert.deepStrictEqual(filesPanelCalls, [fakePane, fakeTab],
-    'the second call site must also still hand filesPanel the raw target');
+  assert.deepStrictEqual(filesPanelCalls, [fakePane, fakeTabPane, fakeTab],
+    'the fallback tab-shaped call must also still hand filesPanel the raw target');
   assert.deepStrictEqual(broadcastCalls(invokeCalls), [
     { cmd: 'panel_host_broadcast', args: { event: 'active-pane-changed', payload: { type: 'ssh', focusedPaneId: 42, id: 'tab-9' } } },
-  ], 'onTabChanged must publish the TAB shape\'s primitives (id/focusedPaneId, no paneId/spawned)');
+  ], 'the fallback must publish the TAB shape\'s primitives (id/focusedPaneId, no paneId/spawned)');
 }
 
 // --- 31. Host re-dispatch: active-pane-changed reaches filesPanel.onTabChanged

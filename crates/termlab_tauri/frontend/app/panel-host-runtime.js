@@ -157,9 +157,10 @@
   // sizes, the animation switch and the native frame tint all matter.
   async function applyAppearanceAndTheme(invoke, listenOnCurrentWindow) {
     const configService = global.termlabConfigService || {};
+    let appCfg = null;
 
     try {
-      const appCfg = await invoke('GET_APP_CONFIG');
+      appCfg = await invoke('GET_APP_CONFIG');
       if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
         global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
       }
@@ -192,6 +193,13 @@
         label: 'panel host',
       }).init();
     }
+
+    // Handed back so boot() can gate the window-controls cluster below on
+    // the SAME config fetch, rather than a second `GET_APP_CONFIG` round
+    // trip the way settings.html's boot block does it (settings.html:104-
+    // 157 fetches app config twice — once for UI sizing, once again purely
+    // to read `.platform`). One request, two uses.
+    return appCfg;
   }
 
   // ---- Chrome --------------------------------------------------------------
@@ -201,7 +209,65 @@
   // tool-window-manager.js): that one carries the zone's own affordances
   // (split, move, hide), none of which mean anything to a window that IS the
   // panel.
-  function buildChrome(title, onDock) {
+  // ---- Windows/Linux window-controls cluster --------------------------------
+  //
+  // Mirrors settings.html's platform-gated custom titlebar cluster
+  // (settings.html:143-157, styles/settings-window.css's `.settings-
+  // titlebar-btn*`): a panel host is built WITHOUT native decorations on
+  // Windows/Linux (`create_panel_host_window`'s `use_custom_titlebar`,
+  // src/panel_host.rs), so the header built above is the only thing that
+  // can offer minimize/maximize/close there. On macOS this function is
+  // never called — gated at construction in `buildChrome` below, not just
+  // hidden by CSS, so there is nothing extra in the DOM to style or focus on
+  // a platform that already has working traffic lights.
+  //
+  // Close does NOT bypass the hide-on-close contract: `currentWindow.close()`
+  // raises the same `CloseRequested` a native close button would, which
+  // `on_panel_host_close_requested` (src/panel_host.rs) intercepts into a
+  // hide + `panel-host-hidden` emit — OS close = hide (design spec rule 4)
+  // for every path into it, native titlebar or this one. There is no
+  // separate "real" close to wire here; the window is only ever destroyed by
+  // dock-back or parent death.
+  function buildWindowControls(currentWindow) {
+    const clusterEl = document.createElement('div');
+    clusterEl.className = 'tl-panelhost__winctl';
+
+    function makeButton(kind, label, svgMarkup) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tl-panelhost__winctl-btn tl-panelhost__winctl-btn-' + kind;
+      btn.setAttribute('aria-label', label);
+      btn.innerHTML = svgMarkup;
+      return btn;
+    }
+
+    const minimizeEl = makeButton('minimize', 'Minimize',
+      '<svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>');
+    minimizeEl.addEventListener('click', () => currentWindow.minimize());
+    clusterEl.appendChild(minimizeEl);
+
+    const maximizeEl = makeButton('maximize', 'Maximize',
+      '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" '
+      + 'fill="none" stroke="currentColor" stroke-width="1"/></svg>');
+    maximizeEl.addEventListener('click', () => {
+      Promise.resolve(currentWindow.isMaximized()).then((isMax) => {
+        if (isMax) currentWindow.unmaximize();
+        else currentWindow.maximize();
+      });
+    });
+    clusterEl.appendChild(maximizeEl);
+
+    const closeEl = makeButton('close', 'Close',
+      '<svg width="10" height="10" viewBox="0 0 10 10">'
+      + '<line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/>'
+      + '<line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/></svg>');
+    closeEl.addEventListener('click', () => currentWindow.close());
+    clusterEl.appendChild(closeEl);
+
+    return { clusterEl, minimizeEl, maximizeEl, closeEl };
+  }
+
+  function buildChrome(title, onDock, platform, currentWindow) {
     const rootEl = document.createElement('div');
     rootEl.className = 'tl-panelhost';
 
@@ -231,12 +297,33 @@
     actionsEl.appendChild(dockButtonEl);
     headerEl.appendChild(actionsEl);
 
+    // The platform gate, traced from settings.html:146: only Windows/Linux
+    // get a cluster at all — macOS keeps its native traffic lights, and
+    // `currentWindow` is required to wire one up, so a caller that omits it
+    // (every test scenario that doesn't care about this cluster) gets none
+    // either, same as macOS.
+    let windowControls = null;
+    if ((platform === 'windows' || platform === 'linux') && currentWindow) {
+      windowControls = buildWindowControls(currentWindow);
+      headerEl.appendChild(windowControls.clusterEl);
+    }
+
     const contentRootEl = document.createElement('div');
     contentRootEl.className = 'tl-panelhost__content';
 
     rootEl.appendChild(headerEl);
     rootEl.appendChild(contentRootEl);
-    return { rootEl, headerEl, titleEl, dockButtonEl, contentRootEl };
+    return {
+      rootEl,
+      headerEl,
+      titleEl,
+      dockButtonEl,
+      contentRootEl,
+      windowControlsEl: windowControls ? windowControls.clusterEl : null,
+      minimizeButtonEl: windowControls ? windowControls.minimizeEl : null,
+      maximizeButtonEl: windowControls ? windowControls.maximizeEl : null,
+      closeButtonEl: windowControls ? windowControls.closeEl : null,
+    };
   }
 
   // The element pair `tool-window-manager.js`'s `ensureWindowElement` builds
@@ -282,7 +369,7 @@
       document.body.classList.add(HOST_BODY_CLASS);
     }
 
-    await applyAppearanceAndTheme(invoke, listenOnCurrentWindow);
+    const appCfg = await applyAppearanceAndTheme(invoke, listenOnCurrentWindow);
 
     // No terminal callbacks, deliberately: `createTab`, `renameActiveTab`,
     // `renameTabById`, `focusTabById` and `writeToActivePty` all sit behind
@@ -334,6 +421,8 @@
       () => {
         invoke('dock_panel_host', { toolWindowId: request.toolWindowId }).catch(() => {});
       },
+      appCfg && appCfg.platform,
+      currentWindow,
     );
     document.body.appendChild(chrome.rootEl);
 
@@ -377,6 +466,10 @@
       titleEl: chrome.titleEl,
       dockButtonEl: chrome.dockButtonEl,
       contentRootEl: chrome.contentRootEl,
+      windowControlsEl: chrome.windowControlsEl,
+      minimizeButtonEl: chrome.minimizeButtonEl,
+      maximizeButtonEl: chrome.maximizeButtonEl,
+      closeButtonEl: chrome.closeButtonEl,
       panelEl: mounted.panelEl,
       renderRootEl: mounted.renderRootEl,
     };

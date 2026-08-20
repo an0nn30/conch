@@ -748,3 +748,134 @@ first mismatch.
        does not exist inside a real app bundle) — the dark half would look
        fine and only the light half would give it away. Check the Light case
        specifically; do not infer success from the Dark one.
+
+## L. Pop-out tool windows — Dock and Window view modes
+
+Added by the pop-out-tool-windows plan: any registered tool window —
+built-in (SFTP, Hosts, Tunnels, Notifications) or plugin — can now switch
+from **Dock** to **Window** view mode. Choosing Window unmounts the panel
+from its zone and re-hosts it in its own OS window, IntelliJ-style, with a
+dock-back affordance in its header; choosing Dock (from either side) tears
+the host window down and remounts the panel back where it came from. The
+capability is carried by the tool-window registration contract itself, not
+opted into per panel, so a plugin gets it for free. Every scenario below was
+verified against real modules through vm-harnesses (`test_panel_host.mjs`,
+774 cargo tests) but **nothing ran in the real GUI and no remote path
+touched a real SSH host** — this is that human pass. **Steps marked [SSH]
+need a real SSH host**; the rest need only a local build. Run in order;
+stop and report at the first mismatch.
+
+133. Pop out each built-in in turn — **SFTP**, **Hosts**, **Tunnels**,
+     **Notifications** — via **View Mode: Window** on its rail icon's
+     context menu. Each pops into its own OS window with a slim header
+     (title + Dock button, no zone toolbar), the docked zone's slot for it
+     goes empty, and the rail icon stays lit the whole time the window is
+     visible.
+134. **The trait in anger.** Pop out a PLUGIN tool window that carries a
+     panel (any installed plugin registering one via
+     `toolWindowManager.register`) the same way. It must behave IDENTICALLY
+     to a built-in — same View Mode entries, same pop-out chrome, same
+     dock-back — with zero plugin-side code making that happen. This is the
+     whole point of the trait living in the registration contract rather
+     than being opted into.
+135. The **View Mode** menu shows BOTH entries — `View Mode: Dock` and
+     `View Mode: Window` — everywhere it is reachable: every rail icon's
+     context menu, for every tool window (built-in and plugin alike), docked
+     or popped. They are two flattened entries, not a submenu (`tl-menu` has
+     no submenu support) — confirm there is no nested fly-out, just the two
+     items with a checkmark on whichever is current.
+136. Dock-back returns to the REMEMBERED zone, not the registration
+     default. Move a tool window to a different zone, THEN pop it out, then
+     dock it back (either the popped window's own Dock button, or `View
+     Mode: Dock` from its own header menu) — it must land back in the zone
+     you moved it to, not snap back to where it started out.
+137. **Judgment/behavior check: parent-side "View Mode: Dock" destroys —
+     no lingering hidden window.** From the PARENT window's rail icon (not
+     the popped window itself), choose `View Mode: Dock` on a tool window
+     that is currently popped out. The panel must remount into its zone
+     immediately. Then check nothing was left behind: pop the SAME tool
+     window back out right away. It should open FRESH and INSTANT — a
+     brand-new host window appearing at once, not a pause that suggests
+     something was being torn down first, and not a summon of a window that
+     was actually still alive and hidden in the background. Instant/fresh is
+     the tell that the parent-side dock genuinely destroyed the host rather
+     than merely hiding it.
+138. OS-close hides; rail summon re-shows with scroll/state preserved. Pop
+     out a tool window with enough content to scroll (Hosts with several
+     sessions, or SFTP with a long directory listing), scroll it partway,
+     then close the OS window with its native close control (traffic light
+     on macOS; the window-controls cluster's close on Windows/Linux, step
+     146). The window disappears, but the tool window is still "open" as far
+     as the rail is concerned — click the rail icon and the SAME window
+     reappears at the SAME scroll position, not a fresh remount that lost
+     your place.
+139. Restart persistence — window mode AND bounds. Pop a tool window out,
+     resize and move it to a size/position you'd recognize, leave it in
+     Window mode and visible, then quit and relaunch the app. It must reopen
+     as a WINDOW (not docked) at the SAME bounds. **Off-screen clamp:** if a
+     second monitor is available, drag the popped window onto it, then
+     physically disconnect that monitor and relaunch — the window should
+     reappear on the remaining screen at a clamped position, not stranded off
+     in unreachable space. If no second monitor is available, say so and
+     skip this half rather than guessing at the result.
+140. TWO main windows, independent pop-outs of the SAME tool window id. Open
+     a second main TermLab window, then pop the SAME tool window id out from
+     BOTH — e.g. Hosts from window A and Hosts from window B. The two live
+     pop-outs must be fully independent: closing or docking one must not
+     touch the other, and each must show its OWN parent's data (two
+     different sets of SSH sessions, or SFTP against two different panes).
+     **Bounds note:** the remembered size/position is ONE shared record keyed
+     by tool-window id alone — not per-parent — by design (see the spec's
+     Persistence section). Resize A's pop-out, dock it, then pop the same id
+     out fresh from B: B's pop-out opens at A's last-saved bounds. Confirm
+     that is what happens (last writer wins); it is not a bug to report.
+141. `[SSH]` Popped-out SFTP follows the parent's active tab. With the SFTP
+     tool window popped out, switch the PARENT window's active tab/pane
+     across a couple of different SSH sessions (and back to local). The
+     popped SFTP window's remote pane must follow automatically, no manual
+     reconnect — and listing, upload, and download must all work correctly
+     against whichever session is active in the parent at the moment you
+     trigger them.
+142. Rapid toggle/dock/re-pop stress — the race territory rounds 1-2
+     hardened against. Pick one tool window and fire off a handful of fast
+     cycles without waiting for anything to visually settle: Window → Dock →
+     Window → Dock a few times in a row, then Window → OS-close (hide) →
+     rail summon → hide → summon a few times. Confirm: never two panels/
+     windows showing the same tool window at once, never a rail icon left
+     dead/unresponsive afterward, and the tool window lands in a
+     self-consistent state — docked or windowed, matching whatever you did
+     last — once everything settles.
+143. Appearance flip restyles hosts live. With one or more tool windows
+     popped out, flip Settings → Appearance Mode between Light and Dark (or
+     flip the OS appearance under System). Every open pop-out window must
+     restyle live along with the main window — chrome, panel content, and
+     (Windows/Linux) the window-controls cluster all repaint together; no
+     pop-out should be left showing the old appearance as a stale island.
+144. **Cmd+W in a host does NOTHING — this is the dead-keys fix.** Focus a
+     popped-out tool window and press Cmd+W (Ctrl+W on Windows/Linux).
+     NOTHING should happen: no tab closes (there are no tabs in a host), the
+     window itself does not close, and no other shortcut silently consumes
+     the keystroke either — the host should behave as if it has no shortcut
+     table reacting to that combo at all. This guards the fix for the app-menu
+     accelerator table's ~18 dead bindings (registered by an uninitialized
+     `titlebar.refresh()`) winning by default in a window with no real
+     shortcut-runtime around to outrank them.
+145. **Judgment call: default 520×400 size and header density.** Pop out a
+     tool window at its DEFAULT size — one you've never popped out before, or
+     with its saved bounds cleared — and look at it beside its docked
+     equivalent. Decide whether 520×400 reads as a comfortable size for that
+     panel's content, and whether the slim header (title + Dock button, no
+     zone toolbar) reads as appropriately light or oddly bare. Say which,
+     with a number, if anything should change.
+146. **Windows/Linux: the window-controls cluster.** On a Windows or Linux
+     build, pop out a tool window and confirm minimize, maximize/restore,
+     and close controls appear in the host's own header — there are no
+     native decorations to supply them there. Minimize and maximize/restore
+     behave normally. Close must behave EXACTLY like every other OS-close
+     path in this section: the window hides rather than truly closing, and
+     rail summon brings it back — confirm it does NOT bypass the hide
+     contract just because it lives in this custom cluster rather than a
+     native titlebar. **Mark this step platform-specific** if you can only
+     verify it on macOS: confirm the ABSENCE of the cluster there instead
+     (native traffic lights only, nothing extra in the header) with the same
+     care presence would get elsewhere.

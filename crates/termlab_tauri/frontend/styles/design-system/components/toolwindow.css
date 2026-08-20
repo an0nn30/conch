@@ -78,6 +78,36 @@ body.tl-panelhost-window { background: var(--tl-panel-bg); }
   min-height: 0; min-width: 0;
   overflow: hidden;
 }
+/* Windows/Linux window-controls cluster — the tokens-only twin of settings.
+   html's `.settings-titlebar-btn*` (styles/settings-window.css), built only
+   when panel-host-runtime.js's platform gate is true (Windows/Linux; macOS
+   keeps native traffic lights and never builds this at all). Sits at the
+   trailing edge of the same header .tl-panelhost__actions already occupies,
+   so drag space is title | dock action | window controls, left to right. */
+.tl-panelhost__winctl { display: inline-flex; flex: 0 0 auto; height: 100%; }
+.tl-panelhost__winctl-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 46px; height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--tl-fg-muted);
+  cursor: pointer;
+  outline: none;
+}
+.tl-panelhost__winctl-btn:hover {
+  background: var(--tl-row-hover);
+  color: var(--tl-fg);
+}
+.tl-panelhost__winctl-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--tl-accent);
+}
+.tl-panelhost__winctl-btn-close:hover {
+  /* Same filled-danger hover treatment as settings-window.css's close
+     button and .tl-menu__item.is-danger:hover — one pair, reused. */
+  background: var(--tl-danger);
+  color: var(--tl-fg);
+}
 .tl-empty-state {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--tl-fg-muted);
