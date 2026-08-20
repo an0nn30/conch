@@ -258,7 +258,10 @@
    dialog rather than one section of it. padding is dropped (picker.css puts
    2px 0 on the box) so the sticky header sits flush against the border. */
 .tl-filedlg__box {
-  max-height: 340px;
+  /* Fill the main column: the box is the dialog's primary surface and its
+     background must reach the footer even with few rows. The old 340px cap
+     was tl-dialog-era sizing; the chooser window's floor now bounds it. */
+  flex: 1 1 auto;
   min-height: 200px;
   padding: 0;
 }

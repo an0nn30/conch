@@ -22,7 +22,10 @@
     .fp-path-input:focus { border-color: var(--dim-fg); }
     .fp-path-input:disabled { opacity: 0.4; }
     .fp-error { padding: 4px 8px; font-size: var(--ui-font-small); color: var(--red); flex-shrink: 0; }
-    .fp-table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; }
+    /* The listing surface owns the background so it reaches the bottom of the
+       pane even when rows don't fill it (docked and panel-host windows alike);
+       tbody painting it instead left a dead strip below the last row. */
+    .fp-table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; background: var(--tl-Table-background); }
     .fp-table { width: 100%; border-collapse: collapse; font-size: var(--ui-font-list); }
     .fp-table th {
       position: sticky; top: 0; z-index: 1; height: 22px; padding: 3px 6px; text-align: left;
@@ -30,7 +33,6 @@
       border-bottom: 1px solid var(--tab-border); white-space: nowrap; user-select: none;
     }
     .fp-table td { padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .fp-table tbody { background: var(--tl-Table-background); }
     .fp-row { height: var(--tl-row-h); cursor: default; }
     .fp-row:hover td { background: var(--input-bg); }
     .fp-row.selected td { background: var(--active-highlight); }
