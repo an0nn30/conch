@@ -299,6 +299,13 @@
   }
 
   async function refresh() {
+    // Callers (bridge-runtime, tool-window-runtime, the settings plugins
+    // section) invoke refresh() on every platform, but init() only runs where
+    // the custom titlebar exists (_initTitlebarPending — Windows/Linux).
+    // Without this gate, refresh() on macOS registered the whole accelerator
+    // table at priority 115 with a null menuActionHandler: matched combos
+    // were consumed and then did nothing.
+    if (!titlebarEl) return;
     const tauri = window.__TAURI__;
     if (!tauri || !tauri.core || !tauri.core.invoke) return;
     let pluginItems = [];
