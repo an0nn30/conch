@@ -418,6 +418,40 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
   assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 0);
 }
 
+// --- 10b. A LATE abort, arriving after the window is docked again, is inert -
+// The reachable race: the parent picks Dock while the host is still booting,
+// the host's boot then aborts, and the event lands on a window that is
+// mounted and active again. Without the same mode guard its three sibling
+// handlers carry, the reset would clear the active flag underneath a visible
+// panel — a dark rail button over a showing panel.
+{
+  const { twm, invoke, zoneEls } = loadManager();
+  let renders = 0;
+  const saves = [];
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => saves.push(1), invoke });
+  twm.register('tunnels', { ...TUNNELS, renderFn: () => { renders += 1; } });
+  twm.setViewMode('tunnels', 'window');
+  viewModeItems(twm.buildContextMenuItems('tunnels'))[0].onSelect(); // dock again
+  assert.strictEqual(twm.getViewModes().tunnels, 'dock');
+  const before = {
+    active: twm.isVisible('tunnels'),
+    zoneSlot: twm.getActiveZoneAssignments()['right-bottom'],
+    children: zoneEls.get('right-bottom')._contentEl.children.length,
+    renders,
+  };
+  assert.strictEqual(before.active, true, 'precondition: the panel is docked and showing');
+  saves.length = 0;
+
+  twm.notifyHostAborted('tunnels');
+
+  assert.strictEqual(twm.isVisible('tunnels'), before.active,
+    'a stale abort must not clear the active flag of an already-docked window');
+  assert.strictEqual(twm.getActiveZoneAssignments()['right-bottom'], before.zoneSlot);
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, before.children);
+  assert.strictEqual(renders, before.renders);
+  assert.strictEqual(saves.length, 0, 'an inert event must not churn the saved layout');
+}
+
 // --- 11. shown/hidden events sync the rail lit-state -----------------------
 {
   const { twm, invoke } = loadManager();
@@ -504,6 +538,90 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
     'ssh-sessions': 'right-top',
     tunnels: 'right-bottom',
   });
+}
+
+// --- 14b. Moving a POPPED-OUT window re-aims its dock target only ----------
+// Scenario 8 moves before popping out, so it never enters moveTo()'s
+// window-mode branch. This one moves while popped out, into a zone that
+// already has a docked window showing — the branch must not reparent
+// anything, must not render, and must not take the destination zone over the
+// way a docked move does.
+{
+  const { twm, invoke, zoneEls } = loadManager();
+  let hostRenders = 0;
+  let tunnelRenders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('ssh-sessions', {
+    ...HOSTS, defaultZone: 'left-top', renderFn: () => { hostRenders += 1; },
+  });
+  twm.register('tunnels', { ...TUNNELS, renderFn: () => { tunnelRenders += 1; } });
+  twm.setViewMode('tunnels', 'window');
+  hostRenders = 0;
+  tunnelRenders = 0;
+
+  twm.moveTo('tunnels', 'left-top');
+
+  assert.strictEqual(twm.getZoneForWindow('tunnels'), 'left-top',
+    'the move re-aims where the window will dock BACK to');
+  assert.strictEqual(twm.getViewModes().tunnels, 'window', 'moving is not docking');
+  assert.deepStrictEqual(Array.from(twm.getWindowsInZone('right-bottom')), [],
+    'the window leaves its old zone\'s list');
+  assert.ok(Array.from(twm.getWindowsInZone('left-top')).includes('tunnels'),
+    'and joins the new one\'s, so its rail button moves with it');
+  assert.strictEqual(tunnelRenders, 0, 'nothing is rendered — the host owns the DOM');
+  assert.strictEqual(twm.getContentElement('tunnels'), null);
+  assert.strictEqual(hostRenders, 0, 'the sitting tenant is not re-rendered either');
+  assert.strictEqual(zoneEls.get('left-top')._contentEl.children.length, 1,
+    'the destination zone still holds exactly its one docked panel');
+  assert.strictEqual(twm.isVisible('ssh-sessions'), true,
+    'a popped-out window must not evict the zone\'s docked window');
+  assert.strictEqual(twm.getActiveZoneAssignments()['left-top'], 'ssh-sessions',
+    'and the docked window keeps the zone\'s one open-window slot');
+}
+
+// --- 14c. "Hide" on a popped-out window hides its host --------------------
+// Reachable from the rail's context menu, which offers Hide for any id.
+{
+  const { twm, invoke, invokeCalls, zoneEls } = loadManager();
+  let renders = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('tunnels', { ...TUNNELS, renderFn: () => { renders += 1; } });
+  twm.setViewMode('tunnels', 'window');
+  renders = 0;
+  invokeCalls.length = 0;
+
+  const hideItem = Array.from(twm.buildContextMenuItems('tunnels'))
+    .find((i) => i.label === 'Hide');
+  hideItem.onSelect();
+
+  assert.deepStrictEqual(plain(invokeCalls), [
+    { cmd: 'hide_panel_host', args: { toolWindowId: 'tunnels' } },
+  ], 'Hide must hide the host window, not close a zone that is not showing it');
+  assert.strictEqual(twm.getViewModes().tunnels, 'window', 'hiding is not un-popping');
+  assert.strictEqual(twm.isVisible('tunnels'), false, 'the rail button goes dark');
+  assert.strictEqual(renders, 0, 'nothing docks back on a hide');
+  assert.strictEqual(zoneEls.get('right-bottom')._contentEl.children.length, 0);
+}
+
+// --- 14d. Unregistering a popped-out window takes its host with it ---------
+// What a plugin removal does: the host would otherwise stay on screen with
+// nothing to host.
+{
+  const { twm, invoke, invokeCalls } = loadManager();
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  twm.register('plugin:fake', { title: 'Fake', renderFn: () => {} });
+  twm.setViewMode('plugin:fake', 'window');
+  invokeCalls.length = 0;
+
+  twm.unregister('plugin:fake');
+
+  assert.deepStrictEqual(plain(invokeCalls), [
+    { cmd: 'hide_panel_host', args: { toolWindowId: 'plugin:fake' } },
+  ], 'an orphaned host must not be left on screen');
+  assert.strictEqual(twm.getRegistration('plugin:fake'), null);
+  assert.deepStrictEqual(plain(twm.getViewModes()), {},
+    'the id\'s view-mode bookkeeping goes with the registration');
+  assert.deepStrictEqual(Array.from(twm.getWindowsInZone('right-bottom')), []);
 }
 
 // ===========================================================================

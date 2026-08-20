@@ -559,9 +559,16 @@
   // The host self-aborted before mounting anything (its boot found no
   // registration for the id). Nothing is coming back, so reset the trait and
   // leave the window closed in its zone for the rail to reopen.
+  //
+  // The mode guard matters as much here as in the three handlers above: an
+  // abort can land AFTER the parent already docked the window (pick Dock
+  // while the host is still booting, and the host aborts into a window that
+  // is mounted and active again). Without the guard, resetToDock() would
+  // clear `tw.active` underneath a still-mounted panel whose zone.activeId
+  // still names it — a dark rail button over a visible panel.
   function notifyHostAborted(id) {
     const tw = toolWindows.get(id);
-    if (!tw) return;
+    if (!tw || getViewMode(id) !== VIEW_MODE_WINDOW) return;
     resetToDock(id);
     refreshZoneChrome(tw.zone);
     triggerSave();
