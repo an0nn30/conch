@@ -29,6 +29,7 @@ pub(crate) mod updater;
 pub(crate) mod utf8_stream;
 pub(crate) mod vault_commands;
 mod watcher;
+pub(crate) mod window_registry_resolver;
 pub(crate) mod windows;
 
 use std::collections::HashMap;

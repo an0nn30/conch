@@ -129,6 +129,15 @@ pub struct LayoutConfig {
     pub tool_window_zones: HashMap<String, String>,
     /// Active tool window by zone-name.
     pub active_tool_windows: HashMap<String, String>,
+    /// Per-tool-window view mode: tool-window id → `"dock"` or `"window"`.
+    /// Mirrors `tool_window_zones` exactly — id-keyed, empty-map default, no
+    /// parent-window scoping — because a view mode is a property of the tool
+    /// window itself (which zone it docks in, or that it is currently popped
+    /// out), not of any one main window that happens to be showing it. An
+    /// absent key (every state.toml written before this field existed) means
+    /// "docked", the same as an absent `tool_window_zones` entry falling back
+    /// to the manager's default zone.
+    pub tool_window_view_modes: HashMap<String, String>,
     /// Left sidebar top/bottom split ratio (0.0–1.0, top portion).
     pub left_split_ratio: f32,
     /// Right sidebar top/bottom split ratio (0.0–1.0, top portion).
@@ -168,6 +177,7 @@ impl Default for LayoutConfig {
             zen_mode: false,
             tool_window_zones: HashMap::new(),
             active_tool_windows: HashMap::new(),
+            tool_window_view_modes: HashMap::new(),
             left_split_ratio: 0.5,
             right_split_ratio: 0.5,
             tool_window_bounds: HashMap::new(),
@@ -232,6 +242,7 @@ mod tests {
                 zen_mode: true,
                 tool_window_zones: zones,
                 active_tool_windows: active,
+                tool_window_view_modes: HashMap::new(),
                 left_split_ratio: 0.6,
                 right_split_ratio: 0.4,
                 tool_window_bounds: HashMap::new(),
@@ -409,6 +420,44 @@ zoom_factor = 1.5
 "#;
         let ps: PersistentState = toml::from_str(toml_str).expect("deserialize");
         assert!(ps.layout.tool_window_bounds.is_empty());
+    }
+
+    #[test]
+    fn tool_window_view_modes_round_trips_toml() {
+        let mut modes = HashMap::new();
+        modes.insert("ssh-sessions".to_string(), "window".to_string());
+        modes.insert("file-explorer".to_string(), "dock".to_string());
+        let original = PersistentState {
+            layout: LayoutConfig {
+                tool_window_view_modes: modes,
+                ..LayoutConfig::default()
+            },
+            ..PersistentState::default()
+        };
+        let toml_str = toml::to_string(&original).expect("serialize");
+        let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(
+            restored.layout.tool_window_view_modes.get("ssh-sessions"),
+            Some(&"window".to_string())
+        );
+        assert_eq!(
+            restored.layout.tool_window_view_modes.get("file-explorer"),
+            Some(&"dock".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_window_view_modes_defaults_to_empty_map_when_key_absent() {
+        // Backward compat: every state.toml written before this field existed
+        // has no [layout.tool_window_view_modes] table at all.
+        let toml_str = r#"
+loaded_plugins = ["my-plugin"]
+
+[layout]
+zoom_factor = 1.5
+"#;
+        let ps: PersistentState = toml::from_str(toml_str).expect("deserialize");
+        assert!(ps.layout.tool_window_view_modes.is_empty());
     }
 
     #[test]

@@ -238,6 +238,7 @@ pub(crate) struct WindowLayout {
     zen_mode: Option<bool>,
     tool_window_zones: Option<std::collections::HashMap<String, String>>,
     active_tool_windows: Option<std::collections::HashMap<String, String>>,
+    tool_window_view_modes: Option<std::collections::HashMap<String, String>>,
     split_ratios: Option<SplitRatios>,
 }
 
@@ -305,6 +306,53 @@ pub(crate) fn get_saved_layout() -> SavedLayout {
     }
 }
 
+/// Merge a frontend-sent [`WindowLayout`] into `state` — every field is
+/// `Option`-gated and merges only when `Some`; an absent field leaves
+/// whatever is already persisted untouched. Pulled out as a pure function
+/// (no window handle, no config I/O) so this merge-only-when-Some contract
+/// is unit-testable directly, the same way the panel-host / chooser
+/// registries' pure logic is.
+fn merge_window_layout(state: &mut config::LayoutConfig, layout: WindowLayout) {
+    if let Some(w) = layout.ssh_panel_width {
+        state.right_panel_width = w as f32;
+    }
+    if let Some(v) = layout.ssh_panel_visible {
+        state.right_panel_visible = v;
+    }
+    if let Some(w) = layout.files_panel_width {
+        state.left_panel_width = w as f32;
+    }
+    if let Some(v) = layout.files_panel_visible {
+        state.left_panel_visible = v;
+    }
+    if let Some(v) = layout.bottom_panel_visible {
+        state.bottom_panel_visible = v;
+    }
+    if let Some(h) = layout.bottom_panel_height {
+        state.bottom_panel_height = h as f32;
+    }
+    if let Some(v) = layout.zen_mode {
+        state.zen_mode = v;
+    }
+    if let Some(zones) = layout.tool_window_zones {
+        state.tool_window_zones = zones;
+    }
+    if let Some(active_windows) = layout.active_tool_windows {
+        state.active_tool_windows = active_windows;
+    }
+    if let Some(view_modes) = layout.tool_window_view_modes {
+        state.tool_window_view_modes = view_modes;
+    }
+    if let Some(ratios) = layout.split_ratios {
+        if let Some(l) = ratios.left {
+            state.left_split_ratio = l as f32;
+        }
+        if let Some(r) = ratios.right {
+            state.right_split_ratio = r as f32;
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLayout) {
     let size = window.inner_size().unwrap_or_default();
@@ -320,41 +368,7 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     // from a full-screen one open full-screen.
     state.layout.window_width = logical_w as f32;
     state.layout.window_height = logical_h as f32;
-    if let Some(w) = layout.ssh_panel_width {
-        state.layout.right_panel_width = w as f32;
-    }
-    if let Some(v) = layout.ssh_panel_visible {
-        state.layout.right_panel_visible = v;
-    }
-    if let Some(w) = layout.files_panel_width {
-        state.layout.left_panel_width = w as f32;
-    }
-    if let Some(v) = layout.files_panel_visible {
-        state.layout.left_panel_visible = v;
-    }
-    if let Some(v) = layout.bottom_panel_visible {
-        state.layout.bottom_panel_visible = v;
-    }
-    if let Some(h) = layout.bottom_panel_height {
-        state.layout.bottom_panel_height = h as f32;
-    }
-    if let Some(v) = layout.zen_mode {
-        state.layout.zen_mode = v;
-    }
-    if let Some(zones) = layout.tool_window_zones {
-        state.layout.tool_window_zones = zones;
-    }
-    if let Some(active_windows) = layout.active_tool_windows {
-        state.layout.active_tool_windows = active_windows;
-    }
-    if let Some(ratios) = layout.split_ratios {
-        if let Some(l) = ratios.left {
-            state.layout.left_split_ratio = l as f32;
-        }
-        if let Some(r) = ratios.right {
-            state.layout.right_split_ratio = r as f32;
-        }
-    }
+    merge_window_layout(&mut state.layout, layout);
     let _ = config::save_persistent_state(&state);
 }
 
@@ -472,4 +486,86 @@ pub(crate) fn rebuild_menu(
     app.set_menu(new_menu)
         .map_err(|e| format!("Set menu failed: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod window_layout_merge_tests {
+    use super::*;
+
+    /// A payload with every field absent — the "the frontend didn't send
+    /// this" case every merge-only-when-Some assertion below starts from.
+    fn empty_layout() -> WindowLayout {
+        WindowLayout {
+            ssh_panel_width: None,
+            ssh_panel_visible: None,
+            files_panel_width: None,
+            files_panel_visible: None,
+            bottom_panel_visible: None,
+            bottom_panel_height: None,
+            zen_mode: None,
+            tool_window_zones: None,
+            active_tool_windows: None,
+            tool_window_view_modes: None,
+            split_ratios: None,
+        }
+    }
+
+    #[test]
+    fn a_present_view_modes_map_replaces_whatever_was_persisted() {
+        let mut state = config::LayoutConfig::default();
+        state
+            .tool_window_view_modes
+            .insert("stale-id".to_string(), "window".to_string());
+
+        let mut incoming = std::collections::HashMap::new();
+        incoming.insert("ssh-sessions".to_string(), "dock".to_string());
+        let layout = WindowLayout {
+            tool_window_view_modes: Some(incoming.clone()),
+            ..empty_layout()
+        };
+
+        merge_window_layout(&mut state, layout);
+
+        assert_eq!(state.tool_window_view_modes, incoming);
+        assert!(
+            !state.tool_window_view_modes.contains_key("stale-id"),
+            "a present map REPLACES the old one outright, it does not merge \
+             key-by-key into it"
+        );
+    }
+
+    #[test]
+    fn an_absent_view_modes_field_leaves_the_persisted_map_untouched() {
+        let mut state = config::LayoutConfig::default();
+        state
+            .tool_window_view_modes
+            .insert("ssh-sessions".to_string(), "window".to_string());
+        let before = state.tool_window_view_modes.clone();
+
+        merge_window_layout(&mut state, empty_layout());
+
+        assert_eq!(state.tool_window_view_modes, before);
+    }
+
+    #[test]
+    fn merge_only_when_some_holds_for_every_optional_field_at_once() {
+        // A broader smoke test: a payload with everything absent except one
+        // field (here, zen_mode) changes ONLY that field.
+        let mut state = config::LayoutConfig::default();
+        state
+            .tool_window_zones
+            .insert("ssh-sessions".to_string(), "right-top".to_string());
+        let zones_before = state.tool_window_zones.clone();
+        let width_before = state.right_panel_width;
+
+        let layout = WindowLayout {
+            zen_mode: Some(true),
+            ..empty_layout()
+        };
+        merge_window_layout(&mut state, layout);
+
+        assert!(state.zen_mode);
+        assert_eq!(state.tool_window_zones, zones_before);
+        assert_eq!(state.right_panel_width, width_before);
+    }
 }

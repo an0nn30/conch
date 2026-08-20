@@ -11,12 +11,18 @@ use tauri::Manager;
 use super::{RemoteState, session_key};
 
 /// The label under which this caller's SSH sessions are keyed. A chooser
-/// window browses on behalf of its parent, so it resolves to the parent's
-/// label (sessions are keyed `<parent>:<pane>`; the chooser's own label
-/// matches nothing — that shipped as "No SSH session for chooser-…"). Every
-/// other window resolves to itself.
+/// window or a popped-out panel host window browses on behalf of its parent,
+/// so either resolves to the parent's label (sessions are keyed
+/// `<parent>:<pane>`; a secondary window's own label matches nothing — the
+/// chooser half of this shipped as "No SSH session for chooser-…"). Every
+/// other window resolves to itself. See
+/// `window_registry_resolver::effective_session_window_label` for the shared
+/// resolution this delegates to.
 fn session_caller_label(window: &tauri::WebviewWindow) -> String {
-    crate::chooser_window::effective_session_window_label(window.app_handle(), window.label())
+    crate::window_registry_resolver::effective_session_window_label(
+        window.app_handle(),
+        window.label(),
+    )
 }
 
 // ---------------------------------------------------------------------------

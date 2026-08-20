@@ -228,6 +228,22 @@ impl PanelHostRegistry {
             None => false,
         }
     }
+
+    /// The window label whose sessions a caller may use — the panel-host twin
+    /// of `chooser_window::ChooserRegistry::session_label_for_caller`. A
+    /// popped-out tool window acts ON BEHALF OF its parent (an SSH-sessions
+    /// tool window browsing the parent's SFTP tree, for instance), so a
+    /// session-scoped command invoked from the host webview must resolve to
+    /// the parent's label, not its own. Any other caller — including a stale
+    /// `panelhost-*` label whose entry has been removed (docked back,
+    /// displaced, or the parent died) — maps to itself, so a stale caller
+    /// reproduces the ordinary "no session" error rather than borrowing a
+    /// session it no longer represents.
+    pub(crate) fn session_label_for_caller(&self, caller_label: &str) -> String {
+        self.get_by_window_label(caller_label)
+            .map(|e| e.parent_label.clone())
+            .unwrap_or_else(|| caller_label.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +448,24 @@ mod tests {
             r.get_by_window_label(&p.window_label).is_none(),
             "a second abort of the same window is a no-op, not a double-teardown"
         );
+    }
+
+    #[test]
+    fn session_label_for_caller_maps_a_live_host_to_its_parent_only() {
+        // Registry-level mirror of
+        // `chooser_window::tests::session_label_for_caller_maps_a_live_chooser_to_its_parent_only`:
+        // a live host's WINDOW label resolves to its parent, the parent and
+        // an unrelated window map to themselves, and a STALE host label
+        // (entry removed) also maps to itself rather than borrowing whatever
+        // now lives at that key.
+        let mut r = PanelHostRegistry::default();
+        let (_, live) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        assert_eq!(r.session_label_for_caller(&live.window_label), "window-1");
+        assert_eq!(r.session_label_for_caller("window-1"), "window-1");
+        assert_eq!(r.session_label_for_caller("window-2"), "window-2");
+        let stale = live.window_label.clone();
+        r.remove("window-1", "ssh-sessions");
+        assert_eq!(r.session_label_for_caller(&stale), stale);
     }
 
     #[test]

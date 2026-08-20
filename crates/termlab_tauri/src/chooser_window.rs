@@ -235,17 +235,6 @@ impl ChooserRegistry {
     }
 }
 
-/// App-handle convenience over [`ChooserRegistry::session_label_for_caller`]
-/// for command layers outside this module (the SFTP commands).
-pub(crate) fn effective_session_window_label<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    caller_label: &str,
-) -> String {
-    app.state::<Mutex<ChooserRegistry>>()
-        .lock()
-        .session_label_for_caller(caller_label)
-}
-
 #[cfg(test)]
 impl ChooserRegistry {
     /// Test-readability shorthand; production code goes through `get` (it
