@@ -37,6 +37,7 @@ const FRONTEND = path.resolve(
 const FILES_PANEL_PATH = path.join(FRONTEND, 'panels/files-panel.js');
 const FILES_DATA_SERVICE_PATH = path.join(FRONTEND, 'features/files/data-service.js');
 const FILES_PANE_STORE_PATH = path.join(FRONTEND, 'features/files/pane-store.js');
+const FILES_ACTIONS_PATH = path.join(FRONTEND, 'features/files/actions.js');
 const PANE_VIEW_PATH = path.join(FRONTEND, 'features/files/pane-view.js');
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -140,12 +141,14 @@ function makeSessionsFixture() {
 
 // --- logic-harness factory --------------------------------------------
 
-// Builds a fresh vm context, loads the real pane-store/data-service/panel
-// modules into it, stubs termlabFilesPaneView.renderPane as a recording spy,
-// and runs filesPanel.init(). `invokeExtra(cmd, args)` may return a Promise
-// (or undefined to fall through to the default fixture responses) so each
-// scenario can override exactly the calls it cares about.
-async function setupLogicHarness(invokeExtra) {
+// Builds a fresh vm context, loads the real pane-store/data-service/actions/
+// panel modules into it, stubs termlabFilesPaneView.renderPane as a
+// recording spy, and runs filesPanel.init(). `invokeExtra(cmd, args)` may
+// return a Promise (or undefined to fall through to the default fixture
+// responses) so each scenario can override exactly the calls it cares
+// about. `opts.getActiveTab`, if given, replaces the default `() => null`
+// (used by the M1 cwd-poll scenario, which needs a focused ssh tab).
+async function setupLogicHarness(invokeExtra, opts = {}) {
   const invokeCalls = [];
   const renderCalls = []; // { pane, el, deps }
   const listeners = {}; // eventName -> handler, from opts.listen registrations
@@ -192,12 +195,16 @@ async function setupLogicHarness(invokeExtra) {
     showColumnMenu: () => {},
     showRowContextMenu: () => {},
   };
-  sandbox.termlabFilesActions = {};
   sandbox.termlabFilesTransfers = {};
 
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
   vm.runInContext(fs.readFileSync(FILES_DATA_SERVICE_PATH, 'utf8'), sandbox, { filename: FILES_DATA_SERVICE_PATH });
+  // Real actions.js (navigate/goBack/...), not a stub: the M1 poll-vs-pin
+  // scenario needs a genuine navigate() that mutates pane.currentPath and
+  // drives loadEntries, so it can tell "the poll navigated the pinned pane"
+  // apart from "navigate is a no-op in this harness".
+  vm.runInContext(fs.readFileSync(FILES_ACTIONS_PATH, 'utf8'), sandbox, { filename: FILES_ACTIONS_PATH });
   vm.runInContext(fs.readFileSync(FILES_PANEL_PATH, 'utf8'), sandbox, { filename: FILES_PANEL_PATH });
 
   const panelEl = makeElement('div');
@@ -216,7 +223,7 @@ async function setupLogicHarness(invokeExtra) {
     resizeHandleEl: makeElement('div'),
     layoutService: null,
     fitActiveTab: () => {},
-    getActiveTab: () => null,
+    getActiveTab: opts.getActiveTab || (() => null),
     listen: (name, handler) => { listeners[name] = handler; },
   });
   await settle();
@@ -602,6 +609,110 @@ function lastRemoteCall(renderCalls) {
     'the vanished session must no longer appear in the combo options',
   );
   console.log('10. remote-sessions-changed drops a vanished pin: ok');
+}
+
+// --- 11 (M1). The remote cwd-follow poll must not navigate a PINNED pane --
+// off the ACTIVE TAB's cwd — that would yank a pane pinned to host A onto
+// host B's cwd interpreted as a path on host A (wrong listing / error
+// loop). Unpinning must restore the poll's normal navigate-on-cwd-change
+// behavior on the very next tick. ------------------------------------------
+{
+  const h = await setupLogicHarness(
+    (cmd) => {
+      if (cmd === 'ssh_get_pane_cwd') return Promise.resolve('/tab/on/host-b');
+      return undefined;
+    },
+    { getActiveTab: () => ({ type: 'ssh', spawned: true, paneId: 42 }) },
+  );
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  h.invokeCalls.length = 0;
+
+  // Simulate a poll tick while pinned: the focused TAB (paneId 42) is a
+  // different session than the pin (main:1000007).
+  await h.sandbox.filesPanel.pollActiveRemotePaneCwd(42);
+  await settle();
+
+  assert.ok(
+    !h.invokeCalls.some((c) => c.cmd === 'ssh_get_pane_cwd'),
+    'the poll must not even query the focused tab cwd while the remote pane is pinned',
+  );
+  assert.ok(
+    !h.invokeCalls.some((c) => c.cmd === 'sftp_list_dir'),
+    'the poll must not navigate/list the pinned pane off the focused tab cwd',
+  );
+  assert.equal(
+    lastRemoteCall(h.renderCalls).deps.hostComboValue, 'main:1000007',
+    'the pin must still hold after the suppressed poll tick',
+  );
+
+  // Unpin: the very next poll tick must resume normal navigate-on-cwd-change
+  // behavior (mirrors scenario 8's onTabChanged-after-unpin check).
+  await h.sandbox.filesPanel.pinRemotePane(null);
+  await settle();
+  h.invokeCalls.length = 0;
+
+  await h.sandbox.filesPanel.pollActiveRemotePaneCwd(42);
+  await settle();
+
+  assert.ok(
+    h.invokeCalls.some((c) => c.cmd === 'ssh_get_pane_cwd'),
+    'after unpinning, the poll must query the focused tab cwd again',
+  );
+  assert.ok(
+    h.invokeCalls.some((c) => c.cmd === 'sftp_list_dir'),
+    'after unpinning, the poll must navigate on a cwd change again',
+  );
+  console.log('11. M1: cwd-follow poll gated on the pin, resumes after unpin: ok');
+}
+
+// --- 12 (L1). refreshHostCombo must not clear a still-in-flight busy state
+// on an UNRELATED remote-sessions-changed event (another window's own
+// connect/disconnect); it clears busy only once the busy entry's own
+// session actually shows up in the refreshed sessions list. ----------------
+{
+  let resolveConnect;
+  const pending = new Promise((resolve) => { resolveConnect = resolve; });
+  const h = await setupLogicHarness((cmd) => {
+    if (cmd === 'sftp_connect_host') return pending;
+    return undefined;
+  });
+  await h.listeners['remote-sessions-changed']();
+  await settle();
+  const deps = lastRemoteCall(h.renderCalls).deps;
+
+  const picked = deps.onHostComboChange('e-personal'); // host vps.example.com:22
+  await settle(1);
+  assert.equal(lastRemoteCall(h.renderCalls).deps.hostComboBusy, true, 'connect must render busy while in flight');
+
+  // An unrelated sessions-changed event fires mid-flight. The refreshed
+  // list still has no session for vps.example.com:22 — the racing connect
+  // hasn't landed.
+  await h.listeners['remote-sessions-changed']();
+  await settle();
+  assert.equal(
+    lastRemoteCall(h.renderCalls).deps.hostComboBusy, true,
+    'an unrelated sessions-changed event mid-flight must not clear busy',
+  );
+
+  // Now the busy entry's own session appears (as if the in-flight connect
+  // just landed and this window is only now hearing about it).
+  h.setSessionsFixture(makeSessionsFixture().concat([
+    { key: 'main:1000088', host: 'vps.example.com', user: 'me', port: 22 },
+  ]));
+  await h.listeners['remote-sessions-changed']();
+  await settle();
+  assert.equal(
+    lastRemoteCall(h.renderCalls).deps.hostComboBusy, false,
+    "busy clears once the busy entry's session appears in the refreshed list",
+  );
+
+  // Let the original connect settle too so nothing is left dangling.
+  resolveConnect({ sessionKey: 'main:1000088', host: 'vps.example.com', user: 'me', port: 22, paneId: 1000088 });
+  await picked;
+  await settle();
+  console.log("12. L1: busy-clear scoped to the busy entry's session appearing: ok");
 }
 
 console.log('sftp connect part 1 (host dropdown + pinning): all assertions passed');

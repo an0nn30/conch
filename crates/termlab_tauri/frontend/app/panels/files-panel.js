@@ -152,6 +152,42 @@
     return options.concat(buildConfiguredHostOptions(servers));
   }
 
+  // A server entry, by id, across folders/ungrouped/ssh_config — used only
+  // by refreshHostCombo's busy-clear scoping (L1) to recognize when a
+  // still-busy connect's target session has appeared. Mirrors connect-
+  // auth.js's own findServerEntry (duplicated rather than shared: that
+  // module's helper is private, and this one only needs an id lookup).
+  function findServerEntryById(servers, entryId) {
+    const data = servers && typeof servers === 'object'
+      ? servers
+      : { folders: [], ungrouped: [], ssh_config: [] };
+    const folders = Array.isArray(data.folders) ? data.folders : [];
+    for (let i = 0; i < folders.length; i += 1) {
+      const entries = Array.isArray(folders[i].entries) ? folders[i].entries : [];
+      const hit = entries.find((e) => e && e.id === entryId);
+      if (hit) return hit;
+    }
+    const ungrouped = Array.isArray(data.ungrouped) ? data.ungrouped : [];
+    const ungroupedHit = ungrouped.find((e) => e && e.id === entryId);
+    if (ungroupedHit) return ungroupedHit;
+    const sshConfig = Array.isArray(data.ssh_config) ? data.ssh_config : [];
+    return sshConfig.find((e) => e && e.id === entryId) || null;
+  }
+
+  // Whether `session` (an ActiveSession from remote_get_sessions — key,
+  // host, user, port; no server_entry_id, that would be a Rust change and
+  // is out of scope here) looks like the session a connect to `entry` (a
+  // ServerEntry) would produce. Host+port is the strong signal; user is
+  // checked too when the entry pins one. Good enough to recognize "the busy
+  // connect landed" without false-clearing on an unrelated session.
+  function sessionMatchesEntry(session, entry) {
+    if (!session || !entry) return false;
+    if (session.host !== entry.host) return false;
+    if (session.port !== entry.port) return false;
+    if (entry.user && session.user !== entry.user) return false;
+    return true;
+  }
+
   function computeHostComboState() {
     return {
       hostOptions: buildHostComboOptions(cachedSessions, cachedServers),
@@ -292,11 +328,25 @@
 
   // Refetch servers + sessions and rebuild the combo. Runs at init and on
   // every remote-sessions-changed event (connect/disconnect/window-cleanup
-  // — see detached_commands.rs's emit_sessions_changed). A pin whose session
-  // vanished (the host disconnected out from under it) drops back to follow
-  // mode with an error note; a still-in-flight busy connect clears here too,
-  // since a sessions-changed event is exactly what a resolved in-flight
-  // connect (success OR the caller giving up) produces.
+  // — see detached_commands.rs's emit_sessions_changed). The event is
+  // app-wide, not scoped to this window or this connect, so it is not by
+  // itself proof that THIS window's busy connect resolved (L1). connectToHost
+  // already clears hostConnectBusyEntryId directly on its own resolution
+  // paths (success at :223, chain-return — success or the chain giving up —
+  // at :253); the only busy state left standing here is the
+  // `connectInProgress` case, deliberately left set because a connect for
+  // this same (window, entry) is already running elsewhere. That case is
+  // cleared below ONLY once the busy entry's session actually shows up in
+  // the refreshed list — an unrelated sessions-changed event (another
+  // window's connect/disconnect, or this window's own event racing ahead of
+  // this refresh) must not re-enable the combo out from under a connect
+  // that is still in flight. A failed winner emits no event at all (Rust
+  // only emits on success/disconnect/window-destroy), so a busy connect
+  // left waiting on a failed racer never gets this clear — it stays busy
+  // until the user's own next pick or another session change; see L2. A pin
+  // whose session vanished (the host disconnected out from under it) drops
+  // back to follow mode with an error note, unrelated to the busy handling
+  // above.
   async function refreshHostCombo() {
     if (!hasPanelDom()) return;
     try {
@@ -314,7 +364,12 @@
       // Keep the previous cache; the next event retries.
     }
 
-    hostConnectBusyEntryId = null;
+    if (hostConnectBusyEntryId) {
+      const busyEntry = findServerEntryById(cachedServers, hostConnectBusyEntryId);
+      if (busyEntry && cachedSessions.some((s) => sessionMatchesEntry(s, busyEntry))) {
+        hostConnectBusyEntryId = null;
+      }
+    }
 
     if (pinnedSessionKey && !cachedSessions.some((s) => s && s.key === pinnedSessionKey)) {
       pinnedSessionKey = null;
@@ -551,6 +606,14 @@
   }
 
   function pollActiveRemotePaneCwd(paneId) {
+    // Mirrors onTabChanged's pin gate (:480): while pinned, the remote pane
+    // is bound directly to pinnedSessionKey and must never be re-navigated
+    // by the focused TAB's cwd — this poll runs off getActivePaneIdForType
+    // ('ssh'), which tracks the focused tab regardless of the pin, so
+    // without this gate a pinned pane would get yanked onto the focused
+    // tab's cwd as a path on the PINNED host (M1: wrong listing / error
+    // loop). Bail before even invoking, same as onTabChanged's early return.
+    if (pinnedSessionKey) return;
     if (!invoke || remoteCwdPollInFlight || paneId == null) return;
     const activePaneId = getActivePaneIdForType('ssh');
     if (activePaneId !== paneId) return;
@@ -1228,5 +1291,12 @@
   const esc = window.utils.esc;
   const attr = window.utils.attr;
 
-  exports.filesPanel = { init, togglePanel, isHidden, onTabChanged, pinRemotePane };
+  // pollActiveRemotePaneCwd is exported only so test_sftp_connect.mjs can
+  // drive the 600ms poll's callback directly (the harness stubs
+  // setInterval/clearInterval to a no-op — see setupLogicHarness — so the
+  // real timer never fires there); it is not part of the module's runtime
+  // API surface otherwise.
+  exports.filesPanel = {
+    init, togglePanel, isHidden, onTabChanged, pinRemotePane, pollActiveRemotePaneCwd,
+  };
 })(window);
