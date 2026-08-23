@@ -715,6 +715,42 @@ function lastRemoteCall(renderCalls) {
   console.log("12. L1: busy-clear scoped to the busy entry's session appearing: ok");
 }
 
+// --- 12b. Directory loads may finish out of order. An older response must not
+// replace a newer listing after back-to-back transfer completion refreshes. --
+{
+  const listingResolvers = [];
+  let deferListings = false;
+  const h = await setupLogicHarness((cmd) => {
+    if (cmd === 'sftp_list_dir' && deferListings) {
+      return new Promise((resolve) => { listingResolvers.push(resolve); });
+    }
+    return undefined;
+  });
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  const rendered = lastRemoteCall(h.renderCalls);
+  deferListings = true;
+
+  const olderLoad = rendered.deps.onRefresh();
+  const newerLoad = rendered.deps.onRefresh();
+  await settle(1);
+  assert.equal(listingResolvers.length, 2, 'both refresh requests must be in flight');
+
+  listingResolvers[1]([{ name: 'latest.txt', is_dir: false, size: 9, modified: 2 }]);
+  await newerLoad;
+  assert.equal(rendered.pane.entries[0].name, 'latest.txt', 'the newer response becomes visible');
+
+  listingResolvers[0]([{ name: 'stale.txt', is_dir: false, size: 5, modified: 1 }]);
+  await olderLoad;
+  assert.equal(
+    rendered.pane.entries[0].name,
+    'latest.txt',
+    'a superseded response must not overwrite the latest listing',
+  );
+  console.log('12b. out-of-order directory loads keep the newest listing: ok');
+}
+
 console.log('sftp connect part 1 (host dropdown + pinning): all assertions passed');
 
 // =============================================================================

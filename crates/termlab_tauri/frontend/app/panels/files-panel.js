@@ -650,6 +650,8 @@
 
   async function loadEntries(pane) {
     if (!hasPanelDom()) return;
+    const generation = (pane.loadGeneration || 0) + 1;
+    pane.loadGeneration = generation;
     pane.error = null;
     pane.loading = true;
     const el = getPaneRoot(`#fp-${pane.prefix}`);
@@ -657,24 +659,28 @@
 
     try {
       let entries;
+      const path = pane.currentPath;
       if (pane.isLocal) {
         entries = filesDataService && typeof filesDataService.listLocalDir === 'function'
-          ? await filesDataService.listLocalDir(invoke, pane.currentPath)
+          ? await filesDataService.listLocalDir(invoke, path)
           : await Promise.reject(new Error('Files data service unavailable: listLocalDir'));
       } else {
-        if (!activeRemotePaneId) {
+        const paneId = activeRemotePaneId;
+        if (!paneId) {
           pane.entries = [];
           pane.loading = false;
           renderPane(pane, el);
           return;
         }
         entries = filesDataService && typeof filesDataService.listRemoteDir === 'function'
-          ? await filesDataService.listRemoteDir(invoke, activeRemotePaneId, pane.currentPath)
+          ? await filesDataService.listRemoteDir(invoke, paneId, path)
           : await Promise.reject(new Error('Files data service unavailable: listRemoteDir'));
       }
+      if (pane.loadGeneration !== generation) return;
       pane.entries = entries;
       sortEntries(pane);
     } catch (e) {
+      if (pane.loadGeneration !== generation) return;
       pane.error = String(e);
       pane.entries = [];
     }

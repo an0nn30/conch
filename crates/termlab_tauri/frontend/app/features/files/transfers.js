@@ -101,7 +101,14 @@
         removeTransferToast(progress.transfer_id);
         showCompletionToast(progress.file_name, progress.kind);
         pane.transferStatus[progress.file_name] = { status: 'completed', percent: 100 };
-        if (typeof d.loadEntries === 'function') d.loadEntries(pane);
+        // A source file can change outside TermLab while its directory remains
+        // open. Refresh both sides only after the backend has flushed and
+        // closed the transfer handles, so neither pane keeps the snapshot it
+        // had before this transfer.
+        if (typeof d.loadEntries === 'function') {
+          if (d.localPane) d.loadEntries(d.localPane);
+          if (d.remotePane && d.remotePane !== d.localPane) d.loadEntries(d.remotePane);
+        }
         return;
       }
 

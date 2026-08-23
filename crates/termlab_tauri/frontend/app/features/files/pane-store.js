@@ -19,6 +19,9 @@
       colModified: false,
       error: null,
       loading: false,
+      // Monotonic token used to discard directory responses superseded by a
+      // newer refresh or navigation request.
+      loadGeneration: 0,
       // Transfer state per entry: { [name]: { status, percent } }
       transferStatus: {},
     };

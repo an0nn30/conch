@@ -16,6 +16,38 @@ use crate::handler::TermLabSshHandler;
 use crate::sftp;
 use crate::sftp::open_sftp;
 
+/// Flush and close a remote file before the transfer is reported complete.
+///
+/// `russh-sftp::client::File` documents that callers must explicitly shut the
+/// handle down. Dropping it only schedules a close in the background, which
+/// can let the completion event and directory refresh race ahead of the
+/// server making the new contents visible.
+async fn finalize_remote_write<W>(file: &mut W, operation: &str) -> Result<(), RemoteError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+
+    file.flush()
+        .await
+        .map_err(|e| RemoteError::Transfer(format!("{operation}: flush failed: {e}")))?;
+    file.shutdown()
+        .await
+        .map_err(|e| RemoteError::Transfer(format!("{operation}: close failed: {e}")))?;
+    Ok(())
+}
+
+async fn close_remote_file<W>(file: &mut W, operation: &str) -> Result<(), RemoteError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+
+    file.shutdown()
+        .await
+        .map_err(|e| RemoteError::Transfer(format!("{operation}: close failed: {e}")))
+}
+
 // ---------------------------------------------------------------------------
 // Transfer types
 // ---------------------------------------------------------------------------
@@ -236,6 +268,9 @@ async fn download_file(
         }
     }
 
+    close_remote_file(&mut remote_file, "finish remote download").await?;
+    std::io::Write::flush(&mut local_file)?;
+
     Ok(bytes_transferred)
 }
 
@@ -382,12 +417,69 @@ async fn upload_file(
         }
     }
 
+    finalize_remote_write(&mut remote_file, "finish remote upload").await?;
+
     Ok(bytes_transferred)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    struct FinalizationWriter {
+        operations: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl tokio::io::AsyncWrite for FinalizationWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.operations.lock().push("flush");
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.operations.lock().push("shutdown");
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn finalizing_remote_file_flushes_then_closes_the_handle() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = FinalizationWriter {
+            operations: Arc::clone(&operations),
+        };
+
+        finalize_remote_write(&mut writer, "finish test transfer")
+            .await
+            .unwrap();
+
+        assert_eq!(*operations.lock(), vec!["flush", "shutdown"]);
+    }
+
+    #[tokio::test]
+    async fn closing_remote_read_handle_only_shuts_it_down() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = FinalizationWriter {
+            operations: Arc::clone(&operations),
+        };
+
+        close_remote_file(&mut writer, "finish test download")
+            .await
+            .unwrap();
+
+        assert_eq!(*operations.lock(), vec!["shutdown"]);
+    }
 
     #[test]
     fn transfer_progress_serializes() {
