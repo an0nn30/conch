@@ -300,7 +300,16 @@ pub(crate) enum LspUnavailableReason {
     NotBundledYet { adapter_id: String },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
-    ResourceUnavailable { adapter_id: String, detail: String },
+    MissingResource {
+        adapter_id: String,
+        relative_path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    CorruptResource {
+        adapter_id: String,
+        relative_path: String,
+    },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     UnsupportedPlatform { expected: String, actual: String },
@@ -331,6 +340,7 @@ pub(crate) struct LspStatus {
     pub project_root_uri: Option<String>,
     pub state: LspSessionState,
     pub message: Option<String>,
+    pub unavailable_reason: Option<LspUnavailableReason>,
     pub capabilities: LspCapabilities,
     pub error_count: u32,
     pub warning_count: u32,
@@ -359,8 +369,8 @@ pub(crate) struct ResyncDocumentResponse {
 mod tests {
     use super::{
         ApplyChangesResponse, CompletionItem, CompletionTextEdit, Diagnostic, EditorLocation,
-        EditorPosition, EditorRange, HoverBlock, LspChangeBatch, LspStatus, LspTextChange,
-        ProjectCandidate, SignatureHelpResponse,
+        EditorPosition, EditorRange, HoverBlock, LspCapabilities, LspChangeBatch, LspSessionState,
+        LspStatus, LspTextChange, LspUnavailableReason, ProjectCandidate, SignatureHelpResponse,
     };
     use ts_rs::TS;
 
@@ -402,6 +412,83 @@ mod tests {
         ] {
             assert!(declaration.starts_with("type ") || declaration.starts_with("interface "));
         }
+    }
+
+    #[test]
+    fn unavailable_reasons_serialize_in_exact_camel_case_and_export_to_typescript() {
+        let values = [
+            (
+                LspUnavailableReason::NotBundledYet {
+                    adapter_id: "json".into(),
+                },
+                serde_json::json!({ "kind": "notBundledYet", "adapterId": "json" }),
+            ),
+            (
+                LspUnavailableReason::MissingResource {
+                    adapter_id: "rust".into(),
+                    relative_path: "manifest.json".into(),
+                },
+                serde_json::json!({ "kind": "missingResource", "adapterId": "rust", "relativePath": "manifest.json" }),
+            ),
+            (
+                LspUnavailableReason::CorruptResource {
+                    adapter_id: "typescript".into(),
+                    relative_path: "node/bin/node".into(),
+                },
+                serde_json::json!({ "kind": "corruptResource", "adapterId": "typescript", "relativePath": "node/bin/node" }),
+            ),
+            (
+                LspUnavailableReason::UnsupportedPlatform {
+                    expected: "macOS".into(),
+                    actual: "linux".into(),
+                },
+                serde_json::json!({ "kind": "unsupportedPlatform", "expected": "macOS", "actual": "linux" }),
+            ),
+            (
+                LspUnavailableReason::UnsupportedArchitecture {
+                    expected: "arm64".into(),
+                    actual: "x86_64".into(),
+                },
+                serde_json::json!({ "kind": "unsupportedArchitecture", "expected": "arm64", "actual": "x86_64" }),
+            ),
+        ];
+        for (value, expected) in values {
+            assert_eq!(serde_json::to_value(value).unwrap(), expected);
+        }
+        let declaration = LspUnavailableReason::decl(&ts_rs::Config::default());
+        assert!(declaration.contains("notBundledYet"));
+        assert!(declaration.contains("relativePath"));
+        assert!(LspStatus::decl(&ts_rs::Config::default()).contains("unavailableReason"));
+    }
+
+    #[test]
+    fn unavailable_reason_is_optional_on_normalized_lsp_status() {
+        let status = LspStatus {
+            revision: 1,
+            document_id: None,
+            session_id: None,
+            adapter_id: Some("json".into()),
+            project_root_uri: None,
+            state: LspSessionState::Unavailable,
+            message: None,
+            unavailable_reason: Some(LspUnavailableReason::NotBundledYet {
+                adapter_id: "json".into(),
+            }),
+            capabilities: LspCapabilities {
+                completion: false,
+                hover: false,
+                signature_help: false,
+                definition: false,
+                diagnostics: false,
+            },
+            error_count: 0,
+            warning_count: 0,
+        };
+
+        assert_eq!(
+            serde_json::to_value(status).unwrap()["unavailableReason"],
+            serde_json::json!({ "kind": "notBundledYet", "adapterId": "json" })
+        );
     }
 
     #[test]

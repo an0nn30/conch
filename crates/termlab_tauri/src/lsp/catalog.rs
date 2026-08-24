@@ -1,8 +1,8 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::root::LanguageId;
@@ -13,6 +13,8 @@ const X86_64: u32 = 0x0100_0007;
 const MACHO_64_LE: u32 = 0xfeed_facf;
 const LC_BUILD_VERSION: u32 = 0x32;
 const PLATFORM_MACOS: u32 = 1;
+const MH_EXECUTE: u32 = 2;
+const INSTALLED_RECEIPT_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PocAvailability {
@@ -26,6 +28,142 @@ pub(crate) struct PackagedMetadata {
     pub upstream_url: &'static str,
     pub license: &'static str,
     pub notices_file: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdapterTimeouts {
+    pub initialize: Duration,
+    pub shutdown: Duration,
+    pub smoke_test: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootStrategy {
+    JavaScript,
+    Json,
+    Python,
+    Rust,
+    Go,
+    Clangd,
+    Java,
+}
+
+impl RootStrategy {
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::JavaScript => "javascript",
+            Self::Json => "json",
+            Self::Python => "python",
+            Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Clangd => "clangd",
+            Self::Java => "java",
+        }
+    }
+
+    pub(crate) const fn markers(self) -> &'static [&'static str] {
+        match self {
+            Self::JavaScript => &[
+                "tsconfig.json",
+                "jsconfig.json",
+                "package.json",
+                "pnpm-workspace.yaml",
+                "lerna.json",
+                "nx.json",
+            ],
+            Self::Json => &["package.json", "tsconfig.json", "jsconfig.json", ".git"],
+            Self::Python => &[
+                "pyproject.toml",
+                "setup.cfg",
+                "setup.py",
+                "tox.ini",
+                "Pipfile",
+                "poetry.lock",
+                "uv.lock",
+                ".git",
+            ],
+            Self::Rust => &["Cargo.toml"],
+            Self::Go => &["go.work", "go.mod"],
+            Self::Clangd => &[
+                "compile_commands.json",
+                "compile_flags.txt",
+                ".clangd",
+                "CMakeLists.txt",
+                "meson.build",
+                ".git",
+            ],
+            Self::Java => &[
+                "pom.xml",
+                "settings.gradle",
+                "settings.gradle.kts",
+                "build.gradle",
+                "build.gradle.kts",
+                ".project",
+                ".git",
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilePattern {
+    Extension(&'static str),
+    FileName(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileBinding {
+    pub pattern: FilePattern,
+    pub language: LanguageId,
+    pub lsp_language_id: &'static str,
+}
+
+impl FileBinding {
+    fn matches(self, path: &Path) -> bool {
+        match self.pattern {
+            FilePattern::Extension(extension) => path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension)),
+            FilePattern::FileName(file_name) => path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(file_name)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedFileBinding {
+    pub adapter_id: &'static str,
+    pub language: LanguageId,
+    pub lsp_language_id: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerNormalizationPolicy {
+    MergeWithServer,
+    StaticOnly,
+}
+
+impl TriggerNormalizationPolicy {
+    fn normalize(self, static_triggers: &[&str], server_triggers: &[String]) -> Vec<String> {
+        let mut normalized = Vec::new();
+        let mut append = |trigger: &str| {
+            if !trigger.is_empty() && !normalized.iter().any(|value| value == trigger) {
+                normalized.push(trigger.to_owned());
+            }
+        };
+        for trigger in static_triggers {
+            append(trigger);
+        }
+        if self == Self::MergeWithServer {
+            for trigger in server_triggers {
+                append(trigger);
+            }
+        }
+        normalized
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,18 +228,16 @@ impl ProgramLayout {
 pub(crate) struct AdapterDescriptor {
     pub adapter_id: &'static str,
     pub display_name: &'static str,
-    pub languages: &'static [LanguageId],
-    pub extensions: &'static [&'static str],
-    pub file_names: &'static [&'static str],
-    pub lsp_language_ids: &'static [&'static str],
-    pub root_markers: &'static [&'static str],
+    pub file_bindings: &'static [FileBinding],
+    pub root_strategy: RootStrategy,
     pub program: ProgramLayout,
     pub initialization_options_json: &'static str,
     pub workspace_configuration_json: &'static str,
     pub completion_trigger_characters: &'static [&'static str],
+    pub trigger_normalization: TriggerNormalizationPolicy,
     pub metadata: PackagedMetadata,
     pub availability: PocAvailability,
-    pub maximum_startup_time: Duration,
+    pub timeouts: AdapterTimeouts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +251,81 @@ pub(crate) struct ResolvedServerCommand {
 pub(crate) struct AdapterCachePaths {
     pub cache_dir: PathBuf,
     pub data_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostOperatingSystem {
+    MacOs,
+    Linux,
+    Windows,
+    Other,
+}
+
+impl HostOperatingSystem {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::MacOs => "macOS",
+            Self::Linux => "linux",
+            Self::Windows => "windows",
+            Self::Other => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostArchitecture {
+    Arm64,
+    X86_64,
+    Other,
+}
+
+impl HostArchitecture {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Arm64 => "arm64",
+            Self::X86_64 => "x86_64",
+            Self::Other => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostPlatform {
+    operating_system: HostOperatingSystem,
+    architecture: HostArchitecture,
+}
+
+impl HostPlatform {
+    pub(crate) const fn new(
+        operating_system: HostOperatingSystem,
+        architecture: HostArchitecture,
+    ) -> Self {
+        Self {
+            operating_system,
+            architecture,
+        }
+    }
+
+    fn current() -> Self {
+        Self::new(
+            if cfg!(target_os = "macos") {
+                HostOperatingSystem::MacOs
+            } else if cfg!(target_os = "linux") {
+                HostOperatingSystem::Linux
+            } else if cfg!(target_os = "windows") {
+                HostOperatingSystem::Windows
+            } else {
+                HostOperatingSystem::Other
+            },
+            if cfg!(target_arch = "aarch64") {
+                HostArchitecture::Arm64
+            } else if cfg!(target_arch = "x86_64") {
+                HostArchitecture::X86_64
+            } else {
+                HostArchitecture::Other
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +363,17 @@ pub(crate) enum CatalogUnavailable {
         adapter_id: String,
         relative_path: PathBuf,
     },
+    MissingReceipt {
+        adapter_id: String,
+    },
+    CorruptResource {
+        adapter_id: String,
+        relative_path: PathBuf,
+    },
+    CacheRootInsideProject {
+        adapter_id: String,
+        cache_root: PathBuf,
+    },
     NoResourceRoot,
 }
 
@@ -173,10 +395,46 @@ impl CatalogUnavailable {
                 expected: expected.clone(),
                 actual: actual.clone(),
             },
-            _ => LspUnavailableReason::ResourceUnavailable {
-                adapter_id: self.adapter_id().to_owned(),
-                detail: self.to_string(),
+            Self::MissingReceipt { adapter_id } => LspUnavailableReason::MissingResource {
+                adapter_id: adapter_id.clone(),
+                relative_path: "manifest.json".to_owned(),
             },
+            Self::MissingResource {
+                adapter_id,
+                relative_path,
+            } => LspUnavailableReason::MissingResource {
+                adapter_id: adapter_id.clone(),
+                relative_path: relative_path.display().to_string(),
+            },
+            Self::CorruptResource {
+                adapter_id,
+                relative_path,
+            }
+            | Self::ResourceIsNotAFile {
+                adapter_id,
+                relative_path,
+            }
+            | Self::ProgramNotExecutable {
+                adapter_id,
+                relative_path,
+            }
+            | Self::ResourceOutsideRoot {
+                adapter_id,
+                relative_path,
+            }
+            | Self::InvalidExecutable {
+                adapter_id,
+                relative_path,
+            } => LspUnavailableReason::CorruptResource {
+                adapter_id: adapter_id.clone(),
+                relative_path: relative_path.display().to_string(),
+            },
+            Self::CacheRootInsideProject { .. } | Self::NoResourceRoot => {
+                LspUnavailableReason::CorruptResource {
+                    adapter_id: self.adapter_id().to_owned(),
+                    relative_path: "resource-root".to_owned(),
+                }
+            }
         }
     }
 
@@ -190,6 +448,9 @@ impl CatalogUnavailable {
             | Self::UnsupportedArchitecture { adapter_id, .. }
             | Self::UnsupportedPlatform { adapter_id, .. }
             | Self::InvalidExecutable { adapter_id, .. } => adapter_id,
+            Self::MissingReceipt { adapter_id }
+            | Self::CorruptResource { adapter_id, .. }
+            | Self::CacheRootInsideProject { adapter_id, .. } => adapter_id,
             Self::NoResourceRoot => "unknown",
         }
     }
@@ -236,12 +497,50 @@ impl std::fmt::Display for CatalogUnavailable {
                 "bundled program {} is not a supported Mach-O executable",
                 relative_path.display()
             ),
+            Self::MissingReceipt { .. } => write!(formatter, "bundled LSP receipt is missing"),
+            Self::CorruptResource { relative_path, .. } => write!(
+                formatter,
+                "bundled resource {} failed integrity validation",
+                relative_path.display()
+            ),
+            Self::CacheRootInsideProject { cache_root, .. } => write!(
+                formatter,
+                "TermLab cache root {} is inside the project source tree",
+                cache_root.display()
+            ),
             Self::NoResourceRoot => write!(formatter, "no bundled LSP resource root is available"),
         }
     }
 }
 
 impl std::error::Error for CatalogUnavailable {}
+
+/// Versioned, packaging-generated receipt stored at `lsp/manifest.json`.
+/// It deliberately names every installed file by relative path and immutable
+/// digest so runtime resolution can fail closed without executing a program.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InstalledLspReceipt {
+    pub schema: u32,
+    pub platform: String,
+    pub architecture: String,
+    pub artifacts: Vec<ReceiptArtifact>,
+    pub files: Vec<ReceiptFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ReceiptArtifact {
+    pub id: String,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReceiptFile {
+    pub relative_path: String,
+    pub sha256: String,
+    pub size: u64,
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct BundledServerCatalog;
@@ -254,14 +553,54 @@ impl BundledServerCatalog {
     pub(crate) fn descriptor(&self, language: LanguageId) -> &'static AdapterDescriptor {
         DESCRIPTORS
             .iter()
-            .find(|descriptor| descriptor.languages.contains(&language))
+            .find(|descriptor| {
+                descriptor
+                    .file_bindings
+                    .iter()
+                    .any(|binding| binding.language == language)
+            })
             .expect("every curated LanguageId has an immutable catalog descriptor")
+    }
+
+    pub(crate) fn file_binding(&self, path: &Path) -> Option<ResolvedFileBinding> {
+        DESCRIPTORS.iter().find_map(|descriptor| {
+            descriptor
+                .file_bindings
+                .iter()
+                .copied()
+                .find(|binding| binding.matches(path))
+                .map(|binding| ResolvedFileBinding {
+                    adapter_id: descriptor.adapter_id,
+                    language: binding.language,
+                    lsp_language_id: binding.lsp_language_id,
+                })
+        })
+    }
+
+    pub(crate) fn normalize_completion_triggers(
+        &self,
+        language: LanguageId,
+        server_triggers: &[String],
+    ) -> Vec<String> {
+        let descriptor = self.descriptor(language);
+        descriptor
+            .trigger_normalization
+            .normalize(descriptor.completion_trigger_characters, server_triggers)
     }
 
     pub(crate) fn resolve(
         &self,
         language: LanguageId,
         resource_root: &Path,
+    ) -> Result<ResolvedServerCommand, CatalogUnavailable> {
+        self.resolve_for_host(language, resource_root, HostPlatform::current())
+    }
+
+    pub(crate) fn resolve_for_host(
+        &self,
+        language: LanguageId,
+        resource_root: &Path,
+        host: HostPlatform,
     ) -> Result<ResolvedServerCommand, CatalogUnavailable> {
         let descriptor = self.descriptor(language);
         if descriptor.availability == PocAvailability::NotBundledYet {
@@ -270,10 +609,20 @@ impl BundledServerCatalog {
             });
         }
 
+        validate_host(host, descriptor.adapter_id)?;
+
         let root = canonical_directory(resource_root, descriptor.adapter_id)?;
+        let receipt = load_receipt(&root, descriptor.adapter_id)?;
+        validate_receipt_identity(&receipt, descriptor.adapter_id)?;
         let program_relative_path = Path::new(descriptor.program.executable_relative_path());
         let program = resource_path(&root, program_relative_path, descriptor.adapter_id)?;
         require_file(&program, program_relative_path, descriptor.adapter_id)?;
+        validate_receipt_file(
+            &receipt,
+            &program,
+            program_relative_path,
+            descriptor.adapter_id,
+        )?;
         require_executable(&program, program_relative_path, descriptor.adapter_id)?;
         validate_macos_arm64_executable(&program, program_relative_path, descriptor.adapter_id)?;
 
@@ -281,6 +630,7 @@ impl BundledServerCatalog {
             let required_path = Path::new(required);
             let resource = resource_path(&root, required_path, descriptor.adapter_id)?;
             require_file(&resource, required_path, descriptor.adapter_id)?;
+            validate_receipt_file(&receipt, &resource, required_path, descriptor.adapter_id)?;
         }
 
         let args = descriptor
@@ -293,6 +643,12 @@ impl BundledServerCatalog {
                     let relative_path = Path::new(relative_path);
                     let absolute = resource_path(&root, relative_path, descriptor.adapter_id)?;
                     require_file(&absolute, relative_path, descriptor.adapter_id)?;
+                    validate_receipt_file(
+                        &receipt,
+                        &absolute,
+                        relative_path,
+                        descriptor.adapter_id,
+                    )?;
                     Ok(absolute)
                 }
             })
@@ -313,12 +669,14 @@ impl BundledServerCatalog {
     ) -> Result<AdapterCachePaths, CatalogUnavailable> {
         let descriptor = self.descriptor(language);
         let cache_root = canonical_directory(termlab_cache_root, descriptor.adapter_id)?;
-        let canonical_project_root = canonical_project_root.canonicalize().map_err(|_| {
-            CatalogUnavailable::MissingResource {
+        let canonical_project_root =
+            canonical_directory(canonical_project_root, descriptor.adapter_id)?;
+        if cache_root.starts_with(&canonical_project_root) {
+            return Err(CatalogUnavailable::CacheRootInsideProject {
                 adapter_id: descriptor.adapter_id.to_owned(),
-                relative_path: canonical_project_root.to_owned(),
-            }
-        })?;
+                cache_root,
+            });
+        }
         let mut hash = Sha256::new();
         hash.update(descriptor.adapter_id.as_bytes());
         hash.update([0]);
@@ -334,6 +692,143 @@ impl BundledServerCatalog {
             data_dir: base.join("data"),
         })
     }
+}
+
+fn validate_host(host: HostPlatform, adapter_id: &str) -> Result<(), CatalogUnavailable> {
+    if host.operating_system != HostOperatingSystem::MacOs {
+        return Err(CatalogUnavailable::UnsupportedPlatform {
+            adapter_id: adapter_id.to_owned(),
+            expected: "macOS".to_owned(),
+            actual: host.operating_system.name().to_owned(),
+        });
+    }
+    if host.architecture != HostArchitecture::Arm64 {
+        return Err(CatalogUnavailable::UnsupportedArchitecture {
+            adapter_id: adapter_id.to_owned(),
+            expected: "arm64".to_owned(),
+            actual: host.architecture.name().to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn load_receipt(root: &Path, adapter_id: &str) -> Result<InstalledLspReceipt, CatalogUnavailable> {
+    let receipt_path = root.join("manifest.json");
+    let contents = match fs::read(&receipt_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CatalogUnavailable::MissingReceipt {
+                adapter_id: adapter_id.to_owned(),
+            });
+        }
+        Err(_) => {
+            return Err(CatalogUnavailable::CorruptResource {
+                adapter_id: adapter_id.to_owned(),
+                relative_path: PathBuf::from("manifest.json"),
+            });
+        }
+    };
+    serde_json::from_slice(&contents).map_err(|_| CatalogUnavailable::CorruptResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: PathBuf::from("manifest.json"),
+    })
+}
+
+fn validate_receipt_identity(
+    receipt: &InstalledLspReceipt,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    if receipt.schema != INSTALLED_RECEIPT_SCHEMA
+        || receipt.platform != "macos"
+        || receipt.architecture != "arm64"
+        || receipt
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.id.is_empty() || artifact.version.is_empty())
+        || ![
+            ("node", "24.19.0"),
+            ("typescript-language-server", "6.0.0"),
+            ("typescript", "7.0.2"),
+            ("rust-analyzer", "2026-08-24"),
+        ]
+        .iter()
+        .all(|(id, version)| {
+            receipt
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == *id && artifact.version == *version)
+        })
+        || receipt
+            .files
+            .iter()
+            .any(|file| !is_safe_receipt_path(&file.relative_path) || !is_sha256(&file.sha256))
+    {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: PathBuf::from("manifest.json"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_receipt_file(
+    receipt: &InstalledLspReceipt,
+    path: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    let relative_path_text = relative_path.to_string_lossy();
+    let files = receipt
+        .files
+        .iter()
+        .filter(|file| file.relative_path == relative_path_text);
+    let mut files = files.peekable();
+    let Some(file) = files.next() else {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        });
+    };
+    if files.next().is_some()
+        || file.size == 0
+        || file.size
+            != fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(u64::MAX)
+        || !is_sha256(&file.sha256)
+    {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        });
+    }
+    let contents = fs::read(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
+    if format!("{:x}", Sha256::digest(contents)) != file.sha256 {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_safe_receipt_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -498,28 +993,15 @@ fn validate_macos_arm64_executable(
     relative_path: &Path,
     adapter_id: &str,
 ) -> Result<(), CatalogUnavailable> {
-    let mut bytes = [0u8; 4096];
-    let mut file = fs::File::open(path).map_err(|_| CatalogUnavailable::MissingResource {
+    let bytes = fs::read(path).map_err(|_| CatalogUnavailable::MissingResource {
         adapter_id: adapter_id.to_owned(),
         relative_path: relative_path.to_owned(),
     })?;
-    let count = file
-        .read(&mut bytes)
-        .map_err(|_| CatalogUnavailable::InvalidExecutable {
-            adapter_id: adapter_id.to_owned(),
-            relative_path: relative_path.to_owned(),
-        })?;
-    let bytes = &bytes[..count];
-    if read_u32(bytes, 0) != Some(MACHO_64_LE) {
-        return Err(CatalogUnavailable::InvalidExecutable {
-            adapter_id: adapter_id.to_owned(),
-            relative_path: relative_path.to_owned(),
-        });
+    if read_u32(&bytes, 0) != Some(MACHO_64_LE) {
+        return Err(corrupt_executable(adapter_id, relative_path));
     }
-    let cpu_type = read_u32(bytes, 4).ok_or_else(|| CatalogUnavailable::InvalidExecutable {
-        adapter_id: adapter_id.to_owned(),
-        relative_path: relative_path.to_owned(),
-    })?;
+    let cpu_type =
+        read_u32(&bytes, 4).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
     if cpu_type != ARM64 {
         return Err(CatalogUnavailable::UnsupportedArchitecture {
             adapter_id: adapter_id.to_owned(),
@@ -527,34 +1009,42 @@ fn validate_macos_arm64_executable(
             actual: cpu_type_name(cpu_type).to_owned(),
         });
     }
-    let ncmds = read_u32(bytes, 16).ok_or_else(|| CatalogUnavailable::InvalidExecutable {
-        adapter_id: adapter_id.to_owned(),
-        relative_path: relative_path.to_owned(),
-    })?;
+    if read_u32(&bytes, 12) != Some(MH_EXECUTE) {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    let ncmds =
+        read_u32(&bytes, 16).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+    let sizeofcmds =
+        read_u32(&bytes, 20).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+    if ncmds == 0 || ncmds > 1_024 || sizeofcmds < ncmds.saturating_mul(8) {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    let command_table_end = 32usize
+        .checked_add(sizeofcmds as usize)
+        .filter(|end| *end <= bytes.len())
+        .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
     let mut offset = 32usize;
     let mut platform = None;
     for _ in 0..ncmds {
-        let command =
-            read_u32(bytes, offset).ok_or_else(|| CatalogUnavailable::InvalidExecutable {
-                adapter_id: adapter_id.to_owned(),
-                relative_path: relative_path.to_owned(),
-            })?;
-        let size =
-            read_u32(bytes, offset + 4).ok_or_else(|| CatalogUnavailable::InvalidExecutable {
-                adapter_id: adapter_id.to_owned(),
-                relative_path: relative_path.to_owned(),
-            })? as usize;
-        if size < 8 || offset.checked_add(size).is_none_or(|end| end > bytes.len()) {
-            return Err(CatalogUnavailable::InvalidExecutable {
-                adapter_id: adapter_id.to_owned(),
-                relative_path: relative_path.to_owned(),
-            });
-        }
+        let command = read_u32(&bytes, offset)
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        let size = read_u32(&bytes, offset + 4)
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?
+            as usize;
+        let command_end = offset
+            .checked_add(size)
+            .filter(|end| size >= 8 && *end <= command_table_end)
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
         if command == LC_BUILD_VERSION {
-            platform = read_u32(bytes, offset + 8);
-            break;
+            if size < 24 {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            platform = read_u32(&bytes, offset + 8);
         }
-        offset += size;
+        offset = command_end;
+    }
+    if offset != command_table_end {
+        return Err(corrupt_executable(adapter_id, relative_path));
     }
     match platform {
         Some(PLATFORM_MACOS) => Ok(()),
@@ -563,10 +1053,14 @@ fn validate_macos_arm64_executable(
             expected: "macOS".to_owned(),
             actual: platform_name(actual).to_owned(),
         }),
-        None => Err(CatalogUnavailable::InvalidExecutable {
-            adapter_id: adapter_id.to_owned(),
-            relative_path: relative_path.to_owned(),
-        }),
+        None => Err(corrupt_executable(adapter_id, relative_path)),
+    }
+}
+
+fn corrupt_executable(adapter_id: &str, relative_path: &Path) -> CatalogUnavailable {
+    CatalogUnavailable::CorruptResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
     }
 }
 
@@ -625,30 +1119,152 @@ const TYPESCRIPT_REQUIRED_FILES: &[&str] = &[
     "typescript/node_modules/typescript/lib/typescript.js",
 ];
 
-const JAVASCRIPT_TYPESCRIPT_LANGUAGES: &[LanguageId] =
-    &[LanguageId::JavaScript, LanguageId::TypeScript];
+const TYPESCRIPT_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("js"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("mjs"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cjs"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("jsx"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascriptreact",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("ts"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("mts"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cts"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("tsx"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescriptreact",
+    },
+];
+
+const JSON_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("json"),
+        language: LanguageId::Json,
+        lsp_language_id: "json",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("jsonc"),
+        language: LanguageId::Json,
+        lsp_language_id: "jsonc",
+    },
+    FileBinding {
+        pattern: FilePattern::FileName("package.json"),
+        language: LanguageId::Json,
+        lsp_language_id: "json",
+    },
+];
+
+const PYTHON_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("py"),
+        language: LanguageId::Python,
+        lsp_language_id: "python",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("pyi"),
+        language: LanguageId::Python,
+        lsp_language_id: "python",
+    },
+];
+
+const RUST_FILE_BINDINGS: &[FileBinding] = &[FileBinding {
+    pattern: FilePattern::Extension("rs"),
+    language: LanguageId::Rust,
+    lsp_language_id: "rust",
+}];
+
+const GO_FILE_BINDINGS: &[FileBinding] = &[FileBinding {
+    pattern: FilePattern::Extension("go"),
+    language: LanguageId::Go,
+    lsp_language_id: "go",
+}];
+
+const CLANGD_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("c"),
+        language: LanguageId::C,
+        lsp_language_id: "c",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("h"),
+        language: LanguageId::C,
+        lsp_language_id: "c",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cc"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cp"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cpp"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cxx"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("hpp"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("hh"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("hxx"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+];
+
+const JAVA_FILE_BINDINGS: &[FileBinding] = &[FileBinding {
+    pattern: FilePattern::Extension("java"),
+    language: LanguageId::Java,
+    lsp_language_id: "java",
+}];
 
 const DESCRIPTORS: &[AdapterDescriptor] = &[
     AdapterDescriptor {
         adapter_id: "typescript",
         display_name: "TypeScript and JavaScript",
-        languages: JAVASCRIPT_TYPESCRIPT_LANGUAGES,
-        extensions: &["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"],
-        file_names: &[],
-        lsp_language_ids: &[
-            "javascript",
-            "javascriptreact",
-            "typescript",
-            "typescriptreact",
-        ],
-        root_markers: &[
-            "tsconfig.json",
-            "jsconfig.json",
-            "package.json",
-            "pnpm-workspace.yaml",
-            "lerna.json",
-            "nx.json",
-        ],
+        file_bindings: TYPESCRIPT_FILE_BINDINGS,
+        root_strategy: RootStrategy::JavaScript,
         program: ProgramLayout::Node {
             executable_relative_path: "node/bin/node",
             arguments: TYPESCRIPT_ARGUMENTS,
@@ -657,6 +1273,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         initialization_options_json: "{}",
         workspace_configuration_json: "{\"typescript\":{},\"javascript\":{}}",
         completion_trigger_characters: &[".", "'", "\"", "/", "@", "<"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "typescript-language-server 6.0.0; typescript 7.0.2; node 24.19.0",
             upstream_url: "https://github.com/typescript-language-server/typescript-language-server",
@@ -664,16 +1281,17 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
         availability: PocAvailability::Bundled,
-        maximum_startup_time: Duration::from_secs(15),
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
     },
     AdapterDescriptor {
         adapter_id: "json",
         display_name: "JSON",
-        languages: &[LanguageId::Json],
-        extensions: &["json", "jsonc"],
-        file_names: &[],
-        lsp_language_ids: &["json", "jsonc"],
-        root_markers: &["package.json", "tsconfig.json", "jsconfig.json", ".git"],
+        file_bindings: JSON_FILE_BINDINGS,
+        root_strategy: RootStrategy::Json,
         program: ProgramLayout::Node {
             executable_relative_path: "node/bin/node",
             arguments: &[
@@ -689,6 +1307,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         initialization_options_json: "{}",
         workspace_configuration_json: "{\"json\":{}}",
         completion_trigger_characters: &["\"", ":", ","],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "not bundled",
             upstream_url: "https://github.com/microsoft/vscode-languageserver-node",
@@ -696,25 +1315,17 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
         availability: PocAvailability::NotBundledYet,
-        maximum_startup_time: Duration::from_secs(15),
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
     },
     AdapterDescriptor {
         adapter_id: "python",
         display_name: "Python",
-        languages: &[LanguageId::Python],
-        extensions: &["py", "pyi"],
-        file_names: &[],
-        lsp_language_ids: &["python"],
-        root_markers: &[
-            "pyproject.toml",
-            "setup.cfg",
-            "setup.py",
-            "tox.ini",
-            "Pipfile",
-            "poetry.lock",
-            "uv.lock",
-            ".git",
-        ],
+        file_bindings: PYTHON_FILE_BINDINGS,
+        root_strategy: RootStrategy::Python,
         program: ProgramLayout::Node {
             executable_relative_path: "node/bin/node",
             arguments: &[
@@ -726,6 +1337,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         initialization_options_json: "{}",
         workspace_configuration_json: "{\"python\":{}}",
         completion_trigger_characters: &[".", "'", "\"", "/", "@"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "not bundled",
             upstream_url: "https://github.com/microsoft/pyright",
@@ -733,16 +1345,17 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
         availability: PocAvailability::NotBundledYet,
-        maximum_startup_time: Duration::from_secs(20),
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
     },
     AdapterDescriptor {
         adapter_id: "rust",
         display_name: "Rust",
-        languages: &[LanguageId::Rust],
-        extensions: &["rs"],
-        file_names: &[],
-        lsp_language_ids: &["rust"],
-        root_markers: &["Cargo.toml"],
+        file_bindings: RUST_FILE_BINDINGS,
+        root_strategy: RootStrategy::Rust,
         program: ProgramLayout::Native {
             executable_relative_path: "rust-analyzer/rust-analyzer",
             arguments: &[],
@@ -750,6 +1363,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         initialization_options_json: "{}",
         workspace_configuration_json: "{\"rust-analyzer\":{}}",
         completion_trigger_characters: &[".", ":", "<"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "2026-08-24",
             upstream_url: "https://github.com/rust-lang/rust-analyzer",
@@ -757,16 +1371,17 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
         availability: PocAvailability::Bundled,
-        maximum_startup_time: Duration::from_secs(20),
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
     },
     AdapterDescriptor {
         adapter_id: "go",
         display_name: "Go",
-        languages: &[LanguageId::Go],
-        extensions: &["go"],
-        file_names: &["go.mod", "go.work"],
-        lsp_language_ids: &["go"],
-        root_markers: &["go.work", "go.mod"],
+        file_bindings: GO_FILE_BINDINGS,
+        root_strategy: RootStrategy::Go,
         program: ProgramLayout::Native {
             executable_relative_path: "gopls/gopls",
             arguments: &[],
@@ -774,6 +1389,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         initialization_options_json: "{}",
         workspace_configuration_json: "{\"gopls\":{}}",
         completion_trigger_characters: &["."],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "not bundled",
             upstream_url: "https://github.com/golang/tools/tree/master/gopls",
@@ -781,22 +1397,17 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
         availability: PocAvailability::NotBundledYet,
-        maximum_startup_time: Duration::from_secs(20),
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
     },
     AdapterDescriptor {
         adapter_id: "clangd",
         display_name: "C and C++",
-        languages: &[LanguageId::C, LanguageId::Cpp],
-        extensions: &["c", "h", "cc", "cp", "cpp", "cxx", "hpp", "hh", "hxx"],
-        file_names: &["compile_commands.json"],
-        lsp_language_ids: &["c", "cpp"],
-        root_markers: &[
-            "compile_commands.json",
-            "compile_flags.txt",
-            "CMakeLists.txt",
-            "meson.build",
-            ".git",
-        ],
+        file_bindings: CLANGD_FILE_BINDINGS,
+        root_strategy: RootStrategy::Clangd,
         program: ProgramLayout::Native {
             executable_relative_path: "clangd/clangd",
             arguments: &[],
@@ -804,6 +1415,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         initialization_options_json: "{}",
         workspace_configuration_json: "{\"clangd\":{}}",
         completion_trigger_characters: &[".", ":", ">"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "not bundled",
             upstream_url: "https://clangd.llvm.org/",
@@ -811,29 +1423,17 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
         availability: PocAvailability::NotBundledYet,
-        maximum_startup_time: Duration::from_secs(30),
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
     },
     AdapterDescriptor {
         adapter_id: "java",
         display_name: "Java",
-        languages: &[LanguageId::Java],
-        extensions: &["java"],
-        file_names: &[
-            "pom.xml",
-            "build.gradle",
-            "build.gradle.kts",
-            "settings.gradle",
-            "settings.gradle.kts",
-        ],
-        lsp_language_ids: &["java"],
-        root_markers: &[
-            "pom.xml",
-            "build.gradle",
-            "build.gradle.kts",
-            "settings.gradle",
-            "settings.gradle.kts",
-            ".git",
-        ],
+        file_bindings: JAVA_FILE_BINDINGS,
+        root_strategy: RootStrategy::Java,
         program: ProgramLayout::Java {
             executable_relative_path: "jre/bin/java",
             arguments: &[
@@ -845,6 +1445,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         initialization_options_json: "{}",
         workspace_configuration_json: "{\"java\":{}}",
         completion_trigger_characters: &["."],
+        trigger_normalization: TriggerNormalizationPolicy::StaticOnly,
         metadata: PackagedMetadata {
             version: "not bundled",
             upstream_url: "https://projects.eclipse.org/projects/eclipse.jdt.ls",
@@ -852,7 +1453,11 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
         availability: PocAvailability::NotBundledYet,
-        maximum_startup_time: Duration::from_secs(45),
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(120),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(20),
+        },
     },
 ];
 
@@ -860,12 +1465,15 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
+    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
     use super::{
-        BundledServerCatalog, CatalogUnavailable, ResourceResolutionMode, ResourceRootCandidates,
-        ResourceRootResolver, resource_path,
+        BundledServerCatalog, CatalogUnavailable, HostArchitecture, HostOperatingSystem,
+        HostPlatform, ResourceResolutionMode, ResourceRootCandidates, ResourceRootResolver,
+        resource_path,
     };
     use crate::lsp::root::LanguageId;
 
@@ -901,6 +1509,68 @@ mod tests {
         assert_eq!(
             catalog.descriptor(LanguageId::JavaScript).adapter_id,
             catalog.descriptor(LanguageId::TypeScript).adapter_id
+        );
+    }
+
+    #[test]
+    fn typed_file_bindings_unambiguously_choose_javascript_and_typescript_lsp_ids() {
+        let catalog = BundledServerCatalog::new();
+
+        for (name, language_id) in [
+            ("component.js", "javascript"),
+            ("component.jsx", "javascriptreact"),
+            ("component.ts", "typescript"),
+            ("component.tsx", "typescriptreact"),
+        ] {
+            let binding = catalog
+                .file_binding(Path::new(name))
+                .expect("typed file binding");
+            assert_eq!(binding.adapter_id, "typescript", "{name}");
+            assert_eq!(binding.lsp_language_id, language_id, "{name}");
+        }
+        assert_eq!(
+            catalog.descriptor(LanguageId::Rust).root_strategy.id(),
+            "rust"
+        );
+        assert_eq!(
+            catalog.descriptor(LanguageId::Json).root_strategy.id(),
+            "json"
+        );
+        assert_eq!(catalog.descriptor(LanguageId::Go).root_strategy.id(), "go");
+        assert!(
+            catalog
+                .descriptor(LanguageId::C)
+                .root_strategy
+                .markers()
+                .contains(&".clangd")
+        );
+        assert!(
+            catalog
+                .descriptor(LanguageId::Java)
+                .root_strategy
+                .markers()
+                .contains(&".project")
+        );
+        assert_eq!(
+            catalog.normalize_completion_triggers(
+                LanguageId::TypeScript,
+                &[".".into(), "?".into(), "?".into()],
+            ),
+            vec![".", "'", "\"", "/", "@", "<", "?"]
+        );
+    }
+
+    #[test]
+    fn descriptors_own_initialize_shutdown_and_smoke_test_timeouts() {
+        let catalog = BundledServerCatalog::new();
+
+        let typescript = catalog.descriptor(LanguageId::TypeScript);
+        assert_eq!(typescript.timeouts.initialize, Duration::from_secs(60));
+        assert_eq!(typescript.timeouts.shutdown, Duration::from_secs(3));
+        assert_eq!(typescript.timeouts.smoke_test, Duration::from_secs(10));
+        assert_eq!(
+            catalog.descriptor(LanguageId::Java).timeouts.initialize,
+            Duration::from_secs(120)
         );
     }
 
@@ -977,11 +1647,130 @@ mod tests {
         );
 
         resources.install_rust_analyzer(false);
+        resources.write_receipt();
         assert_eq!(
             catalog.resolve(LanguageId::Rust, resources.root()),
             Err(CatalogUnavailable::ProgramNotExecutable {
                 adapter_id: "rust".to_owned(),
                 relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+    }
+
+    #[test]
+    fn resolution_requires_a_versioned_receipt_and_rejects_corrupt_required_files() {
+        let resources = ResourceTree::new_without_receipt();
+        let catalog = BundledServerCatalog::new();
+
+        assert_eq!(
+            catalog.resolve(LanguageId::Rust, resources.root()),
+            Err(CatalogUnavailable::MissingReceipt {
+                adapter_id: "rust".to_owned(),
+            })
+        );
+
+        resources.write_receipt();
+        fs::write(
+            resources
+                .root()
+                .join("typescript/node_modules/typescript/lib/typescript.js"),
+            b"corrupt runtime",
+        )
+        .expect("corrupt TypeScript runtime");
+        assert_eq!(
+            catalog.resolve(LanguageId::TypeScript, resources.root()),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "typescript".to_owned(),
+                relative_path: PathBuf::from(
+                    "typescript/node_modules/typescript/lib/typescript.js"
+                ),
+            })
+        );
+
+        let empty_cli_resources = ResourceTree::new();
+        fs::write(
+            empty_cli_resources
+                .root()
+                .join("typescript/node_modules/typescript-language-server/lib/cli.mjs"),
+            b"",
+        )
+        .expect("empty TypeScript language server CLI");
+        empty_cli_resources.write_receipt();
+        assert_eq!(
+            catalog.resolve(LanguageId::TypeScript, empty_cli_resources.root()),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "typescript".to_owned(),
+                relative_path: PathBuf::from(
+                    "typescript/node_modules/typescript-language-server/lib/cli.mjs",
+                ),
+            })
+        );
+
+        assert_eq!(
+            CatalogUnavailable::MissingReceipt {
+                adapter_id: "rust".to_owned(),
+            }
+            .lsp_reason(),
+            crate::lsp::types::LspUnavailableReason::MissingResource {
+                adapter_id: "rust".to_owned(),
+                relative_path: "manifest.json".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn validation_rejects_header_only_truncated_and_non_executable_macho_programs() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        resources.install_rust_analyzer_bytes(&macho_header_only(), true);
+        resources.write_receipt();
+        assert_eq!(
+            catalog.resolve(LanguageId::Rust, resources.root()),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+
+        resources.install_rust_analyzer_bytes(&macho_with_file_type(1), true);
+        resources.write_receipt();
+        assert_eq!(
+            catalog.resolve(LanguageId::Rust, resources.root()),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+    }
+
+    #[test]
+    fn resolution_fails_before_resource_lookup_on_an_unsupported_host() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        assert_eq!(
+            catalog.resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                HostPlatform::new(HostOperatingSystem::Linux, HostArchitecture::Arm64),
+            ),
+            Err(CatalogUnavailable::UnsupportedPlatform {
+                adapter_id: "rust".to_owned(),
+                expected: "macOS".to_owned(),
+                actual: "linux".to_owned(),
+            })
+        );
+        assert_eq!(
+            catalog.resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                HostPlatform::new(HostOperatingSystem::MacOs, HostArchitecture::X86_64),
+            ),
+            Err(CatalogUnavailable::UnsupportedArchitecture {
+                adapter_id: "rust".to_owned(),
+                expected: "arm64".to_owned(),
+                actual: "x86_64".to_owned(),
             })
         );
     }
@@ -1017,6 +1806,7 @@ mod tests {
         let catalog = BundledServerCatalog::new();
 
         resources.install_rust_analyzer_with_header(0x0100_0007, 1, true);
+        resources.write_receipt();
         assert_eq!(
             catalog.resolve(LanguageId::Rust, resources.root()),
             Err(CatalogUnavailable::UnsupportedArchitecture {
@@ -1027,6 +1817,7 @@ mod tests {
         );
 
         resources.install_rust_analyzer_with_header(0x0100_000c, 2, true);
+        resources.write_receipt();
         assert_eq!(
             catalog.resolve(LanguageId::Rust, resources.root()),
             Err(CatalogUnavailable::UnsupportedPlatform {
@@ -1118,12 +1909,41 @@ mod tests {
         assert_ne!(typescript.data_dir, second_typescript.data_dir);
     }
 
+    #[test]
+    fn cache_paths_reject_a_cache_root_inside_the_project_even_via_a_symlink() {
+        let project = TempDir::new().expect("project directory");
+        let cache_link = TempDir::new().expect("link holder");
+        let nested_cache = project.path().join(".termlab-cache");
+        fs::create_dir(&nested_cache).expect("nested cache directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nested_cache, cache_link.path().join("cache"))
+            .expect("cache symlink");
+
+        let catalog = BundledServerCatalog::new();
+        let result = catalog.cache_paths(
+            LanguageId::Rust,
+            &project.path().canonicalize().expect("canonical project"),
+            &cache_link.path().join("cache"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CatalogUnavailable::CacheRootInsideProject { .. })
+        ));
+    }
+
     struct ResourceTree {
         directory: TempDir,
     }
 
     impl ResourceTree {
         fn new() -> Self {
+            let tree = Self::new_without_receipt();
+            tree.write_receipt();
+            tree
+        }
+
+        fn new_without_receipt() -> Self {
             let tree = Self {
                 directory: TempDir::new().expect("resource directory"),
             };
@@ -1177,6 +1997,15 @@ mod tests {
                 executable,
             );
         }
+
+        fn install_rust_analyzer_bytes(&self, bytes: &[u8], executable: bool) {
+            write_file(&self.root().join("rust-analyzer/rust-analyzer"), bytes);
+            set_executable(&self.root().join("rust-analyzer/rust-analyzer"), executable);
+        }
+
+        fn write_receipt(&self) {
+            write_receipt(self.root());
+        }
     }
 
     fn write_file(path: &Path, contents: &[u8]) {
@@ -1185,11 +2014,26 @@ mod tests {
     }
 
     fn write_macho_binary(path: &Path, cpu_type: u32, platform: u32, executable: bool) {
+        write_file(path, &macho_bytes(cpu_type, 2, platform));
+        set_executable(path, executable);
+    }
+
+    fn macho_header_only() -> Vec<u8> {
+        let mut bytes = macho_bytes(0x0100_000c, 2, 1);
+        bytes.truncate(32);
+        bytes
+    }
+
+    fn macho_with_file_type(file_type: u32) -> Vec<u8> {
+        macho_bytes(0x0100_000c, file_type, 1)
+    }
+
+    fn macho_bytes(cpu_type: u32, file_type: u32, platform: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
         bytes.extend_from_slice(&cpu_type.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&file_type.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&24u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
@@ -1200,7 +2044,10 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
-        write_file(path, &bytes);
+        bytes
+    }
+
+    fn set_executable(path: &Path, executable: bool) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1211,5 +2058,43 @@ mod tests {
             )
             .expect("set executable permission");
         }
+        #[cfg(not(unix))]
+        let _ = (path, executable);
+    }
+
+    fn write_receipt(root: &Path) {
+        let files = [
+            "node/bin/node",
+            "typescript/node_modules/typescript-language-server/lib/cli.mjs",
+            "typescript/node_modules/typescript/lib/typescript.js",
+            "rust-analyzer/rust-analyzer",
+        ]
+        .into_iter()
+        .map(|relative_path| {
+            let bytes = fs::read(root.join(relative_path)).expect("receipt file contents");
+            serde_json::json!({
+                "relativePath": relative_path,
+                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                "size": bytes.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": 1,
+                "platform": "macos",
+                "architecture": "arm64",
+                "artifacts": [
+                    { "id": "node", "version": "24.19.0" },
+                    { "id": "typescript-language-server", "version": "6.0.0" },
+                    { "id": "typescript", "version": "7.0.2" },
+                    { "id": "rust-analyzer", "version": "2026-08-24" },
+                ],
+                "files": files,
+            }))
+            .expect("receipt JSON"),
+        )
+        .expect("write receipt");
     }
 }

@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
+use super::catalog::{BundledServerCatalog, RootStrategy};
 use super::types::ProjectCandidate;
 
 const MAX_MARKER_BYTES: u64 = 64 * 1024;
@@ -67,6 +68,18 @@ pub(crate) fn discover_project_roots(
     file: &Path,
     language: LanguageId,
 ) -> io::Result<Vec<ProjectCandidate>> {
+    let strategy = BundledServerCatalog::new()
+        .descriptor(language)
+        .root_strategy;
+    discover_project_roots_for_strategy(file, strategy)
+}
+
+/// Descriptor-driven root discovery. The future manager supplies an adapter
+/// descriptor's strategy instead of branching on raw language names.
+pub(crate) fn discover_project_roots_for_strategy(
+    file: &Path,
+    strategy: RootStrategy,
+) -> io::Result<Vec<ProjectCandidate>> {
     let canonical_file = fs::canonicalize(file)?;
     let parent = canonical_file.parent().ok_or_else(|| {
         io::Error::new(
@@ -94,7 +107,7 @@ pub(crate) fn discover_project_roots(
             );
         }
 
-        for candidate in marker_candidates(current, language, distance) {
+        for candidate in marker_candidates(current, strategy, distance) {
             insert_candidate(&mut candidates, candidate);
         }
 
@@ -102,7 +115,7 @@ pub(crate) fn discover_project_roots(
         distance += 1;
     }
 
-    if language == LanguageId::Json
+    if strategy == RootStrategy::Json
         && candidates
             .iter()
             .any(|candidate| is_javascript_context_marker(&candidate.candidate.marker))
@@ -111,8 +124,9 @@ pub(crate) fn discover_project_roots(
     }
 
     candidates.sort_by(|left, right| {
-        let left_go_workspace = language == LanguageId::Go && left.candidate.marker == "go.work";
-        let right_go_workspace = language == LanguageId::Go && right.candidate.marker == "go.work";
+        let left_go_workspace = strategy == RootStrategy::Go && left.candidate.marker == "go.work";
+        let right_go_workspace =
+            strategy == RootStrategy::Go && right.candidate.marker == "go.work";
         left.candidate
             .is_fallback
             .cmp(&right.candidate.is_fallback)
@@ -162,14 +176,12 @@ fn insert_candidate(candidates: &mut Vec<RankedCandidate>, next: RankedCandidate
 
 fn marker_candidates(
     directory: &Path,
-    language: LanguageId,
+    strategy: RootStrategy,
     distance: usize,
 ) -> Vec<RankedCandidate> {
-    match language {
-        LanguageId::JavaScript | LanguageId::TypeScript => {
-            javascript_candidates(directory, distance)
-        }
-        LanguageId::Json => {
+    match strategy {
+        RootStrategy::JavaScript => javascript_candidates(directory, distance),
+        RootStrategy::Json => {
             let javascript = javascript_candidates(directory, distance);
             if javascript.is_empty() {
                 repository_candidates(directory, distance)
@@ -177,11 +189,11 @@ fn marker_candidates(
                 javascript
             }
         }
-        LanguageId::Python => python_candidates(directory, distance),
-        LanguageId::Rust => rust_candidates(directory, distance),
-        LanguageId::Go => go_candidates(directory, distance),
-        LanguageId::C | LanguageId::Cpp => c_cpp_candidates(directory, distance),
-        LanguageId::Java => java_candidates(directory, distance),
+        RootStrategy::Python => python_candidates(directory, distance),
+        RootStrategy::Rust => rust_candidates(directory, distance),
+        RootStrategy::Go => go_candidates(directory, distance),
+        RootStrategy::Clangd => c_cpp_candidates(directory, distance),
+        RootStrategy::Java => java_candidates(directory, distance),
     }
 }
 
@@ -537,7 +549,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{discover_project_roots, LanguageId};
+    use super::{LanguageId, discover_project_roots};
 
     fn write(root: &Path, relative: &str, contents: &str) -> PathBuf {
         let path = root.join(relative);
