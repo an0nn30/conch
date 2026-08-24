@@ -143,10 +143,15 @@ fn is_javascript_context_marker(marker: &str) -> bool {
 }
 
 fn insert_candidate(candidates: &mut Vec<RankedCandidate>, next: RankedCandidate) {
-    if let Some(existing) = candidates
-        .iter_mut()
-        .find(|existing| existing.candidate.canonical_path == next.candidate.canonical_path)
-    {
+    if next.candidate.is_fallback {
+        candidates.push(next);
+        return;
+    }
+
+    if let Some(existing) = candidates.iter_mut().find(|existing| {
+        !existing.candidate.is_fallback
+            && existing.candidate.canonical_path == next.candidate.canonical_path
+    }) {
         if next.priority > existing.priority {
             *existing = next;
         }
@@ -475,10 +480,20 @@ fn add_simple_marker(
     distance: usize,
     priority: u8,
 ) {
-    if read_marker(&directory.join(marker)).is_some() {
-        candidates.push(RankedCandidate::new(
+    match read_marker(&directory.join(marker)) {
+        Some(Ok(_)) => candidates.push(RankedCandidate::new(
             directory, marker, reason, confidence, false, distance, priority,
-        ));
+        )),
+        Some(Err(())) => candidates.push(RankedCandidate::new(
+            directory,
+            format!("{marker} (unreadable)"),
+            format!("{reason} could not be read"),
+            40,
+            false,
+            distance,
+            40,
+        )),
+        None => {}
     }
 }
 
@@ -525,6 +540,14 @@ mod tests {
     use super::{discover_project_roots, LanguageId};
 
     fn write(root: &Path, relative: &str, contents: &str) -> PathBuf {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().expect("fixture file parent"))
+            .expect("create fixture parent");
+        fs::write(&path, contents).expect("write fixture file");
+        path
+    }
+
+    fn write_bytes(root: &Path, relative: &str, contents: &[u8]) -> PathBuf {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().expect("fixture file parent"))
             .expect("create fixture parent");
@@ -581,6 +604,12 @@ mod tests {
                     "Rust workspace manifest".into(),
                     100,
                     false,
+                ),
+                (
+                    "This folder".into(),
+                    "Use this file's parent folder".into(),
+                    20,
+                    true,
                 ),
             ]
         );
@@ -763,13 +792,83 @@ mod tests {
 
         assert_eq!(
             candidates(&file, LanguageId::TypeScript),
-            vec![(
-                "package.json (unreadable)".into(),
-                "JavaScript package marker could not be parsed".into(),
-                40,
-                false,
-            )]
+            vec![
+                (
+                    "package.json (unreadable)".into(),
+                    "JavaScript package marker could not be parsed".into(),
+                    40,
+                    false,
+                ),
+                (
+                    "This folder".into(),
+                    "Use this file's parent folder".into(),
+                    20,
+                    true,
+                )
+            ]
         );
+    }
+
+    #[test]
+    fn marked_parent_keeps_a_distinct_this_folder_fallback() {
+        let temp = TempDir::new().expect("temporary fixture");
+        let file = write(temp.path(), "project/main.ts", "export {};\n");
+        write(
+            temp.path(),
+            "project/tsconfig.json",
+            "{\"compilerOptions\": {}}\n",
+        );
+
+        assert_eq!(
+            candidates(&file, LanguageId::TypeScript),
+            vec![
+                (
+                    "tsconfig.json".into(),
+                    "TypeScript project configuration".into(),
+                    100,
+                    false,
+                ),
+                (
+                    "This folder".into(),
+                    "Use this file's parent folder".into(),
+                    20,
+                    true,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn unreadable_simple_markers_lower_confidence_without_aborting_discovery() {
+        let cases = [
+            ("oversized", vec![b'x'; 65_537]),
+            ("non_utf8", vec![0xff, 0xfe, 0xfd]),
+        ];
+
+        for (name, contents) in cases {
+            let temp = TempDir::new().expect("temporary fixture");
+            let file = write(temp.path(), "project/main.ts", "export {};\n");
+            write_bytes(temp.path(), "project/tsconfig.json", &contents);
+
+            assert_eq!(
+                candidates(&file, LanguageId::TypeScript),
+                vec![
+                    (
+                        "tsconfig.json (unreadable)".into(),
+                        "TypeScript project configuration could not be read".into(),
+                        40,
+                        false,
+                    ),
+                    (
+                        "This folder".into(),
+                        "Use this file's parent folder".into(),
+                        20,
+                        true,
+                    ),
+                ],
+                "{name}",
+            );
+        }
     }
 
     #[test]
