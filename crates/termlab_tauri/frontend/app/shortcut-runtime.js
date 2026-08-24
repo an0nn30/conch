@@ -56,12 +56,39 @@
       // so gating it on already having one would make it unreachable from a
       // fresh window. The cost is that cmd+o no longer reaches the shell.
       open_file: 'open-file',
+      editor_completion: 'editor-completion',
+      editor_signature_help: 'editor-signature-help',
+      editor_go_to_definition: 'editor-go-to-definition',
+      editor_navigate_back: 'editor-navigate-back',
+      editor_navigate_forward: 'editor-navigate-forward',
+      editor_next_problem: 'editor-next-problem',
+      editor_previous_problem: 'editor-previous-problem',
     };
 
     // Core actions that mean something only inside a focused editor pane. A
     // hit on one of these with any other pane focused is DROPPED rather than
     // consumed — see runShortcutFallbacks.
-    const EDITOR_SCOPED_ACTIONS = ['save-file', 'save-file-as'];
+    const EDITOR_SCOPED_ACTIONS = [
+      'save-file',
+      'save-file-as',
+      'editor-completion',
+      'editor-signature-help',
+      'editor-go-to-definition',
+      'editor-navigate-back',
+      'editor-navigate-forward',
+      'editor-next-problem',
+      'editor-previous-problem',
+    ];
+
+    function runCoreAction(action) {
+      if (action === 'navigate-pane-up') navigatePane('up');
+      else if (action === 'navigate-pane-down') navigatePane('down');
+      else if (action === 'navigate-pane-left') navigatePane('left');
+      else if (action === 'navigate-pane-right') navigatePane('right');
+      else if (action.startsWith('editor-')) {
+        global.dispatchEvent(new global.CustomEvent(`termlab:${action}`));
+      } else handleMenuAction(action);
+    }
 
     function navigatePane(direction) {
       const tab = getActiveTab();
@@ -76,7 +103,7 @@
       if (/^Digit([0-9])$/.test(code)) return code[5];
       if (/^Key([A-Z])$/.test(code)) return code.slice(3).toLowerCase();
       const map = {
-        Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[',
+        Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', Space: 'space',
         BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'",
         Comma: ',', Period: '.', Slash: '/',
       };
@@ -236,11 +263,7 @@
           }
         }
         if (coreHit) {
-          if (coreHit.action === 'navigate-pane-up') navigatePane('up');
-          else if (coreHit.action === 'navigate-pane-down') navigatePane('down');
-          else if (coreHit.action === 'navigate-pane-left') navigatePane('left');
-          else if (coreHit.action === 'navigate-pane-right') navigatePane('right');
-          else handleMenuAction(coreHit.action);
+          runCoreAction(coreHit.action);
           return true;
         }
 
@@ -250,7 +273,7 @@
           && !(suppressedCoreAction && s.kind === 'core' && s.action === suppressedCoreAction));
         if (fKeyHit) {
           if (fKeyHit.kind === 'core') {
-            handleMenuAction(fKeyHit.action);
+            runCoreAction(fKeyHit.action);
           } else if (fKeyHit.kind === 'tool-window') {
             if (window.toolWindowManager) {
               window.toolWindowManager.toggle(fKeyHit.windowId);

@@ -25,6 +25,20 @@
     if (!pendingSettings.editor || typeof pendingSettings.editor !== 'object') {
       pendingSettings.editor = {};
     }
+    if (!pendingSettings.editor.lsp || typeof pendingSettings.editor.lsp !== 'object') {
+      pendingSettings.editor.lsp = {};
+    }
+    if (!pendingSettings.editor.lsp.languages || typeof pendingSettings.editor.lsp.languages !== 'object') {
+      pendingSettings.editor.lsp.languages = {};
+    }
+
+    const lsp = pendingSettings.editor.lsp;
+    const languages = lsp.languages;
+    if (typeof lsp.enabled !== 'boolean') lsp.enabled = true;
+    if (typeof lsp.suggestions_while_typing !== 'boolean') lsp.suggestions_while_typing = true;
+    for (const key of ['typescript', 'json', 'python', 'rust', 'go', 'clangd', 'java']) {
+      if (typeof languages[key] !== 'boolean') languages[key] = true;
+    }
 
     addSectionLabel(container, 'Keys');
 
@@ -41,6 +55,54 @@
       ),
       'editor:vim-mode'
     );
+
+    addSectionLabel(container, 'Language Services');
+
+    const lspCheckbox = makeCheckbox(
+      lsp.enabled,
+      (val) => { lsp.enabled = val; }
+    );
+    setRowTarget(
+      addRow(
+        container,
+        'Enable language services',
+        'Enable code intelligence for supported local files',
+        lspCheckbox
+      ),
+      'editor:lsp-enabled'
+    );
+
+    const suggestionsCheckbox = makeCheckbox(
+      lsp.suggestions_while_typing,
+      (val) => { lsp.suggestions_while_typing = val; }
+    );
+    setRowTarget(
+      addRow(
+        container,
+        'Suggestions while typing',
+        'Show completion suggestions as you type',
+        suggestionsCheckbox
+      ),
+      'editor:lsp-suggestions'
+    );
+
+    addSectionLabel(container, 'Languages');
+    const languageRows = [
+      ['typescript', 'TypeScript / JavaScript'],
+      ['json', 'JSON'],
+      ['python', 'Python'],
+      ['rust', 'Rust'],
+      ['go', 'Go'],
+      ['clangd', 'C / C++'],
+      ['java', 'Java'],
+    ];
+    for (const [key, label] of languageRows) {
+      const checkbox = makeCheckbox(languages[key], (val) => { languages[key] = val; });
+      setRowTarget(
+        addRow(container, label, `Enable language services for ${label}`, checkbox),
+        `editor:lsp-language:${key}`
+      );
+    }
 
     return true;
   }

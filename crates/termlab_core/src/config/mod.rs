@@ -637,6 +637,37 @@ mod tests {
     }
 
     #[test]
+    fn old_editor_config_gets_lsp_defaults() {
+        let cfg: UserConfig = toml::from_str("[editor]\nvim_mode = true\n").unwrap();
+        assert!(cfg.editor.lsp.enabled);
+        assert!(cfg.editor.lsp.languages.typescript);
+        assert!(cfg.editor.lsp.languages.json);
+        assert!(cfg.editor.lsp.languages.python);
+        assert!(cfg.editor.lsp.languages.rust);
+        assert!(cfg.editor.lsp.languages.go);
+        assert!(cfg.editor.lsp.languages.clangd);
+        assert!(cfg.editor.lsp.languages.java);
+        assert_eq!(cfg.termlab.keyboard.editor_completion, "ctrl+space");
+        assert_eq!(cfg.termlab.keyboard.editor_go_to_definition, "f12");
+    }
+
+    #[test]
+    fn explicit_lsp_language_disables_survive_a_round_trip() {
+        let cfg: UserConfig = toml::from_str(
+            "[editor.lsp]\nenabled = false\nsuggestions_while_typing = false\n\n[editor.lsp.languages]\ntypescript = false\njava = false\n",
+        )
+        .unwrap();
+        let serialized = toml::to_string(&cfg).unwrap();
+        let round_tripped: UserConfig = toml::from_str(&serialized).unwrap();
+
+        assert!(!round_tripped.editor.lsp.enabled);
+        assert!(!round_tripped.editor.lsp.suggestions_while_typing);
+        assert!(!round_tripped.editor.lsp.languages.typescript);
+        assert!(!round_tripped.editor.lsp.languages.java);
+        assert!(round_tripped.editor.lsp.languages.rust);
+    }
+
+    #[test]
     fn editor_defaults_off_when_the_section_is_absent() {
         // Every config.toml written before this section existed.
         let cfg: UserConfig = toml::from_str("").unwrap();
