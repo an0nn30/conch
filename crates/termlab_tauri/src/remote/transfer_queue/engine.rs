@@ -367,7 +367,7 @@ impl QueueActor {
 
         let mut next = self.document.clone();
         next.jobs.push(job);
-        self.commit(next, vec![id]).await?;
+        self.commit(next).await?;
         Ok(id)
     }
 
@@ -379,7 +379,7 @@ impl QueueActor {
             .find(|job| job.id == id)
             .ok_or_else(|| format!("transfer job {id} was not found"))?;
         *job = reduce_job(job, event, self.clock.now_ms()).map_err(|error| error.to_string())?;
-        self.commit(next, vec![id]).await
+        self.commit(next).await
     }
 
     async fn set_queue_paused(&mut self, paused: bool) -> Result<(), String> {
@@ -388,12 +388,25 @@ impl QueueActor {
         }
         let mut next = self.document.clone();
         next.queue_paused = paused;
-        self.commit(next, Vec::new()).await
+        self.commit(next).await
     }
 
     async fn cancel(&mut self, id: Uuid) -> Result<bool, String> {
-        if !self.document.jobs.iter().any(|job| job.id == id) {
+        let Some(job) = self.document.jobs.iter().find(|job| job.id == id) else {
             return Ok(false);
+        };
+        if !matches!(job.state, TransferJobState::Queued) {
+            return Err(format!(
+                "transfer job {id} cannot be cancelled until runner cleanup is acknowledged"
+            ));
+        }
+        if job.artifacts.is_some()
+            || job.durable_checkpoint != 0
+            || job.commit_phase != CommitPhase::None
+        {
+            return Err(format!(
+                "transfer job {id} owns durable work that requires runner cleanup"
+            ));
         }
         self.apply_job_event(id, JobEvent::Cancel(None)).await?;
         Ok(true)
@@ -415,22 +428,23 @@ impl QueueActor {
             .document
             .jobs
             .iter()
-            .filter(|job| !job.state.is_terminal())
+            .filter(|job| matches!(job.state, TransferJobState::Queued))
             .map(|job| (job.id, job.queue_order, job.created_at_ms))
             .collect();
         ordered.sort_by_key(|(_, order, created)| (*order, *created));
+        let queue_order_slots: Vec<_> = ordered.iter().map(|(_, order, _)| *order).collect();
 
         let source = ordered
             .iter()
             .position(|(job_id, _, _)| *job_id == id)
-            .ok_or_else(|| format!("active transfer job {id} was not found"))?;
+            .ok_or_else(|| format!("queued transfer job {id} was not found"))?;
         let moved = ordered.remove(source);
         let target = match before {
             Some(before_id) if before_id == id => source.min(ordered.len()),
             Some(before_id) => ordered
                 .iter()
                 .position(|(job_id, _, _)| *job_id == before_id)
-                .ok_or_else(|| format!("active transfer job {before_id} was not found"))?,
+                .ok_or_else(|| format!("queued transfer job {before_id} was not found"))?,
             None => ordered.len(),
         };
         ordered.insert(target, moved);
@@ -438,9 +452,7 @@ impl QueueActor {
         let now_ms = self.clock.now_ms();
         let mut next = self.document.clone();
         let mut changed = Vec::new();
-        for (index, (job_id, _, _)) in ordered.iter().enumerate() {
-            let order = u64::try_from(index + 1)
-                .map_err(|_| "transfer queue order is exhausted".to_string())?;
+        for ((job_id, _, _), order) in ordered.iter().zip(queue_order_slots) {
             let job = next
                 .jobs
                 .iter_mut()
@@ -455,7 +467,7 @@ impl QueueActor {
         if changed.is_empty() {
             return Ok(());
         }
-        self.commit(next, changed).await
+        self.commit(next).await
     }
 
     async fn set_priority(&mut self, id: Uuid, priority: TransferPriority) -> Result<(), String> {
@@ -463,14 +475,14 @@ impl QueueActor {
         let job = next
             .jobs
             .iter_mut()
-            .find(|job| job.id == id && !job.state.is_terminal())
-            .ok_or_else(|| format!("active transfer job {id} was not found"))?;
+            .find(|job| job.id == id && matches!(job.state, TransferJobState::Queued))
+            .ok_or_else(|| format!("queued transfer job {id} was not found"))?;
         if job.priority == priority {
             return Ok(());
         }
         job.priority = priority;
         job.updated_at_ms = self.clock.now_ms();
-        self.commit(next, vec![id]).await
+        self.commit(next).await
     }
 
     async fn clear_completed(&mut self) -> Result<usize, String> {
@@ -486,7 +498,7 @@ impl QueueActor {
         if removed == 0 {
             return Ok(0);
         }
-        self.commit(next, Vec::new()).await?;
+        self.commit(next).await?;
         Ok(removed)
     }
 
@@ -497,14 +509,10 @@ impl QueueActor {
         }
         let mut next = self.document.clone();
         next.settings = settings;
-        self.commit(next, Vec::new()).await
+        self.commit(next).await
     }
 
-    async fn commit(
-        &mut self,
-        mut next: TransferQueueDocument,
-        changed_job_ids: Vec<Uuid>,
-    ) -> Result<(), String> {
+    async fn commit(&mut self, mut next: TransferQueueDocument) -> Result<(), String> {
         compact_history(&mut next);
         validate_document(&next)?;
         next.revision = self
@@ -515,22 +523,14 @@ impl QueueActor {
         self.store.save(&next)?;
 
         let snapshot = TransferQueueSnapshot::from(&next);
-        let changed_jobs: Vec<_> = changed_job_ids
-            .into_iter()
-            .filter_map(|id| next.jobs.iter().find(|job| job.id == id).cloned())
-            .collect();
+        let delta = queue_delta(&self.document, &next);
         self.document = next;
         *self.snapshot.write() = snapshot.clone();
 
-        for job in changed_jobs {
+        self.event_sink.job_updated(delta.clone()).await;
+        for job in &delta.upserts {
             self.event_sink
-                .job_updated(QueueEventPayload {
-                    revision: snapshot.revision,
-                    job: job.clone(),
-                })
-                .await;
-            self.event_sink
-                .legacy_progress(legacy_progress_for(&job))
+                .legacy_progress(legacy_progress_for(job))
                 .await;
         }
         self.event_sink
@@ -540,6 +540,38 @@ impl QueueActor {
             })
             .await;
         Ok(())
+    }
+}
+
+fn queue_delta(
+    previous: &TransferQueueDocument,
+    next: &TransferQueueDocument,
+) -> QueueEventPayload {
+    let upserts = next
+        .jobs
+        .iter()
+        .filter(|job| {
+            previous
+                .jobs
+                .iter()
+                .find(|previous_job| previous_job.id == job.id)
+                != Some(*job)
+        })
+        .cloned()
+        .collect();
+    let removed_ids = previous
+        .jobs
+        .iter()
+        .filter(|job| !next.jobs.iter().any(|next_job| next_job.id == job.id))
+        .map(|job| job.id)
+        .collect();
+
+    QueueEventPayload {
+        revision: next.revision,
+        upserts,
+        removed_ids,
+        queue_paused: next.queue_paused,
+        settings: next.settings.clone(),
     }
 }
 
@@ -653,11 +685,13 @@ mod tests {
         path::PathBuf,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
     };
 
     use async_trait::async_trait;
+    use parking_lot::RwLock;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     use super::{QueueActor, QueueClock, QueueStore, TransferQueueHandle};
@@ -665,19 +699,21 @@ mod tests {
         events::{QueueEventPayload, QueueSummaryPayload, TransferEventSink},
         model::{
             AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ConflictResolution,
-            NewTransferJob, QueueSettings, TransferDirection, TransferEndpoint, TransferJob,
-            TransferJobState, TransferOrigin, TransferPriority, TransferProtocol,
-            TransferQueueDocument,
+            ManagedArtifacts, NewTransferJob, QueueSettings, TransferDirection, TransferEndpoint,
+            TransferJob, TransferJobState, TransferOrigin, TransferPriority, TransferProtocol,
+            TransferQueueDocument, TransferQueueSnapshot,
         },
         store::TransferStore,
     };
 
     #[derive(Default)]
     struct RecordingEventSink {
-        job_updates: Mutex<Vec<QueueEventPayload>>,
+        deltas: Mutex<Vec<QueueEventPayload>>,
         summaries: Mutex<Vec<QueueSummaryPayload>>,
+        legacy_count: Mutex<usize>,
         store_path: Mutex<Option<PathBuf>>,
-        revisions_seen_on_disk: Mutex<Vec<u64>>,
+        latest_delta_revision: AtomicU64,
+        persisted_emissions: Mutex<Vec<(&'static str, u64, u64)>>,
     }
 
     impl RecordingEventSink {
@@ -685,38 +721,69 @@ mod tests {
             *self.store_path.lock().unwrap() = Some(path);
         }
 
-        fn take_job_update(&self, id: Uuid) -> QueueEventPayload {
-            let mut updates = self.job_updates.lock().unwrap();
-            let index = updates
+        fn take_delta_containing(&self, id: Uuid) -> QueueEventPayload {
+            let mut deltas = self.deltas.lock().unwrap();
+            let index = deltas
                 .iter()
-                .position(|payload| payload.job.id == id)
-                .expect("job update was emitted");
-            updates.remove(index)
+                .position(|payload| {
+                    payload.upserts.iter().any(|job| job.id == id)
+                        || payload.removed_ids.contains(&id)
+                })
+                .expect("atomic job delta was emitted");
+            deltas.remove(index)
+        }
+
+        fn take_deltas(&self) -> Vec<QueueEventPayload> {
+            std::mem::take(&mut *self.deltas.lock().unwrap())
+        }
+
+        fn clear(&self) {
+            self.deltas.lock().unwrap().clear();
+            self.summaries.lock().unwrap().clear();
+            *self.legacy_count.lock().unwrap() = 0;
+            self.persisted_emissions.lock().unwrap().clear();
         }
 
         fn event_count(&self) -> usize {
-            self.job_updates.lock().unwrap().len() + self.summaries.lock().unwrap().len()
+            self.deltas.lock().unwrap().len()
+                + self.summaries.lock().unwrap().len()
+                + *self.legacy_count.lock().unwrap()
+        }
+
+        fn record_persisted_emission(&self, kind: &'static str, emitted_revision: u64) {
+            if let Some(path) = self.store_path.lock().unwrap().clone() {
+                let document: TransferQueueDocument =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                self.persisted_emissions.lock().unwrap().push((
+                    kind,
+                    emitted_revision,
+                    document.revision,
+                ));
+            }
         }
     }
 
     #[async_trait]
     impl TransferEventSink for RecordingEventSink {
         async fn job_updated(&self, payload: QueueEventPayload) {
-            if let Some(path) = self.store_path.lock().unwrap().clone() {
-                let document = TransferStore::new(path).load().unwrap().into_document();
-                self.revisions_seen_on_disk
-                    .lock()
-                    .unwrap()
-                    .push(document.revision);
-            }
-            self.job_updates.lock().unwrap().push(payload);
+            self.record_persisted_emission("delta", payload.revision);
+            self.latest_delta_revision
+                .store(payload.revision, Ordering::SeqCst);
+            self.deltas.lock().unwrap().push(payload);
         }
 
         async fn queue_summary(&self, payload: QueueSummaryPayload) {
+            self.record_persisted_emission("summary", payload.revision);
             self.summaries.lock().unwrap().push(payload);
         }
 
-        async fn legacy_progress(&self, _payload: termlab_remote::transfer::TransferProgress) {}
+        async fn legacy_progress(&self, _payload: termlab_remote::transfer::TransferProgress) {
+            self.record_persisted_emission(
+                "legacy",
+                self.latest_delta_revision.load(Ordering::SeqCst),
+            );
+            *self.legacy_count.lock().unwrap() += 1;
+        }
     }
 
     struct ActorHarness {
@@ -818,21 +885,76 @@ mod tests {
         }
     }
 
+    struct ClientProjection {
+        revision: u64,
+        queue_paused: bool,
+        settings: QueueSettings,
+        jobs: Vec<TransferJob>,
+    }
+
+    impl ClientProjection {
+        fn from_snapshot(snapshot: &TransferQueueSnapshot) -> Self {
+            Self {
+                revision: snapshot.revision,
+                queue_paused: snapshot.queue_paused,
+                settings: snapshot.settings.clone(),
+                jobs: snapshot.jobs.clone(),
+            }
+        }
+
+        fn apply(&mut self, delta: QueueEventPayload) {
+            assert_eq!(delta.revision, self.revision + 1);
+            self.jobs.retain(|job| !delta.removed_ids.contains(&job.id));
+            for upsert in delta.upserts {
+                if let Some(job) = self.jobs.iter_mut().find(|job| job.id == upsert.id) {
+                    *job = upsert;
+                } else {
+                    self.jobs.push(upsert);
+                }
+            }
+            self.revision = delta.revision;
+            self.queue_paused = delta.queue_paused;
+            self.settings = delta.settings;
+        }
+
+        fn assert_matches(&self, snapshot: &TransferQueueSnapshot) {
+            assert_eq!(self.revision, snapshot.revision);
+            assert_eq!(self.queue_paused, snapshot.queue_paused);
+            assert_eq!(self.settings, snapshot.settings);
+            assert_eq!(self.jobs, snapshot.jobs);
+        }
+    }
+
+    fn apply_only_delta(
+        client: &mut ClientProjection,
+        events: &RecordingEventSink,
+    ) -> QueueEventPayload {
+        let mut deltas = events.take_deltas();
+        assert_eq!(deltas.len(), 1, "one atomic delta per committed revision");
+        let delta = deltas.remove(0);
+        client.apply(delta.clone());
+        delta
+    }
+
     #[tokio::test]
     async fn enqueue_persists_before_job_event_is_published() {
         let harness = ActorHarness::new();
         let supplied_id = sample_new_job().id;
 
         let id = harness.handle.enqueue(sample_new_job()).await.unwrap();
-        let event = harness.events.take_job_update(id);
+        let event = harness.events.take_delta_containing(id);
         let on_disk = harness.store.load().unwrap().into_document();
 
         assert_eq!(id, supplied_id);
         assert_eq!(on_disk.revision, 1);
         assert_eq!(on_disk.revision, event.revision);
+        assert_eq!(event.upserts.len(), 1);
+        assert!(event.removed_ids.is_empty());
+        assert_eq!(event.queue_paused, on_disk.queue_paused);
+        assert_eq!(event.settings, on_disk.settings);
         assert_eq!(
-            *harness.events.revisions_seen_on_disk.lock().unwrap(),
-            [event.revision]
+            *harness.events.persisted_emissions.lock().unwrap(),
+            [("delta", 1, 1), ("legacy", 1, 1), ("summary", 1, 1),]
         );
         assert!(on_disk.jobs.iter().any(|job| job.id == id));
     }
@@ -937,7 +1059,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_records_durable_cleanup_intent_and_unknown_id_is_a_noop() {
+    async fn queued_job_without_cleanup_work_can_cancel_immediately() {
         let harness = ActorHarness::new();
         let id = harness.handle.enqueue(sample_new_job()).await.unwrap();
 
@@ -1071,7 +1193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reorder_and_priority_update_only_active_queue_work() {
+    async fn reorder_and_priority_update_queued_work() {
         let harness = ActorHarness::new();
         let first = Uuid::from_u128(301);
         let second = Uuid::from_u128(302);
@@ -1108,6 +1230,162 @@ mod tests {
             [(first, 2), (second, 3), (third, 1)]
         );
         assert_eq!(snapshot.jobs[1].priority, TransferPriority::Interactive);
+    }
+
+    #[tokio::test]
+    async fn reorder_uses_queued_order_slots_without_mutating_running_work() {
+        let running_id = Uuid::from_u128(304);
+        let first_queued_id = Uuid::from_u128(305);
+        let second_queued_id = Uuid::from_u128(306);
+        let document = document_with(vec![
+            stored_job(running_id, TransferJobState::Running, 1),
+            stored_job(first_queued_id, TransferJobState::Queued, 2),
+            stored_job(second_queued_id, TransferJobState::Queued, 3),
+        ]);
+        let events = Arc::new(RecordingEventSink::default());
+        let (mut actor, _) = actor_without_startup_recovery(document, events.clone());
+
+        actor
+            .reorder(second_queued_id, Some(first_queued_id))
+            .await
+            .unwrap();
+
+        assert_eq!(actor.document.jobs[0].queue_order, 1);
+        assert_eq!(actor.document.jobs[0].updated_at_ms, 10);
+        assert_eq!(actor.document.jobs[1].queue_order, 3);
+        assert_eq!(actor.document.jobs[2].queue_order, 2);
+        let delta = events.take_deltas().pop().unwrap();
+        assert_eq!(
+            delta.upserts.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [first_queued_id, second_queued_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn reorder_emits_one_delta_that_converges_to_the_committed_snapshot() {
+        let harness = ActorHarness::new();
+        let first = Uuid::from_u128(311);
+        let second = Uuid::from_u128(312);
+        let third = Uuid::from_u128(313);
+        for (id, name) in [(first, "one"), (second, "two"), (third, "three")] {
+            harness
+                .handle
+                .enqueue(new_job(id, &format!("{name}.bin")))
+                .await
+                .unwrap();
+        }
+        let mut client = ClientProjection::from_snapshot(&harness.handle.snapshot());
+        harness.events.clear();
+
+        harness.handle.reorder(third, Some(first)).await.unwrap();
+
+        let delta = apply_only_delta(&mut client, &harness.events);
+        assert_eq!(delta.upserts.len(), 3);
+        assert!(delta.removed_ids.is_empty());
+        client.assert_matches(&harness.handle.snapshot());
+    }
+
+    #[tokio::test]
+    async fn single_row_update_emits_one_delta_that_converges() {
+        let harness = ActorHarness::new();
+        let id = harness.handle.enqueue(sample_new_job()).await.unwrap();
+        let mut client = ClientProjection::from_snapshot(&harness.handle.snapshot());
+        harness.events.clear();
+
+        harness.handle.pause(id).await.unwrap();
+
+        let delta = apply_only_delta(&mut client, &harness.events);
+        assert_eq!(
+            delta.upserts.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [id]
+        );
+        assert!(delta.removed_ids.is_empty());
+        client.assert_matches(&harness.handle.snapshot());
+    }
+
+    #[tokio::test]
+    async fn settings_delta_converges_without_any_job_change() {
+        let harness = ActorHarness::new();
+        let mut client = ClientProjection::from_snapshot(&harness.handle.snapshot());
+        harness.events.clear();
+        let settings = QueueSettings {
+            global_limit: 7,
+            per_host_limit: 9,
+        };
+
+        harness
+            .handle
+            .update_settings(settings.clone())
+            .await
+            .unwrap();
+
+        let delta = apply_only_delta(&mut client, &harness.events);
+        assert!(delta.upserts.is_empty());
+        assert!(delta.removed_ids.is_empty());
+        assert_eq!(delta.settings, settings);
+        client.assert_matches(&harness.handle.snapshot());
+    }
+
+    #[tokio::test]
+    async fn clear_completed_delta_removes_rows_and_converges() {
+        let completed_id = Uuid::from_u128(421);
+        let failed_id = Uuid::from_u128(422);
+        let harness = ActorHarness::with_document(document_with(vec![
+            stored_job(
+                completed_id,
+                TransferJobState::Completed {
+                    result: CompletionResult::Transferred,
+                },
+                1,
+            ),
+            stored_job(
+                failed_id,
+                TransferJobState::Failed {
+                    error: "retry me".into(),
+                },
+                2,
+            ),
+        ]));
+        let mut client = ClientProjection::from_snapshot(&harness.handle.snapshot());
+        harness.events.clear();
+
+        assert_eq!(harness.handle.clear_completed().await.unwrap(), 1);
+
+        let delta = apply_only_delta(&mut client, &harness.events);
+        assert!(delta.upserts.is_empty());
+        assert_eq!(delta.removed_ids, [completed_id]);
+        client.assert_matches(&harness.handle.snapshot());
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_is_included_in_the_same_atomic_delta() {
+        let oldest_id = Uuid::from_u128(1_000);
+        let mut jobs: Vec<_> = (0..500)
+            .map(|index| {
+                stored_job(
+                    Uuid::from_u128(1_000 + index),
+                    TransferJobState::Completed {
+                        result: CompletionResult::Transferred,
+                    },
+                    index as u64 + 1,
+                )
+            })
+            .collect();
+        let queued_id = Uuid::from_u128(2_000);
+        jobs.push(stored_job(queued_id, TransferJobState::Queued, 501));
+        let harness = ActorHarness::with_document(document_with(jobs));
+        let mut client = ClientProjection::from_snapshot(&harness.handle.snapshot());
+        harness.events.clear();
+
+        assert!(harness.handle.cancel(queued_id).await.unwrap());
+
+        let delta = apply_only_delta(&mut client, &harness.events);
+        assert_eq!(delta.removed_ids, [oldest_id]);
+        assert_eq!(
+            delta.upserts.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [queued_id]
+        );
+        client.assert_matches(&harness.handle.snapshot());
     }
 
     #[tokio::test]
@@ -1223,6 +1501,117 @@ mod tests {
     impl QueueClock for FixedClock {
         fn now_ms(&self) -> u64 {
             42
+        }
+    }
+
+    fn actor_without_startup_recovery(
+        document: TransferQueueDocument,
+        events: Arc<RecordingEventSink>,
+    ) -> (QueueActor, Arc<MemoryStore>) {
+        let store = Arc::new(MemoryStore {
+            document: Mutex::new(document.clone()),
+            fail_saves: AtomicBool::new(false),
+        });
+        let snapshot = Arc::new(RwLock::new(TransferQueueSnapshot::from(&document)));
+        let (_command_tx, command_rx) = mpsc::unbounded_channel();
+        (
+            QueueActor {
+                document,
+                store: store.clone(),
+                event_sink: events,
+                clock: Arc::new(FixedClock),
+                command_rx,
+                snapshot,
+            },
+            store,
+        )
+    }
+
+    #[tokio::test]
+    async fn reorder_and_priority_reject_every_non_queued_state_without_mutation() {
+        let states = [
+            TransferJobState::Running,
+            TransferJobState::Checking,
+            TransferJobState::Paused,
+            TransferJobState::NeedsAttention {
+                reason: AttentionReason::MissingPartial,
+            },
+        ];
+        for (index, state) in states.into_iter().enumerate() {
+            let id = Uuid::from_u128(600 + index as u128);
+            let document = document_with(vec![stored_job(id, state, 1)]);
+            let events = Arc::new(RecordingEventSink::default());
+            let (mut actor, store) =
+                actor_without_startup_recovery(document.clone(), events.clone());
+
+            assert!(actor.reorder(id, None).await.is_err());
+            assert!(
+                actor
+                    .set_priority(id, TransferPriority::Interactive)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(actor.document, document);
+            assert_eq!(*store.document.lock().unwrap(), document);
+            assert_eq!(events.event_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn running_and_paused_cancellation_wait_for_runner_cleanup_acknowledgement() {
+        let running_id = Uuid::from_u128(701);
+        let running_document =
+            document_with(vec![stored_job(running_id, TransferJobState::Running, 1)]);
+        let running_events = Arc::new(RecordingEventSink::default());
+        let (mut actor, running_store) =
+            actor_without_startup_recovery(running_document.clone(), running_events.clone());
+
+        assert!(actor.cancel(running_id).await.is_err());
+        assert_eq!(actor.document, running_document);
+        assert_eq!(*running_store.document.lock().unwrap(), running_document);
+        assert_eq!(running_events.event_count(), 0);
+
+        let paused_harness = ActorHarness::new();
+        let paused_id = paused_harness
+            .handle
+            .enqueue(new_job(Uuid::from_u128(702), "paused.bin"))
+            .await
+            .unwrap();
+        paused_harness.handle.pause(paused_id).await.unwrap();
+        let before = paused_harness.handle.snapshot();
+        paused_harness.events.clear();
+
+        assert!(paused_harness.handle.cancel(paused_id).await.is_err());
+        assert_eq!(paused_harness.handle.snapshot(), before);
+        assert_eq!(paused_harness.events.event_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn queued_jobs_with_cleanup_work_cannot_claim_cleanup_success() {
+        for (index, decorate) in ["artifacts", "checkpoint", "commit_phase"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = Uuid::from_u128(710 + index as u128);
+            let mut job = stored_job(id, TransferJobState::Queued, 1);
+            match decorate {
+                "artifacts" => {
+                    job.artifacts = Some(ManagedArtifacts {
+                        partial_path: "/tmp/partial".into(),
+                        backup_path: "/tmp/backup".into(),
+                    });
+                }
+                "checkpoint" => job.durable_checkpoint = 512,
+                "commit_phase" => job.commit_phase = CommitPhase::Prepared,
+                _ => unreachable!(),
+            }
+            let harness = ActorHarness::with_document(document_with(vec![job]));
+            let before = harness.handle.snapshot();
+            harness.events.clear();
+
+            assert!(harness.handle.cancel(id).await.is_err());
+            assert_eq!(harness.handle.snapshot(), before);
+            assert_eq!(harness.events.event_count(), 0);
         }
     }
 

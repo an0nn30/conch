@@ -2,8 +2,11 @@ use async_trait::async_trait;
 use serde::Serialize;
 use termlab_remote::transfer::{TransferKind, TransferProgress, TransferStatus};
 use ts_rs::TS;
+use uuid::Uuid;
 
-use super::model::{TransferDirection, TransferJob, TransferJobState, TransferQueueSummary};
+use super::model::{
+    QueueSettings, TransferDirection, TransferJob, TransferJobState, TransferQueueSummary,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -11,7 +14,10 @@ use super::model::{TransferDirection, TransferJob, TransferJobState, TransferQue
 pub struct QueueEventPayload {
     #[ts(as = "f64")]
     pub revision: u64,
-    pub job: TransferJob,
+    pub upserts: Vec<TransferJob>,
+    pub removed_ids: Vec<Uuid>,
+    pub queue_paused: bool,
+    pub settings: QueueSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
@@ -70,8 +76,39 @@ pub fn legacy_progress_for(job: &TransferJob) -> TransferProgress {
 mod tests {
     use serde_json::json;
 
-    use super::QueueSummaryPayload;
-    use crate::remote::transfer_queue::model::TransferQueueSummary;
+    use uuid::Uuid;
+
+    use super::{QueueEventPayload, QueueSummaryPayload};
+    use crate::remote::transfer_queue::model::{QueueSettings, TransferQueueSummary};
+
+    #[test]
+    fn job_event_payload_is_a_complete_atomic_delta() {
+        let removed = Uuid::from_u128(9);
+        let payload = QueueEventPayload {
+            revision: 17,
+            upserts: Vec::new(),
+            removed_ids: vec![removed],
+            queue_paused: false,
+            settings: QueueSettings {
+                global_limit: 4,
+                per_host_limit: 6,
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(payload).unwrap(),
+            json!({
+                "revision": 17,
+                "upserts": [],
+                "removedIds": [removed],
+                "queuePaused": false,
+                "settings": {
+                    "globalLimit": 4,
+                    "perHostLimit": 6
+                }
+            })
+        );
+    }
 
     #[test]
     fn summary_payload_carries_the_revision_frontends_use_for_gap_detection() {
