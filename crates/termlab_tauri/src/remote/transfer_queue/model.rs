@@ -60,6 +60,20 @@ pub fn build_destination_key(
     format!("{host_key}:{destination}")
 }
 
+/// Build the stable connection identity used by scheduling and destination
+/// serialization. Configured endpoints deliberately key by entry id so a
+/// display-label edit does not split one host's queue.
+pub fn build_host_key(endpoint: &TransferEndpoint) -> String {
+    match endpoint {
+        TransferEndpoint::Configured {
+            server_entry_id, ..
+        } => format!("configured:{server_entry_id}"),
+        TransferEndpoint::AdHoc {
+            host, port, user, ..
+        } => format!("adhoc:{user}@{host}:{port}"),
+    }
+}
+
 pub(super) fn normalize_destination_path(path: &str) -> String {
     let absolute = path.starts_with('/');
     let mut components: Vec<&str> = Vec::new();
@@ -425,6 +439,9 @@ pub struct NewTransferJob {
     pub remote_path: String,
     pub file_name: String,
     pub batch_id: Option<Uuid>,
+    pub priority: TransferPriority,
+    pub host_key: String,
+    pub destination_key: String,
     pub conflict_policy: ConflictPolicy,
 }
 

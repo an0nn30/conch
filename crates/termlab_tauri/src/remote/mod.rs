@@ -31,7 +31,6 @@ use termlab_remote::callbacks::{RemoteCallbacks, RemotePaths};
 use termlab_remote::config::{ServerEntry, SshConfig};
 use termlab_remote::handler::TermLabSshHandler;
 use termlab_remote::ssh::{ChannelInput, SshCredentials};
-use termlab_remote::transfer::{TransferProgress, TransferRegistry};
 use termlab_remote::tunnel::TunnelManager;
 
 use crate::pty::{PtyExitEvent, PtyOutputEvent};
@@ -521,10 +520,6 @@ pub(crate) struct RemoteState {
     pub pending_prompts: Arc<Mutex<PendingPrompts>>,
     /// Active tunnel manager.
     pub tunnel_manager: TunnelManager,
-    /// Active file transfers.
-    pub transfers: Arc<Mutex<TransferRegistry>>,
-    /// Channel for transfer progress events (forwarded to Tauri events).
-    pub transfer_progress_tx: mpsc::UnboundedSender<TransferProgress>,
     /// Platform-specific paths for SSH operations.
     pub paths: RemotePaths,
     /// Last known cwd per SSH pane session key (`"{window_label}:{pane_id}"`).
@@ -542,7 +537,7 @@ pub(crate) struct RemoteState {
 }
 
 impl RemoteState {
-    pub fn new(transfer_progress_tx: mpsc::UnboundedSender<TransferProgress>) -> Self {
+    pub fn new() -> Self {
         let paths = desktop_remote_paths();
         let config = termlab_remote::config::load_config(&paths.config_dir);
         let ssh_config_entries = termlab_remote::config::parse_ssh_config();
@@ -553,8 +548,6 @@ impl RemoteState {
             ssh_config_entries,
             pending_prompts: Arc::new(Mutex::new(PendingPrompts::new())),
             tunnel_manager: TunnelManager::new(),
-            transfers: Arc::new(Mutex::new(TransferRegistry::new())),
-            transfer_progress_tx,
             paths,
             pane_cwds: HashMap::new(),
             pane_cwd_buffers: HashMap::new(),
@@ -570,7 +563,6 @@ impl RemoteState {
 /// nowhere — for registry-level tests that never touch the network or disk.
 #[cfg(test)]
 pub(crate) fn test_remote_state() -> RemoteState {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     RemoteState {
         sessions: HashMap::new(),
         connections: HashMap::new(),
@@ -578,8 +570,6 @@ pub(crate) fn test_remote_state() -> RemoteState {
         ssh_config_entries: Vec::new(),
         pending_prompts: Arc::new(Mutex::new(PendingPrompts::new())),
         tunnel_manager: TunnelManager::new(),
-        transfers: Arc::new(Mutex::new(TransferRegistry::new())),
-        transfer_progress_tx: tx,
         paths: RemotePaths {
             known_hosts_file: std::path::PathBuf::from("/nonexistent/known_hosts"),
             config_dir: std::path::PathBuf::from("/nonexistent/config"),
@@ -832,7 +822,8 @@ async fn establish_ssh_session(
     let wl = window_label.to_owned();
     let app_handle = app.clone();
     let task = tokio::spawn(async move {
-        let exited_naturally = termlab_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
+        let exited_naturally =
+            termlab_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
 
         // Clean up session and decrement connection ref count.
         let mut state = remote_for_loop.lock();
@@ -892,8 +883,7 @@ mod tests {
 
     #[test]
     fn remote_state_new_has_no_sessions() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = RemoteState::new(tx);
+        let state = RemoteState::new();
         assert!(state.sessions.is_empty());
     }
 
@@ -913,8 +903,7 @@ mod tests {
 
     #[test]
     fn remote_state_new_has_no_connections() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = RemoteState::new(tx);
+        let state = RemoteState::new();
         assert!(state.connections.is_empty());
     }
 

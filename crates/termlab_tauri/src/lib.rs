@@ -35,12 +35,18 @@ pub(crate) mod windows;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use termlab_core::config::{self, UserConfig};
 use parking_lot::{Mutex, RwLock};
 use pty_backend::PtyBackend;
-use remote::RemoteState;
+use remote::{
+    RemoteState,
+    transfer_queue::{
+        QueueActor, SftpTransferJobRunner, SystemQueueClock, TauriTransferEventSink,
+        store::TransferStore,
+    },
+};
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
+use termlab_core::config::{self, UserConfig};
 
 pub(crate) struct TauriState {
     ptys: Arc<Mutex<HashMap<String, PtyBackend>>>,
@@ -254,15 +260,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     // Mirrors the reference app, whose title segment is its launch workspace.
     let workspace_dir = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
 
-    let (transfer_tx, mut transfer_rx) =
-        tokio::sync::mpsc::unbounded_channel::<termlab_remote::transfer::TransferProgress>();
-    let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
+    let remote_state = Arc::new(Mutex::new(RemoteState::new()));
     let plugins_config = config.termlab.plugins.clone();
     let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new(
         plugins_config.clone(),
     )));
 
     let config_dir = config::config_dir();
+    let (queue_bootstrap, queue_handle) =
+        QueueActor::bootstrap(TransferStore::new(config_dir.join("transfers.json")))
+            .map_err(anyhow::Error::msg)?;
     let vault_path = config_dir.join("vault.enc");
     let vault_state: vault_commands::VaultState =
         Arc::new(Mutex::new(termlab_vault::VaultManager::new(vault_path)));
@@ -314,6 +321,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             workspace_dir,
         })
         .manage(Arc::clone(&remote_state))
+        .manage(queue_handle.clone())
         .manage(Arc::clone(&plugin_state))
         .manage(Arc::clone(&vault_state))
         .manage(updater::PendingUpdate::new())
@@ -322,6 +330,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
+
+            queue_bootstrap.start(
+                Arc::new(TauriTransferEventSink::new(app.handle().clone())),
+                Arc::new(SystemQueueClock),
+                Arc::new(SftpTransferJobRunner::new(Arc::clone(&remote_state))),
+            );
 
             // Inject the packaged bundled-themes dir (if this is a packaged
             // build) before anything else runs, so no command can resolve a
@@ -429,18 +443,6 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             if let Some(guard) = _ipc_guard {
                 std::mem::forget(guard);
             }
-
-            // Forward transfer progress events to the frontend.
-            // Use a std::thread since we're not inside a tokio runtime here.
-            let handle = app.handle().clone();
-            std::thread::Builder::new()
-                .name("transfer-progress".into())
-                .spawn(move || {
-                    while let Some(progress) = transfer_rx.blocking_recv() {
-                        let _ = handle.emit("transfer-progress", &progress);
-                    }
-                })
-                .ok();
 
             // Sweep orphaned light-editor temp files left by a previous crash.
             // Uses a std::thread since we're not inside a tokio runtime here.
@@ -657,7 +659,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                             };
                             let json = serde_json::to_string(&event).unwrap_or_default();
                             sender
-                                .blocking_send(termlab_plugin::bus::PluginMail::WidgetEvent { json })
+                                .blocking_send(termlab_plugin::bus::PluginMail::WidgetEvent {
+                                    json,
+                                })
                                 .is_ok()
                         } else {
                             false
@@ -879,7 +883,18 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::sftp_commands::local_remove,
             remote::transfer_commands::transfer_download,
             remote::transfer_commands::transfer_upload,
+            remote::transfer_commands::transfer_queue_snapshot,
+            remote::transfer_commands::transfer_pause,
+            remote::transfer_commands::transfer_resume,
+            remote::transfer_commands::transfer_pause_all,
+            remote::transfer_commands::transfer_resume_all,
             remote::transfer_commands::transfer_cancel,
+            remote::transfer_commands::transfer_retry,
+            remote::transfer_commands::transfer_resolve,
+            remote::transfer_commands::transfer_reorder,
+            remote::transfer_commands::transfer_set_priority,
+            remote::transfer_commands::transfer_clear_completed,
+            remote::transfer_commands::transfer_update_settings,
             remote::tunnel_commands::tunnel_start,
             remote::tunnel_commands::tunnel_stop,
             remote::tunnel_commands::tunnel_save,

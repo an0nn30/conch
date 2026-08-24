@@ -15,7 +15,7 @@ use super::{
     model::{
         CommitPhase, ConflictResolution, ManagedArtifacts, NewTransferJob, QueueSettings,
         TRANSFER_HISTORY_LIMIT, TransferEndpoint, TransferJob, TransferJobState, TransferPriority,
-        TransferQueueDocument, TransferQueueSnapshot, build_destination_key,
+        TransferQueueDocument, TransferQueueSnapshot, build_destination_key, build_host_key,
     },
     reducer::{JobEvent, reduce_job},
     runner::{
@@ -188,6 +188,54 @@ pub enum QueueCommand {
     },
 }
 
+/// Durable queue state and command receiver prepared before the Tauri builder
+/// exists. The actor is constructed and started exactly once in application
+/// setup, when its AppHandle-backed event sink and live connection runner are
+/// available.
+pub struct QueueBootstrap {
+    document: TransferQueueDocument,
+    store: Arc<dyn QueueStore>,
+    command_rx: mpsc::UnboundedReceiver<QueueCommand>,
+    snapshot: Arc<RwLock<TransferQueueSnapshot>>,
+}
+
+impl QueueBootstrap {
+    pub fn start(
+        self,
+        event_sink: Arc<dyn TransferEventSink>,
+        clock: Arc<dyn QueueClock>,
+        runner: Arc<dyn TransferJobRunner>,
+    ) {
+        tauri::async_runtime::spawn(self.into_actor(event_sink, clock, Some(runner)).run());
+    }
+
+    fn into_actor(
+        self,
+        event_sink: Arc<dyn TransferEventSink>,
+        clock: Arc<dyn QueueClock>,
+        runner: Option<SharedTransferJobRunner>,
+    ) -> QueueActor {
+        let (runner_event_tx, runner_event_rx) = mpsc::unbounded_channel();
+        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        QueueActor {
+            document: self.document,
+            store: self.store,
+            event_sink,
+            clock,
+            runner,
+            command_rx: self.command_rx,
+            runner_event_tx,
+            runner_event_rx,
+            internal_tx,
+            internal_rx,
+            active: HashMap::new(),
+            pending_progress: HashMap::new(),
+            persistence_fault: false,
+            snapshot: self.snapshot,
+        }
+    }
+}
+
 pub struct QueueActor {
     document: TransferQueueDocument,
     store: Arc<dyn QueueStore>,
@@ -246,6 +294,12 @@ enum InternalEvent {
 }
 
 impl QueueActor {
+    pub fn bootstrap(
+        store: TransferStore,
+    ) -> Result<(QueueBootstrap, TransferQueueHandle), String> {
+        Self::bootstrap_with_store(Arc::new(store))
+    }
+
     pub fn spawn(
         store: TransferStore,
         event_sink: Arc<dyn TransferEventSink>,
@@ -276,35 +330,32 @@ impl QueueActor {
         clock: Arc<dyn QueueClock>,
         runner: Option<SharedTransferJobRunner>,
     ) -> Result<TransferQueueHandle, String> {
+        let (bootstrap, handle) = Self::bootstrap_with_store(store)?;
+        let actor = bootstrap.into_actor(event_sink, clock, runner);
+        tokio::spawn(actor.run());
+        Ok(handle)
+    }
+
+    fn bootstrap_with_store(
+        store: Arc<dyn QueueStore>,
+    ) -> Result<(QueueBootstrap, TransferQueueHandle), String> {
         let mut document = store.load()?;
         recover_for_startup(&mut document);
         validate_document(&document)?;
         store.save(&document)?;
         let snapshot = Arc::new(RwLock::new(TransferQueueSnapshot::from(&document)));
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let (runner_event_tx, runner_event_rx) = mpsc::unbounded_channel();
-        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
-        let actor = Self {
+        let bootstrap = QueueBootstrap {
             document,
             store,
-            event_sink,
-            clock,
-            runner,
             command_rx,
-            runner_event_tx,
-            runner_event_rx,
-            internal_tx,
-            internal_rx,
-            active: HashMap::new(),
-            pending_progress: HashMap::new(),
-            persistence_fault: false,
             snapshot: snapshot.clone(),
         };
-        tokio::spawn(actor.run());
-        Ok(TransferQueueHandle {
+        let handle = TransferQueueHandle {
             command_tx,
             snapshot,
-        })
+        };
+        Ok((bootstrap, handle))
     }
 
     async fn run(mut self) {
@@ -990,11 +1041,11 @@ impl QueueActor {
             remote_path,
             file_name,
             batch_id,
+            priority,
+            host_key,
+            destination_key,
             conflict_policy,
         } = request;
-        let host_key = host_key(&endpoint);
-        let destination_key =
-            build_destination_key(&host_key, &direction, &local_path, &remote_path);
         let job = TransferJob {
             id,
             protocol,
@@ -1005,7 +1056,7 @@ impl QueueActor {
             remote_path,
             file_name,
             batch_id,
-            priority: TransferPriority::Normal,
+            priority,
             queue_order,
             host_key,
             destination_key,
@@ -1283,18 +1334,20 @@ fn validate_new_job(request: &NewTransferJob) -> Result<(), String> {
         }
         _ => {}
     }
-    Ok(())
-}
-
-fn host_key(endpoint: &TransferEndpoint) -> String {
-    match endpoint {
-        TransferEndpoint::Configured {
-            server_entry_id, ..
-        } => format!("configured:{server_entry_id}"),
-        TransferEndpoint::AdHoc {
-            host, port, user, ..
-        } => format!("adhoc:{user}@{host}:{port}"),
+    let expected_host_key = build_host_key(&request.endpoint);
+    if request.host_key != expected_host_key {
+        return Err("transfer host key is not canonical".into());
     }
+    let expected_destination_key = build_destination_key(
+        &expected_host_key,
+        &request.direction,
+        &request.local_path,
+        &request.remote_path,
+    );
+    if request.destination_key != expected_destination_key {
+        return Err("transfer destination key is not canonical".into());
+    }
+    Ok(())
 }
 
 fn validate_settings(settings: &QueueSettings) -> Result<(), String> {
@@ -1669,6 +1722,9 @@ mod tests {
             remote_path: format!("/srv/{file_name}"),
             file_name: file_name.into(),
             batch_id: None,
+            priority: TransferPriority::Normal,
+            host_key: "configured:server-1".into(),
+            destination_key: format!("configured:server-1:/srv/{file_name}"),
             conflict_policy: ConflictPolicy::Ask,
         }
     }
@@ -3125,5 +3181,29 @@ mod tests {
         assert_eq!(snapshot.jobs[0].state, TransferJobState::Paused);
         assert_eq!(store.document.lock().unwrap().revision, snapshot.revision);
         assert_eq!(events.event_count(), 0);
+    }
+
+    #[test]
+    fn bootstrap_exposes_quarantine_error_and_suspension_before_actor_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transfers.json");
+        std::fs::write(&path, b"not json").unwrap();
+
+        let (bootstrap, handle) = QueueActor::bootstrap(TransferStore::new(path.clone())).unwrap();
+
+        let snapshot = handle.snapshot();
+        assert!(snapshot.queue_paused);
+        assert!(snapshot.jobs.is_empty());
+        assert!(
+            snapshot
+                .recovery_error
+                .as_deref()
+                .is_some_and(|message| message.contains("quarantined"))
+        );
+        assert!(
+            path.exists(),
+            "the recovered snapshot is persisted for late subscribers"
+        );
+        drop(bootstrap);
     }
 }
