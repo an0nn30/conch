@@ -26,14 +26,11 @@ pub enum FailureClass {
 
 /// Select eligible jobs without mutating the durable queue or starting work.
 pub fn select_runnable_jobs(
-    document: &TransferQueueDocument,
+    jobs: &[TransferJob],
     active: &[ActiveLease],
+    settings: &QueueSettings,
     now_ms: u64,
 ) -> Vec<Uuid> {
-    if document.queue_paused {
-        return Vec::new();
-    }
-
     let mut reservations = Reservations::default();
     let mut leased_job_ids = HashSet::new();
 
@@ -43,16 +40,15 @@ pub fn select_runnable_jobs(
         }
     }
 
-    for job in &document.jobs {
+    for job in jobs {
         if job.state.holds_lease() && leased_job_ids.insert(job.id) {
             reservations.reserve(&job.host_key, &job.destination_key);
         }
     }
 
-    let mut candidates: Vec<&TransferJob> = document
-        .jobs
+    let mut candidates: Vec<&TransferJob> = jobs
         .iter()
-        .filter(|job| is_eligible(job, now_ms))
+        .filter(|job| !leased_job_ids.contains(&job.id) && is_eligible(job, now_ms))
         .collect();
     candidates.sort_by_key(|job| {
         (
@@ -64,12 +60,25 @@ pub fn select_runnable_jobs(
 
     let mut selected = Vec::new();
     for job in candidates {
-        if reservations.can_reserve(job, &document.settings) {
+        if reservations.can_reserve(job, settings) {
             reservations.reserve(&job.host_key, &job.destination_key);
             selected.push(job.id);
         }
     }
     selected
+}
+
+/// Apply durable queue suspension before selecting otherwise pure candidates.
+pub fn select_runnable_jobs_from_document(
+    document: &TransferQueueDocument,
+    active: &[ActiveLease],
+    now_ms: u64,
+) -> Vec<Uuid> {
+    if document.queue_paused {
+        Vec::new()
+    } else {
+        select_runnable_jobs(&document.jobs, active, &document.settings, now_ms)
+    }
 }
 
 /// Classify text received from transfer infrastructure conservatively: only
@@ -143,10 +152,11 @@ impl Reservations {
 mod tests {
     use super::{
         ActiveLease, FailureClass, classify_failure, retry_delay_ms, select_runnable_jobs,
+        select_runnable_jobs_from_document,
     };
     use crate::remote::transfer_queue::model::{
-        CommitPhase, ConflictPolicy, TransferDirection, TransferEndpoint, TransferJob,
-        TransferJobState, TransferOrigin, TransferPriority, TransferProtocol,
+        CommitPhase, ConflictPolicy, QueueSettings, TransferDirection, TransferEndpoint,
+        TransferJob, TransferJobState, TransferOrigin, TransferPriority, TransferProtocol,
         TransferQueueDocument, build_destination_key,
     };
     use uuid::Uuid;
@@ -271,9 +281,7 @@ mod tests {
                 TransferJobState::Queued,
             ),
         ];
-        let document = document(jobs.clone());
-
-        let chosen = select_runnable_jobs(&document, &[], 100);
+        let chosen = select_runnable_jobs(&jobs, &[], &QueueSettings::default(), 100);
 
         assert_eq!(
             selected_ids(&jobs, chosen),
@@ -312,15 +320,14 @@ mod tests {
                 TransferJobState::Queued,
             ),
         ];
-        let document = document(jobs.clone());
-
-        let chosen = select_runnable_jobs(&document, &[], 100);
+        let original_jobs = jobs.clone();
+        let chosen = select_runnable_jobs(&jobs, &[], &QueueSettings::default(), 100);
 
         assert_eq!(
             selected_ids(&jobs, chosen),
             ["first-order", "earlier-created", "later-created"]
         );
-        assert_eq!(document.jobs, jobs);
+        assert_eq!(jobs, original_jobs);
     }
 
     #[test]
@@ -379,9 +386,7 @@ mod tests {
                 TransferJobState::Queued,
             ),
         ];
-        let document = document(jobs.clone());
-
-        let chosen = select_runnable_jobs(&document, &[], 100);
+        let chosen = select_runnable_jobs(&jobs, &[], &QueueSettings::default(), 100);
 
         assert_eq!(selected_ids(&jobs, chosen), ["ready"]);
     }
@@ -416,9 +421,7 @@ mod tests {
             ),
             exhausted,
         ];
-        let document = document(jobs.clone());
-
-        let chosen = select_runnable_jobs(&document, &[], 100);
+        let chosen = select_runnable_jobs(&jobs, &[], &QueueSettings::default(), 100);
 
         assert_eq!(selected_ids(&jobs, chosen), ["third-attempt"]);
     }
@@ -463,9 +466,7 @@ mod tests {
                 TransferJobState::Queued,
             ),
         ];
-        let document = document(jobs.clone());
-
-        let chosen = select_runnable_jobs(&document, &[], 100);
+        let chosen = select_runnable_jobs(&jobs, &[], &QueueSettings::default(), 100);
 
         assert!(chosen.is_empty());
     }
@@ -501,7 +502,6 @@ mod tests {
                 TransferJobState::Queued,
             ),
         ];
-        let document = document(jobs.clone());
         let active = vec![
             ActiveLease {
                 job_id: Uuid::new_v4(),
@@ -525,9 +525,36 @@ mod tests {
             },
         ];
 
-        let chosen = select_runnable_jobs(&document, &active, 100);
+        let chosen = select_runnable_jobs(&jobs, &active, &QueueSettings::default(), 100);
 
         assert_eq!(selected_ids(&jobs, chosen), ["other-host"]);
+    }
+
+    #[test]
+    fn a_queued_job_with_an_active_lease_id_is_not_redispatched() {
+        let jobs = vec![job(
+            "already-running",
+            TransferPriority::Interactive,
+            "host-a",
+            "/same",
+            1,
+            1,
+            TransferJobState::Queued,
+        )];
+        let active = vec![ActiveLease {
+            job_id: jobs[0].id,
+            host_key: "host-b".into(),
+            destination_key: build_destination_key(
+                "host-b",
+                &TransferDirection::Upload,
+                "/local/other",
+                "/other",
+            ),
+        }];
+
+        let chosen = select_runnable_jobs(&jobs, &active, &QueueSettings::default(), 100);
+
+        assert!(chosen.is_empty());
     }
 
     #[test]
@@ -544,7 +571,7 @@ mod tests {
         let mut document = document(jobs);
         document.queue_paused = true;
 
-        assert!(select_runnable_jobs(&document, &[], 100).is_empty());
+        assert!(select_runnable_jobs_from_document(&document, &[], 100).is_empty());
     }
 
     #[test]
