@@ -230,6 +230,12 @@ impl TransferJobState {
             Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. }
         )
     }
+
+    /// Whether this state owns scheduler capacity until its transfer actor
+    /// reports a new state.
+    pub fn holds_lease(&self) -> bool {
+        matches!(self, Self::Connecting | Self::Checking | Self::Running)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
