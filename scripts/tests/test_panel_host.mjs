@@ -938,6 +938,13 @@ async function loadRuntime(savedLayout) {
   sandbox.window = sandbox;
   sandbox.global = sandbox;
   sandbox.toolWindowManager = twm;
+  sandbox.toast = {};
+  sandbox.termlabTransferRuntime = {
+    ensureStarted(options) {
+      twm.calls.push({ name: 'transferEnsureStarted', args: [options] });
+      return Promise.resolve();
+    },
+  };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(RUNTIME_PATH, 'utf8'), sandbox, { filename: RUNTIME_PATH });
 
@@ -963,6 +970,19 @@ async function loadRuntime(savedLayout) {
     for (const fn of listeners.get(name) || []) fn({ payload });
   };
   return { twm, invokeCalls, listeners, emit, result };
+}
+
+// --- 14j. Main-window transfer state starts before panels can consume it ---
+{
+  const { twm } = await loadRuntime({});
+  const transferStartIdx = twm.calls.findIndex((call) => call.name === 'transferEnsureStarted');
+  const firstRegisterIdx = twm.calls.findIndex((call) => call.name === 'register');
+  assert.ok(transferStartIdx >= 0, 'main tool-window init must start the transfer runtime');
+  assert.ok(transferStartIdx < firstRegisterIdx, 'transfer listeners/snapshot must start before built-in panel registration');
+  const options = twm.calls[transferStartIdx].args[0];
+  assert.equal(typeof options.invoke, 'function');
+  assert.equal(typeof options.listen, 'function');
+  assert.ok(options.toast && typeof options.toast === 'object');
 }
 
 // --- 15. The save payload carries the view modes ---------------------------

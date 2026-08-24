@@ -88,6 +88,17 @@ export const COMMANDS = {
   TRANSFER_DOWNLOAD: 'transfer_download',
   TRANSFER_UPLOAD: 'transfer_upload',
   TRANSFER_CANCEL: 'transfer_cancel',
+  TRANSFER_QUEUE_SNAPSHOT: 'transfer_queue_snapshot',
+  TRANSFER_PAUSE: 'transfer_pause',
+  TRANSFER_RESUME: 'transfer_resume',
+  TRANSFER_PAUSE_ALL: 'transfer_pause_all',
+  TRANSFER_RESUME_ALL: 'transfer_resume_all',
+  TRANSFER_RETRY: 'transfer_retry',
+  TRANSFER_RESOLVE: 'transfer_resolve',
+  TRANSFER_REORDER: 'transfer_reorder',
+  TRANSFER_SET_PRIORITY: 'transfer_set_priority',
+  TRANSFER_CLEAR_COMPLETED: 'transfer_clear_completed',
+  TRANSFER_UPDATE_SETTINGS: 'transfer_update_settings',
 
   // Tunnels
   TUNNEL_START: 'tunnel_start',
@@ -165,6 +176,8 @@ export const EVENTS = {
 
   // Transfers
   TRANSFER_PROGRESS: 'transfer-progress',
+  TRANSFER_JOB_UPDATED: 'transfer-job-updated',
+  TRANSFER_QUEUE_SUMMARY: 'transfer-queue-summary',
 
   // Updater
   UPDATE_AVAILABLE: 'update-available',

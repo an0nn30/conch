@@ -301,6 +301,15 @@
     }
 
     async function init() {
+      if (global.termlabTransferRuntime
+          && typeof global.termlabTransferRuntime.ensureStarted === 'function') {
+        await global.termlabTransferRuntime.ensureStarted({
+          invoke,
+          listen: listenOnCurrentWindow,
+          toast: global.toast,
+        });
+      }
+
       const bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
       const bottomZoneResizeEl = document.getElementById('bottom-zone-resize');
       let initialLayoutData = null;
