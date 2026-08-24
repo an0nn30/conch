@@ -60,6 +60,25 @@ pub(crate) struct EditorTextEdit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum CompletionTextEdit {
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    TextEdit {
+        range: EditorRange,
+        new_text: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    InsertReplaceEdit {
+        insert: EditorRange,
+        replace: EditorRange,
+        new_text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HoverBlock {
@@ -84,7 +103,7 @@ pub(crate) struct CompletionItem {
     pub filter_text: Option<String>,
     pub insert_text: Option<String>,
     pub is_snippet: bool,
-    pub text_edit: Option<EditorTextEdit>,
+    pub text_edit: Option<CompletionTextEdit>,
     pub additional_text_edits: Vec<EditorTextEdit>,
     pub commit_characters: Vec<String>,
     pub deprecated: bool,
@@ -275,9 +294,9 @@ pub(crate) struct ResyncDocumentResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyChangesResponse, CompletionItem, Diagnostic, EditorLocation, EditorPosition,
-        EditorRange, HoverBlock, LspChangeBatch, LspStatus, LspTextChange, ProjectCandidate,
-        SignatureHelpResponse,
+        ApplyChangesResponse, CompletionItem, CompletionTextEdit, Diagnostic, EditorLocation,
+        EditorPosition, EditorRange, HoverBlock, LspChangeBatch, LspStatus, LspTextChange,
+        ProjectCandidate, SignatureHelpResponse,
     };
     use ts_rs::TS;
 
@@ -347,5 +366,75 @@ mod tests {
                 }],
             })
         );
+    }
+
+    #[test]
+    fn completion_text_edits_preserve_plain_and_insert_replace_ranges() {
+        let insert = EditorRange {
+            start: EditorPosition {
+                line: 2,
+                character: 3,
+            },
+            end: EditorPosition {
+                line: 2,
+                character: 5,
+            },
+        };
+        let replace = EditorRange {
+            start: EditorPosition {
+                line: 2,
+                character: 3,
+            },
+            end: EditorPosition {
+                line: 2,
+                character: 8,
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(CompletionTextEdit::TextEdit {
+                range: insert,
+                new_text: "plain".into(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "textEdit",
+                "range": {
+                    "start": { "line": 2, "character": 3 },
+                    "end": { "line": 2, "character": 5 },
+                },
+                "newText": "plain",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(CompletionTextEdit::InsertReplaceEdit {
+                insert,
+                replace,
+                new_text: "wide".into(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "insertReplaceEdit",
+                "insert": {
+                    "start": { "line": 2, "character": 3 },
+                    "end": { "line": 2, "character": 5 },
+                },
+                "replace": {
+                    "start": { "line": 2, "character": 3 },
+                    "end": { "line": 2, "character": 8 },
+                },
+                "newText": "wide",
+            })
+        );
+    }
+
+    #[test]
+    fn completion_text_edit_typescript_keeps_both_insert_replace_ranges() {
+        let declaration = CompletionTextEdit::decl(&ts_rs::Config::default());
+
+        assert!(declaration.contains("insert: EditorRange"));
+        assert!(declaration.contains("replace: EditorRange"));
+        assert!(declaration.contains("newText: string"));
+        assert!(!declaration.contains("new_text"));
     }
 }

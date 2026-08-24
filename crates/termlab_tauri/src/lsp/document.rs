@@ -140,12 +140,19 @@ pub(crate) struct VersionedDocument {
 }
 
 impl VersionedDocument {
-    pub(crate) fn new(document_id: &str, text: &str, version: i32) -> Self {
-        Self {
+    pub(crate) fn new(document_id: &str, text: &str, version: i32) -> Result<Self, DocumentError> {
+        if text.len() > MAX_EDIT_BYTES as usize {
+            return Err(DocumentError::TooLarge {
+                size: text.len(),
+                max: MAX_EDIT_BYTES as usize,
+            });
+        }
+
+        Ok(Self {
             document_id: document_id.to_owned(),
             text: DocumentText::new(text),
             version,
-        }
+        })
     }
 
     pub(crate) fn text(&self) -> String {
@@ -401,7 +408,7 @@ mod tests {
 
     #[test]
     fn applies_code_mirror_changes_high_to_low() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abcdef", 1);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abcdef", 1).unwrap();
         let batch = LspChangeBatch {
             document_id: "file:///tmp/a.ts".into(),
             base_version: 1,
@@ -428,7 +435,7 @@ mod tests {
 
     #[test]
     fn derives_every_lsp_range_from_the_pre_change_snapshot() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "a😀b\nçd", 8);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "a😀b\nçd", 8).unwrap();
         let batch = LspChangeBatch {
             document_id: "file:///tmp/a.ts".into(),
             base_version: 8,
@@ -466,7 +473,7 @@ mod tests {
 
     #[test]
     fn rejects_two_insertions_at_the_same_snapshot_offset() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 4);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 4).unwrap();
         let batch = LspChangeBatch {
             document_id: "file:///tmp/a.ts".into(),
             base_version: 4,
@@ -495,7 +502,7 @@ mod tests {
 
     #[test]
     fn stale_base_version_requires_resync_without_mutating() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 7);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 7).unwrap();
 
         let result = doc.apply_batch(change_batch("file:///tmp/a.ts", 6, 8, [(0, 1, "X")]));
 
@@ -513,7 +520,7 @@ mod tests {
     #[test]
     fn rejects_non_monotonic_next_version() {
         for next_version in [4, 3] {
-            let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 4);
+            let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 4).unwrap();
 
             let result = doc.apply_batch(change_batch(
                 "file:///tmp/a.ts",
@@ -536,7 +543,7 @@ mod tests {
 
     #[test]
     fn invalid_later_change_rejects_the_whole_batch_atomically() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "a😀b", 1);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "a😀b", 1).unwrap();
         let result = doc.apply_batch(change_batch(
             "file:///tmp/a.ts",
             1,
@@ -554,7 +561,7 @@ mod tests {
 
     #[test]
     fn rejects_reversed_change_range() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 1);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abc", 1).unwrap();
 
         let result = doc.apply_batch(change_batch("file:///tmp/a.ts", 1, 2, [(3, 1, "X")]));
 
@@ -571,7 +578,7 @@ mod tests {
 
     #[test]
     fn rejects_overlapping_snapshot_ranges() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abcdef", 1);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "abcdef", 1).unwrap();
 
         let result = doc.apply_batch(change_batch(
             "file:///tmp/a.ts",
@@ -587,7 +594,7 @@ mod tests {
 
     #[test]
     fn applies_insertion_at_end_of_document() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "a😀", 1);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "a😀", 1).unwrap();
 
         let applied = doc
             .apply_batch(change_batch("file:///tmp/a.ts", 1, 3, [(3, 3, "\n")]))
@@ -605,7 +612,7 @@ mod tests {
     fn rejects_batch_that_exceeds_editor_size_limit() {
         let max = MAX_EDIT_BYTES as usize;
         let original = "a".repeat(max);
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", &original, 1);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", &original, 1).unwrap();
 
         let result = doc.apply_batch(change_batch(
             "file:///tmp/a.ts",
@@ -623,8 +630,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversized_initial_snapshot() {
+        let max = MAX_EDIT_BYTES as usize;
+        let oversized = "a".repeat(max + 1);
+
+        let result = VersionedDocument::new("file:///tmp/a.ts", &oversized, 1);
+
+        assert!(matches!(
+            result,
+            Err(DocumentError::TooLarge { size, max: limit })
+                if size == max + 1 && limit == max
+        ));
+    }
+
+    #[test]
     fn explicit_resync_replaces_text_at_the_supplied_newer_version() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "stale", 7);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "stale", 7).unwrap();
 
         doc.resync("fresh😀\n", 10).unwrap();
 
@@ -634,7 +655,7 @@ mod tests {
 
     #[test]
     fn explicit_resync_rejects_a_non_monotonic_version() {
-        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "current", 7);
+        let mut doc = VersionedDocument::new("file:///tmp/a.ts", "current", 7).unwrap();
 
         let result = doc.resync("stale", 7);
 
