@@ -350,18 +350,22 @@ fn identity_key(
     canonical_path: &Path,
     sensitivity: CaseSensitivity,
 ) -> Result<PathBuf, OwnershipError> {
+    let path = canonical_path
+        .to_str()
+        .ok_or(OwnershipError::CanonicalizationFailed(
+            io::ErrorKind::InvalidData,
+        ))?;
+    // Both case-sensitive and case-insensitive APFS are normalization-insensitive.
+    let decomposed: String = path.nfd().collect();
+
     match sensitivity {
-        CaseSensitivity::Sensitive => Ok(canonical_path.to_path_buf()),
+        CaseSensitivity::Sensitive => Ok(PathBuf::from(decomposed.nfc().collect::<String>())),
         CaseSensitivity::Insensitive => {
-            let path = canonical_path
-                .to_str()
-                .ok_or(OwnershipError::CanonicalizationFailed(
-                    io::ErrorKind::InvalidData,
-                ))?;
             // Canonical caseless key order is deliberate: decompose equivalent
             // spellings, apply the Unicode data table's full non-Turkic fold
             // (including multi-scalar mappings), then recompose a stable key.
-            let decomposed: String = path.nfd().collect();
+            // APFS matching is frozen to Unicode 9.0, so unicode-casefold 0.2.0
+            // is intentionally pinned; newer folds would create false aliases.
             let folded: String = decomposed
                 .case_fold_with(Variant::Full, Locale::NonTurkic)
                 .collect();
@@ -1048,6 +1052,45 @@ mod tests {
     }
 
     #[test]
+    fn case_sensitive_policy_still_collapses_canonically_equivalent_names() {
+        let temp = TempDir::new().unwrap();
+        let now = Instant::now();
+        let mut registry = OwnershipRegistry::with_policy(FixedPathIdentityPolicy::new(
+            CaseSensitivity::Sensitive,
+        ));
+
+        reserved(
+            registry
+                .reserve_at(local(temp.path().join("File.ts")), "upper-owner", now)
+                .unwrap(),
+        );
+        assert!(matches!(
+            registry
+                .reserve_at(local(temp.path().join("file.ts")), "lower-owner", now)
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
+
+        reserved(
+            registry
+                .reserve_at(
+                    local(temp.path().join("Caf\u{e9}.ts")),
+                    "unicode-owner",
+                    now,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            registry
+                .reserve_at(local(temp.path().join("Cafe\u{301}.ts")), "popup", now)
+                .unwrap(),
+            ReserveResult::FocusPending {
+                window_label: "unicode-owner".into(),
+            }
+        );
+    }
+
+    #[test]
     fn injected_case_insensitive_policy_collapses_case_and_unicode_equivalent_targets() {
         let temp = TempDir::new().unwrap();
         let now = Instant::now();
@@ -1122,6 +1165,35 @@ mod tests {
                 window_label: "eszett-owner".into(),
             }
         );
+    }
+
+    #[test]
+    fn insensitive_policy_preserves_post_unicode_9_georgian_case_pair_for_apfs() {
+        let temp = TempDir::new().unwrap();
+        let now = Instant::now();
+        let mut registry = OwnershipRegistry::with_policy(FixedPathIdentityPolicy::new(
+            CaseSensitivity::Insensitive,
+        ));
+
+        reserved(
+            registry
+                .reserve_at(
+                    local(temp.path().join("georgian-\u{1c90}.ts")),
+                    "mtavruli-owner",
+                    now,
+                )
+                .unwrap(),
+        );
+        assert!(matches!(
+            registry
+                .reserve_at(
+                    local(temp.path().join("georgian-\u{10d0}.ts")),
+                    "mkhedruli-owner",
+                    now,
+                )
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
     }
 
     #[derive(Debug)]
