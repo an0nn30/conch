@@ -1301,23 +1301,30 @@ impl QueueActor {
         };
         ordered.insert(target, moved);
 
+        let changed: Vec<_> = ordered
+            .iter()
+            .zip(queue_order_slots)
+            .filter_map(|((job_id, previous_order, _), proposed_order)| {
+                (*previous_order != proposed_order).then_some((*job_id, proposed_order))
+            })
+            .collect();
+        for (job_id, _) in &changed {
+            self.ensure_lifecycle_mutation_allowed(*job_id)?;
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+
         let now_ms = self.clock.now_ms();
         let mut next = self.document.clone();
-        let mut changed = Vec::new();
-        for ((job_id, _, _), order) in ordered.iter().zip(queue_order_slots) {
+        for (job_id, order) in &changed {
             let job = next
                 .jobs
                 .iter_mut()
                 .find(|job| job.id == *job_id)
-                .expect("ordered jobs came from this document");
-            if job.queue_order != order {
-                job.queue_order = order;
-                job.updated_at_ms = now_ms;
-                changed.push(*job_id);
-            }
-        }
-        if changed.is_empty() {
-            return Ok(());
+                .expect("changed jobs came from this document");
+            job.queue_order = *order;
+            job.updated_at_ms = now_ms;
         }
         self.commit(next).await
     }
@@ -3451,6 +3458,86 @@ mod tests {
         assert!(harness.handle.snapshot().jobs.iter().all(|job| {
             job.id == blocker || matches!(job.state, TransferJobState::Cancelled { .. })
         }));
+    }
+
+    #[tokio::test]
+    async fn reorder_rejects_when_an_indirectly_affected_job_is_cleanup_owned() {
+        let blocker = Uuid::from_u128(757);
+        let cleanup = Uuid::from_u128(758);
+        let ordinary = Uuid::from_u128(759);
+        let mut cleanup_job = durable_cancel_job(cleanup, "host-cleanup", 2);
+        cleanup_job.state = TransferJobState::Queued;
+        let mut document = document_with(vec![
+            on_host_with_destination(
+                stored_job(blocker, TransferJobState::Queued, 1),
+                "host-blocker",
+                "host-blocker:/srv/blocker.bin",
+            ),
+            cleanup_job,
+            on_host_with_destination(
+                stored_job(ordinary, TransferJobState::Queued, 3),
+                "host-ordinary",
+                "host-ordinary:/srv/ordinary.bin",
+            ),
+        ]);
+        document.queue_paused = false;
+        document.settings = QueueSettings {
+            global_limit: 1,
+            per_host_limit: 1,
+        };
+        let runner = Arc::new(GatedRunner::default());
+        let blocker_release = runner.gate(blocker);
+        let cleanup_release = runner.gate(cleanup);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+        assert_eq!(runner.starts(), [blocker]);
+        assert!(harness.handle.cancel(cleanup).await.unwrap());
+        let before = harness.handle.snapshot();
+        let cleanup_before = before
+            .jobs
+            .iter()
+            .find(|job| job.id == cleanup)
+            .unwrap()
+            .clone();
+        let ordinary_before = before
+            .jobs
+            .iter()
+            .find(|job| job.id == ordinary)
+            .unwrap()
+            .clone();
+        harness.events.clear();
+
+        let error = harness
+            .handle
+            .reorder(ordinary, Some(cleanup))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("cancellation cleanup owns"), "{error}");
+        let after = harness.handle.snapshot();
+        assert_eq!(
+            after.jobs.iter().find(|job| job.id == cleanup).unwrap(),
+            &cleanup_before
+        );
+        assert_eq!(
+            after.jobs.iter().find(|job| job.id == ordinary).unwrap(),
+            &ordinary_before
+        );
+        assert_eq!(harness.events.event_count(), 0);
+
+        blocker_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        wait_for_starts(&runner, 2).await;
+        assert_eq!(runner.starts(), [blocker, cleanup]);
+        assert_eq!(runner.control_state(cleanup), RunnerControlState::Cancel);
+        cleanup_release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
     }
 
     #[tokio::test]
