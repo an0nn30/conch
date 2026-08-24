@@ -1,8 +1,30 @@
 # SFTP Durable Transfer Queue and Transfer Center — Design
 
-**Status:** Approved
+**Status:** Implemented
 **Date:** 2026-08-23
 **Scope:** Replace the current fire-and-forget SFTP transfer registry with a Rust-owned, durable, resumable queue and expose it through a desktop-native Transfer Center. The design is SFTP-first, while keeping persisted job records extensible enough for later FTP/FTPS/SCP adapters.
+
+**Implementation:** branch `feat/sftp-durable-transfer-queue-impl`; commits
+`8ce24d2` through `d907f66`, plus the Task 14 commit
+`Harden SFTP queue recovery and document verification` (its immutable hash is
+recorded in the Task 14 report because this document is part of that commit).
+Manual and product-gap evidence is tracked in the
+[SFTP transfer queue manual checklist](../notes/sftp-transfer-queue-manual-checklist.md).
+
+Automated queue, runner, workspace, frontend VM, and token-extraction evidence
+was green before this status changed. The opt-in live test harness was invoked
+but skipped before connecting because disposable-server credentials were not
+present; the checklist therefore remains the authority for unexecuted live GUI
+and server verification. The repository-wide formatter and frontend boundary
+checks retain their verified clean-base exceptions: unrelated Rust formatting
+drift and `frontend/app/ui/tl-dialog.js:334`, respectively.
+
+**Accepted implementation deviation:** version 1 retains nullable
+`speedBytesPerSecond` and `etaSeconds` fields in the serialized job projection
+for schema/frontend compatibility, rather than splitting instantaneous metrics
+into a separate runtime-only DTO. They are reset to unknown during startup
+recovery, and the SFTP runner reports unknown until a real measurement exists;
+`0` is never used to claim a measurement.
 
 ## Product rules settled in brainstorming
 

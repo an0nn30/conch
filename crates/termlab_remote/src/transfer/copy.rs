@@ -259,6 +259,48 @@ mod tests {
 
     struct FailingWriter;
 
+    struct ShortWriter {
+        inner: Cursor<Vec<u8>>,
+        max_write: usize,
+        writes: usize,
+    }
+
+    impl AsyncWrite for ShortWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.writes += 1;
+            let limit = buf.len().min(self.max_write);
+            Pin::new(&mut self.inner).poll_write(cx, &buf[..limit])
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    impl AsyncSeek for ShortWriter {
+        fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+            Pin::new(&mut self.inner).start_seek(position)
+        }
+
+        fn poll_complete(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<u64>> {
+            Pin::new(&mut self.inner).poll_complete(cx)
+        }
+    }
+
     impl AsyncWrite for FailingWriter {
         fn poll_write(
             self: Pin<&mut Self>,
@@ -460,5 +502,31 @@ mod tests {
                 cause,
             } if cause == "write broke"
         ));
+    }
+
+    #[tokio::test]
+    async fn short_destination_writes_are_retried_until_the_whole_chunk_is_written() {
+        let mut source = Cursor::new(b"0123456789".to_vec());
+        let mut destination = ShortWriter {
+            inner: Cursor::new(Vec::new()),
+            max_write: 2,
+            writes: 0,
+        };
+
+        let outcome = copy_with_checkpoint_typed(
+            &mut source,
+            &mut destination,
+            0,
+            10,
+            10,
+            || ControlDecision::Continue,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, CopyOutcome::Completed { bytes: 10 });
+        assert_eq!(destination.inner.into_inner(), b"0123456789");
+        assert_eq!(destination.writes, 5);
     }
 }

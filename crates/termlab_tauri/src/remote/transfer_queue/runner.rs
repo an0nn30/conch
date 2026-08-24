@@ -614,10 +614,7 @@ where
                 RunnerControlState::Pause => ControlDecision::Pause,
                 RunnerControlState::Cancel => ControlDecision::Cancel,
             },
-            |bytes, total| {
-                let remaining = total.saturating_sub(bytes);
-                reporter.progress(bytes, 0, (remaining > 0).then_some(0));
-            },
+            |bytes, _total| reporter.progress(bytes, None, None),
         )
         .await
         .map_err(|error| TransferIoError::from_copy(&job.direction, error));
@@ -826,64 +823,20 @@ where
     C: Send + Sync,
     I: TransferIo<C>,
 {
-    let mut inventory = match io.inventory(connection, job, artifacts).await {
-        Ok(inventory) => inventory,
-        Err(error) => return failed(error),
-    };
     let mut phase = job.commit_phase;
 
-    if phase == CommitPhase::Prepared {
-        if !inventory.partial_exists {
-            if !inventory.final_exists && inventory.backup_exists {
-                let _ = io.restore_backup(connection, job, artifacts).await;
-            }
-            return commit_attention(
-                io,
-                connection,
-                job,
-                artifacts,
-                "Prepared commit has no promotable partial",
-            )
-            .await;
-        }
-        if inventory.final_exists
-            && !inventory.backup_exists
-            && job.conflict_policy == ConflictPolicy::Ask
-        {
-            return RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
-                resume_available: job
-                    .source_fingerprint
-                    .as_ref()
-                    .and_then(|fingerprint| fingerprint.modified_token.as_ref())
-                    .is_some(),
-            });
-        }
-        if inventory.final_exists && !inventory.backup_exists {
-            if let Err(error) = io.move_final_to_backup(connection, job, artifacts).await {
-                return commit_attention(io, connection, job, artifacts, error.message).await;
-            }
-        } else if inventory.final_exists && inventory.backup_exists {
-            return commit_attention(
-                io,
-                connection,
-                job,
-                artifacts,
-                "Prepared commit has both final and backup",
-            )
-            .await;
-        }
-        if let Err(message) = reporter.commit_phase(CommitPhase::BackupMoved).await {
-            return permanent_failure(message);
-        }
-        phase = CommitPhase::BackupMoved;
-        inventory = match io.inventory(connection, job, artifacts).await {
+    loop {
+        let inventory = match io.inventory(connection, job, artifacts).await {
             Ok(inventory) => inventory,
             Err(error) => return failed(error),
         };
-    }
 
-    if phase == CommitPhase::BackupMoved {
-        if inventory.partial_exists
+        // Resume is the one explicit extension to the persisted recovery
+        // matrix: after BackupMoved, an Overwrite resolution authorizes one
+        // late destination to become this job's backup. The next inventory is
+        // then interpreted by the shared policy like every other layout.
+        if phase == CommitPhase::BackupMoved
+            && inventory.partial_exists
             && inventory.final_exists
             && !inventory.backup_exists
             && job.conflict_policy == ConflictPolicy::Overwrite
@@ -891,96 +844,99 @@ where
             if let Err(error) = io.move_final_to_backup(connection, job, artifacts).await {
                 return commit_attention(io, connection, job, artifacts, error.message).await;
             }
-            // A Resume resolution can authorize one late final after the
-            // original BackupMoved acknowledgement. Acknowledge the same
-            // phase again only after that controlled move; never loop.
             if let Err(message) = reporter.commit_phase(CommitPhase::BackupMoved).await {
                 return permanent_failure(message);
             }
-            inventory = match io.inventory(connection, job, artifacts).await {
-                Ok(inventory) => inventory,
-                Err(error) => return failed(error),
-            };
+            continue;
         }
-        if inventory.partial_exists && !inventory.final_exists {
-            if let Err(error) = io
-                .promote_partial_no_replace(connection, job, artifacts)
-                .await
-            {
-                if inventory.backup_exists && error.allows_backup_restore() {
-                    let _ = io.restore_backup(connection, job, artifacts).await;
+
+        let action = recovery_action(phase, inventory);
+        match action {
+            RecoveryAction::ResumeCopy => {
+                return commit_attention(
+                    io,
+                    connection,
+                    job,
+                    artifacts,
+                    format!("commit recovery cannot resume copy from persisted phase {phase:?}"),
+                )
+                .await;
+            }
+            RecoveryAction::MoveFinalToBackup => {
+                if job.conflict_policy == ConflictPolicy::Ask {
+                    return RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
+                        resume_available: job
+                            .source_fingerprint
+                            .as_ref()
+                            .and_then(|fingerprint| fingerprint.modified_token.as_ref())
+                            .is_some(),
+                    });
                 }
-                return commit_attention(io, connection, job, artifacts, error.message()).await;
+                if let Err(error) = io.move_final_to_backup(connection, job, artifacts).await {
+                    return commit_attention(io, connection, job, artifacts, error.message).await;
+                }
+                if let Err(message) = reporter.commit_phase(CommitPhase::BackupMoved).await {
+                    return permanent_failure(message);
+                }
+                phase = CommitPhase::BackupMoved;
             }
-        } else if !inventory.partial_exists && inventory.final_exists {
-            // Promotion completed before its durable phase acknowledgement.
-        } else {
-            if !inventory.final_exists && inventory.backup_exists {
-                let _ = io.restore_backup(connection, job, artifacts).await;
+            RecoveryAction::PromotePartial => {
+                if phase == CommitPhase::Prepared {
+                    if let Err(message) = reporter.commit_phase(CommitPhase::BackupMoved).await {
+                        return permanent_failure(message);
+                    }
+                    phase = CommitPhase::BackupMoved;
+                    continue;
+                }
+                if let Err(error) = io
+                    .promote_partial_no_replace(connection, job, artifacts)
+                    .await
+                {
+                    if inventory.backup_exists && error.allows_backup_restore() {
+                        let _ = io.restore_backup(connection, job, artifacts).await;
+                    }
+                    return commit_attention(io, connection, job, artifacts, error.message()).await;
+                }
+                if let Err(message) = reporter.commit_phase(CommitPhase::PartialPromoted).await {
+                    return permanent_failure(message);
+                }
+                phase = CommitPhase::PartialPromoted;
             }
-            return commit_attention(
-                io,
-                connection,
-                job,
-                artifacts,
-                "BackupMoved inventory cannot prove a completed promotion",
-            )
-            .await;
-        }
-        if let Err(message) = reporter.commit_phase(CommitPhase::PartialPromoted).await {
-            return permanent_failure(message);
-        }
-        phase = CommitPhase::PartialPromoted;
-        inventory = match io.inventory(connection, job, artifacts).await {
-            Ok(inventory) => inventory,
-            Err(error) => return failed(error),
-        };
-    }
-
-    if matches!(
-        phase,
-        CommitPhase::PartialPromoted | CommitPhase::CleanupPending
-    ) {
-        if !inventory.final_exists || inventory.partial_exists {
-            if !inventory.final_exists && inventory.backup_exists {
-                let _ = io.restore_backup(connection, job, artifacts).await;
+            RecoveryAction::RestoreBackup => {
+                if let Err(error) = io.restore_backup(connection, job, artifacts).await {
+                    return commit_attention(io, connection, job, artifacts, error.message).await;
+                }
+                return commit_attention(
+                    io,
+                    connection,
+                    job,
+                    artifacts,
+                    format!("restored the owned backup required by the {phase:?} recovery policy"),
+                )
+                .await;
             }
-            return commit_attention(
-                io,
-                connection,
-                job,
-                artifacts,
-                "PartialPromoted inventory does not contain exactly one promoted final",
-            )
-            .await;
+            RecoveryAction::DeleteBackupAndComplete => {
+                if let Err(error) = io.delete_backup(connection, job, artifacts).await {
+                    return commit_attention(io, connection, job, artifacts, error.message).await;
+                }
+                if let Err(message) = reporter.commit_phase(CommitPhase::Complete).await {
+                    return permanent_failure(message);
+                }
+                return RunnerResult::Completed(CompletionResult::Transferred);
+            }
+            RecoveryAction::Complete => {
+                if phase != CommitPhase::Complete
+                    && let Err(message) = reporter.commit_phase(CommitPhase::Complete).await
+                {
+                    return permanent_failure(message);
+                }
+                return RunnerResult::Completed(CompletionResult::Transferred);
+            }
+            RecoveryAction::NeedsAttention { message } => {
+                return commit_attention(io, connection, job, artifacts, message).await;
+            }
         }
-        if inventory.backup_exists
-            && let Err(error) = io.delete_backup(connection, job, artifacts).await
-        {
-            return commit_attention(io, connection, job, artifacts, error.message).await;
-        }
-        if let Err(message) = reporter.commit_phase(CommitPhase::Complete).await {
-            return permanent_failure(message);
-        }
-        return RunnerResult::Completed(CompletionResult::Transferred);
     }
-
-    if phase == CommitPhase::Complete
-        && inventory.final_exists
-        && !inventory.partial_exists
-        && !inventory.backup_exists
-    {
-        return RunnerResult::Completed(CompletionResult::Transferred);
-    }
-
-    commit_attention(
-        io,
-        connection,
-        job,
-        artifacts,
-        format!("unexpected persisted commit phase {phase:?}"),
-    )
-    .await
 }
 
 async fn commit_attention<C, I>(
@@ -1429,18 +1385,23 @@ async fn remove_artifact(
                 return Ok(());
             }
             session.remove_file(path.to_owned()).await.map_err(|error| {
-                TransferIoError::from_remote_operation("delete remote artifact", error)
+                TransferIoError::from_remote_operation(
+                    &format!("delete remote artifact {path}"),
+                    error,
+                )
             })
         }
-        TransferDirection::Download => {
-            if missing_ok && !local_exists(path).await? {
-                return Ok(());
-            }
-            tokio::fs::remove_file(path).await.map_err(|error| {
-                TransferIoError::permanent(format!("delete local artifact failed: {error}"))
-            })
-        }
+        TransferDirection::Download => remove_local_artifact(path, missing_ok).await,
     }
+}
+
+async fn remove_local_artifact(path: &str, missing_ok: bool) -> Result<(), TransferIoError> {
+    if missing_ok && !local_exists(path).await? {
+        return Ok(());
+    }
+    tokio::fs::remove_file(path).await.map_err(|error| {
+        TransferIoError::permanent(format!("delete local artifact {path} failed: {error}"))
+    })
 }
 
 #[async_trait]
@@ -1572,7 +1533,12 @@ impl RunnerReporter {
         await_ack(response).await
     }
 
-    pub fn progress(&self, bytes: u64, speed_bytes_per_second: u64, eta_seconds: Option<u64>) {
+    pub fn progress(
+        &self,
+        bytes: u64,
+        speed_bytes_per_second: Option<u64>,
+        eta_seconds: Option<u64>,
+    ) {
         let progress = RunnerProgress {
             bytes,
             speed_bytes_per_second,
@@ -1601,7 +1567,7 @@ impl RunnerReporter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RunnerProgress {
     pub(crate) bytes: u64,
-    pub(crate) speed_bytes_per_second: u64,
+    pub(crate) speed_bytes_per_second: Option<u64>,
     pub(crate) eta_seconds: Option<u64>,
 }
 
@@ -1690,32 +1656,39 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use parking_lot::Mutex as ParkingMutex;
     use termlab_remote::{
         RemoteError,
-        transfer::{ControlDecision, SourceFingerprint, copy::copy_with_checkpoint_typed},
+        callbacks::{RemoteCallbacks, RemotePaths},
+        config::ServerEntry,
+        ssh::{SshCredentials, connect_and_auth},
+        transfer::{
+            ControlDecision, SourceFingerprint, copy::copy_with_checkpoint_typed, open_sftp_session,
+        },
     };
     use tokio::{
-        io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
-        sync::mpsc,
+        io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf},
+        sync::{mpsc, watch},
     };
     use uuid::Uuid;
 
     use super::{
-        ConnectionResolver, LiveConnectionIdentity, PromotionError, RunnerControl, RunnerReporter,
-        RunnerResult, SftpTransferJobRunner, TransferIo, TransferIoError, TransferJobRunner,
-        select_live_connection_key,
+        ConnectionResolver, LiveConnectionIdentity, PromotionError, RunnerControl,
+        RunnerControlState, RunnerReporter, RunnerResult, SftpTransferJobRunner, TransferIo,
+        TransferIoError, TransferJobRunner, remove_local_artifact, select_live_connection_key,
     };
     use crate::remote::transfer_queue::{
         artifacts::ArtifactInventory,
         events::RunnerEvent,
         model::{
-            AttentionReason, CommitPhase, ConflictPolicy, ConflictResolution, ManagedArtifacts,
-            TransferDirection, TransferEndpoint, TransferJob, TransferJobState, TransferOrigin,
-            TransferPriority, TransferProtocol,
+            AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ConflictResolution,
+            ManagedArtifacts, TransferDirection, TransferEndpoint, TransferJob, TransferJobState,
+            TransferOrigin, TransferPriority, TransferProtocol,
         },
         reducer::{JobEvent, reduce_job},
         scheduler::FailureClass,
     };
+    use crate::remote::{SshConnection, test_remote_state};
 
     #[derive(Clone, Copy)]
     struct TestConnection;
@@ -1751,6 +1724,22 @@ mod tests {
     struct FailingWrite {
         kind: ErrorKind,
         cause: &'static str,
+    }
+
+    #[tokio::test]
+    async fn failed_local_cleanup_reports_the_exact_leftover_artifact_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let leftover = directory.path().join("job.termlab-part-exact");
+        tokio::fs::create_dir(&leftover).await.unwrap();
+        let leftover = leftover.to_string_lossy().into_owned();
+
+        let error = remove_local_artifact(&leftover, false).await.unwrap_err();
+
+        assert!(
+            error.message.contains(&leftover),
+            "cleanup error must identify the exact owned artifact left behind: {}",
+            error.message
+        );
     }
 
     impl AsyncWrite for FailingWrite {
@@ -1865,6 +1854,7 @@ mod tests {
         partial_identity: Option<&'static str>,
         backup_identity: Option<&'static str>,
         fail_at: Option<&'static str>,
+        fail_error: Option<TransferIoError>,
         source_bytes: Vec<u8>,
         local_source_path: Option<PathBuf>,
         pending_partial_bytes: Vec<u8>,
@@ -1926,6 +1916,7 @@ mod tests {
                     partial_identity: None,
                     backup_identity: None,
                     fail_at: None,
+                    fail_error: None,
                     source_bytes,
                     local_source_path: None,
                     pending_partial_bytes: Vec::new(),
@@ -1976,6 +1967,14 @@ mod tests {
             self
         }
 
+        fn failing_at_with(self, operation: &'static str, error: TransferIoError) -> Self {
+            let mut state = self.state.lock().unwrap();
+            state.fail_at = Some(operation);
+            state.fail_error = Some(error);
+            drop(state);
+            self
+        }
+
         fn with_final_appearing_after_copy(self) -> Self {
             self.state.lock().unwrap().final_after_finish_partial = true;
             self
@@ -2011,11 +2010,13 @@ mod tests {
             state.log.lock().unwrap().push(operation.into());
             if state.fail_at == Some(operation) {
                 state.fail_at = None;
-                Err(if operation == "open_source" {
-                    TransferIoError::transient("connection reset while opening source")
-                } else {
-                    TransferIoError::permanent(format!("{operation}: disk full"))
-                })
+                Err(state.fail_error.take().unwrap_or_else(|| {
+                    if operation == "open_source" {
+                        TransferIoError::transient("connection reset while opening source")
+                    } else {
+                        TransferIoError::permanent(format!("{operation}: disk full"))
+                    }
+                }))
             } else {
                 Ok(())
             }
@@ -2256,7 +2257,7 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: 0,
+            speed_bytes_per_second: None,
             eta_seconds: None,
             retry_attempt: 1,
             max_attempts: 3,
@@ -2325,6 +2326,506 @@ mod tests {
         acknowledger.await.unwrap();
         let operations = log.lock().unwrap().clone();
         (result, operations)
+    }
+
+    struct NoPromptLiveCallbacks;
+
+    #[async_trait]
+    impl RemoteCallbacks for NoPromptLiveCallbacks {
+        async fn verify_host_key(&self, _message: &str, _fingerprint: &str) -> bool {
+            true
+        }
+
+        async fn prompt_password(&self, _message: &str) -> Option<String> {
+            None
+        }
+
+        fn on_transfer_progress(&self, _transfer_id: &str, _bytes: u64, _total: Option<u64>) {}
+    }
+
+    async fn run_live_transfer(
+        runner: &SftpTransferJobRunner,
+        job: TransferJob,
+        control_state: RunnerControlState,
+    ) -> Result<(RunnerResult, TransferJob), String> {
+        let durable_job = Arc::new(StdMutex::new(job.clone()));
+        let event_job = Arc::clone(&durable_job);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let reporter = RunnerReporter::new(job.id, Uuid::new_v4(), event_tx.clone());
+        drop(event_tx);
+        let acknowledger = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    RunnerEvent::Checking { ack, .. } => {
+                        event_job.lock().unwrap().state = TransferJobState::Checking;
+                        let _ = ack.send(Ok(()));
+                    }
+                    RunnerEvent::Fingerprinted {
+                        fingerprint,
+                        total_bytes,
+                        artifacts,
+                        ack,
+                        ..
+                    } => {
+                        let mut job = event_job.lock().unwrap();
+                        job.state = TransferJobState::Running;
+                        job.source_fingerprint = Some(fingerprint);
+                        job.total_bytes = total_bytes;
+                        job.artifacts = Some(artifacts);
+                        let _ = ack.send(Ok(()));
+                    }
+                    RunnerEvent::DurableCheckpoint { bytes, ack, .. } => {
+                        let mut job = event_job.lock().unwrap();
+                        job.durable_checkpoint = bytes;
+                        job.bytes_transferred = bytes;
+                        let _ = ack.send(Ok(()));
+                    }
+                    RunnerEvent::CommitPhase { phase, ack, .. } => {
+                        event_job.lock().unwrap().commit_phase = phase;
+                        let _ = ack.send(Ok(()));
+                    }
+                    RunnerEvent::ProgressReady { slot, .. } => {
+                        if let Some(progress) = slot.take_latest_and_release_wake() {
+                            let mut job = event_job.lock().unwrap();
+                            job.bytes_transferred = progress.bytes;
+                            job.speed_bytes_per_second = progress.speed_bytes_per_second;
+                            job.eta_seconds = progress.eta_seconds;
+                        }
+                    }
+                }
+            }
+        });
+        let (_control_tx, control_rx) = watch::channel(control_state);
+        let result = runner
+            .run(job, RunnerControl::new(control_rx), reporter)
+            .await;
+        acknowledger
+            .await
+            .map_err(|error| format!("live transfer event acknowledger failed: {error}"))?;
+        let durable_job = durable_job.lock().unwrap().clone();
+        Ok((result, durable_job))
+    }
+
+    fn live_job(
+        id: Uuid,
+        server_id: &str,
+        direction: TransferDirection,
+        local_path: String,
+        remote_path: String,
+    ) -> TransferJob {
+        let file_name = match direction {
+            TransferDirection::Upload => remote_path.rsplit('/').next().unwrap_or("upload.bin"),
+            TransferDirection::Download => local_path.rsplit('/').next().unwrap_or("download.bin"),
+        }
+        .to_owned();
+        TransferJob {
+            id,
+            protocol: TransferProtocol::Sftp,
+            direction,
+            origin: TransferOrigin::FilesPanel,
+            endpoint: TransferEndpoint::Configured {
+                server_entry_id: server_id.to_owned(),
+                label: "Disposable OpenSSH".into(),
+            },
+            local_path,
+            remote_path: remote_path.clone(),
+            file_name,
+            batch_id: None,
+            priority: TransferPriority::Normal,
+            queue_order: 1,
+            host_key: format!("configured:{server_id}"),
+            destination_key: format!("configured:{server_id}:{remote_path}"),
+            state: TransferJobState::Connecting,
+            source_fingerprint: None,
+            durable_checkpoint: 0,
+            bytes_transferred: 0,
+            total_bytes: 0,
+            speed_bytes_per_second: None,
+            eta_seconds: None,
+            retry_attempt: 1,
+            max_attempts: 3,
+            conflict_policy: ConflictPolicy::Overwrite,
+            artifacts: None,
+            commit_phase: CommitPhase::None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            started_at_ms: Some(1),
+            finished_at_ms: None,
+        }
+    }
+
+    async fn write_live_remote(
+        session: &termlab_remote::transfer::SftpSessionHandle,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let mut file = session
+            .create(path)
+            .await
+            .map_err(|error| format!("create remote test file {path} failed: {error}"))?;
+        file.write_all(bytes)
+            .await
+            .map_err(|error| format!("write remote test file {path} failed: {error}"))?;
+        file.flush()
+            .await
+            .map_err(|error| format!("flush remote test file {path} failed: {error}"))?;
+        file.shutdown()
+            .await
+            .map_err(|error| format!("close remote test file {path} failed: {error}"))
+    }
+
+    async fn read_live_remote(
+        session: &termlab_remote::transfer::SftpSessionHandle,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        let mut file = session
+            .open(path)
+            .await
+            .map_err(|error| format!("open remote test file {path} failed: {error}"))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .await
+            .map_err(|error| format!("read remote test file {path} failed: {error}"))?;
+        file.shutdown()
+            .await
+            .map_err(|error| format!("close remote test file {path} failed: {error}"))?;
+        Ok(bytes)
+    }
+
+    async fn cleanup_live_remote_directory(
+        session: &termlab_remote::transfer::SftpSessionHandle,
+        remote_directory: &str,
+    ) -> Result<(), String> {
+        if let Ok(entries) = session.read_dir(remote_directory).await {
+            for entry in entries {
+                let child = format!("{remote_directory}/{}", entry.file_name());
+                if entry.metadata().is_dir() {
+                    return Err(format!(
+                        "refusing recursive cleanup of unexpected directory {child}"
+                    ));
+                }
+                session.remove_file(child.clone()).await.map_err(|error| {
+                    format!("remove remote test artifact {child} failed: {error}")
+                })?;
+            }
+        }
+        session.remove_dir(remote_directory).await.map_err(|error| {
+            format!("remove disposable remote directory {remote_directory} failed: {error}")
+        })
+    }
+
+    fn require_live(condition: bool, message: impl Into<String>) -> Result<(), String> {
+        condition.then_some(()).ok_or_else(|| message.into())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly configured disposable OpenSSH server"]
+    async fn live_sftp_queue_roundtrip() {
+        let host = std::env::var("TERMLAB_TEST_SFTP_HOST").ok();
+        let port = std::env::var("TERMLAB_TEST_SFTP_PORT").ok();
+        let user = std::env::var("TERMLAB_TEST_SFTP_USER").ok();
+        let key = std::env::var("TERMLAB_TEST_SFTP_KEY").ok();
+        let (Some(host), Some(port), Some(user), Some(key)) = (host, port, user, key) else {
+            eprintln!(
+                "SKIP live_sftp_queue_roundtrip: set TERMLAB_TEST_SFTP_HOST, \
+                 TERMLAB_TEST_SFTP_PORT, TERMLAB_TEST_SFTP_USER, and TERMLAB_TEST_SFTP_KEY \
+                 for an explicitly disposable OpenSSH server"
+            );
+            return;
+        };
+        let port = port
+            .parse::<u16>()
+            .expect("TERMLAB_TEST_SFTP_PORT must be a valid u16");
+        let local = tempfile::tempdir().expect("create live SFTP test directory");
+        let live_id = Uuid::new_v4();
+        let server_id = format!("live-sftp-{live_id}");
+        let server = ServerEntry {
+            id: server_id.clone(),
+            label: "Disposable OpenSSH".into(),
+            host: host.clone(),
+            port,
+            user: Some(user.clone()),
+            auth_method: Some("key".into()),
+            key_path: Some(key.clone()),
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        };
+        let credentials = SshCredentials {
+            username: user.clone(),
+            auth_method: "key".into(),
+            password: None,
+            key_path: Some(key.clone()),
+            key_passphrase: None,
+        };
+        let paths = RemotePaths {
+            known_hosts_file: local.path().join("known_hosts"),
+            config_dir: local.path().join("remote-config"),
+            default_key_paths: vec![PathBuf::from(&key)],
+        };
+        let ssh_handle = Arc::new(
+            connect_and_auth(
+                &server,
+                &credentials,
+                Arc::new(NoPromptLiveCallbacks),
+                &paths,
+            )
+            .await
+            .expect("connect to configured disposable OpenSSH server"),
+        );
+        let session = open_sftp_session(ssh_handle.as_ref())
+            .await
+            .expect("open disposable SFTP session");
+        let remote_directory = format!("/tmp/{live_id}");
+        session
+            .create_dir(remote_directory.clone())
+            .await
+            .expect("create UUID-named disposable remote directory");
+
+        let mut remote_state = test_remote_state();
+        remote_state.connections.insert(
+            "live-sftp-test".into(),
+            SshConnection {
+                ssh_handle: Arc::clone(&ssh_handle),
+                server_entry_id: Some(server_id.clone()),
+                host,
+                user,
+                port,
+                proxy_command: None,
+                proxy_jump: None,
+                ref_count: 1,
+            },
+        );
+        let runner = SftpTransferJobRunner::new(Arc::new(ParkingMutex::new(remote_state)));
+
+        let verification = async {
+            let upload_path = format!("{remote_directory}/upload.bin");
+            let remote_source_path = format!("{remote_directory}/download.bin");
+            let local_upload_path = local.path().join("upload.bin");
+            let local_download_path = local.path().join("download.bin");
+            let upload_bytes: Vec<u8> = (0..700_000).map(|index| (index % 251) as u8).collect();
+            let download_bytes: Vec<u8> = (0..710_000)
+                .map(|index| (250 - (index % 251)) as u8)
+                .collect();
+            tokio::fs::write(&local_upload_path, &upload_bytes)
+                .await
+                .map_err(|error| format!("write local upload fixture failed: {error}"))?;
+            write_live_remote(&session, &upload_path, b"old remote destination").await?;
+
+            let upload = live_job(
+                Uuid::new_v4(),
+                &server_id,
+                TransferDirection::Upload,
+                local_upload_path.to_string_lossy().into_owned(),
+                upload_path.clone(),
+            );
+            let (paused_result, mut upload) =
+                run_live_transfer(&runner, upload, RunnerControlState::Pause).await?;
+            let RunnerResult::Paused { durable_checkpoint } = paused_result else {
+                return Err(format!("upload did not pause: {paused_result:?}"));
+            };
+            require_live(
+                durable_checkpoint > 0 && durable_checkpoint < upload_bytes.len() as u64,
+                format!("upload pause checkpoint was not resumable: {durable_checkpoint}"),
+            )?;
+            let upload_artifacts = upload
+                .artifacts
+                .clone()
+                .ok_or_else(|| "paused upload did not persist managed artifacts".to_string())?;
+            require_live(
+                read_live_remote(&session, &upload_artifacts.partial_path)
+                    .await?
+                    .len() as u64
+                    == durable_checkpoint,
+                "remote upload partial length did not match the durable checkpoint",
+            )?;
+            require_live(
+                read_live_remote(&session, &upload_path).await? == b"old remote destination",
+                "paused overwrite changed the existing remote destination before commit",
+            )?;
+
+            upload.state = TransferJobState::Connecting;
+            let (upload_result, uploaded) =
+                run_live_transfer(&runner, upload, RunnerControlState::Run).await?;
+            require_live(
+                matches!(
+                    upload_result,
+                    RunnerResult::Completed(CompletionResult::Transferred)
+                ),
+                format!("resumed upload did not complete: {upload_result:?}"),
+            )?;
+            require_live(
+                read_live_remote(&session, &upload_path).await? == upload_bytes,
+                "resumed upload did not promote the complete new bytes",
+            )?;
+            require_live(
+                session
+                    .metadata(upload_path.clone())
+                    .await
+                    .map_err(|error| format!("stat uploaded file failed: {error}"))?
+                    .mtime
+                    .is_some(),
+                "OpenSSH did not expose a remote mtime for the uploaded file",
+            )?;
+            require_live(
+                !session
+                    .try_exists(upload_artifacts.partial_path.clone())
+                    .await
+                    .map_err(|error| format!("inspect upload partial cleanup failed: {error}"))?
+                    && !session
+                        .try_exists(upload_artifacts.backup_path.clone())
+                        .await
+                        .map_err(|error| {
+                            format!("inspect upload backup cleanup failed: {error}")
+                        })?,
+                "completed upload left a managed partial or backup",
+            )?;
+            require_live(
+                uploaded
+                    .source_fingerprint
+                    .as_ref()
+                    .and_then(|fingerprint| fingerprint.modified_token.as_deref())
+                    .is_some_and(|token| token.starts_with("unixNs:")),
+                "upload did not retain its local nanosecond mtime fingerprint",
+            )?;
+
+            write_live_remote(&session, &remote_source_path, &download_bytes).await?;
+            tokio::fs::write(&local_download_path, b"old local destination")
+                .await
+                .map_err(|error| format!("write local download destination failed: {error}"))?;
+            let download = live_job(
+                Uuid::new_v4(),
+                &server_id,
+                TransferDirection::Download,
+                local_download_path.to_string_lossy().into_owned(),
+                remote_source_path.clone(),
+            );
+            let (paused_result, mut download) =
+                run_live_transfer(&runner, download, RunnerControlState::Pause).await?;
+            let RunnerResult::Paused { durable_checkpoint } = paused_result else {
+                return Err(format!("download did not pause: {paused_result:?}"));
+            };
+            require_live(
+                durable_checkpoint > 0 && durable_checkpoint < download_bytes.len() as u64,
+                format!("download pause checkpoint was not resumable: {durable_checkpoint}"),
+            )?;
+            require_live(
+                download
+                    .source_fingerprint
+                    .as_ref()
+                    .and_then(|fingerprint| fingerprint.modified_token.as_deref())
+                    .is_some_and(|token| token.starts_with("unixSeconds:")),
+                "download did not persist the remote second-resolution mtime fingerprint",
+            )?;
+            let download_artifacts = download
+                .artifacts
+                .clone()
+                .ok_or_else(|| "paused download did not persist managed artifacts".to_string())?;
+            require_live(
+                tokio::fs::metadata(&download_artifacts.partial_path)
+                    .await
+                    .map_err(|error| format!("stat local download partial failed: {error}"))?
+                    .len()
+                    == durable_checkpoint,
+                "local download partial length did not match the durable checkpoint",
+            )?;
+            require_live(
+                tokio::fs::read(&local_download_path)
+                    .await
+                    .map_err(|error| format!("read paused local destination failed: {error}"))?
+                    == b"old local destination",
+                "paused overwrite changed the existing local destination before commit",
+            )?;
+
+            download.state = TransferJobState::Connecting;
+            let (download_result, _) =
+                run_live_transfer(&runner, download, RunnerControlState::Run).await?;
+            require_live(
+                matches!(
+                    download_result,
+                    RunnerResult::Completed(CompletionResult::Transferred)
+                ),
+                format!("resumed download did not complete: {download_result:?}"),
+            )?;
+            require_live(
+                tokio::fs::read(&local_download_path)
+                    .await
+                    .map_err(|error| format!("read completed local destination failed: {error}"))?
+                    == download_bytes,
+                "resumed download did not promote the complete new bytes",
+            )?;
+            require_live(
+                !tokio::fs::try_exists(&download_artifacts.partial_path)
+                    .await
+                    .map_err(|error| format!("inspect download partial cleanup failed: {error}"))?
+                    && !tokio::fs::try_exists(&download_artifacts.backup_path)
+                        .await
+                        .map_err(|error| {
+                            format!("inspect download backup cleanup failed: {error}")
+                        })?,
+                "completed download left a managed partial or backup",
+            )?;
+
+            let latest_upload = b"latest upload bytes from the second transfer".to_vec();
+            tokio::fs::write(&local_upload_path, &latest_upload)
+                .await
+                .map_err(|error| format!("rewrite local upload source failed: {error}"))?;
+            let second_upload = live_job(
+                Uuid::new_v4(),
+                &server_id,
+                TransferDirection::Upload,
+                local_upload_path.to_string_lossy().into_owned(),
+                upload_path.clone(),
+            );
+            let (second_upload_result, second_upload) =
+                run_live_transfer(&runner, second_upload, RunnerControlState::Run).await?;
+            require_live(
+                matches!(
+                    second_upload_result,
+                    RunnerResult::Completed(CompletionResult::Transferred)
+                ) && second_upload
+                    .source_fingerprint
+                    .as_ref()
+                    .is_some_and(|fingerprint| fingerprint.size == latest_upload.len() as u64)
+                    && read_live_remote(&session, &upload_path).await? == latest_upload,
+                "second upload reused stale source bytes or fingerprint",
+            )?;
+
+            let latest_download = b"latest remote bytes from the second download".to_vec();
+            write_live_remote(&session, &remote_source_path, &latest_download).await?;
+            let second_download = live_job(
+                Uuid::new_v4(),
+                &server_id,
+                TransferDirection::Download,
+                local_download_path.to_string_lossy().into_owned(),
+                remote_source_path.clone(),
+            );
+            let (second_download_result, second_download) =
+                run_live_transfer(&runner, second_download, RunnerControlState::Run).await?;
+            require_live(
+                matches!(
+                    second_download_result,
+                    RunnerResult::Completed(CompletionResult::Transferred)
+                ) && second_download
+                    .source_fingerprint
+                    .as_ref()
+                    .is_some_and(|fingerprint| fingerprint.size == latest_download.len() as u64)
+                    && tokio::fs::read(&local_download_path)
+                        .await
+                        .map_err(|error| format!("read second downloaded file failed: {error}"))?
+                        == latest_download,
+                "second download reused stale source bytes or fingerprint",
+            )?;
+
+            Ok::<(), String>(())
+        }
+        .await;
+
+        let cleanup = cleanup_live_remote_directory(&session, &remote_directory).await;
+        if let Err(error) = verification {
+            panic!("live SFTP queue verification failed: {error}; cleanup result: {cleanup:?}");
+        }
+        cleanup.expect("clean only the exact UUID-named disposable remote directory");
     }
 
     #[tokio::test]
@@ -2423,6 +2924,118 @@ mod tests {
                 "phase:Complete",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn backup_moved_recovery_defers_to_the_authoritative_artifact_policy() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: false,
+                backup_exists: false,
+            },
+            None,
+        );
+        let inspected_io = io.clone();
+        let mut job = test_job();
+        job.source_fingerprint = Some(fingerprint(4, Some("v1")));
+        job.durable_checkpoint = 4;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+        job.commit_phase = CommitPhase::BackupMoved;
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        let RunnerResult::NeedsAttention(AttentionReason::CommitRecovery { message }) = result
+        else {
+            panic!("an unowned final without the persisted backup must not be assumed promoted")
+        };
+        assert!(message.contains("BackupMoved"));
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (Some("existing-final"), None, None)
+        );
+        assert!(!operations.iter().any(|entry| entry == "phase:Complete"));
+    }
+
+    #[tokio::test]
+    async fn restart_after_each_proven_commit_phase_completes_without_recopying() {
+        let cases = [
+            (
+                CommitPhase::Prepared,
+                ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: true,
+                    backup_exists: false,
+                },
+            ),
+            (
+                CommitPhase::BackupMoved,
+                ArtifactInventory {
+                    final_exists: false,
+                    partial_exists: true,
+                    backup_exists: true,
+                },
+            ),
+            (
+                CommitPhase::PartialPromoted,
+                ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+            ),
+            (
+                CommitPhase::CleanupPending,
+                ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+            ),
+            (
+                CommitPhase::Complete,
+                ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: false,
+                },
+            ),
+        ];
+
+        for (phase, inventory) in cases {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let io = FakeIo::new(log, fingerprint(4, Some("v1")))
+                .with_inventory(inventory, inventory.partial_exists.then_some(4));
+            let mut job = test_job();
+            job.conflict_policy = ConflictPolicy::Overwrite;
+            job.source_fingerprint = Some(fingerprint(4, Some("v1")));
+            job.durable_checkpoint = 4;
+            job.artifacts =
+                Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+            job.commit_phase = phase;
+
+            let (result, operations) =
+                run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+            assert!(
+                matches!(
+                    result,
+                    RunnerResult::Completed(CompletionResult::Transferred)
+                ),
+                "phase {phase:?}, inventory {inventory:?}, operations {operations:?}, result {result:?}"
+            );
+            assert!(
+                !operations
+                    .iter()
+                    .any(|operation| operation == "open_source")
+            );
+            assert!(
+                !operations
+                    .iter()
+                    .any(|operation| operation == "open_partial")
+            );
+        }
     }
 
     #[tokio::test]
@@ -3545,6 +4158,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn permission_failure_is_permanent_and_preserves_owned_artifacts() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(6, Some("v1"))).failing_at_with(
+            "finish_partial",
+            TransferIoError::permanent("permission denied while syncing the owned partial"),
+        );
+        let inspected_io = io.clone();
+
+        let (result, operations) =
+            run_fake(true, io, test_job(), super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::Failed {
+                class: FailureClass::Permanent,
+                ref message,
+            } if message.contains("permission denied")
+        ));
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (None, Some("copied-source"), None)
+        );
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "cleanup_owned_artifacts")
+        );
+        assert!(!operations.iter().any(|entry| entry.starts_with("phase:")));
+    }
+
+    #[tokio::test]
     async fn disconnect_is_classified_transient_without_touching_artifacts() {
         let log = Arc::new(StdMutex::new(Vec::new()));
         let io = FakeIo::new(log, fingerprint(6, Some("v1"))).failing_at("open_source");
@@ -3795,7 +4439,7 @@ mod tests {
         let reporter = RunnerReporter::new(job_id, lease_id, event_tx);
 
         for bytes in 1..=10_000 {
-            reporter.progress(bytes, bytes * 2, Some(10_001 - bytes));
+            reporter.progress(bytes, Some(bytes * 2), Some(10_001 - bytes));
         }
 
         assert_eq!(event_rx.len(), 1, "a burst queues at most one actor wake");
@@ -3811,11 +4455,11 @@ mod tests {
         assert_eq!(reported_lease, lease_id);
         let latest = slot.take_latest_and_release_wake().unwrap();
         assert_eq!(latest.bytes, 10_000);
-        assert_eq!(latest.speed_bytes_per_second, 20_000);
+        assert_eq!(latest.speed_bytes_per_second, Some(20_000));
         assert_eq!(latest.eta_seconds, Some(1));
         assert!(event_rx.is_empty());
 
-        reporter.progress(10_001, 30_000, None);
+        reporter.progress(10_001, Some(30_000), None);
         assert_eq!(event_rx.len(), 1, "draining re-arms exactly one wake");
         let RunnerEvent::ProgressReady { slot, .. } = event_rx.recv().await.unwrap() else {
             panic!("progress publishes a progress-ready wake")

@@ -331,6 +331,9 @@ function loadHarness(options = {}) {
   assert.ok(fs.existsSync(DIALOG_PATH), 'Transfer Center dialogs IIFE must exist');
   vm.runInContext(fs.readFileSync(DIALOG_PATH, 'utf8'), sandbox, { filename: DIALOG_PATH });
   vm.runInContext(fs.readFileSync(VIEW_PATH, 'utf8'), sandbox, { filename: VIEW_PATH });
+  if (typeof options.configureView === 'function') {
+    options.configureView(sandbox.termlabTransferCenterView);
+  }
   vm.runInContext(fs.readFileSync(PANEL_PATH, 'utf8'), sandbox, { filename: PANEL_PATH });
   const controller = sandbox.transferCenterPanel.init({
     panelEl,
@@ -1100,10 +1103,33 @@ async function loadMountLifecycleHarness() {
   const progress = harness.panelEl.querySelector('progress');
   assert.strictEqual(progress.value, 25);
   assert.strictEqual(progress.max, 100);
-  assert.strictEqual(progress.getAttribute('aria-label'), 'running progress: 25%');
+  assert.strictEqual(
+    progress.getAttribute('aria-label'),
+    '<img src=x onerror=alert(1)> progress: 25%',
+    'progress uses the visible file label, never an opaque backend id',
+  );
   assert.ok(harness.panelEl.querySelector('[aria-live="polite"]').textContent.includes('3 active'));
   assert.strictEqual(harness.shellSentinel.parentNode, harness.sandbox.document.body,
     'runtime updates stay inside the panel surface and do not replace shell chrome');
+}
+
+// Selection and rendering share the view projection contract. Instrumenting
+// that public contract must observe controller reconciliation as well as view
+// rendering; a second terminal-state classifier in the panel would drift.
+{
+  let projectionCalls = 0;
+  const harness = loadHarness({
+    configureView(view) {
+      const jobsFor = view.jobsFor;
+      view.jobsFor = (...args) => {
+        projectionCalls += 1;
+        return jobsFor(...args);
+      };
+    },
+  });
+  harness.emit(snapshot([job('active', 'running')]));
+  assert.ok(projectionCalls > 0, 'controller reconciliation delegates membership to the view');
+  assert.strictEqual(harness.controller.getState().selectedId, 'active');
 }
 
 // History is a delegated view-state change. Its membership is terminal-only,

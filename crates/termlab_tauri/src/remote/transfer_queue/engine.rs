@@ -283,7 +283,7 @@ struct PendingTerminalResult {
 struct PendingProgress {
     lease_id: Uuid,
     bytes: u64,
-    speed_bytes_per_second: u64,
+    speed_bytes_per_second: Option<u64>,
     eta_seconds: Option<u64>,
     deadline_ms: u64,
 }
@@ -767,10 +767,22 @@ impl QueueActor {
 
         let reporter = RunnerReporter::new(id, lease_id, self.runner_event_tx.clone());
         let internal_tx = self.internal_tx.clone();
-        tokio::spawn(async move {
-            let result = runner
+        let runner_task = tokio::spawn(async move {
+            runner
                 .run(job, RunnerControl::new(control_rx), reporter)
-                .await;
+                .await
+        });
+        tokio::spawn(async move {
+            let result = runner_task
+                .await
+                .unwrap_or_else(|error| RunnerResult::Failed {
+                    class: FailureClass::Permanent,
+                    message: if error.is_panic() {
+                        "transfer runner task panicked".into()
+                    } else {
+                        "transfer runner task failed before reporting a result".into()
+                    },
+                });
             let _ = internal_tx.send(InternalEvent::RunnerFinished {
                 job_id: id,
                 lease_id,
@@ -963,7 +975,7 @@ impl QueueActor {
                 job.state = TransferJobState::Completed { result: *result };
                 job.commit_phase = CommitPhase::Complete;
                 job.finished_at_ms = Some(now_ms);
-                job.speed_bytes_per_second = 0;
+                job.speed_bytes_per_second = None;
                 job.eta_seconds = None;
                 job.updated_at_ms = now_ms;
                 Ok(())
@@ -1158,7 +1170,7 @@ impl QueueActor {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: 0,
+            speed_bytes_per_second: None,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
@@ -1649,6 +1661,34 @@ mod tests {
         }
     }
 
+    struct PanickingFirstRunner {
+        panic_id: Uuid,
+        starts: Mutex<Vec<Uuid>>,
+        next_gate: Mutex<Option<oneshot::Receiver<RunnerResult>>>,
+    }
+
+    #[async_trait]
+    impl TransferJobRunner for PanickingFirstRunner {
+        async fn run(
+            &self,
+            job: TransferJob,
+            _control: RunnerControl,
+            _reporter: RunnerReporter,
+        ) -> RunnerResult {
+            self.starts.lock().unwrap().push(job.id);
+            if job.id == self.panic_id {
+                panic!("injected transfer runner panic");
+            }
+            let gate = self
+                .next_gate
+                .lock()
+                .unwrap()
+                .take()
+                .expect("second transfer has a gate");
+            gate.await.expect("test releases the second transfer")
+        }
+    }
+
     async fn wait_for_starts(runner: &GatedRunner, count: usize) {
         for _ in 0..100 {
             if runner.starts().len() == count {
@@ -1889,7 +1929,7 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: 0,
+            speed_bytes_per_second: None,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
@@ -2028,6 +2068,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restored_due_retry_stays_suspended_until_explicit_resume() {
+        let id = Uuid::from_u128(8_002);
+        let mut document = document_with(vec![stored_job(
+            id,
+            TransferJobState::RetryWaiting {
+                attempt: 2,
+                next_retry_at_ms: 10,
+            },
+            1,
+        )]);
+        document.queue_paused = false;
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(id);
+        let clock = Arc::new(FakeClock::new(20));
+        let harness = ActorHarness::with_runner_and_clock(document, runner.clone(), clock);
+
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            runner.starts().is_empty(),
+            "startup recovery must not dispatch a due retry"
+        );
+        assert!(harness.handle.snapshot().queue_paused);
+        assert!(matches!(
+            harness.handle.snapshot().jobs[0].state,
+            TransferJobState::RetryWaiting { attempt: 2, .. }
+        ));
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+        release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runner_panic_is_persisted_and_releases_capacity_for_the_next_job() {
+        let panicking = Uuid::from_u128(8_011);
+        let next = Uuid::from_u128(8_012);
+        let mut document = document_with(vec![
+            stored_job(panicking, TransferJobState::Queued, 1),
+            stored_job(next, TransferJobState::Queued, 2),
+        ]);
+        document.settings = QueueSettings {
+            global_limit: 1,
+            per_host_limit: 1,
+        };
+        let (release, gate) = oneshot::channel();
+        let runner = Arc::new(PanickingFirstRunner {
+            panic_id: panicking,
+            starts: Mutex::new(Vec::new()),
+            next_gate: Mutex::new(Some(gate)),
+        });
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        for _ in 0..100 {
+            if runner.starts.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(runner.starts.lock().unwrap().as_slice(), [panicking, next]);
+        let failed = wait_for_job(&harness.handle, panicking, |job| {
+            matches!(job.state, TransferJobState::Failed { .. })
+        })
+        .await;
+        assert!(matches!(
+            failed.state,
+            TransferJobState::Failed { ref error }
+                if error.contains("runner")
+                    && error.contains("panic")
+                    && !error.contains("injected")
+        ));
+        assert!(matches!(
+            harness
+                .store
+                .load()
+                .unwrap()
+                .into_document()
+                .jobs
+                .iter()
+                .find(|job| job.id == panicking)
+                .unwrap()
+                .state,
+            TransferJobState::Failed { .. }
+        ));
+
+        release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn dispatch_respects_limits_destination_locks_and_skips_blocked_jobs() {
         let first = Uuid::from_u128(8_101);
         let same_destination = Uuid::from_u128(8_102);
@@ -2092,6 +2228,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completing_one_host_releases_only_that_hosts_capacity() {
+        let host_a_first = Uuid::from_u128(8_111);
+        let host_a_next = Uuid::from_u128(8_112);
+        let host_b = Uuid::from_u128(8_113);
+        let mut document = document_with(vec![
+            on_host_with_destination(
+                stored_job(host_a_first, TransferJobState::Queued, 1),
+                "host-a",
+                "host-a:/first",
+            ),
+            on_host_with_destination(
+                stored_job(host_a_next, TransferJobState::Queued, 2),
+                "host-a",
+                "host-a:/next",
+            ),
+            on_host_with_destination(
+                stored_job(host_b, TransferJobState::Queued, 3),
+                "host-b",
+                "host-b:/only",
+            ),
+        ]);
+        document.settings = QueueSettings {
+            global_limit: 2,
+            per_host_limit: 1,
+        };
+        let runner = Arc::new(GatedRunner::default());
+        let release_a_first = runner.gate(host_a_first);
+        let release_a_next = runner.gate(host_a_next);
+        let release_b = runner.gate(host_b);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 2).await;
+        assert!(runner.starts().contains(&host_a_first));
+        assert!(runner.starts().contains(&host_b));
+
+        release_b
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        wait_for_job(&harness.handle, host_b, |job| job.state.is_terminal()).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            runner.starts().len(),
+            2,
+            "host B completion must not free host A's occupied per-host slot"
+        );
+
+        release_a_first
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        wait_for_starts(&runner, 3).await;
+        assert_eq!(runner.starts()[2], host_a_next);
+        release_a_next
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn interactive_work_is_dispatched_before_earlier_normal_work() {
         let normal = Uuid::from_u128(8_201);
         let interactive = Uuid::from_u128(8_202);
@@ -2146,8 +2342,8 @@ mod tests {
         let revision_before_progress = harness.store.load().unwrap().into_document().revision;
         harness.events.clear();
 
-        reporter.progress(1_024, 500, Some(14));
-        reporter.progress(2_048, 600, Some(10));
+        reporter.progress(1_024, Some(500), Some(14));
+        reporter.progress(2_048, Some(600), Some(10));
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
@@ -3766,7 +3962,7 @@ mod tests {
             super::PendingProgress {
                 lease_id,
                 bytes: 128,
-                speed_bytes_per_second: 64,
+                speed_bytes_per_second: Some(64),
                 eta_seconds: Some(2),
                 deadline_ms: 300,
             },

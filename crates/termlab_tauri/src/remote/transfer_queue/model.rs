@@ -384,8 +384,8 @@ pub struct TransferJob {
     pub bytes_transferred: u64,
     #[ts(as = "f64")]
     pub total_bytes: u64,
-    #[ts(as = "f64")]
-    pub speed_bytes_per_second: u64,
+    #[ts(as = "Option<f64>")]
+    pub speed_bytes_per_second: Option<u64>,
     #[ts(as = "Option<f64>")]
     pub eta_seconds: Option<u64>,
     pub retry_attempt: u8,
@@ -551,7 +551,7 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: 0,
+            speed_bytes_per_second: None,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
@@ -588,6 +588,10 @@ mod tests {
         .unwrap();
 
         assert!(json.contains("\"state\":{\"kind\":\"needsConnection\""));
+        assert!(
+            json.contains("\"speedBytesPerSecond\":null"),
+            "an unavailable transfer rate must remain unknown, not serialize as zero: {json}"
+        );
         for forbidden in [
             "password",
             "passphrase",

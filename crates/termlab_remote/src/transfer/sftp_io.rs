@@ -115,14 +115,22 @@ pub async fn open_remote_partial(
     path: &str,
     resume: bool,
 ) -> Result<SftpFile, RemoteError> {
+    session
+        .open_with_flags(path, remote_partial_open_flags(resume))
+        .await
+        .map_err(|error| RemoteError::Transfer(format!("open remote partial failed: {error}")))
+}
+
+fn remote_partial_open_flags(resume: bool) -> OpenFlags {
     let mut flags = OpenFlags::CREATE | OpenFlags::WRITE;
     if !resume {
         flags |= OpenFlags::TRUNCATE;
     }
-    session
-        .open_with_flags(path, flags)
-        .await
-        .map_err(|error| RemoteError::Transfer(format!("open remote partial failed: {error}")))
+    flags
+}
+
+fn resume_partial_from(offset: u64) -> bool {
+    offset > 0
 }
 
 pub async fn truncate_local_partial(
@@ -221,7 +229,7 @@ where
     let (mut source, fingerprint) = fingerprint_open_local(local_path).await?;
     let (mut destination, total) = open_after_fingerprint(fingerprint, on_fingerprint, || async {
         let session = open_sftp(ssh).await?;
-        open_remote_partial(&session, remote_partial_path, offset > 0).await
+        open_remote_partial(&session, remote_partial_path, resume_partial_from(offset)).await
     })
     .await?;
     let copy_result = copy_with_checkpoint(
@@ -259,7 +267,7 @@ where
     let (mut source, fingerprint) = fingerprint_open_remote(&session, remote_path).await?;
     let local_partial_path = local_partial_path.as_ref();
     let (mut destination, total) = match open_after_fingerprint(fingerprint, on_fingerprint, || {
-        open_local_partial(local_partial_path, offset > 0)
+        open_local_partial(local_partial_path, resume_partial_from(offset))
     })
     .await
     {
@@ -300,8 +308,26 @@ mod tests {
 
     use super::{
         fingerprint_local_parts, fingerprint_open_local, fingerprint_remote_parts,
-        open_after_fingerprint, open_local_partial, truncate_local_partial,
+        open_after_fingerprint, open_local_partial, remote_partial_open_flags, resume_partial_from,
+        truncate_local_partial,
     };
+    use russh_sftp::protocol::OpenFlags;
+
+    #[test]
+    fn fresh_and_resumed_wrapper_offsets_select_safe_partial_open_flags() {
+        assert!(!resume_partial_from(0));
+        assert!(resume_partial_from(1));
+
+        let fresh = remote_partial_open_flags(resume_partial_from(0));
+        assert!(fresh.contains(OpenFlags::CREATE));
+        assert!(fresh.contains(OpenFlags::WRITE));
+        assert!(fresh.contains(OpenFlags::TRUNCATE));
+
+        let resumed = remote_partial_open_flags(resume_partial_from(4_096));
+        assert!(resumed.contains(OpenFlags::CREATE));
+        assert!(resumed.contains(OpenFlags::WRITE));
+        assert!(!resumed.contains(OpenFlags::TRUNCATE));
+    }
 
     #[test]
     fn local_fingerprints_preserve_nanosecond_mtime_precision() {

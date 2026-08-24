@@ -18,7 +18,7 @@ pub enum JobEvent {
     },
     Progress {
         bytes: u64,
-        speed_bytes_per_second: u64,
+        speed_bytes_per_second: Option<u64>,
         eta_seconds: Option<u64>,
     },
     Checkpoint {
@@ -89,7 +89,7 @@ pub fn reduce_job(
             next.source_fingerprint = Some(fingerprint);
             next.total_bytes = total_bytes;
             next.bytes_transferred = next.durable_checkpoint;
-            next.speed_bytes_per_second = 0;
+            next.speed_bytes_per_second = None;
             next.eta_seconds = None;
             next.artifacts = Some(artifacts);
         }
@@ -270,7 +270,7 @@ fn reset_attempt(job: &mut TransferJob) {
 }
 
 fn clear_live_progress(job: &mut TransferJob) {
-    job.speed_bytes_per_second = 0;
+    job.speed_bytes_per_second = None;
     job.eta_seconds = None;
 }
 
@@ -356,7 +356,7 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: 0,
+            speed_bytes_per_second: None,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
@@ -629,7 +629,7 @@ mod tests {
             &running,
             JobEvent::Progress {
                 bytes: 2_048,
-                speed_bytes_per_second: 512,
+                speed_bytes_per_second: Some(512),
                 eta_seconds: Some(12),
             },
             70,
@@ -664,7 +664,7 @@ mod tests {
                     &job,
                     JobEvent::Progress {
                         bytes: 1,
-                        speed_bytes_per_second: 1,
+                        speed_bytes_per_second: Some(1),
                         eta_seconds: None,
                     },
                     80,

@@ -195,6 +195,10 @@ pub fn recover_for_startup(document: &mut TransferQueueDocument) {
     }
 
     for job in &mut document.jobs {
+        if !job.state.is_terminal() && job.bytes_transferred != job.durable_checkpoint {
+            job.bytes_transferred = job.durable_checkpoint;
+            changed = true;
+        }
         if matches!(
             job.state,
             TransferJobState::Connecting | TransferJobState::Checking | TransferJobState::Running
@@ -202,8 +206,8 @@ pub fn recover_for_startup(document: &mut TransferQueueDocument) {
             job.state = TransferJobState::Paused;
             changed = true;
         }
-        if job.speed_bytes_per_second != 0 {
-            job.speed_bytes_per_second = 0;
+        if job.speed_bytes_per_second.is_some() {
+            job.speed_bytes_per_second = None;
             changed = true;
         }
         if job.eta_seconds.is_some() {
@@ -373,7 +377,7 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: 0,
+            speed_bytes_per_second: None,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
@@ -506,7 +510,7 @@ mod tests {
             jobs: states.into_iter().map(sample_job).collect(),
             ..TransferQueueDocument::default()
         };
-        document.jobs[2].speed_bytes_per_second = 1_024;
+        document.jobs[2].speed_bytes_per_second = Some(1_024);
         document.jobs[2].eta_seconds = Some(15);
 
         recover_for_startup(&mut document);
@@ -530,8 +534,41 @@ mod tests {
             document.jobs[7].state,
             TransferJobState::RetryWaiting { .. }
         ));
-        assert_eq!(document.jobs[2].speed_bytes_per_second, 0);
+        assert_eq!(document.jobs[2].speed_bytes_per_second, None);
         assert_eq!(document.jobs[2].eta_seconds, None);
+    }
+
+    #[test]
+    fn startup_recovery_reconciles_display_progress_to_the_durable_checkpoint() {
+        let states = [
+            TransferJobState::Running,
+            TransferJobState::Paused,
+            TransferJobState::RetryWaiting {
+                attempt: 2,
+                next_retry_at_ms: 42,
+            },
+        ];
+        let mut document = TransferQueueDocument {
+            revision: 12,
+            queue_paused: false,
+            jobs: states.into_iter().map(sample_job).collect(),
+            ..TransferQueueDocument::default()
+        };
+        for job in &mut document.jobs {
+            job.durable_checkpoint = 3;
+            job.bytes_transferred = 5;
+        }
+
+        recover_for_startup(&mut document);
+
+        assert_eq!(
+            document
+                .jobs
+                .iter()
+                .map(|job| job.bytes_transferred)
+                .collect::<Vec<_>>(),
+            [3, 3, 3]
+        );
     }
 
     #[test]

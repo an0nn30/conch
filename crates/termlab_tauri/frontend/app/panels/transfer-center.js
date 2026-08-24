@@ -1,7 +1,6 @@
 (function initTransferCenterPanel(global) {
   'use strict';
 
-  const TERMINAL_KINDS = new Set(['completed', 'failed', 'cancelled']);
   const ACTIONS_BY_KIND = {
     running: new Set(['pause', 'cancel']),
     paused: new Set(['resume', 'cancel']),
@@ -13,14 +12,6 @@
     cancelled: new Set(['details']),
   };
 
-  function visibleJobs(snapshot, viewMode) {
-    const history = viewMode === 'history';
-    return snapshot.jobs.filter((job) => {
-      const kind = job && job.state ? job.state.kind : '';
-      return TERMINAL_KINDS.has(kind) === history;
-    });
-  }
-
   function init(options) {
     const opts = options || {};
     const panelEl = opts.panelEl;
@@ -31,7 +22,7 @@
     if (!runtime || typeof runtime.subscribe !== 'function') {
       throw new Error('Transfer Center panel requires the shared transfer runtime');
     }
-    if (!viewFactory || typeof viewFactory.create !== 'function') {
+    if (!viewFactory || typeof viewFactory.create !== 'function' || typeof viewFactory.jobsFor !== 'function') {
       throw new Error('Transfer Center view must load before its panel');
     }
 
@@ -41,7 +32,7 @@
 
     function reconcileSelection() {
       if (!latestSnapshot) return;
-      const jobs = visibleJobs(latestSnapshot, viewMode);
+      const jobs = viewFactory.jobsFor(latestSnapshot, viewMode);
       if (!jobs.some((job) => job.id === selectedId)) selectedId = jobs.length > 0 ? jobs[0].id : null;
     }
 

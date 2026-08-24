@@ -205,6 +205,7 @@
     function patchProgress(rowRecord, job) {
       const statusCell = rowRecord.cells.status;
       statusCell.replaceChildren();
+      const paths = transferPaths(job);
       const percentage = percentFor(job);
       const status = statusFor(job);
       append(
@@ -217,7 +218,8 @@
         const progressEl = append(statusCell, 'progress', 'tl-transfer-center__progress');
         progressEl.value = Number(job.bytesTransferred) || 0;
         progressEl.max = Number(job.totalBytes) || 1;
-        progressEl.setAttribute('aria-label', `${job.id} progress: ${percentage}%`);
+        const progressName = job.fileName || paths.destination || paths.source || 'Transfer';
+        progressEl.setAttribute('aria-label', `${progressName} progress: ${percentage}%`);
       }
 
       const speedCell = rowRecord.cells.speed;

@@ -1,5 +1,7 @@
 #transfer-center-panel,
 .tl-transfer-center {
+  --tl-transfer-center-table-min-width: 840px;
+
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -104,7 +106,7 @@
 
 .tl-transfer-center__table {
   width: 100%;
-  min-width: 840px;
+  min-width: var(--tl-transfer-center-table-min-width);
   border-collapse: collapse;
   table-layout: fixed;
   color: var(--tl-fg);
