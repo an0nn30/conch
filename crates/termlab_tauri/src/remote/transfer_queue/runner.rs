@@ -385,7 +385,19 @@ impl SftpTransferJobRunner {
     pub(crate) fn new(remote: Arc<ParkingMutex<RemoteState>>) -> Self {
         Self::with_services(
             LiveConnectionResolver { remote },
-            RealTransferIo,
+            RealTransferIo::new(),
+            DEFAULT_COPY_CHUNK_SIZE,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_partial_seek_observer(
+        remote: Arc<ParkingMutex<RemoteState>>,
+        observer: PartialSeekObserver,
+    ) -> Self {
+        Self::with_services(
+            LiveConnectionResolver { remote },
+            RealTransferIo::with_partial_seek_observer(observer),
             DEFAULT_COPY_CHUNK_SIZE,
         )
     }
@@ -968,16 +980,79 @@ where
     })
 }
 
-struct RealTransferIo;
+#[cfg(test)]
+// Test-only telemetry injected into the ordinary real-I/O runner. It is not a
+// queue event, job field, or persisted schema value.
+type PartialSeekObserver = Arc<dyn Fn(u64) + Send + Sync>;
+
+struct RealTransferIo {
+    #[cfg(test)]
+    partial_seek_observer: Option<PartialSeekObserver>,
+}
+
+impl RealTransferIo {
+    fn new() -> Self {
+        Self {
+            #[cfg(test)]
+            partial_seek_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_partial_seek_observer(observer: PartialSeekObserver) -> Self {
+        Self {
+            partial_seek_observer: Some(observer),
+        }
+    }
+
+    fn local_partial(&self, file: tokio::fs::File) -> RealPartial {
+        RealPartial {
+            handle: RealPartialHandle::Local(file),
+            #[cfg(test)]
+            seek_observer: self.partial_seek_observer.clone(),
+            #[cfg(test)]
+            seek_observation_pending: false,
+        }
+    }
+
+    fn remote_partial(&self, file: SftpFileHandle) -> RealPartial {
+        RealPartial {
+            handle: RealPartialHandle::Remote(file),
+            #[cfg(test)]
+            seek_observer: self.partial_seek_observer.clone(),
+            #[cfg(test)]
+            seek_observation_pending: false,
+        }
+    }
+}
 
 enum RealSource {
     Local(tokio::fs::File),
     Remote(SftpFileHandle),
 }
 
-enum RealPartial {
+enum RealPartialHandle {
     Local(tokio::fs::File),
     Remote(SftpFileHandle),
+}
+
+struct RealPartial {
+    handle: RealPartialHandle,
+    #[cfg(test)]
+    seek_observer: Option<PartialSeekObserver>,
+    #[cfg(test)]
+    seek_observation_pending: bool,
+}
+
+#[cfg(test)]
+impl RealPartial {
+    fn local_with_test_seek_observer(file: tokio::fs::File, observer: PartialSeekObserver) -> Self {
+        Self {
+            handle: RealPartialHandle::Local(file),
+            seek_observer: Some(observer),
+            seek_observation_pending: false,
+        }
+    }
 }
 
 impl AsyncRead for RealSource {
@@ -1018,43 +1093,60 @@ impl AsyncWrite for RealPartial {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            Self::Local(file) => Pin::new(file).poll_write(context, buffer),
-            Self::Remote(file) => Pin::new(file).poll_write(context, buffer),
+        match &mut self.get_mut().handle {
+            RealPartialHandle::Local(file) => Pin::new(file).poll_write(context, buffer),
+            RealPartialHandle::Remote(file) => Pin::new(file).poll_write(context, buffer),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Local(file) => Pin::new(file).poll_flush(context),
-            Self::Remote(file) => Pin::new(file).poll_flush(context),
+        match &mut self.get_mut().handle {
+            RealPartialHandle::Local(file) => Pin::new(file).poll_flush(context),
+            RealPartialHandle::Remote(file) => Pin::new(file).poll_flush(context),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Local(file) => Pin::new(file).poll_shutdown(context),
-            Self::Remote(file) => Pin::new(file).poll_shutdown(context),
+        match &mut self.get_mut().handle {
+            RealPartialHandle::Local(file) => Pin::new(file).poll_shutdown(context),
+            RealPartialHandle::Remote(file) => Pin::new(file).poll_shutdown(context),
         }
     }
 }
 
 impl AsyncSeek for RealPartial {
     fn start_seek(self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
-        match self.get_mut() {
-            Self::Local(file) => Pin::new(file).start_seek(position),
-            Self::Remote(file) => Pin::new(file).start_seek(position),
+        let this = self.get_mut();
+        let result = match &mut this.handle {
+            RealPartialHandle::Local(file) => Pin::new(file).start_seek(position),
+            RealPartialHandle::Remote(file) => Pin::new(file).start_seek(position),
+        };
+        #[cfg(test)]
+        if result.is_ok() {
+            this.seek_observation_pending = true;
         }
+        result
     }
 
     fn poll_complete(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<std::io::Result<u64>> {
-        match self.get_mut() {
-            Self::Local(file) => Pin::new(file).poll_complete(context),
-            Self::Remote(file) => Pin::new(file).poll_complete(context),
+        let this = self.get_mut();
+        let result = match &mut this.handle {
+            RealPartialHandle::Local(file) => Pin::new(file).poll_complete(context),
+            RealPartialHandle::Remote(file) => Pin::new(file).poll_complete(context),
+        };
+        #[cfg(test)]
+        if let Poll::Ready(Ok(position)) = &result
+            && this.seek_observation_pending
+        {
+            this.seek_observation_pending = false;
+            if let Some(observer) = &this.seek_observer {
+                observer(*position);
+            }
         }
+        result
     }
 }
 
@@ -1180,12 +1272,12 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
                     .map_err(TransferIoError::from_remote)?;
                 open_remote_partial(&session, &artifacts.partial_path, resume)
                     .await
-                    .map(RealPartial::Remote)
+                    .map(|file| self.remote_partial(file))
                     .map_err(TransferIoError::from_remote)
             }
             TransferDirection::Download => open_local_partial(&artifacts.partial_path, resume)
                 .await
-                .map(RealPartial::Local)
+                .map(|file| self.local_partial(file))
                 .map_err(TransferIoError::from_local),
         }
     }
@@ -1200,8 +1292,8 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
     }
 
     async fn finish_partial(&self, partial: &mut Self::Partial) -> Result<(), TransferIoError> {
-        match partial {
-            RealPartial::Local(file) => {
+        match &mut partial.handle {
+            RealPartialHandle::Local(file) => {
                 file.flush().await.map_err(|error| {
                     TransferIoError::permanent(format!("flush local partial failed: {error}"))
                 })?;
@@ -1209,7 +1301,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
                     TransferIoError::permanent(format!("sync local partial failed: {error}"))
                 })
             }
-            RealPartial::Remote(file) => {
+            RealPartialHandle::Remote(file) => {
                 file.flush().await.map_err(|error| {
                     TransferIoError::from_io_operation("flush remote partial", error)
                 })?;
@@ -1694,7 +1786,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConnectionResolver, LiveConnectionIdentity, PromotionError, RunnerControl,
+        ConnectionResolver, LiveConnectionIdentity, PromotionError, RealPartial, RunnerControl,
         RunnerControlState, RunnerReporter, RunnerResult, SftpTransferJobRunner, TransferIo,
         TransferIoError, TransferJobRunner, recover_commit, remove_local_artifact,
         select_live_connection_key,
@@ -2451,6 +2543,40 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn real_partial_observer_reports_only_a_completed_destination_seek() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("partial.bin");
+        tokio::fs::write(&path, b"abcdef").await.unwrap();
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .await
+            .unwrap();
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let observer_values = Arc::clone(&observed);
+        let mut partial = RealPartial::local_with_test_seek_observer(
+            file,
+            Arc::new(move |offset| observer_values.lock().unwrap().push(offset)),
+        );
+
+        Pin::new(&mut partial)
+            .start_seek(SeekFrom::Start(3))
+            .unwrap();
+        assert!(
+            observed.lock().unwrap().is_empty(),
+            "a requested seek is not an observed completed seek"
+        );
+        let completed =
+            std::future::poll_fn(|context| Pin::new(&mut partial).poll_complete(context))
+                .await
+                .unwrap();
+
+        assert_eq!(completed, 3);
+        assert_eq!(*observed.lock().unwrap(), vec![3]);
+    }
+
     async fn run_fake(
         connection: bool,
         io: FakeIo,
@@ -2532,7 +2658,7 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct LiveRunObservation {
-        resume_offset: u64,
+        destination_seek_offsets: Vec<u64>,
         checkpoints: Vec<u64>,
         progress_bytes: Vec<u64>,
         commits: Vec<LiveCommitObservation>,
@@ -2580,9 +2706,11 @@ mod tests {
         job: TransferJob,
         control_state: RunnerControlState,
         session: Arc<termlab_remote::transfer::SftpSessionHandle>,
+        destination_seek_offsets: Arc<StdMutex<Vec<u64>>>,
     ) -> Result<(RunnerResult, TransferJob, LiveRunObservation), String> {
+        let seek_observation_start = destination_seek_offsets.lock().unwrap().len();
         let observations = Arc::new(StdMutex::new(LiveRunObservation {
-            resume_offset: job.durable_checkpoint,
+            destination_seek_offsets: Vec::new(),
             checkpoints: Vec::new(),
             progress_bytes: Vec::new(),
             commits: Vec::new(),
@@ -2678,6 +2806,12 @@ mod tests {
             .await
             .map_err(|error| format!("live transfer event acknowledger failed: {error}"))?;
         let durable_job = durable_job.lock().unwrap().clone();
+        observations.lock().unwrap().destination_seek_offsets = destination_seek_offsets
+            .lock()
+            .unwrap()
+            .get(seek_observation_start..)
+            .unwrap_or_default()
+            .to_vec();
         let observations = observations.lock().unwrap().clone();
         Ok((result, durable_job, observations))
     }
@@ -2801,10 +2935,10 @@ mod tests {
         expected_total: u64,
     ) -> Result<(), String> {
         require_live(
-            observation.resume_offset == expected_offset,
+            observation.destination_seek_offsets == [expected_offset],
             format!(
-                "ordinary runner resumed from {} instead of durable checkpoint {expected_offset}",
-                observation.resume_offset
+                "ordinary runner destination completed seeks {:?} instead of exactly the durable checkpoint {expected_offset}",
+                observation.destination_seek_offsets
             ),
         )?;
         require_live(
@@ -2952,7 +3086,14 @@ mod tests {
                 ref_count: 1,
             },
         );
-        let runner = SftpTransferJobRunner::new(Arc::new(ParkingMutex::new(remote_state)));
+        let destination_seek_offsets = Arc::new(StdMutex::new(Vec::new()));
+        let observed_destination_seeks = Arc::clone(&destination_seek_offsets);
+        let runner = SftpTransferJobRunner::new_with_partial_seek_observer(
+            Arc::new(ParkingMutex::new(remote_state)),
+            Arc::new(move |offset| {
+                observed_destination_seeks.lock().unwrap().push(offset);
+            }),
+        );
 
         let verification = async {
             let upload_path = format!("{remote_directory}/upload.bin");
@@ -2980,6 +3121,7 @@ mod tests {
                 upload,
                 RunnerControlState::Pause,
                 Arc::clone(&session),
+                Arc::clone(&destination_seek_offsets),
             )
             .await?;
             let RunnerResult::Paused { durable_checkpoint } = paused_result else {
@@ -3012,6 +3154,7 @@ mod tests {
                 upload,
                 RunnerControlState::Run,
                 Arc::clone(&session),
+                Arc::clone(&destination_seek_offsets),
             )
             .await?;
             require_live(
@@ -3077,6 +3220,7 @@ mod tests {
                 download,
                 RunnerControlState::Pause,
                 Arc::clone(&session),
+                Arc::clone(&destination_seek_offsets),
             )
             .await?;
             let RunnerResult::Paused { durable_checkpoint } = paused_result else {
@@ -3121,6 +3265,7 @@ mod tests {
                 download,
                 RunnerControlState::Run,
                 Arc::clone(&session),
+                Arc::clone(&destination_seek_offsets),
             )
             .await?;
             require_live(
@@ -3170,6 +3315,7 @@ mod tests {
                 second_upload,
                 RunnerControlState::Run,
                 Arc::clone(&session),
+                Arc::clone(&destination_seek_offsets),
             )
             .await?;
             require_live(
@@ -3198,6 +3344,7 @@ mod tests {
                 second_download,
                 RunnerControlState::Run,
                 Arc::clone(&session),
+                Arc::clone(&destination_seek_offsets),
             )
             .await?;
             require_live(
@@ -3459,14 +3606,6 @@ mod tests {
                 backup_bytes: None,
             },
             Case {
-                name: "fresh-prepared-after-promotion-before-phase-write",
-                phase: CommitPhase::Prepared,
-                backup_expected: false,
-                final_bytes: Some(b"new"),
-                partial_bytes: None,
-                backup_bytes: None,
-            },
-            Case {
                 name: "fresh-backup-moved-before-promotion",
                 phase: CommitPhase::BackupMoved,
                 backup_expected: false,
@@ -3523,8 +3662,8 @@ mod tests {
                 backup_bytes: Some(b"old"),
             },
             Case {
-                name: "overwrite-prepared-after-promotion-before-phase-write",
-                phase: CommitPhase::Prepared,
+                name: "overwrite-backup-moved-after-promotion-before-phase-write",
+                phase: CommitPhase::BackupMoved,
                 backup_expected: true,
                 final_bytes: Some(b"new"),
                 partial_bytes: None,
@@ -4724,6 +4863,45 @@ mod tests {
                     case.inventory
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn inactive_cancel_quarantines_unproven_prepared_final_and_backup_for_all_provenance() {
+        for backup_expected in [None, Some(false), Some(true)] {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let io = FakeIo::new(log, fingerprint(6, Some("v1"))).with_inventory(
+                ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+                None,
+            );
+            let inspected_io = io.clone();
+            let mut job = test_job();
+            job.state = TransferJobState::NeedsAttention {
+                reason: AttentionReason::CommitRecovery {
+                    message: "unproven prepared layout".into(),
+                },
+            };
+            job.artifacts =
+                Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+            job.commit_phase = CommitPhase::Prepared;
+            job.commit_backup_expected = backup_expected;
+
+            let (result, operations) = run_fake(true, io, job, RunnerControlState::Cancel).await;
+
+            assert!(matches!(
+                result,
+                RunnerResult::NeedsAttention(AttentionReason::CommitRecovery { .. })
+            ));
+            assert_eq!(
+                inspected_io.artifact_identities(),
+                (Some("existing-final"), None, Some("owned-backup")),
+                "provenance {backup_expected:?}, operations {operations:?}"
+            );
+            assert_eq!(operations, vec!["resolve", "inventory"]);
         }
     }
 

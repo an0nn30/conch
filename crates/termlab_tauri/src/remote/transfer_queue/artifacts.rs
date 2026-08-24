@@ -73,11 +73,9 @@ pub fn recovery_action(
         (Prepared | BackupMoved, Some(false), (false, true, false)) => {
             RecoveryAction::PromotePartial
         }
-        (
-            Prepared | BackupMoved | PartialPromoted | CleanupPending,
-            Some(false),
-            (true, false, false),
-        ) => RecoveryAction::Complete,
+        (BackupMoved | PartialPromoted | CleanupPending, Some(false), (true, false, false)) => {
+            RecoveryAction::Complete
+        }
 
         // An overwrite promised an authoritative backup. Never reinterpret a
         // missing backup as a fresh destination: that would make an ambiguous
@@ -89,11 +87,9 @@ pub fn recovery_action(
             Some(true),
             (false, false, true),
         ) => RecoveryAction::RestoreBackup,
-        (
-            Prepared | BackupMoved | PartialPromoted | CleanupPending,
-            Some(true),
-            (true, false, true),
-        ) => RecoveryAction::DeleteBackupAndComplete,
+        (BackupMoved | PartialPromoted | CleanupPending, Some(true), (true, false, true)) => {
+            RecoveryAction::DeleteBackupAndComplete
+        }
 
         // Legacy v1 jobs have no destination provenance. A managed backup is
         // positive evidence that an old final existed, so those layouts remain
@@ -102,7 +98,7 @@ pub fn recovery_action(
         (Prepared | BackupMoved | PartialPromoted | CleanupPending, None, (false, false, true)) => {
             RecoveryAction::RestoreBackup
         }
-        (Prepared | BackupMoved | PartialPromoted | CleanupPending, None, (true, false, true)) => {
+        (BackupMoved | PartialPromoted | CleanupPending, None, (true, false, true)) => {
             RecoveryAction::DeleteBackupAndComplete
         }
 
@@ -437,7 +433,7 @@ mod tests {
             (Prepared, (false, true, false), NeedsAttention),
             (Prepared, (false, true, true), PromotePartial),
             (Prepared, (true, false, false), NeedsAttention),
-            (Prepared, (true, false, true), DeleteBackupAndComplete),
+            (Prepared, (true, false, true), NeedsAttention),
             (Prepared, (true, true, false), NeedsAttention),
             (Prepared, (true, true, true), NeedsAttention),
             // BackupMoved: either promote the partial, restore the only
@@ -504,11 +500,11 @@ mod tests {
         use ExpectedAction::{Complete as MarkComplete, NeedsAttention, PromotePartial};
 
         let cases = [
-            // A fresh commit has no authoritative backup. Both the pre-promotion
-            // and post-promotion layouts are safe even when the next phase write
-            // did not reach the store before restart.
+            // Prepared proves only the pre-promotion layout. A promoted final
+            // becomes recoverable only after the BackupMoved barrier.
             (Prepared, (false, true, false), PromotePartial),
-            (Prepared, (true, false, false), MarkComplete),
+            (Prepared, (true, false, false), NeedsAttention),
+            (Prepared, (true, false, true), NeedsAttention),
             (BackupMoved, (false, true, false), PromotePartial),
             (BackupMoved, (true, false, false), MarkComplete),
             (PartialPromoted, (true, false, false), MarkComplete),
@@ -551,6 +547,7 @@ mod tests {
             // overwrite promised an authoritative backup and must stop.
             (Prepared, (false, true, false), NeedsAttention),
             (Prepared, (true, false, false), NeedsAttention),
+            (Prepared, (true, false, true), NeedsAttention),
             (BackupMoved, (false, true, false), NeedsAttention),
             (BackupMoved, (true, false, false), NeedsAttention),
             (PartialPromoted, (true, false, false), NeedsAttention),

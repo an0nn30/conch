@@ -736,33 +736,6 @@ mod tests {
         assert!(!resumed.contains(OpenFlags::TRUNCATE));
     }
 
-    #[test]
-    fn public_wrappers_delegate_to_the_injectable_wiring() {
-        let source = include_str!("sftp_io.rs");
-        for delegation in [
-            [
-                "upload_to_partial_with_io",
-                "(\n        &RealPartialTransferIo",
-            ]
-            .concat(),
-            [
-                "download_to_partial_with_io",
-                "(\n        &RealPartialTransferIo",
-            ]
-            .concat(),
-            [
-                "truncate_remote_partial_with_io",
-                "(&RealSftpSessionPartialIo",
-            ]
-            .concat(),
-        ] {
-            assert!(
-                source.contains(&delegation),
-                "public wrapper is not wired through {delegation}"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn upload_wrapper_wiring_uses_offset_to_select_resume_without_truncation() {
         let io = FakePartialTransferIo::new();
