@@ -11,6 +11,10 @@ import path from 'node:path';
 import vm from 'node:vm';
 
 const FRONTEND = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
+const DIALOG_PATH = path.join(FRONTEND, 'app/features/transfers/dialogs.js');
+const TRANSFER_DATA_PATH = path.join(FRONTEND, 'app/features/transfers/data-service.js');
+const TRANSFER_STORE_PATH = path.join(FRONTEND, 'app/features/transfers/store.js');
+const TRANSFER_RUNTIME_PATH = path.join(FRONTEND, 'app/features/transfers/runtime.js');
 const VIEW_PATH = path.join(FRONTEND, 'app/features/transfers/view.js');
 const PANEL_PATH = path.join(FRONTEND, 'app/panels/transfer-center.js');
 const MANAGER_PATH = path.join(FRONTEND, 'app/layout/tool-window-manager.js');
@@ -44,6 +48,7 @@ function makeElement(tag) {
     max: 0,
     tabIndex: -1,
     _textContentWriteCount: 0,
+    _focusCount: 0,
     get className() { return className; },
     set className(value) { className = String(value || ''); },
     classList: {
@@ -102,6 +107,7 @@ function makeElement(tag) {
       children.forEach((child) => this.appendChild(child));
     },
     remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+    focus() { this._focusCount += 1; },
     setAttribute(name, value) {
       const stringValue = String(value);
       attributes.set(name, stringValue);
@@ -232,6 +238,7 @@ function loadHarness(options = {}) {
 
   let subscriber = null;
   const runtimeCalls = [];
+  const dialogs = [];
   const actionEvents = [];
   const selectionEvents = [];
   const runtime = {
@@ -240,7 +247,10 @@ function loadHarness(options = {}) {
       return () => { subscriber = null; };
     },
   };
-  for (const method of ['pause', 'resume', 'cancel', 'retry', 'resolve', 'pauseAll', 'resumeAll', 'clearCompleted']) {
+  for (const method of [
+    'pause', 'resume', 'cancel', 'retry', 'resolve', 'pauseAll', 'resumeAll',
+    'clearCompleted', 'reorder', 'setPriority', 'updateSettings', 'reconnect',
+  ]) {
     runtime[method] = (...args) => {
       runtimeCalls.push({ method, args });
       return Promise.resolve();
@@ -263,13 +273,35 @@ function loadHarness(options = {}) {
       formatSize(value) { return `${Number(value)} B`; },
     },
     termlabTransferRuntime: runtime,
+    tlDialog: {
+      open(dialogOptions) {
+        const root = makeElement('div');
+        const bodyEl = makeElement('div');
+        root.appendChild(bodyEl);
+        let closed = false;
+        const handle = {
+          el: root,
+          close(result) {
+            if (closed) return;
+            closed = true;
+            if (typeof dialogOptions.onClose === 'function') dialogOptions.onClose(result);
+          },
+        };
+        if (typeof dialogOptions.body === 'function') dialogOptions.body(bodyEl);
+        dialogs.push({ options: dialogOptions, handle, bodyEl });
+        return handle;
+      },
+    },
   };
+  Object.assign(sandbox, options.globals || {});
   sandbox.window = sandbox;
   sandbox.global = sandbox;
   vm.createContext(sandbox);
 
   assert.ok(fs.existsSync(VIEW_PATH), 'Transfer Center view IIFE must exist');
   assert.ok(fs.existsSync(PANEL_PATH), 'Transfer Center panel IIFE must exist');
+  assert.ok(fs.existsSync(DIALOG_PATH), 'Transfer Center dialogs IIFE must exist');
+  vm.runInContext(fs.readFileSync(DIALOG_PATH, 'utf8'), sandbox, { filename: DIALOG_PATH });
   vm.runInContext(fs.readFileSync(VIEW_PATH, 'utf8'), sandbox, { filename: VIEW_PATH });
   vm.runInContext(fs.readFileSync(PANEL_PATH, 'utf8'), sandbox, { filename: PANEL_PATH });
   const controller = sandbox.transferCenterPanel.init({
@@ -294,6 +326,7 @@ function loadHarness(options = {}) {
     controller,
     actionEvents,
     selectionEvents,
+    dialogs,
     emit(value) {
       assert.ok(subscriber, 'controller must subscribe to the shared transfer runtime');
       subscriber(value);
@@ -302,12 +335,293 @@ function loadHarness(options = {}) {
   };
 }
 
+function actionNames(row) {
+  return row.querySelectorAll('[data-transfer-action]').map((button) => button.dataset.transferAction);
+}
+
+async function loadReconnectHarness(startingError) {
+  const calls = [];
+  const authCalls = [];
+  const filesData = {
+    connectHost(invoke, serverEntryId) {
+      calls.push({ command: 'files.connectHost', serverEntryId, invoke });
+      return Promise.reject(startingError);
+    },
+  };
+  const auth = {
+    run(serverEntryId, error, ctx) {
+      authCalls.push({ serverEntryId, error, ctx });
+      return Promise.resolve({ sessionKey: 'won-session' });
+    },
+  };
+  const invoke = (command, args) => {
+    calls.push({ command, args });
+    if (command === 'transfer_queue_snapshot') return Promise.resolve(snapshot([]));
+    return Promise.resolve(undefined);
+  };
+  const sandbox = {
+    console,
+    Promise,
+    Set,
+    Map,
+    structuredClone,
+    setTimeout,
+    clearTimeout,
+    termlabFilesFeatureDataService: filesData,
+    termlabConnectAuth: auth,
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  for (const modulePath of [TRANSFER_DATA_PATH, TRANSFER_STORE_PATH, TRANSFER_RUNTIME_PATH]) {
+    vm.runInContext(fs.readFileSync(modulePath, 'utf8'), sandbox, { filename: modulePath });
+  }
+  await sandbox.termlabTransferRuntime.ensureStarted({
+    invoke,
+    listen: () => Promise.resolve(() => {}),
+  });
+  return { sandbox, calls, authCalls, filesData, invoke };
+}
+
 function rowIds(panelEl) {
   return panelEl.querySelectorAll('tr[data-job-id]').map((row) => row.dataset.jobId);
 }
 
+// The backend state is the only action-availability authority. Every state
+// gets its exact supported surface; terminal rows cannot accidentally expose
+// lifecycle commands, and conflict resume is not inferred from checkpoints.
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([
+    job('running', 'running'),
+    job('paused', 'paused'),
+    job('failed', 'failed', { state: { kind: 'failed', error: 'disk full' } }),
+    job('connection', 'needsConnection'),
+    job('attention', 'needsAttention', { state: { kind: 'needsAttention', reason: { kind: 'destinationConflict', resumeAvailable: false } } }),
+    job('queued', 'queued'),
+    job('completed', 'completed'),
+    job('cancelled', 'cancelled'),
+  ], { summary: summary({ active: 6, history: 2 }) }));
+
+  const actions = (id) => actionNames(harness.panelEl.querySelector(`tr[data-job-id="${id}"]`));
+  assert.deepStrictEqual(actions('running'), ['pause', 'cancel']);
+  assert.deepStrictEqual(actions('paused'), ['resume', 'cancel']);
+  assert.deepStrictEqual(actions('connection'), ['connect', 'cancel']);
+  assert.deepStrictEqual(actions('attention'), ['resolve', 'cancel']);
+  assert.deepStrictEqual(actions('queued'), ['pause', 'toggle-priority', 'move-up', 'move-down', 'cancel']);
+
+  click(harness.panelEl, harness.panelEl.querySelector('[data-transfer-view="history"]'));
+  assert.deepStrictEqual(actions('failed'), ['retry', 'details']);
+  assert.deepStrictEqual(actions('completed'), ['details']);
+  assert.deepStrictEqual(actions('cancelled'), ['details']);
+}
+
 function click(panelEl, target) {
   panelEl._fire('click', { target });
+}
+
+function dialogButton(dialog, label) {
+  const button = (dialog.options.buttons || []).find((item) => item.label === label);
+  assert.ok(button, `dialog must expose ${label}`);
+  return button;
+}
+
+// Configured reconnects use the files service first, preserve the typed
+// starting error for the shared auth chain, and resume only after a session
+// is actually won.
+{
+  const startingError = { kind: 'needsPassword', hasVaultAccount: true, message: 'Password required' };
+  const harness = await loadReconnectHarness(startingError);
+  const configured = job('reconnect', 'needsConnection');
+  await harness.sandbox.termlabTransferRuntime.reconnect(configured);
+  assert.strictEqual(harness.authCalls.length, 1);
+  assert.strictEqual(harness.authCalls[0].serverEntryId, 'server-1');
+  assert.strictEqual(harness.authCalls[0].error, startingError);
+  assert.strictEqual(harness.authCalls[0].ctx.invoke, harness.invoke);
+  assert.strictEqual(harness.authCalls[0].ctx.data, harness.filesData);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.calls.filter((call) => call.command === 'transfer_resume'))), [
+    { command: 'transfer_resume', args: { transferId: 'reconnect' } },
+  ]);
+}
+
+// Ad-hoc endpoints never enter the configured-host runtime path. The dialog
+// gives the exact matching session identity and makes the no-storage behavior
+// explicit.
+{
+  const harness = loadHarness();
+  const adHoc = job('adhoc', 'needsConnection', {
+    endpoint: { kind: 'adHoc', user: 'sam', host: 'files.example', port: 2222 },
+  });
+  harness.emit(snapshot([adHoc], { summary: summary({ active: 1, attention: 1 }) }));
+  click(harness.panelEl, harness.panelEl.querySelector('[data-transfer-action="connect"]'));
+  assert.deepStrictEqual(harness.runtimeCalls, []);
+  const text = harness.dialogs.at(-1).bodyEl.textContent;
+  assert.ok(text.includes('sam@files.example:2222'));
+  assert.ok(text.includes('will not store credentials'));
+}
+
+// Delegated controls acknowledge exactly one runtime command and keep the
+// backend projection untouched until a new snapshot arrives.
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([
+    job('a', 'running'),
+    job('b', 'queued', { queueOrder: 2, priority: 'normal' }),
+    job('c', 'queued', { queueOrder: 3, priority: 'normal' }),
+  ], { summary: summary({ active: 3, running: 1, queued: 2 }) }));
+
+  click(harness.panelEl, harness.panelEl.querySelector('tr[data-job-id="a"]').querySelector('[data-transfer-action="pause"]'));
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'pause', args: ['a'] }]);
+  assert.deepStrictEqual(actionNames(harness.panelEl.querySelector('tr[data-job-id="a"]')), ['pause', 'cancel'],
+    'command acknowledgement must not optimistically rewrite backend-owned state');
+
+  click(harness.panelEl, harness.panelEl.querySelector('tr[data-job-id="b"]').querySelector('[data-transfer-action="toggle-priority"]'));
+  click(harness.panelEl, harness.panelEl.querySelector('tr[data-job-id="c"]').querySelector('[data-transfer-action="move-up"]'));
+  assert.deepStrictEqual(harness.runtimeCalls.slice(1), [
+    { method: 'setPriority', args: ['b', 'interactive'] },
+    { method: 'reorder', args: ['c', 'b'] },
+  ]);
+
+  click(harness.panelEl, harness.panelEl.querySelector('[data-transfer-action="pause-all"]'));
+  assert.deepStrictEqual(harness.runtimeCalls.at(-1), { method: 'pauseAll', args: [] });
+}
+
+// Cancel is explicit and names the file. Escape/cancel never mutates, input
+// data is cleared on close, and focus returns to the invoking control.
+{
+  const harness = loadHarness();
+  const invoker = makeElement('button');
+  const calls = [];
+  harness.sandbox.termlabTransferDialogs.showCancel(
+    job('danger', 'running', { fileName: '<danger>.key' }),
+    invoker,
+    () => calls.push('cancel'),
+  );
+  const first = harness.dialogs.at(-1);
+  assert.ok(first.bodyEl.textContent.includes('<danger>.key'));
+  assert.ok(dialogButton(first, 'Cancel transfer').danger);
+  first.handle.close('escape');
+  assert.deepStrictEqual(calls, []);
+  assert.strictEqual(invoker._focusCount, 1);
+
+  harness.sandbox.termlabTransferDialogs.showCancel(job('danger', 'running'), invoker, () => calls.push('cancel'));
+  const confirmed = harness.dialogs.at(-1);
+  await dialogButton(confirmed, 'Cancel transfer').onSelect();
+  assert.deepStrictEqual(calls, ['cancel']);
+}
+
+// Controller-owned confirmations and settings call the runtime once after
+// confirmation, using one atomic settings payload and no optimistic render.
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([
+    job('running', 'running'),
+    job('attention', 'needsAttention', {
+      state: { kind: 'needsAttention', reason: { kind: 'destinationConflict', resumeAvailable: false } },
+    }),
+  ], {
+    settings: { globalLimit: 3, perHostLimit: 2 },
+    summary: summary({ active: 2, running: 1, attention: 1 }),
+  }));
+
+  click(harness.panelEl, harness.panelEl.querySelector('tr[data-job-id="running"]').querySelector('[data-transfer-action="cancel"]'));
+  assert.deepStrictEqual(harness.runtimeCalls, []);
+  await dialogButton(harness.dialogs.at(-1), 'Cancel transfer').onSelect();
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'cancel', args: ['running'] }]);
+
+  click(harness.panelEl, harness.panelEl.querySelector('tr[data-job-id="attention"]').querySelector('[data-transfer-action="resolve"]'));
+  await dialogButton(harness.dialogs.at(-1), 'Overwrite').onSelect();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.runtimeCalls.at(-1))), {
+    method: 'resolve', args: ['attention', { kind: 'overwrite' }],
+  });
+
+  click(harness.panelEl, harness.panelEl.querySelector('[data-transfer-action="concurrency"]'));
+  const concurrency = harness.dialogs.at(-1);
+  concurrency.bodyEl.querySelector('[data-transfer-field="global-limit"]').value = '6';
+  concurrency.bodyEl.querySelector('[data-transfer-field="per-host-limit"]').value = '3';
+  await dialogButton(concurrency, 'Save').onSelect();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.runtimeCalls.at(-1))), {
+    method: 'updateSettings', args: [{ globalLimit: 6, perHostLimit: 3 }],
+  });
+}
+
+// Details are useful for diagnosis but deliberately omit credential-shaped
+// fields even when an over-complete object reaches the UI.
+{
+  const harness = loadHarness();
+  const detailed = job('details', 'failed', {
+    state: { kind: 'failed', error: 'permission denied' },
+    durableCheckpoint: 42,
+    endpoint: {
+      kind: 'configured', serverEntryId: 'server-1', label: 'Production',
+      password: 'pw-secret', passphrase: 'phrase-secret', privateKey: 'key-secret',
+      vaultHandle: 'vault-secret', liveHandle: 'live-secret',
+    },
+  });
+  harness.sandbox.termlabTransferDialogs.showDetails(detailed, makeElement('tr'));
+  const text = harness.dialogs.at(-1).bodyEl.textContent;
+  for (const visible of ['Production', '/local/details.bin', '/remote/details.bin', '42', 'permission denied']) {
+    assert.ok(text.includes(visible), `details must include ${visible}`);
+  }
+  for (const secret of ['pw-secret', 'phrase-secret', 'key-secret', 'vault-secret', 'live-secret']) {
+    assert.ok(!text.includes(secret), `details must exclude ${secret}`);
+  }
+}
+
+// Conflict choices come solely from the backend reason. Rename validates
+// nonblank destinations and concurrency commits its two limits atomically.
+{
+  const harness = loadHarness();
+  const resolutions = [];
+  const conflict = job('conflict', 'needsAttention', {
+    state: { kind: 'needsAttention', reason: { kind: 'destinationConflict', resumeAvailable: false } },
+  });
+  harness.sandbox.termlabTransferDialogs.showConflict(conflict, makeElement('tr'), (value) => resolutions.push(value));
+  const first = harness.dialogs.at(-1);
+  assert.deepStrictEqual(Array.from(first.options.buttons, (button) => button.label), ['Cancel', 'Skip', 'Rename', 'Overwrite']);
+  assert.ok(dialogButton(first, 'Overwrite').danger);
+  const renameInput = first.bodyEl.querySelector('[data-transfer-field="rename"]');
+  const renameError = first.bodyEl.querySelector('[data-transfer-error="rename"]');
+  renameInput.value = '   ';
+  await dialogButton(first, 'Rename').onSelect();
+  assert.deepStrictEqual(resolutions, []);
+  assert.strictEqual(renameError.hidden, false);
+  renameInput.value = '/remote/renamed.bin';
+  await dialogButton(first, 'Rename').onSelect();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(resolutions)), [{ kind: 'rename', destination: '/remote/renamed.bin' }]);
+  assert.strictEqual(renameInput.value, '', 'rename input is cleared on close');
+
+  harness.sandbox.termlabTransferDialogs.showConflict(job('resume', 'needsAttention', {
+    state: { kind: 'needsAttention', reason: { kind: 'destinationConflict', resumeAvailable: true } },
+  }), makeElement('tr'), () => {});
+  assert.deepStrictEqual(Array.from(harness.dialogs.at(-1).options.buttons, (button) => button.label),
+    ['Cancel', 'Skip', 'Resume', 'Rename', 'Overwrite']);
+
+  harness.sandbox.termlabTransferDialogs.showConflict(job('changed', 'needsAttention', {
+    state: { kind: 'needsAttention', reason: { kind: 'sourceChanged' } },
+  }), makeElement('tr'), () => {});
+  assert.deepStrictEqual(Array.from(harness.dialogs.at(-1).options.buttons, (button) => button.label), ['Cancel', 'Skip', 'Restart']);
+
+  const settings = [];
+  harness.sandbox.termlabTransferDialogs.showConcurrency(
+    { globalLimit: 3, perHostLimit: 2 },
+    makeElement('button'),
+    (value) => settings.push(value),
+  );
+  const concurrency = harness.dialogs.at(-1);
+  const globalInput = concurrency.bodyEl.querySelector('[data-transfer-field="global-limit"]');
+  const hostInput = concurrency.bodyEl.querySelector('[data-transfer-field="per-host-limit"]');
+  const settingsError = concurrency.bodyEl.querySelector('[data-transfer-error="concurrency"]');
+  globalInput.value = '0';
+  hostInput.value = '2.5';
+  await dialogButton(concurrency, 'Save').onSelect();
+  assert.deepStrictEqual(settings, []);
+  assert.strictEqual(settingsError.hidden, false);
+  globalInput.value = '8';
+  hostInput.value = '4';
+  await dialogButton(concurrency, 'Save').onSelect();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(settings)), [{ globalLimit: 8, perHostLimit: 4 }]);
+  assert.strictEqual(globalInput.value, '');
+  assert.strictEqual(hostInput.value, '');
 }
 
 async function loadMountLifecycleHarness() {
@@ -424,6 +738,8 @@ async function loadMountLifecycleHarness() {
 {
   const harness = await loadMountLifecycleHarness();
   const manager = harness.sandbox.toolWindowManager;
+  assert.ok(manager.listWindows().some((item) => item.id === 'transfer-center'),
+    'generic tool-window shortcut inventory includes the registered Transfer Center id');
   manager.activate('transfer-center');
   assert.strictEqual(harness.activeSubscribers(), 1);
   const firstPanel = harness.body.querySelector('#transfer-center-panel');
@@ -432,6 +748,9 @@ async function loadMountLifecycleHarness() {
   manager.setViewMode('transfer-center', 'window');
   assert.strictEqual(harness.activeSubscribers(), 0,
     'detaching the docked DOM must destroy its controller subscription');
+  assert.strictEqual(firstPanel._listenerCount('click'), 0);
+  assert.strictEqual(firstPanel._listenerCount('keydown'), 0,
+    'detaching removes both root-scoped delegated handlers');
   const detachedText = firstSummary.textContent;
   harness.emit(snapshot([job('a', 'running')], {
     revision: 2,
@@ -443,12 +762,15 @@ async function loadMountLifecycleHarness() {
   const registration = manager.getRegistration('transfer-center');
   const hostRoot = makeElement('div');
   const hostMount = registration.renderFn(hostRoot);
+  const hostPanel = hostRoot.querySelector('#transfer-center-panel');
   assert.strictEqual(typeof hostMount.destroy, 'function',
     'the shared renderFn must return the controller disposal contract to a host');
   assert.strictEqual(harness.activeSubscribers(), 1);
   hostMount.destroy();
   assert.strictEqual(harness.activeSubscribers(), 0,
     'host teardown must release its controller subscription');
+  assert.strictEqual(hostPanel._listenerCount('click'), 0);
+  assert.strictEqual(hostPanel._listenerCount('keydown'), 0);
 
   manager.notifyHostDocked('transfer-center');
   assert.strictEqual(harness.activeSubscribers(), 1,
@@ -460,9 +782,13 @@ async function loadMountLifecycleHarness() {
   assert.strictEqual(harness.activeSubscribers(), 0);
   const secondHostRoot = makeElement('div');
   const secondHostMount = registration.renderFn(secondHostRoot);
+  const secondHostPanel = secondHostRoot.querySelector('#transfer-center-panel');
   assert.strictEqual(harness.activeSubscribers(), 1);
   secondHostMount.destroy();
   assert.strictEqual(harness.activeSubscribers(), 0);
+  assert.strictEqual(secondHostPanel._listenerCount('click'), 0);
+  assert.strictEqual(secondHostPanel._listenerCount('keydown'), 0,
+    'repeated host mounts do not leak delegated handlers');
   manager.notifyHostDocked('transfer-center');
   assert.strictEqual(harness.activeSubscribers(), 1,
     'a second complete lifecycle still has exactly one live subscriber');
@@ -471,61 +797,89 @@ async function loadMountLifecycleHarness() {
     'unregistering a mounted tool window disposes its final controller');
 }
 
-// Row actions and selection are exposed through the one delegated surface so
-// Task 12 can bind dialogs/commands without replacing this renderer. They do
-// not call the runtime by themselves in this read-only slice.
+// Row actions and selection share one delegated surface; the controller binds
+// the selected backend job to exactly one runtime acknowledgement.
 {
   const harness = loadHarness();
   harness.emit(snapshot([job('a', 'running')], { summary: summary({ active: 1, running: 1 }) }));
-  const details = harness.panelEl.querySelector('[data-transfer-action="details"]');
-  click(harness.panelEl, details);
+  const pause = harness.panelEl.querySelector('[data-transfer-action="pause"]');
+  click(harness.panelEl, pause);
   assert.deepStrictEqual(harness.selectionEvents, ['a']);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.actionEvents)), [{ action: 'details', jobId: 'a' }]);
-  assert.deepStrictEqual(harness.runtimeCalls, []);
+  assert.strictEqual(harness.actionEvents[0].action, 'pause');
+  assert.strictEqual(harness.actionEvents[0].jobId, 'a');
+  assert.strictEqual(harness.actionEvents[0].invoker, pause);
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'pause', args: ['a'] }]);
 }
 
-// Focusable rows use the same selection seam from keyboard and pointer. Enter
-// selects; Space selects and prevents scrolling. Native buttons inside rows
-// are left alone so their own keyboard click activation fires exactly once.
+// Root-scoped keyboard flow moves selection, dispatches only eligible state
+// actions, and leaves native inputs/buttons alone.
 {
   const harness = loadHarness();
   harness.emit(snapshot([
     job('a', 'running'),
-    job('b', 'queued', { queueOrder: 2 }),
-  ], { summary: summary({ active: 2, running: 1, queued: 1 }) }));
+    job('b', 'paused', { queueOrder: 2 }),
+    job('attention', 'needsAttention', {
+      queueOrder: 3,
+      state: { kind: 'needsAttention', reason: { kind: 'destinationConflict', resumeAvailable: false } },
+    }),
+    job('failed', 'failed', { state: { kind: 'failed', error: 'disk full' } }),
+  ], { summary: summary({ active: 3, history: 1, running: 1, paused: 1, attention: 1, failed: 1 }) }));
   const rowA = harness.panelEl.querySelector('tr[data-job-id="a"]');
   const rowB = harness.panelEl.querySelector('tr[data-job-id="b"]');
+  const rowAttention = harness.panelEl.querySelector('tr[data-job-id="attention"]');
 
-  let enterPrevented = 0;
+  let arrowPrevented = 0;
   harness.panelEl._fire('keydown', {
-    target: rowB,
-    key: 'Enter',
-    preventDefault: () => { enterPrevented += 1; },
+    target: rowA,
+    key: 'ArrowDown',
+    preventDefault: () => { arrowPrevented += 1; },
   });
   assert.deepStrictEqual(harness.selectionEvents, ['b']);
   assert.strictEqual(rowB.getAttribute('aria-selected'), 'true');
   assert.strictEqual(rowA.getAttribute('aria-selected'), 'false');
-  assert.strictEqual(enterPrevented, 0);
+  assert.strictEqual(rowB._focusCount, 1);
+  assert.strictEqual(arrowPrevented, 1);
 
   let spacePrevented = 0;
   harness.panelEl._fire('keydown', {
-    target: rowA,
+    target: rowB,
     key: ' ',
     preventDefault: () => { spacePrevented += 1; },
   });
-  assert.deepStrictEqual(harness.selectionEvents, ['b', 'a']);
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'resume', args: ['b'] }]);
   assert.strictEqual(spacePrevented, 1, 'Space must not scroll the transfer table');
 
-  const details = rowA.querySelector('[data-transfer-action="details"]');
   harness.panelEl._fire('keydown', {
-    target: details,
-    key: 'Enter',
-    preventDefault: () => { throw new Error('button keyboard activation stays native'); },
+    target: rowB,
+    key: 'ArrowDown',
+    preventDefault() {},
   });
-  assert.deepStrictEqual(harness.selectionEvents, ['b', 'a'],
-    'button keydown must not also trigger delegated row selection');
-  assert.deepStrictEqual(harness.actionEvents, [],
-    'the browser-generated button click, not keydown, owns action activation');
+  harness.panelEl._fire('keydown', {
+    target: rowAttention,
+    key: 'Enter',
+    preventDefault() {},
+  });
+  assert.strictEqual(harness.dialogs.at(-1).options.title, 'Destination conflict');
+
+  harness.panelEl._fire('keydown', { target: rowAttention, key: 'Delete', preventDefault() {} });
+  assert.strictEqual(harness.dialogs.at(-1).options.title, 'Cancel transfer?');
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'resume', args: ['b'] }],
+    'Delete opens confirmation without cancelling');
+
+  const nativeButton = rowAttention.querySelector('[data-transfer-action="resolve"]');
+  const nativeInput = makeElement('input');
+  rowAttention.appendChild(nativeInput);
+  harness.panelEl._fire('keydown', { target: nativeButton, key: 'Enter', preventDefault() {
+    throw new Error('button behavior stays native');
+  } });
+  harness.panelEl._fire('keydown', { target: nativeInput, key: ' ', preventDefault() {
+    throw new Error('input behavior stays native');
+  } });
+
+  click(harness.panelEl, harness.panelEl.querySelector('[data-transfer-view="history"]'));
+  const failedRow = harness.panelEl.querySelector('tr[data-job-id="failed"]');
+  harness.panelEl._fire('keydown', { target: failedRow, key: 'Enter', preventDefault() {} });
+  assert.strictEqual(harness.dialogs.at(-1).options.title, 'Transfer details');
 
   assert.strictEqual(harness.panelEl._listenerCount('keydown'), 1);
   harness.controller.destroy();

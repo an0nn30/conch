@@ -226,6 +226,37 @@
     return command('resolve', [id, resolution]);
   }
 
+  async function reconnect(job) {
+    if (!dependencies) throw new Error('Transfer runtime has not started');
+    const endpoint = job && job.endpoint;
+    if (!job || !job.id || !endpoint || endpoint.kind !== 'configured' || !endpoint.serverEntryId) {
+      throw new TypeError('Configured transfer reconnect requires a job and server entry');
+    }
+    const filesData = global.termlabFilesFeatureDataService;
+    if (!filesData || typeof filesData.connectHost !== 'function') {
+      throw new Error('SFTP host connection service is unavailable');
+    }
+
+    let session = null;
+    try {
+      session = await filesData.connectHost(dependencies.invoke, endpoint.serverEntryId);
+    } catch (startingError) {
+      const connectAuth = global.termlabConnectAuth;
+      if (!connectAuth || typeof connectAuth.run !== 'function') throw startingError;
+      session = await connectAuth.run(endpoint.serverEntryId, startingError, {
+        invoke: dependencies.invoke,
+        data: filesData,
+        onError(message) {
+          const toast = dependencies && dependencies.toast;
+          if (toast && typeof toast.error === 'function') toast.error('SFTP reconnect failed', String(message));
+        },
+      });
+    }
+    if (!session) return false;
+    await command('resume', [job.id]);
+    return true;
+  }
+
   const runtime = {
     ensureStarted,
     subscribe,
@@ -241,6 +272,7 @@
     setPriority: (id, priority) => command('setPriority', [id, priority]),
     clearCompleted: () => command('clearCompleted', []),
     updateSettings: (settings) => command('updateSettings', [settings]),
+    reconnect,
     refresh: () => synchronize(),
   };
 

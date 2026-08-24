@@ -92,14 +92,25 @@
 
   function actionsFor(job) {
     const kind = job && job.state ? job.state.kind : '';
-    const actions = [];
-    if (kind === 'running' || kind === 'connecting' || kind === 'checking') actions.push(['pause', 'Pause']);
-    else if (kind === 'paused') actions.push(['resume', 'Resume']);
-    else if (kind === 'needsConnection') actions.push(['connect', 'Connect']);
-    else if (kind === 'needsAttention') actions.push(['resolve', 'Resolve']);
-    else if (kind === 'failed') actions.push(['retry', 'Retry']);
-    actions.push(['details', 'Details']);
-    return actions;
+    switch (kind) {
+      case 'running': return [['pause', 'Pause'], ['cancel', 'Cancel']];
+      case 'paused': return [['resume', 'Resume'], ['cancel', 'Cancel']];
+      case 'failed': return [['retry', 'Retry'], ['details', 'Details']];
+      case 'needsConnection': return [['connect', 'Connect'], ['cancel', 'Cancel']];
+      case 'needsAttention': return [['resolve', 'Resolve'], ['cancel', 'Cancel']];
+      case 'queued': return [
+        ['pause', 'Pause'],
+        ['toggle-priority', job.priority === 'interactive' ? 'Normal priority' : 'Prioritize'],
+        ['move-up', 'Move up'],
+        ['move-down', 'Move down'],
+        ['cancel', 'Cancel'],
+      ];
+      case 'completed':
+      case 'cancelled':
+        return [['details', 'Details']];
+      default:
+        return [];
+    }
   }
 
   function create(options) {
@@ -141,6 +152,10 @@
     clearButtonEl.setAttribute('type', 'button');
     clearButtonEl.setAttribute('aria-label', 'Clear completed transfer history');
     setData(clearButtonEl, 'transfer-action', 'clear-completed');
+    const concurrencyButtonEl = append(toolbarActionsEl, 'button', 'tl-btn tl-transfer-center__toolbar-button', 'Concurrency');
+    concurrencyButtonEl.setAttribute('type', 'button');
+    concurrencyButtonEl.setAttribute('aria-label', 'Configure transfer concurrency');
+    setData(concurrencyButtonEl, 'transfer-action', 'concurrency');
 
     const recoveryEl = append(panelEl, 'div', 'tl-transfer-center__recovery');
     recoveryEl.setAttribute('role', 'alert');
@@ -241,7 +256,7 @@
           job.speedBytesPerSecond,
           job.etaSeconds,
         ]),
-        actions: job.state && job.state.kind,
+        actions: JSON.stringify([job.state && job.state.kind, job.priority]),
       };
     }
 
@@ -373,7 +388,7 @@
       if (actionButton) {
         const jobId = actionButton.getAttribute('data-job-id');
         if (jobId) onSelect(jobId);
-        onAction({ action: actionButton.getAttribute('data-transfer-action'), jobId });
+        onAction({ action: actionButton.getAttribute('data-transfer-action'), jobId, invoker: actionButton });
         return;
       }
 
@@ -384,17 +399,44 @@
     function onKeyDown(event) {
       const target = event && event.target;
       if (!target || typeof target.closest !== 'function') return;
-      // Buttons keep native Enter/Space activation. Their synthesized click
-      // reaches onClick once; selecting here too would double-trigger the row
-      // seam and prevent Space from activating the button normally.
-      if (target.closest('button')) return;
-      const isEnter = event.key === 'Enter';
-      const isSpace = event.key === ' ' || event.key === 'Spacebar';
-      if (!isEnter && !isSpace) return;
+      const tag = String(target.tagName || '').toUpperCase();
+      if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
+          || target.getAttribute('contenteditable') === 'true') return;
+
+      const key = event.key;
       const row = target.closest('tr[data-job-id]');
-      if (!row) return;
-      if (isSpace && typeof event.preventDefault === 'function') event.preventDefault();
-      onSelect(row.getAttribute('data-job-id'));
+      const currentId = row ? row.getAttribute('data-job-id') : latestState.selectedId;
+      if (key === 'ArrowUp' || key === 'ArrowDown') {
+        if (currentIds.length === 0) return;
+        const currentIndex = Math.max(0, currentIds.indexOf(currentId));
+        const delta = key === 'ArrowUp' ? -1 : 1;
+        const nextIndex = Math.max(0, Math.min(currentIds.length - 1, currentIndex + delta));
+        const nextId = currentIds[nextIndex];
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        onSelect(nextId);
+        const nextRow = rowsById.get(nextId);
+        if (nextRow && typeof nextRow.element.focus === 'function') nextRow.element.focus();
+        return;
+      }
+
+      const jobId = latestState.selectedId || currentId;
+      const jobs = latestSnapshot && Array.isArray(latestSnapshot.jobs) ? latestSnapshot.jobs : [];
+      const job = jobs.find((item) => item.id === jobId);
+      const kind = job && job.state ? job.state.kind : '';
+      let action = null;
+      if (key === ' ' || key === 'Spacebar') {
+        if (kind === 'running' || kind === 'queued') action = 'pause';
+        else if (kind === 'paused') action = 'resume';
+      } else if (key === 'Enter') {
+        if (kind === 'needsAttention') action = 'resolve';
+        else if (actionsFor(job).some(([name]) => name === 'details')) action = 'details';
+      } else if (key === 'Delete' && actionsFor(job).some(([name]) => name === 'cancel')) {
+        action = 'cancel';
+      }
+      if (!action) return;
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      const invoker = rowsById.get(jobId);
+      onAction({ action, jobId, invoker: invoker ? invoker.element : row });
     }
 
     panelEl.addEventListener('click', onClick);
