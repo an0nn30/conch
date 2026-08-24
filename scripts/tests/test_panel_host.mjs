@@ -1240,6 +1240,8 @@ function makeHostSandbox(config) {
   const appearanceSyncs = [];
   const panelInits = [];
   const transferRuntimeStarts = [];
+  const panelDestroys = [];
+  const windowLifecycleListeners = new Map();
 
   const body = makeElement('body');
   const appEl = makeElement('div');
@@ -1283,7 +1285,15 @@ function makeHostSandbox(config) {
       querySelectorAll: () => [],
       addEventListener() {},
     },
-    addEventListener() {},
+    addEventListener(name, handler) {
+      if (!windowLifecycleListeners.has(name)) windowLifecycleListeners.set(name, []);
+      windowLifecycleListeners.get(name).push(handler);
+    },
+    removeEventListener(name, handler) {
+      const handlers = windowLifecycleListeners.get(name) || [];
+      const index = handlers.indexOf(handler);
+      if (index >= 0) handlers.splice(index, 1);
+    },
   };
   sandbox.window = sandbox;
   sandbox.global = sandbox;
@@ -1306,7 +1316,13 @@ function makeHostSandbox(config) {
   sandbox.sshPanel = panelStub('ssh-sessions');
   sandbox.tunnelsPanel = panelStub('tunnels');
   sandbox.notificationsPanel = panelStub('notifications');
-  sandbox.transferCenterPanel = panelStub('transfer-center');
+  sandbox.transferCenterPanel = {
+    init: (opts) => {
+      timeline.push('render:transfer-center');
+      panelInits.push({ name: 'transfer-center', opts });
+      return { destroy: () => panelDestroys.push(1) };
+    },
+  };
   sandbox.termlabTransferRuntime = {
     ensureStarted(options) {
       transferRuntimeStarts.push(options);
@@ -1433,6 +1449,7 @@ function makeHostSandbox(config) {
     appearanceSyncs,
     panelInits,
     transferRuntimeStarts,
+    panelDestroys,
     titlebarRefreshes,
     routerRegistrations,
     warnCalls,
@@ -1444,6 +1461,9 @@ function makeHostSandbox(config) {
     byId,
     emitWindow: (name, payload) => {
       for (const fn of listens.window.get(name) || []) fn({ payload });
+    },
+    fireWindowLifecycle: (name) => {
+      for (const fn of windowLifecycleListeners.get(name) || []) fn({ type: name });
     },
   };
 }
@@ -1636,6 +1656,12 @@ function makeHostSandbox(config) {
   assert.strictEqual(init.panelEl.id, 'transfer-center-panel');
   assert.strictEqual(init.panelEl.parentNode, result.renderRootEl,
     'the shared renderFn mounts into the panel host content root');
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(host.panelDestroys.length, 1,
+    'destroying the host window must dispose its mounted panel controller');
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(host.panelDestroys.length, 1,
+    'host mount disposal is exactly once even if lifecycle delivery repeats');
 }
 
 // --- 23. A plugin panel that is already loaded registers and can mount ---

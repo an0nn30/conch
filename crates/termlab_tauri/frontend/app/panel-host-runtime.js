@@ -331,6 +331,12 @@
   // renderFn cannot tell which side of the pop-out it is running on and the
   // shared `.tool-window-content` / `.tool-window-scroll-viewport` rules in
   // styles/tool-windows.css apply unchanged.
+  function disposerForRenderResult(result) {
+    if (typeof result === 'function') return result;
+    if (result && typeof result.destroy === 'function') return () => result.destroy();
+    return null;
+  }
+
   function mountRegistration(contentRootEl, registration) {
     const panelEl = document.createElement('div');
     panelEl.className = 'tool-window-content';
@@ -339,8 +345,17 @@
     renderRootEl.className = 'tool-window-scroll-viewport';
     panelEl.appendChild(renderRootEl);
     contentRootEl.appendChild(panelEl);
-    registration.renderFn(renderRootEl);
-    return { panelEl, renderRootEl };
+    const disposeRender = disposerForRenderResult(registration.renderFn(renderRootEl));
+    let disposed = false;
+    return {
+      panelEl,
+      renderRootEl,
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        if (disposeRender) disposeRender();
+      },
+    };
   }
 
   // ---- Boot ----------------------------------------------------------------
@@ -427,6 +442,18 @@
     document.body.appendChild(chrome.rootEl);
 
     const mounted = mountRegistration(chrome.contentRootEl, registration);
+    const disposeMountedPanel = () => {
+      if (typeof global.removeEventListener === 'function') {
+        global.removeEventListener('beforeunload', disposeMountedPanel);
+      }
+      mounted.destroy();
+    };
+    if (typeof global.addEventListener === 'function') {
+      // A native close hides a live host and must keep its projection current.
+      // Destructive dock-back/parent teardown unloads the webview; only that
+      // lifecycle releases the mounted controller subscription.
+      global.addEventListener('beforeunload', disposeMountedPanel);
+    }
 
     // Subscribed BEFORE `panel_host_ready`: the parent may broadcast the
     // moment this window becomes visible, and an event that arrives before
@@ -472,6 +499,7 @@
       closeButtonEl: chrome.closeButtonEl,
       panelEl: mounted.panelEl,
       renderRootEl: mounted.renderRootEl,
+      destroy: disposeMountedPanel,
     };
   }
 

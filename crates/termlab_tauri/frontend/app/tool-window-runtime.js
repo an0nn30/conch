@@ -136,12 +136,13 @@
           panelEl.id = 'transfer-center-panel';
           container.appendChild(panelEl);
           if (global.transferCenterPanel) {
-            global.transferCenterPanel.init({
+            return global.transferCenterPanel.init({
               panelEl,
               invoke,
               listen: listenOnCurrentWindow,
             });
           }
+          return undefined;
         },
       });
 

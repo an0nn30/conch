@@ -167,6 +167,7 @@
     let rowsById = new Map();
     let latestSnapshot = null;
     let latestState = { viewMode: 'active', selectedId: null };
+    let lastSummaryText = null;
 
     function patchIdentity(rowRecord, job) {
       const fileCell = rowRecord.cells.file;
@@ -288,8 +289,13 @@
         `${Number(summary.queued) || 0} queued`,
         `${Number(summary.paused) || 0} paused`,
         `${Number(summary.attention) || 0} need attention`,
+        `${Number(summary.failed) || 0} failed`,
       ];
-      summaryEl.textContent = `${snapshot.queuePaused ? 'Queue paused · ' : ''}${parts.join(' · ')}`;
+      const summaryText = `${snapshot.queuePaused ? 'Queue paused · ' : ''}${parts.join(' · ')}`;
+      if (summaryText !== lastSummaryText) {
+        summaryEl.textContent = summaryText;
+        lastSummaryText = summaryText;
+      }
 
       const paused = !!snapshot.queuePaused;
       queueButtonEl.textContent = paused ? 'Resume all' : 'Pause all';
@@ -375,12 +381,32 @@
       if (row) onSelect(row.getAttribute('data-job-id'));
     }
 
+    function onKeyDown(event) {
+      const target = event && event.target;
+      if (!target || typeof target.closest !== 'function') return;
+      // Buttons keep native Enter/Space activation. Their synthesized click
+      // reaches onClick once; selecting here too would double-trigger the row
+      // seam and prevent Space from activating the button normally.
+      if (target.closest('button')) return;
+      const isEnter = event.key === 'Enter';
+      const isSpace = event.key === ' ' || event.key === 'Spacebar';
+      if (!isEnter && !isSpace) return;
+      const row = target.closest('tr[data-job-id]');
+      if (!row) return;
+      if (isSpace && typeof event.preventDefault === 'function') event.preventDefault();
+      onSelect(row.getAttribute('data-job-id'));
+    }
+
     panelEl.addEventListener('click', onClick);
+    panelEl.addEventListener('keydown', onKeyDown);
 
     return {
       render,
       setSelection,
-      destroy() { panelEl.removeEventListener('click', onClick); },
+      destroy() {
+        panelEl.removeEventListener('click', onClick);
+        panelEl.removeEventListener('keydown', onKeyDown);
+      },
       getSnapshot: () => latestSnapshot,
     };
   }

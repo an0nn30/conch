@@ -13,6 +13,8 @@ import vm from 'node:vm';
 const FRONTEND = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
 const VIEW_PATH = path.join(FRONTEND, 'app/features/transfers/view.js');
 const PANEL_PATH = path.join(FRONTEND, 'app/panels/transfer-center.js');
+const MANAGER_PATH = path.join(FRONTEND, 'app/layout/tool-window-manager.js');
+const TOOL_RUNTIME_PATH = path.join(FRONTEND, 'app/tool-window-runtime.js');
 
 function dataName(attribute) {
   return attribute.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
@@ -41,6 +43,7 @@ function makeElement(tag) {
     value: 0,
     max: 0,
     tabIndex: -1,
+    _textContentWriteCount: 0,
     get className() { return className; },
     set className(value) { className = String(value || ''); },
     classList: {
@@ -65,6 +68,7 @@ function makeElement(tag) {
       return ownText + this.children.map((child) => child.textContent || '').join('');
     },
     set textContent(value) {
+      this._textContentWriteCount += 1;
       for (const child of this.children) child.parentNode = null;
       this.children = [];
       ownText = String(value == null ? '' : value);
@@ -72,6 +76,16 @@ function makeElement(tag) {
     appendChild(child) {
       if (child.parentNode) child.parentNode.removeChild(child);
       this.children.push(child);
+      child.parentNode = this;
+      return child;
+    },
+    get firstChild() { return this.children[0] || null; },
+    insertBefore(child, reference) {
+      if (!reference) return this.appendChild(child);
+      if (child.parentNode) child.parentNode.removeChild(child);
+      const index = this.children.indexOf(reference);
+      if (index < 0) return this.appendChild(child);
+      this.children.splice(index, 0, child);
       child.parentNode = this;
       return child;
     },
@@ -217,13 +231,11 @@ function loadHarness(options = {}) {
   body.appendChild(panelEl);
 
   let subscriber = null;
-  let subscriptionCount = 0;
   const runtimeCalls = [];
   const actionEvents = [];
   const selectionEvents = [];
   const runtime = {
     subscribe(handler) {
-      subscriptionCount += 1;
       subscriber = handler;
       return () => { subscriber = null; };
     },
@@ -260,7 +272,7 @@ function loadHarness(options = {}) {
   assert.ok(fs.existsSync(PANEL_PATH), 'Transfer Center panel IIFE must exist');
   vm.runInContext(fs.readFileSync(VIEW_PATH, 'utf8'), sandbox, { filename: VIEW_PATH });
   vm.runInContext(fs.readFileSync(PANEL_PATH, 'utf8'), sandbox, { filename: PANEL_PATH });
-  sandbox.transferCenterPanel.init({
+  const controller = sandbox.transferCenterPanel.init({
     panelEl,
     invoke: () => { throw new Error('the Transfer Center must not invoke Tauri directly'); },
     listen: () => { throw new Error('the Transfer Center must not listen to Tauri directly'); },
@@ -279,13 +291,14 @@ function loadHarness(options = {}) {
     panelEl,
     shellSentinel,
     runtimeCalls,
+    controller,
     actionEvents,
     selectionEvents,
     emit(value) {
       assert.ok(subscriber, 'controller must subscribe to the shared transfer runtime');
       subscriber(value);
     },
-    subscriptionCount: () => subscriptionCount,
+    subscriptionCount: () => (subscriber ? 1 : 0),
   };
 }
 
@@ -295,6 +308,99 @@ function rowIds(panelEl) {
 
 function click(panelEl, target) {
   panelEl._fire('click', { target });
+}
+
+async function loadMountLifecycleHarness() {
+  const body = makeElement('body');
+  const appEl = makeElement('div');
+  appEl.id = 'app';
+  body.appendChild(appEl);
+  for (const zoneName of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom']) {
+    const zoneEl = makeElement('div');
+    zoneEl.setAttribute('data-zone', zoneName);
+    const tabsEl = makeElement('div');
+    tabsEl.className = 'zone-tab-strip';
+    const contentEl = makeElement('div');
+    contentEl.className = 'zone-content';
+    zoneEl.appendChild(tabsEl);
+    zoneEl.appendChild(contentEl);
+    appEl.appendChild(zoneEl);
+  }
+
+  let currentSnapshot = snapshot([job('a', 'running')], {
+    summary: summary({ active: 1, running: 1 }),
+  });
+  const subscribers = new Set();
+  const transferRuntime = {
+    ensureStarted: () => Promise.resolve(currentSnapshot),
+    subscribe(handler) {
+      subscribers.add(handler);
+      handler(currentSnapshot);
+      return () => subscribers.delete(handler);
+    },
+  };
+  const invokeCalls = [];
+  const invoke = (command, args) => {
+    invokeCalls.push({ command, args });
+    if (command === 'open_panel_host') return Promise.resolve(17);
+    return Promise.resolve(undefined);
+  };
+  const sandbox = {
+    console,
+    Promise,
+    Number,
+    Math,
+    Set,
+    Map,
+    JSON,
+    setTimeout,
+    clearTimeout,
+    innerWidth: 1200,
+    innerHeight: 800,
+    addEventListener() {},
+    removeEventListener() {},
+    document: {
+      body,
+      createElement: (tag) => makeElement(tag),
+      createTextNode: (text) => ({ textContent: String(text), parentNode: null }),
+      getElementById: (id) => body.querySelector(`#${id}`),
+      querySelector: (selector) => body.querySelector(selector),
+      querySelectorAll: (selector) => body.querySelectorAll(selector),
+      addEventListener() {},
+    },
+    utils: { formatSize: (value) => `${Number(value)} B` },
+    termlabTransferRuntime: transferRuntime,
+    toast: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  vm.createContext(sandbox);
+  for (const modulePath of [VIEW_PATH, PANEL_PATH, MANAGER_PATH, TOOL_RUNTIME_PATH]) {
+    vm.runInContext(fs.readFileSync(modulePath, 'utf8'), sandbox, { filename: modulePath });
+  }
+
+  sandbox.toolWindowManager.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  const toolRuntime = sandbox.termlabToolWindowRuntime.create({
+    invoke,
+    listen: () => Promise.resolve(() => {}),
+    listenOnCurrentWindow: () => Promise.resolve(() => {}),
+    layoutService: { getSavedLayout: () => Promise.resolve({}), saveLayout: () => {} },
+    debouncedFitAndResize: () => {},
+    getCurrentTab: () => null,
+    getCurrentPane: () => null,
+  });
+  await toolRuntime.registerAll({ registrationsOnly: true });
+
+  return {
+    sandbox,
+    body,
+    invokeCalls,
+    activeSubscribers: () => subscribers.size,
+    emit(nextSnapshot) {
+      currentSnapshot = nextSnapshot;
+      for (const subscriber of Array.from(subscribers)) subscriber(nextSnapshot);
+    },
+  };
 }
 
 // Missing view/controller files or globals is the first RED. Once present,
@@ -312,6 +418,59 @@ function click(panelEl, target) {
     'the read-only Task 11 slice must not optimistically call queue actions');
 }
 
+// A render result is the mount's disposal contract. Repeated dock -> window
+// -> host -> dock transitions must keep exactly one live runtime subscriber,
+// and removed DOM must stop receiving snapshots immediately.
+{
+  const harness = await loadMountLifecycleHarness();
+  const manager = harness.sandbox.toolWindowManager;
+  manager.activate('transfer-center');
+  assert.strictEqual(harness.activeSubscribers(), 1);
+  const firstPanel = harness.body.querySelector('#transfer-center-panel');
+  const firstSummary = firstPanel.querySelector('[aria-live="polite"]');
+
+  manager.setViewMode('transfer-center', 'window');
+  assert.strictEqual(harness.activeSubscribers(), 0,
+    'detaching the docked DOM must destroy its controller subscription');
+  const detachedText = firstSummary.textContent;
+  harness.emit(snapshot([job('a', 'running')], {
+    revision: 2,
+    summary: summary({ active: 2, running: 2 }),
+  }));
+  assert.strictEqual(firstSummary.textContent, detachedText,
+    'a detached docked panel must stop receiving runtime snapshots');
+
+  const registration = manager.getRegistration('transfer-center');
+  const hostRoot = makeElement('div');
+  const hostMount = registration.renderFn(hostRoot);
+  assert.strictEqual(typeof hostMount.destroy, 'function',
+    'the shared renderFn must return the controller disposal contract to a host');
+  assert.strictEqual(harness.activeSubscribers(), 1);
+  hostMount.destroy();
+  assert.strictEqual(harness.activeSubscribers(), 0,
+    'host teardown must release its controller subscription');
+
+  manager.notifyHostDocked('transfer-center');
+  assert.strictEqual(harness.activeSubscribers(), 1,
+    'dock-back creates one fresh controller subscription');
+  const secondPanel = harness.body.querySelector('#transfer-center-panel');
+  assert.notStrictEqual(secondPanel, firstPanel);
+
+  manager.setViewMode('transfer-center', 'window');
+  assert.strictEqual(harness.activeSubscribers(), 0);
+  const secondHostRoot = makeElement('div');
+  const secondHostMount = registration.renderFn(secondHostRoot);
+  assert.strictEqual(harness.activeSubscribers(), 1);
+  secondHostMount.destroy();
+  assert.strictEqual(harness.activeSubscribers(), 0);
+  manager.notifyHostDocked('transfer-center');
+  assert.strictEqual(harness.activeSubscribers(), 1,
+    'a second complete lifecycle still has exactly one live subscriber');
+  manager.unregister('transfer-center');
+  assert.strictEqual(harness.activeSubscribers(), 0,
+    'unregistering a mounted tool window disposes its final controller');
+}
+
 // Row actions and selection are exposed through the one delegated surface so
 // Task 12 can bind dialogs/commands without replacing this renderer. They do
 // not call the runtime by themselves in this read-only slice.
@@ -323,6 +482,58 @@ function click(panelEl, target) {
   assert.deepStrictEqual(harness.selectionEvents, ['a']);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.actionEvents)), [{ action: 'details', jobId: 'a' }]);
   assert.deepStrictEqual(harness.runtimeCalls, []);
+}
+
+// Focusable rows use the same selection seam from keyboard and pointer. Enter
+// selects; Space selects and prevents scrolling. Native buttons inside rows
+// are left alone so their own keyboard click activation fires exactly once.
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([
+    job('a', 'running'),
+    job('b', 'queued', { queueOrder: 2 }),
+  ], { summary: summary({ active: 2, running: 1, queued: 1 }) }));
+  const rowA = harness.panelEl.querySelector('tr[data-job-id="a"]');
+  const rowB = harness.panelEl.querySelector('tr[data-job-id="b"]');
+
+  let enterPrevented = 0;
+  harness.panelEl._fire('keydown', {
+    target: rowB,
+    key: 'Enter',
+    preventDefault: () => { enterPrevented += 1; },
+  });
+  assert.deepStrictEqual(harness.selectionEvents, ['b']);
+  assert.strictEqual(rowB.getAttribute('aria-selected'), 'true');
+  assert.strictEqual(rowA.getAttribute('aria-selected'), 'false');
+  assert.strictEqual(enterPrevented, 0);
+
+  let spacePrevented = 0;
+  harness.panelEl._fire('keydown', {
+    target: rowA,
+    key: ' ',
+    preventDefault: () => { spacePrevented += 1; },
+  });
+  assert.deepStrictEqual(harness.selectionEvents, ['b', 'a']);
+  assert.strictEqual(spacePrevented, 1, 'Space must not scroll the transfer table');
+
+  const details = rowA.querySelector('[data-transfer-action="details"]');
+  harness.panelEl._fire('keydown', {
+    target: details,
+    key: 'Enter',
+    preventDefault: () => { throw new Error('button keyboard activation stays native'); },
+  });
+  assert.deepStrictEqual(harness.selectionEvents, ['b', 'a'],
+    'button keydown must not also trigger delegated row selection');
+  assert.deepStrictEqual(harness.actionEvents, [],
+    'the browser-generated button click, not keydown, owns action activation');
+
+  assert.strictEqual(harness.panelEl._listenerCount('keydown'), 1);
+  harness.controller.destroy();
+  assert.strictEqual(harness.panelEl._listenerCount('click'), 0);
+  assert.strictEqual(harness.panelEl._listenerCount('keydown'), 0,
+    'destroy removes both delegated handlers');
+  assert.strictEqual(harness.subscriptionCount(), 0,
+    'destroy also releases the one runtime subscription');
 }
 
 // Active is the default projection, driven only by job.state.kind. The table
@@ -443,6 +654,37 @@ function click(panelEl, target) {
   }));
   assert.notStrictEqual(harness.panelEl.querySelector('tr[data-job-id="a"]'), row,
     'membership changes rebuild the table rows');
+}
+
+// The polite region announces aggregate state, not byte ticks. Repeated
+// progress snapshots with identical counts must perform zero text writes;
+// one backend summary change earns exactly one new announcement.
+{
+  const harness = loadHarness();
+  const aggregate = summary({ active: 1, running: 1 });
+  harness.emit(snapshot([job('a', 'running')], { revision: 1, summary: aggregate }));
+  const liveRegion = harness.panelEl.querySelector('[aria-live="polite"]');
+  const writesAfterInitialSummary = liveRegion._textContentWriteCount;
+
+  for (let revision = 2; revision <= 12; revision += 1) {
+    harness.emit(snapshot([job('a', 'running', {
+      bytesTransferred: revision * 5,
+      speedBytesPerSecond: revision * 1024,
+      etaSeconds: 20 - revision,
+    })], { revision, summary: aggregate }));
+  }
+  assert.strictEqual(liveRegion._textContentWriteCount, writesAfterInitialSummary,
+    'progress-only snapshots must not churn the polite live region');
+
+  harness.emit(snapshot([
+    job('a', 'running', { bytesTransferred: 60 }),
+    job('b', 'queued', { queueOrder: 2 }),
+  ], {
+    revision: 13,
+    summary: summary({ active: 2, running: 1, queued: 1 }),
+  }));
+  assert.strictEqual(liveRegion._textContentWriteCount, writesAfterInitialSummary + 1,
+    'one aggregate count change produces one polite announcement');
 }
 
 console.log('transfer center: all assertions passed');

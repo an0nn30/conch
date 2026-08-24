@@ -7,7 +7,7 @@
 
   const ZONE_IDS = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom'];
 
-  // id → { id, title, icon, type, zone, renderFn, el, active }
+  // id → { id, title, icon, type, zone, renderFn, renderDisposer, el, active }
   const toolWindows = new Map();
 
   const zones = {};
@@ -207,6 +207,7 @@
       type:     opts.type  || 'plugin',
       zone,
       renderFn: opts.renderFn,
+      renderDisposer: null,
       el:       null,
       renderRootEl: null,
       active:   false,
@@ -296,6 +297,7 @@
       }
     }
 
+    disposeWindowRender(tw);
     if (tw.el && tw.el.parentNode) tw.el.parentNode.removeChild(tw.el);
     // A popped-out window whose plugin was just removed would otherwise leave
     // its host on screen with nothing to host. DESTROY it rather than hide it:
@@ -333,6 +335,27 @@
     return !!(appRoot && appRoot.classList.contains('zen-mode'));
   }
 
+  // A renderFn may return either a disposer function or an object with a
+  // destroy() method. Most existing tool windows return nothing and keep
+  // their historical render-once behavior; stateful panels use this focused
+  // contract to release subscriptions before their DOM is detached.
+  function disposerForRenderResult(result) {
+    if (typeof result === 'function') return result;
+    if (result && typeof result.destroy === 'function') return () => result.destroy();
+    return null;
+  }
+
+  function disposeWindowRender(tw) {
+    if (!tw || typeof tw.renderDisposer !== 'function') return;
+    const dispose = tw.renderDisposer;
+    tw.renderDisposer = null;
+    try {
+      dispose();
+    } catch (error) {
+      console.error('tool-window-manager: render disposal failed', tw.id, error);
+    }
+  }
+
   function ensureWindowElement(tw, zone) {
     if (!tw || tw.el) return;
     const targetZone = zone || zones[tw.zone];
@@ -345,7 +368,7 @@
     tw.el.appendChild(renderRootEl);
     tw.renderRootEl = renderRootEl;
     targetZone.contentEl.appendChild(tw.el);
-    tw.renderFn(renderRootEl);
+    tw.renderDisposer = disposerForRenderResult(tw.renderFn(renderRootEl));
   }
 
   // ---- Activation / Deactivation --------------------------------------------
@@ -478,6 +501,7 @@
   function detachFromZone(tw) {
     const zone = zones[tw.zone];
     if (zone && zone.activeId === tw.id) zone.activeId = null;
+    disposeWindowRender(tw);
     if (tw.el && tw.el.parentNode) tw.el.parentNode.removeChild(tw.el);
     tw.el = null;
     tw.renderRootEl = null;
