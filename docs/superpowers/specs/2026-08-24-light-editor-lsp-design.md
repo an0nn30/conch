@@ -120,9 +120,12 @@ lsp/
   types.rs           serde/ts-rs frontend payloads
 ```
 
-Use `async-lsp` 0.2.4 for the bidirectional LSP client loop and `lsp-types`
-0.97.0 for protocol types. `tower-lsp` is not used because it is specialized
-for implementing language servers rather than clients.
+Use `async-lsp` 0.2.4 for the bidirectional LSP client loop and its re-exported
+`async_lsp::lsp_types` protocol types. That release is built against
+`lsp-types` 0.95; adding a separate direct `lsp-types` 0.97 dependency would
+create two incompatible copies of every protocol type. `tower-lsp` is not used
+because it is specialized for implementing language servers rather than
+clients.
 
 ### Frontend module shape
 
