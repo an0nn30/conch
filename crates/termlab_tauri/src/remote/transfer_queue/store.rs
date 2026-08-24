@@ -105,9 +105,7 @@ impl TransferStore {
             Ok(document) => document,
             Err(_) => return self.quarantine(),
         };
-        if validate_document(&document).is_err() {
-            return self.quarantine();
-        }
+        validate_document(&document)?;
         recover_for_startup(&mut document);
         Ok(LoadOutcome::Loaded(document))
     }
@@ -290,7 +288,7 @@ fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
         file.write_all(contents)?;
         file.flush()?;
         file.sync_all()?;
-        fs::rename(&temporary_path, path)?;
+        replace_atomically(&temporary_path, path)?;
         sync_parent_directory(parent)?;
         Ok(())
     })();
@@ -299,6 +297,41 @@ fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary_path);
     }
     write_result
+}
+
+#[cfg(not(windows))]
+fn replace_atomically(temporary_path: &Path, path: &Path) -> io::Result<()> {
+    fs::rename(temporary_path, path)
+}
+
+#[cfg(windows)]
+fn replace_atomically(temporary_path: &Path, path: &Path) -> io::Result<()> {
+    use std::{iter::once, os::windows::ffi::OsStrExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let temporary_wide: Vec<u16> = temporary_path
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect();
+    let target_wide: Vec<u16> = path.as_os_str().encode_wide().chain(once(0)).collect();
+
+    // Both paths are siblings, so Windows can atomically replace the target
+    // without the delete-then-rename durability gap.
+    if unsafe {
+        MoveFileExW(
+            temporary_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } != 0
+    {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 #[cfg(unix)]
@@ -386,6 +419,20 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".tmp")
         }));
+    }
+
+    #[test]
+    fn second_save_replaces_the_previous_document() {
+        let (_dir, store, _path) = temp_store();
+        store.save(&TransferQueueDocument::default()).unwrap();
+
+        store
+            .save(&document_with(sample_job(TransferJobState::Paused)))
+            .unwrap();
+
+        let loaded = store.load().unwrap().into_document();
+        assert_eq!(loaded.jobs.len(), 1);
+        assert_eq!(loaded.jobs[0].state, TransferJobState::Paused);
     }
 
     #[cfg(unix)]
@@ -545,5 +592,37 @@ mod tests {
             error,
             StoreError::Migration(MigrationError::UnsupportedVersion { version: 0 })
         ));
+    }
+
+    #[test]
+    fn load_rejects_unsupported_schema_without_moving_the_original_file() {
+        for version in [0, TRANSFER_STORE_VERSION + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transfers.json");
+            let mut document = TransferQueueDocument::default();
+            document.version = version;
+            let original = serde_json::to_vec(&document).unwrap();
+            std::fs::write(&path, &original).unwrap();
+
+            let error = match TransferStore::new(path.clone()).load() {
+                Err(error) => error,
+                Ok(_) => panic!("unsupported schema version {version} must be rejected"),
+            };
+
+            assert!(matches!(
+                error,
+                StoreError::Migration(MigrationError::UnsupportedVersion {
+                    version: rejected_version
+                }) if rejected_version == version
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".corrupt-")
+            }));
+        }
     }
 }

@@ -6226,6 +6226,7 @@ dependencies = [
  "ttf-parser",
  "uuid",
  "vergen-git2",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
