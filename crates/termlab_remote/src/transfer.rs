@@ -19,6 +19,15 @@ use crate::sftp::open_sftp;
 mod fingerprint;
 pub use fingerprint::SourceFingerprint;
 
+pub mod copy;
+pub mod sftp_io;
+pub use copy::{ControlDecision, CopyOutcome, copy_with_checkpoint};
+pub use sftp_io::{
+    download_to_partial, fingerprint_local_parts, fingerprint_open_local, fingerprint_open_remote,
+    fingerprint_remote_parts, open_local_partial, open_remote_partial, truncate_local_partial,
+    truncate_remote_partial, upload_to_partial,
+};
+
 /// Flush and close a remote file before the transfer is reported complete.
 ///
 /// `russh-sftp::client::File` documents that callers must explicitly shut the
@@ -31,13 +40,15 @@ where
 {
     use tokio::io::AsyncWriteExt;
 
-    file.flush()
+    let flush_result = file
+        .flush()
         .await
-        .map_err(|e| RemoteError::Transfer(format!("{operation}: flush failed: {e}")))?;
-    file.shutdown()
+        .map_err(|e| RemoteError::Transfer(format!("{operation}: flush failed: {e}")));
+    let shutdown_result = file
+        .shutdown()
         .await
-        .map_err(|e| RemoteError::Transfer(format!("{operation}: close failed: {e}")))?;
-    Ok(())
+        .map_err(|e| RemoteError::Transfer(format!("{operation}: close failed: {e}")));
+    flush_result.and(shutdown_result)
 }
 
 async fn close_remote_file<W>(file: &mut W, operation: &str) -> Result<(), RemoteError>
@@ -434,6 +445,7 @@ mod tests {
 
     struct FinalizationWriter {
         operations: Arc<Mutex<Vec<&'static str>>>,
+        fail_flush: bool,
     }
 
     impl tokio::io::AsyncWrite for FinalizationWriter {
@@ -447,7 +459,11 @@ mod tests {
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             self.operations.lock().push("flush");
-            Poll::Ready(Ok(()))
+            if self.fail_flush {
+                Poll::Ready(Err(std::io::Error::other("flush broke")))
+            } else {
+                Poll::Ready(Ok(()))
+            }
         }
 
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -461,6 +477,7 @@ mod tests {
         let operations = Arc::new(Mutex::new(Vec::new()));
         let mut writer = FinalizationWriter {
             operations: Arc::clone(&operations),
+            fail_flush: false,
         };
 
         finalize_remote_write(&mut writer, "finish test transfer")
@@ -471,10 +488,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalizing_remote_file_still_closes_after_a_flush_error() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = FinalizationWriter {
+            operations: Arc::clone(&operations),
+            fail_flush: true,
+        };
+
+        let error = finalize_remote_write(&mut writer, "finish test transfer")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RemoteError::Transfer(message) if message.contains("flush broke")));
+        assert_eq!(*operations.lock(), vec!["flush", "shutdown"]);
+    }
+
+    #[tokio::test]
     async fn closing_remote_read_handle_only_shuts_it_down() {
         let operations = Arc::new(Mutex::new(Vec::new()));
         let mut writer = FinalizationWriter {
             operations: Arc::clone(&operations),
+            fail_flush: false,
         };
 
         close_remote_file(&mut writer, "finish test download")
