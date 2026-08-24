@@ -4,7 +4,7 @@
   function transferBadgeHtml(status) {
     if (!status) return '';
     if (status.status === 'attention') {
-      return '<span class="fp-transfer-pct" role="status">Needs attention</span>';
+      return '<span class="fp-transfer-attention" role="status">Needs attention</span>';
     }
     if (status.status === 'in_progress') {
       return `<span class="fp-transfer-pct">${status.percent || 0}%</span>`;

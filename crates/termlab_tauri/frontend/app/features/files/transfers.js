@@ -34,16 +34,17 @@
       const pane = paneForDirection(progress.kind);
       if (!pane) return;
 
-      const pct = progress.total_bytes > 0
-        ? Math.round((progress.bytes_transferred / progress.total_bytes) * 100)
-        : 0;
-
       if (terminalKinds.has(progress.status)) {
         if (clearBadge(pane, progress.file_name, progress.transfer_id)) {
           renderTransferStatus(pane);
         }
         return;
       }
+      if (progress.status !== 'in_progress') return;
+
+      const pct = progress.total_bytes > 0
+        ? Math.round((progress.bytes_transferred / progress.total_bytes) * 100)
+        : 0;
 
       pane.transferStatus[progress.file_name] = {
         status: 'in_progress',

@@ -56,7 +56,13 @@
     .fp-th-size { width: 65px; }
     .fp-th-mod { width: 110px; }
     .fp-footer { padding: 3px 8px; font-size: var(--ui-font-small); color: var(--dim-fg); flex-shrink: 0; }
-    .fp-transfer-pct { margin-left: 6px; color: var(--green); font-weight: 600; font-size: var(--ui-font-small); }
+    .fp-transfer-pct, .fp-transfer-attention { margin-left: 6px; font-weight: 600; font-size: var(--ui-font-small); }
+    .fp-transfer-pct { color: var(--green); }
+    .fp-transfer-attention {
+      display: inline-block; padding: 0 var(--tl-space-1);
+      color: var(--tl-warning-fg); background: var(--tl-warning-bg);
+      border: 1px solid var(--tl-warning-border); border-radius: var(--tl-radius);
+    }
     /* Row context menu (right-click on a file/dir row) and the column-chooser
        menu (right-click a column header) both render through the shared
        .tl-menu component (styles/design-system/components/menu.css,

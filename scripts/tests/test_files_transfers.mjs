@@ -96,7 +96,7 @@ vm.runInContext(source, sandbox, { filename: 'transfers.js' });
   vm.runInContext(paneViewSource, paneSandbox, { filename: 'pane-view.js' });
   assert.equal(
     paneSandbox.termlabFilesPaneView.transferBadgeHtml({ status: 'attention' }),
-    '<span class="fp-transfer-pct" role="status">Needs attention</span>',
+    '<span class="fp-transfer-attention" role="status">Needs attention</span>',
   );
 }
 
@@ -157,6 +157,22 @@ controller.handleTransferSnapshot({
 assert.deepEqual(JSON.parse(JSON.stringify(remotePane.transferStatus['blocked.txt'])), {
   status: 'attention', percent: 0, transferId: 'upload-2',
 });
+controller.handleTransferProgress({
+  payload: {
+    transfer_id: 'upload-2',
+    kind: 'upload',
+    status: 'pending',
+    bytes_transferred: 0,
+    total_bytes: 100,
+    file_name: 'blocked.txt',
+    error: null,
+  },
+});
+assert.deepEqual(
+  JSON.parse(JSON.stringify(remotePane.transferStatus['blocked.txt'])),
+  { status: 'attention', percent: 0, transferId: 'upload-2' },
+  'the real queue-delta then legacy-pending event order preserves attention',
+);
 
 controller.handleTransferSnapshot({
   revision: 3,
