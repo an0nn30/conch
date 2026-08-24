@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
@@ -622,25 +623,30 @@ impl BundledServerCatalog {
         validate_host(host, descriptor.adapter_id)?;
 
         let root = canonical_directory(resource_root, descriptor.adapter_id)?;
+        validate_architecture_layout(&root, descriptor.adapter_id)?;
         let receipt = load_receipt(&root, descriptor.adapter_id)?;
         validate_receipt_identity(&receipt, descriptor.adapter_id)?;
+        let mut validated_resources = HashMap::new();
         let program_relative_path = Path::new(descriptor.program.executable_relative_path());
-        let program = resource_path(&root, program_relative_path, descriptor.adapter_id)?;
-        require_file(&program, program_relative_path, descriptor.adapter_id)?;
-        validate_receipt_file(
+        let program = validated_resource(
             &receipt,
-            &program,
+            &root,
             program_relative_path,
             descriptor.adapter_id,
+            &mut validated_resources,
         )?;
         require_executable(&program, program_relative_path, descriptor.adapter_id)?;
         validate_macos_arm64_executable(&program, program_relative_path, descriptor.adapter_id)?;
 
         for required in descriptor.program.required_files() {
             let required_path = Path::new(required);
-            let resource = resource_path(&root, required_path, descriptor.adapter_id)?;
-            require_file(&resource, required_path, descriptor.adapter_id)?;
-            validate_receipt_file(&receipt, &resource, required_path, descriptor.adapter_id)?;
+            validated_resource(
+                &receipt,
+                &root,
+                required_path,
+                descriptor.adapter_id,
+                &mut validated_resources,
+            )?;
         }
 
         let args = descriptor
@@ -651,13 +657,12 @@ impl BundledServerCatalog {
                 CommandArgument::Literal(value) => Ok(PathBuf::from(value)),
                 CommandArgument::ResourcePath(relative_path) => {
                     let relative_path = Path::new(relative_path);
-                    let absolute = resource_path(&root, relative_path, descriptor.adapter_id)?;
-                    require_file(&absolute, relative_path, descriptor.adapter_id)?;
-                    validate_receipt_file(
+                    let absolute = validated_resource(
                         &receipt,
-                        &absolute,
+                        &root,
                         relative_path,
                         descriptor.adapter_id,
+                        &mut validated_resources,
                     )?;
                     Ok(absolute)
                 }
@@ -704,6 +709,23 @@ impl BundledServerCatalog {
     }
 }
 
+fn validated_resource(
+    receipt: &InstalledLspReceipt,
+    root: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+    validated: &mut HashMap<PathBuf, PathBuf>,
+) -> Result<PathBuf, CatalogUnavailable> {
+    if let Some(path) = validated.get(relative_path) {
+        return Ok(path.clone());
+    }
+    let path = resource_path(root, relative_path, adapter_id)?;
+    require_file(&path, relative_path, adapter_id)?;
+    validate_receipt_file(receipt, &path, relative_path, adapter_id)?;
+    validated.insert(relative_path.to_owned(), path.clone());
+    Ok(path)
+}
+
 fn validate_host(host: HostPlatform, adapter_id: &str) -> Result<(), CatalogUnavailable> {
     if host.operating_system != HostOperatingSystem::MacOs {
         return Err(CatalogUnavailable::UnsupportedPlatform {
@@ -731,11 +753,9 @@ fn load_receipt(
         relative_path: PathBuf::from("manifest.json"),
     };
     let lsp_root = architecture_root.parent().ok_or_else(corrupt)?;
-    let lsp_root = lsp_root.canonicalize().map_err(|_| corrupt())?;
     let receipt_path = lsp_root.join("manifest.json");
-    let metadata = match fs::symlink_metadata(&receipt_path) {
-        Ok(metadata) if metadata.file_type().is_file() => metadata,
-        Ok(_) => return Err(corrupt()),
+    let file = match open_receipt_without_following_symlink(&receipt_path) {
+        Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Err(CatalogUnavailable::MissingReceipt {
                 adapter_id: adapter_id.to_owned(),
@@ -743,15 +763,10 @@ fn load_receipt(
         }
         Err(_) => return Err(corrupt()),
     };
-    if metadata.len() > MAX_RECEIPT_BYTES
-        || !receipt_path
-            .canonicalize()
-            .map_err(|_| corrupt())?
-            .starts_with(&lsp_root)
-    {
+    let metadata = file.metadata().map_err(|_| corrupt())?;
+    if !metadata.is_file() || metadata.len() > MAX_RECEIPT_BYTES {
         return Err(corrupt());
     }
-    let file = fs::File::open(&receipt_path).map_err(|_| corrupt())?;
     let mut contents = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_RECEIPT_BYTES + 1)
         .read_to_end(&mut contents)
@@ -760,6 +775,41 @@ fn load_receipt(
         return Err(corrupt());
     }
     serde_json::from_slice(&contents).map_err(|_| corrupt())
+}
+
+#[cfg(unix)]
+fn open_receipt_without_following_symlink(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_receipt_without_following_symlink(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().read(true).open(path)
+}
+
+fn validate_architecture_layout(
+    architecture_root: &Path,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    let is_valid = architecture_root
+        .file_name()
+        .is_some_and(|name| name == "arm64")
+        && architecture_root
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "lsp");
+    if is_valid {
+        Ok(())
+    } else {
+        Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: PathBuf::from("manifest.json"),
+        })
+    }
 }
 
 fn validate_receipt_identity(
@@ -789,6 +839,13 @@ fn validate_receipt_identity(
             .files
             .iter()
             .any(|file| !is_safe_receipt_path(&file.relative_path) || !is_sha256(&file.sha256))
+        || receipt
+            .files
+            .iter()
+            .map(|file| &file.relative_path)
+            .collect::<HashSet<_>>()
+            .len()
+            != receipt.files.len()
     {
         return Err(CatalogUnavailable::CorruptResource {
             adapter_id: adapter_id.to_owned(),
@@ -1107,8 +1164,8 @@ fn validate_macos_arm64_executable(
     let mut offset = 0usize;
     let mut platform = None;
     let mut build_versions = 0usize;
-    let mut has_executable_text = false;
-    let mut has_entry = false;
+    let mut executable_text = None;
+    let mut main_entryoff = None;
     for _ in 0..ncmds {
         let command = read_u32(&table, offset)
             .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
@@ -1136,28 +1193,32 @@ fn validate_macos_arm64_executable(
             build_versions += 1;
             platform = read_u32(command_bytes, 8);
         } else if command == LC_SEGMENT_64 {
-            if structurally_valid_executable_text_segment(command_bytes, file_size) {
-                has_executable_text = true;
-            } else {
-                return Err(corrupt_executable(adapter_id, relative_path));
+            let text = validate_segment_64(command_bytes, file_size)
+                .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+            if let Some(text) = text {
+                if executable_text.replace(text).is_some() {
+                    return Err(corrupt_executable(adapter_id, relative_path));
+                }
             }
         } else if command == LC_MAIN {
-            if size != 24 || read_u64(command_bytes, 8).is_none_or(|entry| entry >= file_size) {
+            if size != 24
+                || main_entryoff
+                    .replace(read_u64(command_bytes, 8).unwrap_or(u64::MAX))
+                    .is_some()
+            {
                 return Err(corrupt_executable(adapter_id, relative_path));
             }
-            has_entry = true;
         } else if command == LC_UNIXTHREAD {
-            if !structurally_valid_unixthread(command_bytes) {
-                return Err(corrupt_executable(adapter_id, relative_path));
-            }
-            has_entry = true;
+            // This POC supports LC_MAIN only. ARM64 LC_UNIXTHREAD requires
+            // validating flavor/count and the program counter's VM address.
+            return Err(corrupt_executable(adapter_id, relative_path));
         }
         offset = command_end;
     }
     if offset as u64 != command_table_end - MACH_HEADER_64_SIZE as u64
         || build_versions != 1
-        || !has_executable_text
-        || !has_entry
+        || executable_text.is_none()
+        || main_entryoff.is_none_or(|entry| !executable_text.unwrap().contains(entry))
     {
         return Err(corrupt_executable(adapter_id, relative_path));
     }
@@ -1172,7 +1233,19 @@ fn validate_macos_arm64_executable(
     }
 }
 
-fn structurally_valid_executable_text_segment(bytes: &[u8], file_size: u64) -> bool {
+#[derive(Debug, Clone, Copy)]
+struct FileRange {
+    start: u64,
+    end: u64,
+}
+
+impl FileRange {
+    fn contains(self, offset: u64) -> bool {
+        self.start <= offset && offset < self.end
+    }
+}
+
+fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>> {
     const SEGMENT_64_SIZE: usize = 72;
     const SECTION_64_SIZE: usize = 80;
     const VM_PROT_EXECUTE: u32 = 0x4;
@@ -1180,36 +1253,62 @@ fn structurally_valid_executable_text_segment(bytes: &[u8], file_size: u64) -> b
         || bytes.len()
             != SEGMENT_64_SIZE + read_u32(bytes, 64).unwrap_or(u32::MAX) as usize * SECTION_64_SIZE
     {
-        return false;
+        return None;
     }
     let fileoff = read_u64(bytes, 40).unwrap_or(u64::MAX);
     let filesize = read_u64(bytes, 48).unwrap_or(u64::MAX);
-    if c_string(&bytes[8..24]) != b"__TEXT"
-        || read_u32(bytes, 60).unwrap_or(0) & VM_PROT_EXECUTE == 0
-        || fileoff
-            .checked_add(filesize)
-            .is_none_or(|end| end > file_size)
+    if fileoff
+        .checked_add(filesize)
+        .is_none_or(|end| end > file_size)
     {
-        return false;
+        return None;
     }
     let nsects = read_u32(bytes, 64).unwrap_or(0) as usize;
-    nsects > 0
-        && (0..nsects).any(|index| {
-            let section = &bytes[SEGMENT_64_SIZE + index * SECTION_64_SIZE
-                ..SEGMENT_64_SIZE + (index + 1) * SECTION_64_SIZE];
-            let offset = read_u32(section, 48).unwrap_or(u32::MAX) as u64;
-            let size = read_u64(section, 40).unwrap_or(u64::MAX);
-            c_string(&section[..16]) == b"__text"
-                && c_string(&section[16..32]) == b"__TEXT"
-                && read_u32(section, 52).is_some_and(|align| align <= 31)
-                && offset.checked_add(size).is_some_and(|end| end <= file_size)
-        })
+    let range = FileRange {
+        start: fileoff,
+        end: fileoff.checked_add(filesize)?,
+    };
+    let mut text_section = None;
+    for index in 0..nsects {
+        let section = &bytes[SEGMENT_64_SIZE + index * SECTION_64_SIZE
+            ..SEGMENT_64_SIZE + (index + 1) * SECTION_64_SIZE];
+        let offset = read_u32(section, 48).unwrap_or(u32::MAX) as u64;
+        let size = read_u64(section, 40).unwrap_or(u64::MAX);
+        if !read_u32(section, 52).is_some_and(|align| align <= 31)
+            || !offset
+                .checked_add(size)
+                .is_some_and(|end| end <= file_size && range.start <= offset && end <= range.end)
+        {
+            return None;
+        }
+        if c_string(&bytes[8..24]) == b"__TEXT"
+            && (c_string(&section[..16]) == b"__text" && c_string(&section[16..32]) == b"__TEXT")
+        {
+            if text_section
+                .replace(FileRange {
+                    start: offset,
+                    end: offset.checked_add(size)?,
+                })
+                .is_some()
+            {
+                return None;
+            }
+        }
+    }
+    if c_string(&bytes[8..24]) != b"__TEXT" {
+        return Some(None);
+    }
+    (read_u32(bytes, 60).unwrap_or(0) & VM_PROT_EXECUTE != 0)
+        .then_some(text_section)
+        .flatten()
+        .map(Some)
 }
 
 fn c_string(bytes: &[u8]) -> &[u8] {
     bytes.split(|byte| *byte == 0).next().unwrap_or(bytes)
 }
 
+#[allow(dead_code)]
 fn structurally_valid_unixthread(bytes: &[u8]) -> bool {
     let mut offset = 8usize;
     let mut has_state = false;
@@ -1962,6 +2061,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn receipt_requires_global_file_path_uniqueness_and_an_lsp_arm64_root() {
+        let resources = ResourceTree::new();
+        let receipt_path = resources.lsp_root().join("manifest.json");
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        let unused_typescript_file = receipt["files"].as_array().unwrap()[1].clone();
+        receipt["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(unused_typescript_file);
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+
+        let wrong_layout = ResourceTree::new_with_architecture_directory("x86_64");
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(LanguageId::Rust, wrong_layout.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn receipt_symlink_escape_is_rejected() {
@@ -2005,6 +2128,27 @@ mod tests {
         assert!(matches!(
             catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_accepts_a_normal_multi_segment_executable_and_requires_main_in_text() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        resources.install_rust_analyzer_bytes(&macho_with_data_segment(), true);
+        resources.write_receipt();
+        assert!(catalog
+            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+            .is_ok());
+
+        let mut invalid_entry = macho_with_data_segment();
+        let main_offset = 32 + 152 + 72 + 24;
+        invalid_entry[main_offset + 8..main_offset + 16].copy_from_slice(&500u64.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&invalid_entry, true);
+        resources.write_receipt();
+        assert!(matches!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("rust-analyzer/rust-analyzer")
         ));
     }
 
@@ -2212,6 +2356,7 @@ mod tests {
 
     struct ResourceTree {
         directory: TempDir,
+        lsp_root: PathBuf,
         architecture_root: PathBuf,
     }
 
@@ -2223,9 +2368,22 @@ mod tests {
         }
 
         fn new_without_receipt() -> Self {
+            Self::new_without_receipt_with_architecture_directory("arm64")
+        }
+
+        fn new_with_architecture_directory(architecture_directory: &str) -> Self {
+            let tree =
+                Self::new_without_receipt_with_architecture_directory(architecture_directory);
+            tree.write_receipt();
+            tree
+        }
+
+        fn new_without_receipt_with_architecture_directory(architecture_directory: &str) -> Self {
             let directory = TempDir::new().expect("resource directory");
+            let lsp_root = directory.path().join("lsp");
             let tree = Self {
-                architecture_root: directory.path().join("arm64"),
+                architecture_root: lsp_root.join(architecture_directory),
+                lsp_root,
                 directory,
             };
             tree.install_node();
@@ -2239,7 +2397,7 @@ mod tests {
         }
 
         fn lsp_root(&self) -> &Path {
-            self.directory.path()
+            &self.lsp_root
         }
 
         fn canonical_root(&self) -> PathBuf {
@@ -2360,6 +2518,35 @@ mod tests {
         bytes.extend_from_slice(&232u64.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.resize(512, 0);
+        bytes
+    }
+
+    fn macho_with_data_segment() -> Vec<u8> {
+        let mut bytes = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+        let insert_at = 32 + 152;
+        let segment = macho_segment("__DATA", 400, 100, 3);
+        bytes.splice(insert_at..insert_at, segment);
+        bytes[16..20].copy_from_slice(&4u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&272u32.to_le_bytes());
+        bytes.resize(584, 0);
+        bytes
+    }
+
+    fn macho_segment(name: &str, fileoff: u64, filesize: u64, initprot: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
+        bytes.extend_from_slice(&72u32.to_le_bytes());
+        let mut name_bytes = [0u8; 16];
+        name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&name_bytes);
+        bytes.extend_from_slice(&0x1_0000_0000u64.to_le_bytes());
+        bytes.extend_from_slice(&filesize.to_le_bytes());
+        bytes.extend_from_slice(&fileoff.to_le_bytes());
+        bytes.extend_from_slice(&filesize.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&initprot.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes
     }
 
