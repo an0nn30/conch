@@ -125,7 +125,7 @@
           return acknowledge(runtime.reconnect(job));
         }
         if (dialogs && typeof dialogs.showAdHocReconnect === 'function') {
-          dialogs.showAdHocReconnect(job, event.invoker);
+          dialogs.showAdHocReconnect(job, event.invoker, () => acknowledge(runtime.retry(job.id)));
         }
       }
       return undefined;

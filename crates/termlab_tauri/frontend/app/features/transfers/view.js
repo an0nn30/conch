@@ -125,6 +125,7 @@
     const onAction = typeof opts.onAction === 'function' ? opts.onAction : () => {};
 
     panelEl.classList.add('tl-transfer-center');
+    panelEl.setAttribute('tabindex', '-1');
 
     const toolbarEl = append(panelEl, 'div', 'tl-transfer-center__toolbar');
     toolbarEl.setAttribute('role', 'toolbar');
@@ -419,7 +420,7 @@
         return;
       }
 
-      const jobId = latestState.selectedId || currentId;
+      const jobId = currentId || latestState.selectedId;
       const jobs = latestSnapshot && Array.isArray(latestSnapshot.jobs) ? latestSnapshot.jobs : [];
       const job = jobs.find((item) => item.id === jobId);
       const kind = job && job.state ? job.state.kind : '';
@@ -435,6 +436,7 @@
       }
       if (!action) return;
       if (typeof event.preventDefault === 'function') event.preventDefault();
+      if (currentId && latestState.selectedId !== currentId) onSelect(currentId);
       const invoker = rowsById.get(jobId);
       onAction({ action, jobId, invoker: invoker ? invoker.element : row });
     }

@@ -9,19 +9,42 @@
     return element;
   }
 
-  function restoreFocus(invoker) {
-    if (invoker && typeof invoker.focus === 'function') invoker.focus();
+  function connected(element) {
+    return !!element && element.isConnected !== false;
+  }
+
+  function createFocusReturn(invoker) {
+    const row = invoker && typeof invoker.closest === 'function'
+      ? invoker.closest('tr[data-job-id]')
+      : null;
+    const panel = row && typeof row.closest === 'function' ? row.closest('.tl-transfer-center') : null;
+    const jobId = row ? row.getAttribute('data-job-id') : null;
+    const rowsAtOpen = panel ? Array.from(panel.querySelectorAll('tr[data-job-id]')) : [];
+    const rowIndex = Math.max(0, rowsAtOpen.indexOf(row));
+
+    return () => {
+      if (connected(invoker) && typeof invoker.focus === 'function') {
+        invoker.focus();
+        return;
+      }
+      if (!connected(panel)) return;
+      const currentRows = Array.from(panel.querySelectorAll('tr[data-job-id]'));
+      const keyedRow = currentRows.find((candidate) => candidate.getAttribute('data-job-id') === jobId);
+      const fallback = keyedRow || currentRows[Math.min(rowIndex, Math.max(0, currentRows.length - 1))] || panel;
+      if (fallback && typeof fallback.focus === 'function') fallback.focus();
+    };
   }
 
   function openDialog(options, invoker, clearInputs) {
     if (!global.tlDialog || typeof global.tlDialog.open !== 'function') return null;
     const inputs = Array.isArray(clearInputs) ? clearInputs : [];
+    const returnFocus = createFocusReturn(invoker);
     const opts = { ...options };
     const callerOnClose = opts.onClose;
     opts.onClose = (result) => {
       for (const input of inputs) input.value = '';
       if (typeof callerOnClose === 'function') callerOnClose(result);
-      restoreFocus(invoker);
+      returnFocus();
     };
     return global.tlDialog.open(opts);
   }
@@ -90,18 +113,73 @@
     return handleRef.current;
   }
 
+  function attentionPresentation(reason) {
+    switch (reason && reason.kind) {
+      case 'destinationConflict':
+        return {
+          title: 'Destination conflict',
+          ariaLabel: 'Resolve destination conflict',
+          description: 'The destination already exists. Overwrite permanently replaces it.',
+          restartable: false,
+        };
+      case 'sourceChanged':
+        return {
+          title: 'Source changed',
+          ariaLabel: 'Resolve changed source',
+          description: 'The source changed after this transfer started. Restart from the beginning or skip it.',
+          restartable: true,
+        };
+      case 'sourceCannotResume':
+        return {
+          title: 'Resume unavailable',
+          ariaLabel: 'Resolve transfer that cannot resume',
+          description: 'The source identity cannot be verified, so this transfer cannot be safely resumed.',
+          restartable: true,
+        };
+      case 'missingPartial':
+        return {
+          title: 'Partial file missing',
+          ariaLabel: 'Resolve missing transfer partial',
+          description: 'The managed partial file is missing. Restart from the beginning or skip this transfer.',
+          restartable: true,
+        };
+      case 'commitRecovery':
+        return {
+          title: 'Commit recovery required',
+          ariaLabel: 'Resolve transfer commit recovery',
+          description: 'TermLab found an interrupted destination commit that needs an explicit decision.',
+          restartable: true,
+        };
+      case 'cleanup':
+        return {
+          title: 'Cleanup required',
+          ariaLabel: 'Resolve transfer cleanup',
+          description: 'TermLab could not finish cleaning up managed transfer artifacts.',
+          restartable: true,
+        };
+      default:
+        return {
+          title: 'Transfer needs attention',
+          ariaLabel: 'Transfer needs attention',
+          description: 'This transfer reported an unsupported attention reason. Review Details before continuing.',
+          restartable: false,
+        };
+    }
+  }
+
   function showConflict(job, invoker, onResolve) {
     const handleRef = { current: null };
     const inputs = [];
     const reason = job && job.state && job.state.reason ? job.state.reason : {};
     const destinationConflict = reason.kind === 'destinationConflict';
+    const presentation = attentionPresentation(reason);
     let renameInput = null;
     let renameError = null;
 
     const resolveAndClose = (resolution) => closeAfter(handleRef, onResolve, resolution);
     const buttons = [{ label: 'Cancel', onSelect: () => handleRef.current && handleRef.current.close('cancel') }];
-    buttons.push({ label: 'Skip', onSelect: () => resolveAndClose({ kind: 'skip' }) });
     if (destinationConflict) {
+      buttons.push({ label: 'Skip', onSelect: () => resolveAndClose({ kind: 'skip' }) });
       if (reason.resumeAvailable === true) {
         buttons.push({ label: 'Resume', onSelect: () => resolveAndClose({ kind: 'resume' }) });
       }
@@ -119,17 +197,18 @@
         },
       });
       buttons.push({ label: 'Overwrite', danger: true, onSelect: () => resolveAndClose({ kind: 'overwrite' }) });
-    } else {
+    } else if (presentation.restartable) {
+      buttons.push({ label: 'Skip', onSelect: () => resolveAndClose({ kind: 'skip' }) });
       buttons.push({ label: 'Restart', primary: true, onSelect: () => resolveAndClose({ kind: 'restart' }) });
     }
 
     handleRef.current = openDialog({
-      title: destinationConflict ? 'Destination conflict' : 'Source changed',
-      ariaLabel: destinationConflict ? 'Resolve destination conflict' : 'Resolve changed source',
+      title: presentation.title,
+      ariaLabel: presentation.ariaLabel,
       size: 'md',
       body(bodyEl) {
+        append(bodyEl, 'p', '', presentation.description);
         if (destinationConflict) {
-          append(bodyEl, 'p', '', 'The destination already exists. Overwrite permanently replaces it.');
           addDetail(bodyEl, 'Destination', job && (job.direction === 'upload' ? job.remotePath : job.localPath));
           const field = append(bodyEl, 'label', 'tl-field');
           append(field, 'span', 'tl-field__label', 'Rename destination');
@@ -142,8 +221,13 @@
           renameError.setAttribute('data-transfer-error', 'rename');
           renameError.setAttribute('role', 'alert');
           renameError.hidden = true;
-        } else {
-          append(bodyEl, 'p', '', 'The source changed after this transfer started. Restart from the beginning or skip it.');
+        }
+        if (reason.kind === 'sourceChanged') {
+          addDetail(bodyEl, 'Expected size', reason.expected && reason.expected.size);
+          addDetail(bodyEl, 'Current size', reason.actual && reason.actual.size);
+        }
+        if (reason.kind === 'commitRecovery' || reason.kind === 'cleanup') {
+          addDetail(bodyEl, 'Backend message', reason.message);
         }
       },
       buttons,
@@ -212,7 +296,7 @@
     return handleRef.current;
   }
 
-  function showAdHocReconnect(job, invoker) {
+  function showAdHocReconnect(job, invoker, onRequeue) {
     const handleRef = { current: null };
     const endpoint = (job && job.endpoint) || {};
     const match = `${endpoint.user || '<user>'}@${endpoint.host || '<host>'}:${endpoint.port || 22}`;
@@ -221,10 +305,17 @@
       ariaLabel: 'Reconnect ad-hoc transfer host',
       size: 'sm',
       body(bodyEl) {
-        append(bodyEl, 'p', '', `Reconnect a matching ${match} session, then choose Resume for this transfer.`);
+        append(bodyEl, 'p', '', `Reconnect a matching ${match} session, then choose Requeue transfer.`);
         append(bodyEl, 'p', '', 'TermLab will not store credentials or reconnect an ad-hoc endpoint automatically.');
       },
-      buttons: [{ label: 'Close', primary: true, onSelect: () => handleRef.current && handleRef.current.close('close') }],
+      buttons: [
+        { label: 'Close', onSelect: () => handleRef.current && handleRef.current.close('close') },
+        {
+          label: 'Requeue transfer',
+          primary: true,
+          onSelect: () => closeAfter(handleRef, onRequeue),
+        },
+      ],
     }, invoker);
     return handleRef.current;
   }

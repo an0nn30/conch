@@ -27,7 +27,7 @@ use super::{
     events::RunnerEvent,
     model::{
         AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ManagedArtifacts,
-        TransferDirection, TransferEndpoint, TransferJob,
+        TransferDirection, TransferEndpoint, TransferJob, TransferJobState,
     },
     scheduler::FailureClass,
 };
@@ -429,6 +429,45 @@ where
         control: RunnerControl,
         reporter: RunnerReporter,
     ) -> RunnerResult {
+        if control.state() == RunnerControlState::Cancel
+            && matches!(
+                job.state,
+                TransferJobState::Queued
+                    | TransferJobState::Paused
+                    | TransferJobState::NeedsConnection { .. }
+                    | TransferJobState::NeedsAttention { .. }
+            )
+        {
+            let artifacts = match job
+                .artifacts
+                .clone()
+                .or_else(|| expected_artifacts(&job).ok())
+            {
+                Some(artifacts) => artifacts,
+                None => {
+                    return RunnerResult::Cancelled {
+                        cleanup_error: Some(
+                            "managed transfer artifacts could not be resolved".into(),
+                        ),
+                    };
+                }
+            };
+            let Some(connection) = self.resolver.resolve(&job.endpoint) else {
+                return RunnerResult::Cancelled {
+                    cleanup_error: Some(
+                        "managed artifacts were retained because no matching live SSH connection was available"
+                            .into(),
+                    ),
+                };
+            };
+            let cleanup_error = self
+                .io
+                .cleanup_owned_artifacts(&connection, &job, &artifacts)
+                .await
+                .err()
+                .map(|error| error.message);
+            return RunnerResult::Cancelled { cleanup_error };
+        }
         let Some(connection) = self.resolver.resolve(&job.endpoint) else {
             return RunnerResult::NeedsConnection(
                 "No matching live SSH connection; reconnect the transfer endpoint".into(),
@@ -2925,6 +2964,37 @@ mod tests {
                 .any(|entry| entry == "cleanup_owned_artifacts")
         );
         assert!(!operations.iter().any(|entry| entry == "phase:Prepared"));
+    }
+
+    #[tokio::test]
+    async fn inactive_cancel_cleans_owned_artifacts_without_reopening_the_transfer() {
+        let states = [TransferJobState::Queued, TransferJobState::Paused];
+        for state in states {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let io = FakeIo::new(log, fingerprint(6, Some("v1")));
+            let mut job = test_job();
+            job.state = state;
+            job.durable_checkpoint = 2;
+            job.artifacts =
+                Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+
+            let (result, operations) =
+                run_fake(true, io, job, super::RunnerControlState::Cancel).await;
+
+            assert!(matches!(
+                result,
+                RunnerResult::Cancelled {
+                    cleanup_error: None
+                }
+            ));
+            assert!(
+                operations
+                    .iter()
+                    .any(|entry| entry == "cleanup_owned_artifacts")
+            );
+            assert!(!operations.iter().any(|entry| entry == "open_source"));
+            assert!(!operations.iter().any(|entry| entry == "open_partial"));
+        }
     }
 
     #[tokio::test]

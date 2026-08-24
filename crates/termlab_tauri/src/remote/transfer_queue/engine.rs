@@ -684,11 +684,6 @@ impl QueueActor {
         if job.retry_attempt == 0 {
             job.retry_attempt = 1;
         }
-        let lease = ActiveLease {
-            job_id: id,
-            host_key: job.host_key.clone(),
-            destination_key: job.destination_key.clone(),
-        };
         self.commit(next).await?;
         let job = self
             .document
@@ -698,8 +693,30 @@ impl QueueActor {
             .expect("started job remains in committed document")
             .clone();
 
+        self.spawn_runner(job, RunnerControlState::Run)
+    }
+
+    fn spawn_runner(
+        &mut self,
+        job: TransferJob,
+        initial_control: RunnerControlState,
+    ) -> Result<(), String> {
+        let id = job.id;
+        if self.active.contains_key(&id) {
+            return Ok(());
+        }
+        let runner = self
+            .runner
+            .clone()
+            .ok_or_else(|| "transfer runner is unavailable".to_string())?;
+        let lease = ActiveLease {
+            job_id: id,
+            host_key: job.host_key.clone(),
+            destination_key: job.destination_key.clone(),
+        };
+
         let lease_id = Uuid::new_v4();
-        let (control_tx, control_rx) = watch::channel(RunnerControlState::Run);
+        let (control_tx, control_rx) = watch::channel(initial_control);
         self.active.insert(
             id,
             ActiveTask {
@@ -713,10 +730,6 @@ impl QueueActor {
             },
         );
 
-        let runner = self
-            .runner
-            .clone()
-            .expect("dispatch is disabled when no runner is configured");
         let reporter = RunnerReporter::new(id, lease_id, self.runner_event_tx.clone());
         let internal_tx = self.internal_tx.clone();
         tokio::spawn(async move {
@@ -730,6 +743,17 @@ impl QueueActor {
             });
         });
         Ok(())
+    }
+
+    fn start_cancel_cleanup(&mut self, id: Uuid) -> Result<(), String> {
+        let job = self
+            .document
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| format!("transfer job {id} was not found"))?
+            .clone();
+        self.spawn_runner(job, RunnerControlState::Cancel)
     }
 
     fn active_task(&self, job_id: Uuid, lease_id: Uuid) -> Result<&ActiveTask, String> {
@@ -1118,18 +1142,15 @@ impl QueueActor {
         let Some(job) = self.document.jobs.iter().find(|job| job.id == id) else {
             return Ok(false);
         };
-        if !matches!(job.state, TransferJobState::Queued) {
-            return Err(format!(
-                "transfer job {id} cannot be cancelled until runner cleanup is acknowledged"
-            ));
+        if job.state.is_terminal() {
+            return Err(format!("terminal transfer job {id} cannot be cancelled"));
         }
         if job.artifacts.is_some()
             || job.durable_checkpoint != 0
             || job.commit_phase != CommitPhase::None
         {
-            return Err(format!(
-                "transfer job {id} owns durable work that requires runner cleanup"
-            ));
+            self.start_cancel_cleanup(id)?;
+            return Ok(true);
         }
         self.apply_job_event(id, JobEvent::Cancel(None)).await?;
         Ok(true)
@@ -2959,7 +2980,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn running_and_paused_cancellation_wait_for_runner_cleanup_acknowledgement() {
+    async fn stale_running_and_paused_jobs_without_owned_work_cancel_immediately() {
         let running_id = Uuid::from_u128(701);
         let running_document =
             document_with(vec![stored_job(running_id, TransferJobState::Running, 1)]);
@@ -2967,10 +2988,15 @@ mod tests {
         let (mut actor, running_store) =
             actor_without_startup_recovery(running_document.clone(), running_events.clone());
 
-        assert!(actor.cancel(running_id).await.is_err());
-        assert_eq!(actor.document, running_document);
-        assert_eq!(*running_store.document.lock().unwrap(), running_document);
-        assert_eq!(running_events.event_count(), 0);
+        assert!(actor.cancel(running_id).await.unwrap());
+        assert!(matches!(
+            actor.document.jobs[0].state,
+            TransferJobState::Cancelled {
+                cleanup_error: None
+            }
+        ));
+        assert_eq!(*running_store.document.lock().unwrap(), actor.document);
+        assert!(running_events.event_count() > 0);
 
         let paused_harness = ActorHarness::new();
         let paused_id = paused_harness
@@ -2979,12 +3005,79 @@ mod tests {
             .await
             .unwrap();
         paused_harness.handle.pause(paused_id).await.unwrap();
-        let before = paused_harness.handle.snapshot();
         paused_harness.events.clear();
 
-        assert!(paused_harness.handle.cancel(paused_id).await.is_err());
-        assert_eq!(paused_harness.handle.snapshot(), before);
-        assert_eq!(paused_harness.events.event_count(), 0);
+        assert!(paused_harness.handle.cancel(paused_id).await.unwrap());
+        assert!(matches!(
+            paused_harness.handle.snapshot().jobs[0].state,
+            TransferJobState::Cancelled {
+                cleanup_error: None
+            }
+        ));
+        assert!(paused_harness.events.event_count() > 0);
+    }
+
+    #[tokio::test]
+    async fn clean_inactive_states_advertised_by_the_ui_cancel_without_a_runner() {
+        let states = [
+            TransferJobState::Paused,
+            TransferJobState::NeedsConnection {
+                message: "reconnect".into(),
+            },
+            TransferJobState::NeedsAttention {
+                reason: AttentionReason::MissingPartial,
+            },
+        ];
+        for (index, state) in states.into_iter().enumerate() {
+            let id = Uuid::from_u128(730 + index as u128);
+            let harness =
+                ActorHarness::with_document(document_with(vec![stored_job(id, state, 1)]));
+
+            assert!(harness.handle.cancel(id).await.unwrap());
+            assert_eq!(
+                harness.handle.snapshot().jobs[0].state,
+                TransferJobState::Cancelled {
+                    cleanup_error: None
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_inactive_cancel_starts_cleanup_and_publishes_only_its_result() {
+        let id = Uuid::from_u128(740);
+        let mut paused = stored_job(id, TransferJobState::Paused, 1);
+        paused.durable_checkpoint = 512;
+        paused.artifacts = Some(ManagedArtifacts {
+            partial_path: "/tmp/.paused.partial".into(),
+            backup_path: "/tmp/.paused.backup".into(),
+        });
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document_with(vec![paused]), runner.clone());
+
+        assert!(harness.handle.cancel(id).await.unwrap());
+        wait_for_starts(&runner, 1).await;
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+        assert_eq!(
+            harness.handle.snapshot().jobs[0].state,
+            TransferJobState::Paused
+        );
+
+        release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
+        wait_for_job(&harness.handle, id, |job| {
+            matches!(
+                job.state,
+                TransferJobState::Cancelled {
+                    cleanup_error: None
+                }
+            )
+        })
+        .await;
     }
 
     #[tokio::test]

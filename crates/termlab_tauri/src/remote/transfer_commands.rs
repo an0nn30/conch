@@ -649,9 +649,16 @@ mod tests {
         )
         .unwrap();
         queue.enqueue(request).await.unwrap();
+        queue.pause(id).await.unwrap();
 
         assert!(!cancel_transfer(&queue, "not-a-uuid").await);
         assert!(!cancel_transfer(&queue, &Uuid::from_u128(0xffff).to_string()).await);
         assert!(cancel_transfer(&queue, &id.to_string()).await);
+        assert!(matches!(
+            queue.snapshot().jobs[0].state,
+            crate::remote::transfer_queue::model::TransferJobState::Cancelled {
+                cleanup_error: None
+            }
+        ));
     }
 }

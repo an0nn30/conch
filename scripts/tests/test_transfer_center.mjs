@@ -19,6 +19,7 @@ const VIEW_PATH = path.join(FRONTEND, 'app/features/transfers/view.js');
 const PANEL_PATH = path.join(FRONTEND, 'app/panels/transfer-center.js');
 const MANAGER_PATH = path.join(FRONTEND, 'app/layout/tool-window-manager.js');
 const TOOL_RUNTIME_PATH = path.join(FRONTEND, 'app/tool-window-runtime.js');
+let focusDocument = null;
 
 function dataName(attribute) {
   return attribute.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
@@ -49,6 +50,11 @@ function makeElement(tag) {
     tabIndex: -1,
     _textContentWriteCount: 0,
     _focusCount: 0,
+    get isConnected() {
+      let current = this;
+      while (current && current.parentNode) current = current.parentNode;
+      return !!current && current.tagName === 'BODY';
+    },
     get className() { return className; },
     set className(value) { className = String(value || ''); },
     classList: {
@@ -95,19 +101,38 @@ function makeElement(tag) {
       return child;
     },
     removeChild(child) {
+      if (focusDocument && child._contains(focusDocument.activeElement)) {
+        focusDocument.activeElement = focusDocument.body;
+      }
       const index = this.children.indexOf(child);
       if (index >= 0) this.children.splice(index, 1);
       child.parentNode = null;
       return child;
     },
     replaceChildren(...children) {
-      for (const child of this.children) child.parentNode = null;
+      for (const child of this.children) {
+        if (focusDocument && child._contains(focusDocument.activeElement)) {
+          focusDocument.activeElement = focusDocument.body;
+        }
+        child.parentNode = null;
+      }
       this.children = [];
       ownText = '';
       children.forEach((child) => this.appendChild(child));
     },
     remove() { if (this.parentNode) this.parentNode.removeChild(this); },
-    focus() { this._focusCount += 1; },
+    focus() {
+      this._focusCount += 1;
+      if (focusDocument && this.isConnected) focusDocument.activeElement = this;
+    },
+    _contains(candidate) {
+      let current = candidate;
+      while (current) {
+        if (current === this) return true;
+        current = current.parentNode;
+      }
+      return false;
+    },
     setAttribute(name, value) {
       const stringValue = String(value);
       attributes.set(name, stringValue);
@@ -257,6 +282,13 @@ function loadHarness(options = {}) {
     };
   }
 
+  const documentStub = {
+    body,
+    activeElement: body,
+    createElement: (tag) => makeElement(tag),
+    getElementById: (id) => body.querySelector(`#${id}`),
+  };
+  focusDocument = documentStub;
   const sandbox = {
     console,
     Promise,
@@ -264,11 +296,7 @@ function loadHarness(options = {}) {
     Math,
     Set,
     Map,
-    document: {
-      body,
-      createElement: (tag) => makeElement(tag),
-      getElementById: (id) => body.querySelector(`#${id}`),
-    },
+    document: documentStub,
     utils: {
       formatSize(value) { return `${Number(value)} B`; },
     },
@@ -354,9 +382,18 @@ async function loadReconnectHarness(startingError) {
       return Promise.resolve({ sessionKey: 'won-session' });
     },
   };
+  let queueState = 'needsConnection';
   const invoke = (command, args) => {
     calls.push({ command, args });
     if (command === 'transfer_queue_snapshot') return Promise.resolve(snapshot([]));
+    if (command === 'transfer_resume') {
+      if (queueState !== 'paused') return Promise.reject(new Error(`resume is illegal from ${queueState}`));
+      queueState = 'queued';
+    }
+    if (command === 'transfer_retry') {
+      if (queueState !== 'needsConnection') return Promise.reject(new Error(`retry is illegal from ${queueState}`));
+      queueState = 'queued';
+    }
     return Promise.resolve(undefined);
   };
   const sandbox = {
@@ -379,7 +416,7 @@ async function loadReconnectHarness(startingError) {
     invoke,
     listen: () => Promise.resolve(() => {}),
   });
-  return { sandbox, calls, authCalls, filesData, invoke };
+  return { sandbox, calls, authCalls, filesData, invoke, queueState: () => queueState };
 }
 
 function rowIds(panelEl) {
@@ -426,7 +463,7 @@ function dialogButton(dialog, label) {
 }
 
 // Configured reconnects use the files service first, preserve the typed
-// starting error for the shared auth chain, and resume only after a session
+// starting error for the shared auth chain, and requeue only after a session
 // is actually won.
 {
   const startingError = { kind: 'needsPassword', hasVaultAccount: true, message: 'Password required' };
@@ -438,9 +475,11 @@ function dialogButton(dialog, label) {
   assert.strictEqual(harness.authCalls[0].error, startingError);
   assert.strictEqual(harness.authCalls[0].ctx.invoke, harness.invoke);
   assert.strictEqual(harness.authCalls[0].ctx.data, harness.filesData);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.calls.filter((call) => call.command === 'transfer_resume'))), [
-    { command: 'transfer_resume', args: { transferId: 'reconnect' } },
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.calls.filter((call) => call.command === 'transfer_retry'))), [
+    { command: 'transfer_retry', args: { transferId: 'reconnect' } },
   ]);
+  assert.strictEqual(harness.queueState(), 'queued');
+  assert.ok(!harness.calls.some((call) => call.command === 'transfer_resume'));
 }
 
 // Ad-hoc endpoints never enter the configured-host runtime path. The dialog
@@ -448,6 +487,15 @@ function dialogButton(dialog, label) {
 // explicit.
 {
   const harness = loadHarness();
+  let queueState = 'needsConnection';
+  harness.sandbox.termlabTransferRuntime.retry = (id) => {
+    if (queueState !== 'needsConnection') {
+      return Promise.reject(new Error(`retry is illegal from ${queueState}`));
+    }
+    queueState = 'queued';
+    harness.runtimeCalls.push({ method: 'retry', args: [id] });
+    return Promise.resolve();
+  };
   const adHoc = job('adhoc', 'needsConnection', {
     endpoint: { kind: 'adHoc', user: 'sam', host: 'files.example', port: 2222 },
   });
@@ -457,6 +505,10 @@ function dialogButton(dialog, label) {
   const text = harness.dialogs.at(-1).bodyEl.textContent;
   assert.ok(text.includes('sam@files.example:2222'));
   assert.ok(text.includes('will not store credentials'));
+  assert.ok(text.includes('choose Requeue transfer'));
+  await dialogButton(harness.dialogs.at(-1), 'Requeue transfer').onSelect();
+  assert.strictEqual(queueState, 'queued');
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'retry', args: ['adhoc'] }]);
 }
 
 // Delegated controls acknowledge exactly one runtime command and keep the
@@ -490,6 +542,7 @@ function dialogButton(dialog, label) {
 {
   const harness = loadHarness();
   const invoker = makeElement('button');
+  harness.sandbox.document.body.appendChild(invoker);
   const calls = [];
   harness.sandbox.termlabTransferDialogs.showCancel(
     job('danger', 'running', { fileName: '<danger>.key' }),
@@ -542,6 +595,53 @@ function dialogButton(dialog, label) {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.runtimeCalls.at(-1))), {
     method: 'updateSettings', args: [{ globalLimit: 6, perHostLimit: 3 }],
   });
+}
+
+// Mutating dialogs restore focus through the live keyed table, not a detached
+// action button captured before the backend event patched or removed its row.
+{
+  const harness = loadHarness();
+  const running = job('a', 'running');
+  const sibling = job('b', 'running', { queueOrder: 2 });
+  harness.emit(snapshot([running, sibling], {
+    summary: summary({ active: 2, running: 2 }),
+  }));
+  const oldButton = harness.panelEl.querySelector('tr[data-job-id="a"]').querySelector('[data-transfer-action="cancel"]');
+  oldButton.focus();
+  click(harness.panelEl, oldButton);
+  harness.sandbox.termlabTransferRuntime.cancel = () => {
+    harness.emit(snapshot([
+      job('a', 'paused'),
+      sibling,
+    ], { revision: 2, summary: summary({ active: 2, running: 1, paused: 1 }) }));
+    return Promise.resolve();
+  };
+  await dialogButton(harness.dialogs.at(-1), 'Cancel transfer').onSelect();
+  const liveRow = harness.panelEl.querySelector('tr[data-job-id="a"]');
+  assert.strictEqual(oldButton.isConnected, false);
+  assert.strictEqual(harness.sandbox.document.activeElement, liveRow,
+    'replaced action button falls back to its still-connected keyed row');
+}
+
+{
+  const harness = loadHarness();
+  const sibling = job('b', 'running', { queueOrder: 2 });
+  harness.emit(snapshot([job('a', 'running'), sibling], {
+    summary: summary({ active: 2, running: 2 }),
+  }));
+  const oldButton = harness.panelEl.querySelector('tr[data-job-id="a"]').querySelector('[data-transfer-action="cancel"]');
+  oldButton.focus();
+  click(harness.panelEl, oldButton);
+  harness.sandbox.termlabTransferRuntime.cancel = () => {
+    harness.emit(snapshot([
+      job('a', 'cancelled', { state: { kind: 'cancelled', cleanupError: null } }),
+      sibling,
+    ], { revision: 2, summary: summary({ active: 1, history: 1, running: 1 }) }));
+    return Promise.resolve();
+  };
+  await dialogButton(harness.dialogs.at(-1), 'Cancel transfer').onSelect();
+  assert.strictEqual(harness.sandbox.document.activeElement, harness.panelEl.querySelector('tr[data-job-id="b"]'),
+    'removed row falls forward to the next connected row');
 }
 
 // Details are useful for diagnosis but deliberately omit credential-shaped
@@ -622,6 +722,46 @@ function dialogButton(dialog, label) {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(settings)), [{ globalLimit: 8, perHostLimit: 4 }]);
   assert.strictEqual(globalInput.value, '');
   assert.strictEqual(hostInput.value, '');
+}
+
+// Every backend attention reason has its own safe copy and resolution set.
+// Recovery/cleanup messages survive verbatim; destination-only mutations can
+// never leak onto source/recovery reasons.
+{
+  const harness = loadHarness();
+  const cases = [
+    {
+      reason: { kind: 'sourceChanged', expected: { size: 10, modifiedToken: 'old' }, actual: { size: 12, modifiedToken: 'new' } },
+      title: 'Source changed', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['Expected size', '10', 'Current size', '12'],
+    },
+    {
+      reason: { kind: 'sourceCannotResume' },
+      title: 'Resume unavailable', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['cannot be safely resumed'],
+    },
+    {
+      reason: { kind: 'missingPartial' },
+      title: 'Partial file missing', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['managed partial file is missing'],
+    },
+    {
+      reason: { kind: 'commitRecovery', message: 'backup and final both remain; preserve both' },
+      title: 'Commit recovery required', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['backup and final both remain; preserve both'],
+    },
+    {
+      reason: { kind: 'cleanup', message: 'partial cleanup failed with EACCES' },
+      title: 'Cleanup required', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['partial cleanup failed with EACCES'],
+    },
+  ];
+
+  for (const item of cases) {
+    harness.sandbox.termlabTransferDialogs.showConflict(job(item.reason.kind, 'needsAttention', {
+      state: { kind: 'needsAttention', reason: item.reason },
+    }), makeElement('tr'), () => {});
+    const dialog = harness.dialogs.at(-1);
+    assert.strictEqual(dialog.options.title, item.title);
+    assert.deepStrictEqual(Array.from(dialog.options.buttons, (button) => button.label), item.buttons);
+    assert.ok(!dialog.options.buttons.some((button) => ['Overwrite', 'Rename', 'Resume'].includes(button.label)));
+    for (const copy of item.copy) assert.ok(dialog.bodyEl.textContent.includes(copy));
+  }
 }
 
 async function loadMountLifecycleHarness() {
@@ -888,6 +1028,34 @@ async function loadMountLifecycleHarness() {
     'destroy removes both delegated handlers');
   assert.strictEqual(harness.subscriptionCount(), 0,
     'destroy also releases the one runtime subscription');
+}
+
+// A focused row wins over stale selection for every keyboard action. This
+// covers tab/programmatic focus movement that does not first emit Arrow keys.
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([
+    job('selected', 'running'),
+    job('focused', 'paused', { queueOrder: 2 }),
+    job('attention-focus', 'needsAttention', {
+      queueOrder: 3,
+      state: { kind: 'needsAttention', reason: { kind: 'missingPartial' } },
+    }),
+  ], { summary: summary({ active: 3, running: 1, paused: 1, attention: 1 }) }));
+  const focused = harness.panelEl.querySelector('tr[data-job-id="focused"]');
+  focused.focus();
+  harness.panelEl._fire('keydown', { target: focused, key: ' ', preventDefault() {} });
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'resume', args: ['focused'] }]);
+  assert.strictEqual(harness.controller.getState().selectedId, 'focused');
+
+  const attention = harness.panelEl.querySelector('tr[data-job-id="attention-focus"]');
+  attention.focus();
+  harness.panelEl._fire('keydown', { target: attention, key: 'Enter', preventDefault() {} });
+  assert.strictEqual(harness.dialogs.at(-1).options.title, 'Partial file missing');
+  assert.strictEqual(harness.controller.getState().selectedId, 'attention-focus');
+
+  harness.panelEl._fire('keydown', { target: attention, key: 'Delete', preventDefault() {} });
+  assert.ok(harness.dialogs.at(-1).bodyEl.textContent.includes('attention-focus.bin'));
 }
 
 // Active is the default projection, driven only by job.state.kind. The table

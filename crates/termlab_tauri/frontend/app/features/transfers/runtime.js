@@ -253,7 +253,7 @@
       });
     }
     if (!session) return false;
-    await command('resume', [job.id]);
+    await command('retry', [job.id]);
     return true;
   }
 
