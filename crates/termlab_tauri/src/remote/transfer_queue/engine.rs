@@ -1031,6 +1031,8 @@ impl QueueActor {
             })
             .ok_or_else(|| format!("transfer job {job_id} has no pending runner result"))?;
         let now_ms = self.clock.now_ms();
+        let continue_cancel_cleanup = ownership == JobOwnership::CancellationCleanup
+            && matches!(&result, RunnerResult::Paused { .. });
         let mut next = self.document.clone();
         let job = next
             .jobs
@@ -1084,7 +1086,10 @@ impl QueueActor {
                     paused.bytes_transferred = paused.bytes_transferred.max(*durable_checkpoint);
                     reduce_job(&paused, JobEvent::Pause, now_ms)
                         .and_then(|paused| {
-                            if resume_after_pause && !self.document.queue_paused {
+                            if resume_after_pause
+                                && ownership == JobOwnership::Transfer
+                                && !self.document.queue_paused
+                            {
                                 reduce_job(&paused, JobEvent::Resume, now_ms)
                             } else {
                                 Ok(paused)
@@ -1162,6 +1167,9 @@ impl QueueActor {
         }
         self.pending_terminal_results.remove(&job_id);
         self.persistence_fault = !self.pending_terminal_results.is_empty();
+        if continue_cancel_cleanup && application_error.is_none() {
+            self.pending_cancel_cleanup.insert(job_id);
+        }
         if matches!(ownership, JobOwnership::ArtifactResolution(_))
             && self.startup_suspended
             && self.document.queue_paused
@@ -1232,7 +1240,10 @@ impl QueueActor {
             .active
             .get_mut(&id)
             .ok_or_else(|| format!("active transfer job {id} was not found"))?;
-        if requested == RunnerControlState::Pause {
+        if matches!(
+            requested,
+            RunnerControlState::Pause | RunnerControlState::Cancel
+        ) {
             task.resume_after_pause = false;
         }
         if task.commit_critical {
@@ -2977,6 +2988,56 @@ mod tests {
         .await;
         assert_eq!(paused.durable_checkpoint, 768);
         assert_eq!(runner.starts(), [id]);
+    }
+
+    #[tokio::test]
+    async fn cancel_after_resume_all_keeps_a_late_paused_result_cancellation_owned() {
+        let id = Uuid::from_u128(8_404);
+        let mut job = stored_job(id, TransferJobState::Queued, 1);
+        job.source_fingerprint = Some(SourceFingerprint {
+            size: 1_024,
+            modified_token: Some("cancel-after-resume".into()),
+        });
+        job.durable_checkpoint = 256;
+        job.artifacts = Some(ManagedArtifacts {
+            partial_path: "/tmp/.cancel-after-resume.partial".into(),
+            backup_path: "/tmp/.cancel-after-resume.backup".into(),
+        });
+        let runner = Arc::new(GatedRunner::default());
+        let transfer_release = runner.gate(id);
+        let cleanup_release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document_with(vec![job]), runner.clone());
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        harness.handle.pause_all().await.unwrap();
+        harness.handle.resume_all().await.unwrap();
+        assert!(harness.handle.cancel(id).await.unwrap());
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+
+        transfer_release
+            .send(RunnerResult::Paused {
+                durable_checkpoint: 768,
+            })
+            .unwrap();
+        wait_for_starts(&runner, 2).await;
+        assert_eq!(runner.starts(), [id, id]);
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+        assert_eq!(
+            harness.handle.snapshot().jobs[0].durable_checkpoint,
+            768,
+            "the late pause checkpoint is durable before cleanup starts"
+        );
+
+        cleanup_release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
+        wait_for_job(&harness.handle, id, |job| {
+            matches!(job.state, TransferJobState::Cancelled { .. })
+        })
+        .await;
     }
 
     #[tokio::test]
