@@ -50,6 +50,7 @@ zeroize = { workspace = true }
 arboard = "3"
 font-kit = "0.14"
 ts-rs = { workspace = true }
+sha2 = "0.10"
 
 # SSH (via termlab_remote, only async-trait needed locally for TauriRemoteCallbacks)
 async-trait = "0.1"

@@ -2,6 +2,7 @@
 // session, diagnostics, and command modules consume in later tasks.
 #![allow(dead_code)]
 
+pub(crate) mod catalog;
 pub(crate) mod document;
 pub(crate) mod ownership;
 pub(crate) mod root;

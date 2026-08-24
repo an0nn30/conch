@@ -288,6 +288,27 @@ pub(crate) enum LspSessionState {
     Unavailable,
 }
 
+/// A stable reason why a curated language adapter cannot be started. The
+/// catalog keeps the detailed filesystem validation error internal, while the
+/// manager later exposes this normalized status to the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum LspUnavailableReason {
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    NotBundledYet { adapter_id: String },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    ResourceUnavailable { adapter_id: String, detail: String },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    UnsupportedPlatform { expected: String, actual: String },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    UnsupportedArchitecture { expected: String, actual: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
