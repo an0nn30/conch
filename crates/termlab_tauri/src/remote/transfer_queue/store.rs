@@ -206,8 +206,8 @@ pub fn recover_for_startup(document: &mut TransferQueueDocument) {
             job.state = TransferJobState::Paused;
             changed = true;
         }
-        if job.speed_bytes_per_second.is_some() {
-            job.speed_bytes_per_second = None;
+        if job.speed_bytes_per_second != 0 {
+            job.speed_bytes_per_second = 0;
             changed = true;
         }
         if job.eta_seconds.is_some() {
@@ -377,13 +377,14 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: None,
+            speed_bytes_per_second: 0,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
             conflict_policy: ConflictPolicy::Ask,
             artifacts: None,
             commit_phase: CommitPhase::None,
+            commit_backup_expected: None,
             created_at_ms: 10,
             updated_at_ms: 10,
             started_at_ms: None,
@@ -510,7 +511,7 @@ mod tests {
             jobs: states.into_iter().map(sample_job).collect(),
             ..TransferQueueDocument::default()
         };
-        document.jobs[2].speed_bytes_per_second = Some(1_024);
+        document.jobs[2].speed_bytes_per_second = 1_024;
         document.jobs[2].eta_seconds = Some(15);
 
         recover_for_startup(&mut document);
@@ -534,7 +535,7 @@ mod tests {
             document.jobs[7].state,
             TransferJobState::RetryWaiting { .. }
         ));
-        assert_eq!(document.jobs[2].speed_bytes_per_second, None);
+        assert_eq!(document.jobs[2].speed_bytes_per_second, 0);
         assert_eq!(document.jobs[2].eta_seconds, None);
     }
 

@@ -53,36 +53,65 @@ pub enum RecoveryAction {
     NeedsAttention { message: String },
 }
 
-pub fn recovery_action(phase: CommitPhase, inventory: ArtifactInventory) -> RecoveryAction {
-    use CommitPhase::{BackupMoved, CleanupPending, Complete, None, PartialPromoted, Prepared};
+pub fn recovery_action(
+    phase: CommitPhase,
+    backup_expected: Option<bool>,
+    inventory: ArtifactInventory,
+) -> RecoveryAction {
+    use CommitPhase::{BackupMoved, CleanupPending, Complete, PartialPromoted, Prepared};
 
     let layout = (
         inventory.final_exists,
         inventory.partial_exists,
         inventory.backup_exists,
     );
-    match (phase, layout) {
-        (None, (_, _, false)) => RecoveryAction::ResumeCopy,
+    match (phase, backup_expected, layout) {
+        (CommitPhase::None, _, (_, _, false)) => RecoveryAction::ResumeCopy,
 
-        (Prepared, (true, true, false)) => RecoveryAction::MoveFinalToBackup,
-        (Prepared, (false, true, _)) => RecoveryAction::PromotePartial,
-        (Prepared, (false, false, true)) => RecoveryAction::RestoreBackup,
+        // A fresh destination has no authoritative backup. The final-only
+        // layout means promotion succeeded before its next durable phase write.
+        (Prepared | BackupMoved, Some(false), (false, true, false)) => {
+            RecoveryAction::PromotePartial
+        }
+        (
+            Prepared | BackupMoved | PartialPromoted | CleanupPending,
+            Some(false),
+            (true, false, false),
+        ) => RecoveryAction::Complete,
 
-        (BackupMoved, (false, true, true)) => RecoveryAction::PromotePartial,
-        (BackupMoved, (false, false, true)) => RecoveryAction::RestoreBackup,
-        (BackupMoved, (true, false, true)) => RecoveryAction::DeleteBackupAndComplete,
+        // An overwrite promised an authoritative backup. Never reinterpret a
+        // missing backup as a fresh destination: that would make an ambiguous
+        // final eligible for destructive cleanup.
+        (Prepared, Some(true), (true, true, false)) => RecoveryAction::MoveFinalToBackup,
+        (Prepared | BackupMoved, Some(true), (false, true, true)) => RecoveryAction::PromotePartial,
+        (
+            Prepared | BackupMoved | PartialPromoted | CleanupPending,
+            Some(true),
+            (false, false, true),
+        ) => RecoveryAction::RestoreBackup,
+        (
+            Prepared | BackupMoved | PartialPromoted | CleanupPending,
+            Some(true),
+            (true, false, true),
+        ) => RecoveryAction::DeleteBackupAndComplete,
 
-        (PartialPromoted | CleanupPending, (true, false, true)) => {
+        // Legacy v1 jobs have no destination provenance. A managed backup is
+        // positive evidence that an old final existed, so those layouts remain
+        // recoverable. Backup-free commit layouts are intentionally ambiguous.
+        (Prepared | BackupMoved, None, (false, true, true)) => RecoveryAction::PromotePartial,
+        (Prepared | BackupMoved | PartialPromoted | CleanupPending, None, (false, false, true)) => {
+            RecoveryAction::RestoreBackup
+        }
+        (Prepared | BackupMoved | PartialPromoted | CleanupPending, None, (true, false, true)) => {
             RecoveryAction::DeleteBackupAndComplete
         }
-        (PartialPromoted | CleanupPending, (false, false, true)) => RecoveryAction::RestoreBackup,
-        (PartialPromoted | CleanupPending, (true, false, false)) => RecoveryAction::Complete,
 
-        (Complete, (true, false, false)) => RecoveryAction::Complete,
+        (Complete, _, (true, false, false)) => RecoveryAction::Complete,
         _ => RecoveryAction::NeedsAttention {
             message: format!(
                 "managed artifact inventory does not match persisted {phase:?} commit phase \
-                 (final={}, partial={}, backup={}); preserve all artifacts and resolve explicitly",
+                 with backup_expected={backup_expected:?} (final={}, partial={}, backup={}); \
+                 preserve all artifacts and resolve explicitly",
                 inventory.final_exists, inventory.partial_exists, inventory.backup_exists
             ),
         },
@@ -383,31 +412,33 @@ mod tests {
 
     #[test]
     fn recovery_action_is_exhaustive_for_every_phase_and_inventory() {
-        use CommitPhase::{BackupMoved, CleanupPending, Complete, None, PartialPromoted, Prepared};
+        use CommitPhase::{
+            BackupMoved, CleanupPending, Complete, None as NoCommitPhase, PartialPromoted, Prepared,
+        };
         use ExpectedAction::{
-            Complete as MarkComplete, DeleteBackupAndComplete, MoveFinalToBackup, NeedsAttention,
-            PromotePartial, RestoreBackup, ResumeCopy,
+            Complete as MarkComplete, DeleteBackupAndComplete, NeedsAttention, PromotePartial,
+            RestoreBackup, ResumeCopy,
         };
 
         let cases = [
             // None: no backup operation has begun, so copying can start or resume.
-            (None, (false, false, false), ResumeCopy),
-            (None, (false, false, true), NeedsAttention),
-            (None, (false, true, false), ResumeCopy),
-            (None, (false, true, true), NeedsAttention),
-            (None, (true, false, false), ResumeCopy),
-            (None, (true, false, true), NeedsAttention),
-            (None, (true, true, false), ResumeCopy),
-            (None, (true, true, true), NeedsAttention),
+            (NoCommitPhase, (false, false, false), ResumeCopy),
+            (NoCommitPhase, (false, false, true), NeedsAttention),
+            (NoCommitPhase, (false, true, false), ResumeCopy),
+            (NoCommitPhase, (false, true, true), NeedsAttention),
+            (NoCommitPhase, (true, false, false), ResumeCopy),
+            (NoCommitPhase, (true, false, true), NeedsAttention),
+            (NoCommitPhase, (true, true, false), ResumeCopy),
+            (NoCommitPhase, (true, true, true), NeedsAttention),
             // Prepared: the complete partial can move forward, including after a
             // final-to-backup rename that crashed before its phase barrier.
             (Prepared, (false, false, false), NeedsAttention),
             (Prepared, (false, false, true), RestoreBackup),
-            (Prepared, (false, true, false), PromotePartial),
+            (Prepared, (false, true, false), NeedsAttention),
             (Prepared, (false, true, true), PromotePartial),
             (Prepared, (true, false, false), NeedsAttention),
-            (Prepared, (true, false, true), NeedsAttention),
-            (Prepared, (true, true, false), MoveFinalToBackup),
+            (Prepared, (true, false, true), DeleteBackupAndComplete),
+            (Prepared, (true, true, false), NeedsAttention),
             (Prepared, (true, true, true), NeedsAttention),
             // BackupMoved: either promote the partial, restore the only
             // authoritative backup, or finish a promotion that already landed.
@@ -425,7 +456,7 @@ mod tests {
             (PartialPromoted, (false, false, true), RestoreBackup),
             (PartialPromoted, (false, true, false), NeedsAttention),
             (PartialPromoted, (false, true, true), NeedsAttention),
-            (PartialPromoted, (true, false, false), MarkComplete),
+            (PartialPromoted, (true, false, false), NeedsAttention),
             (
                 PartialPromoted,
                 (true, false, true),
@@ -439,7 +470,7 @@ mod tests {
             (CleanupPending, (false, false, true), RestoreBackup),
             (CleanupPending, (false, true, false), NeedsAttention),
             (CleanupPending, (false, true, true), NeedsAttention),
-            (CleanupPending, (true, false, false), MarkComplete),
+            (CleanupPending, (true, false, false), NeedsAttention),
             (CleanupPending, (true, false, true), DeleteBackupAndComplete),
             (CleanupPending, (true, true, false), NeedsAttention),
             (CleanupPending, (true, true, true), NeedsAttention),
@@ -461,8 +492,78 @@ mod tests {
                 partial_exists,
                 backup_exists,
             };
-            let action = recovery_action(phase, inventory);
+            let action = recovery_action(phase, None, inventory);
 
+            assert_expected_action(phase, inventory, action, expected);
+        }
+    }
+
+    #[test]
+    fn recovery_distinguishes_fresh_destination_commit_crash_windows() {
+        use CommitPhase::{BackupMoved, CleanupPending, Complete, PartialPromoted, Prepared};
+        use ExpectedAction::{Complete as MarkComplete, NeedsAttention, PromotePartial};
+
+        let cases = [
+            // A fresh commit has no authoritative backup. Both the pre-promotion
+            // and post-promotion layouts are safe even when the next phase write
+            // did not reach the store before restart.
+            (Prepared, (false, true, false), PromotePartial),
+            (Prepared, (true, false, false), MarkComplete),
+            (BackupMoved, (false, true, false), PromotePartial),
+            (BackupMoved, (true, false, false), MarkComplete),
+            (PartialPromoted, (true, false, false), MarkComplete),
+            (CleanupPending, (true, false, false), MarkComplete),
+            (Complete, (true, false, false), MarkComplete),
+            // A backup is impossible for a destination observed as fresh.
+            (BackupMoved, (false, true, true), NeedsAttention),
+            (PartialPromoted, (true, false, true), NeedsAttention),
+        ];
+
+        for (phase, (final_exists, partial_exists, backup_exists), expected) in cases {
+            let inventory = ArtifactInventory {
+                final_exists,
+                partial_exists,
+                backup_exists,
+            };
+            let action = recovery_action(phase, Some(false), inventory);
+            assert_expected_action(phase, inventory, action, expected);
+        }
+    }
+
+    #[test]
+    fn recovery_never_treats_a_missing_overwrite_backup_as_fresh() {
+        use CommitPhase::{BackupMoved, CleanupPending, PartialPromoted, Prepared};
+        use ExpectedAction::{
+            DeleteBackupAndComplete, MoveFinalToBackup, NeedsAttention, PromotePartial,
+        };
+
+        let cases = [
+            (Prepared, (true, true, false), MoveFinalToBackup),
+            (Prepared, (false, true, true), PromotePartial),
+            (BackupMoved, (false, true, true), PromotePartial),
+            (
+                PartialPromoted,
+                (true, false, true),
+                DeleteBackupAndComplete,
+            ),
+            (CleanupPending, (true, false, true), DeleteBackupAndComplete),
+            // These layouts would be safe for a fresh destination, but an
+            // overwrite promised an authoritative backup and must stop.
+            (Prepared, (false, true, false), NeedsAttention),
+            (Prepared, (true, false, false), NeedsAttention),
+            (BackupMoved, (false, true, false), NeedsAttention),
+            (BackupMoved, (true, false, false), NeedsAttention),
+            (PartialPromoted, (true, false, false), NeedsAttention),
+            (CleanupPending, (true, false, false), NeedsAttention),
+        ];
+
+        for (phase, (final_exists, partial_exists, backup_exists), expected) in cases {
+            let inventory = ArtifactInventory {
+                final_exists,
+                partial_exists,
+                backup_exists,
+            };
+            let action = recovery_action(phase, Some(true), inventory);
             assert_expected_action(phase, inventory, action, expected);
         }
     }

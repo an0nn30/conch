@@ -2,10 +2,11 @@ use std::future::Future;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt};
 
 use super::SourceFingerprint;
 use super::copy::{ControlDecision, CopyOutcome, copy_with_checkpoint};
@@ -133,6 +134,193 @@ fn resume_partial_from(offset: u64) -> bool {
     offset > 0
 }
 
+#[async_trait]
+trait RemotePartialIo<C>: Sync {
+    type RemoteDestination: AsyncWrite + AsyncSeek + Unpin + Send;
+    async fn open_remote_destination(
+        &self,
+        connection: &C,
+        path: &str,
+        resume: bool,
+    ) -> Result<Self::RemoteDestination, RemoteError>;
+    async fn finalize_remote_destination(
+        &self,
+        destination: &mut Self::RemoteDestination,
+        operation: &str,
+    ) -> Result<(), RemoteError>;
+    async fn set_remote_destination_len(
+        &self,
+        destination: &mut Self::RemoteDestination,
+        checkpoint: u64,
+    ) -> Result<(), RemoteError>;
+}
+
+#[async_trait]
+trait PartialTransferIo<C>: RemotePartialIo<C> {
+    type LocalSource: AsyncRead + AsyncSeek + Unpin + Send;
+    type RemoteSource: AsyncRead + AsyncSeek + Unpin + Send;
+    type LocalDestination: AsyncWrite + AsyncSeek + Unpin + Send;
+
+    async fn open_local_source(
+        &self,
+        path: &Path,
+    ) -> Result<(Self::LocalSource, SourceFingerprint), RemoteError>;
+    async fn open_remote_source(
+        &self,
+        connection: &C,
+        path: &str,
+    ) -> Result<(Self::RemoteSource, SourceFingerprint), RemoteError>;
+    async fn finalize_remote_source(
+        &self,
+        source: &mut Self::RemoteSource,
+        operation: &str,
+    ) -> Result<(), RemoteError>;
+    async fn open_local_destination(
+        &self,
+        path: &Path,
+        resume: bool,
+    ) -> Result<Self::LocalDestination, RemoteError>;
+    async fn finalize_local_destination(
+        &self,
+        destination: &mut Self::LocalDestination,
+        operation: &str,
+    ) -> Result<(), RemoteError>;
+}
+
+struct RealPartialTransferIo;
+
+struct UploadPartialRequest<'a> {
+    local_path: &'a Path,
+    remote_partial_path: &'a str,
+    offset: u64,
+    chunk_size: usize,
+}
+
+struct DownloadPartialRequest<'a> {
+    remote_path: &'a str,
+    local_partial_path: &'a Path,
+    offset: u64,
+    chunk_size: usize,
+}
+
+#[async_trait]
+impl RemotePartialIo<russh::client::Handle<TermLabSshHandler>> for RealPartialTransferIo {
+    type RemoteDestination = SftpFile;
+
+    async fn open_remote_destination(
+        &self,
+        connection: &russh::client::Handle<TermLabSshHandler>,
+        path: &str,
+        resume: bool,
+    ) -> Result<Self::RemoteDestination, RemoteError> {
+        let session = open_sftp(connection).await?;
+        open_remote_partial(&session, path, resume).await
+    }
+
+    async fn finalize_remote_destination(
+        &self,
+        destination: &mut Self::RemoteDestination,
+        operation: &str,
+    ) -> Result<(), RemoteError> {
+        super::finalize_remote_write(destination, operation).await
+    }
+
+    async fn set_remote_destination_len(
+        &self,
+        destination: &mut Self::RemoteDestination,
+        checkpoint: u64,
+    ) -> Result<(), RemoteError> {
+        let mut metadata = FileAttributes::empty();
+        metadata.size = Some(checkpoint);
+        destination.set_metadata(metadata).await.map_err(|error| {
+            RemoteError::Transfer(format!("truncate remote partial failed: {error}"))
+        })
+    }
+}
+
+struct RealSftpSessionPartialIo;
+
+#[async_trait]
+impl RemotePartialIo<SftpSession> for RealSftpSessionPartialIo {
+    type RemoteDestination = SftpFile;
+
+    async fn open_remote_destination(
+        &self,
+        session: &SftpSession,
+        path: &str,
+        resume: bool,
+    ) -> Result<Self::RemoteDestination, RemoteError> {
+        open_remote_partial(session, path, resume).await
+    }
+
+    async fn finalize_remote_destination(
+        &self,
+        destination: &mut Self::RemoteDestination,
+        operation: &str,
+    ) -> Result<(), RemoteError> {
+        super::finalize_remote_write(destination, operation).await
+    }
+
+    async fn set_remote_destination_len(
+        &self,
+        destination: &mut Self::RemoteDestination,
+        checkpoint: u64,
+    ) -> Result<(), RemoteError> {
+        let mut metadata = FileAttributes::empty();
+        metadata.size = Some(checkpoint);
+        destination.set_metadata(metadata).await.map_err(|error| {
+            RemoteError::Transfer(format!("truncate remote partial failed: {error}"))
+        })
+    }
+}
+
+#[async_trait]
+impl PartialTransferIo<russh::client::Handle<TermLabSshHandler>> for RealPartialTransferIo {
+    type LocalSource = tokio::fs::File;
+    type RemoteSource = SftpFile;
+    type LocalDestination = tokio::fs::File;
+
+    async fn open_local_source(
+        &self,
+        path: &Path,
+    ) -> Result<(Self::LocalSource, SourceFingerprint), RemoteError> {
+        fingerprint_open_local(path).await
+    }
+
+    async fn open_remote_source(
+        &self,
+        connection: &russh::client::Handle<TermLabSshHandler>,
+        path: &str,
+    ) -> Result<(Self::RemoteSource, SourceFingerprint), RemoteError> {
+        let session = open_sftp(connection).await?;
+        fingerprint_open_remote(&session, path).await
+    }
+
+    async fn finalize_remote_source(
+        &self,
+        source: &mut Self::RemoteSource,
+        operation: &str,
+    ) -> Result<(), RemoteError> {
+        super::close_remote_file(source, operation).await
+    }
+
+    async fn open_local_destination(
+        &self,
+        path: &Path,
+        resume: bool,
+    ) -> Result<Self::LocalDestination, RemoteError> {
+        open_local_partial(path, resume).await
+    }
+
+    async fn finalize_local_destination(
+        &self,
+        destination: &mut Self::LocalDestination,
+        operation: &str,
+    ) -> Result<(), RemoteError> {
+        finalize_local_write(destination, operation).await
+    }
+}
+
 pub async fn truncate_local_partial(
     path: impl AsRef<Path>,
     checkpoint: u64,
@@ -157,15 +345,24 @@ pub async fn truncate_remote_partial(
     path: &str,
     checkpoint: u64,
 ) -> Result<(), RemoteError> {
-    let mut file = open_remote_partial(session, path, true).await?;
-    let mut metadata = FileAttributes::empty();
-    metadata.size = Some(checkpoint);
-    let truncate_result = file
-        .set_metadata(metadata)
-        .await
-        .map_err(|error| RemoteError::Transfer(format!("truncate remote partial failed: {error}")));
-    let finalize_result = super::finalize_remote_write(&mut file, "truncate remote partial").await;
+    truncate_remote_partial_with_io(&RealSftpSessionPartialIo, session, path, checkpoint).await
+}
 
+async fn truncate_remote_partial_with_io<I, C>(
+    io: &I,
+    connection: &C,
+    path: &str,
+    checkpoint: u64,
+) -> Result<(), RemoteError>
+where
+    C: Sync,
+    I: RemotePartialIo<C>,
+{
+    let mut file = io.open_remote_destination(connection, path, true).await?;
+    let truncate_result = io.set_remote_destination_len(&mut file, checkpoint).await;
+    let finalize_result = io
+        .finalize_remote_destination(&mut file, "truncate remote partial")
+        .await;
     truncate_result.and(finalize_result)
 }
 
@@ -226,24 +423,61 @@ where
     C: FnMut() -> ControlDecision,
     P: FnMut(u64, u64),
 {
-    let (mut source, fingerprint) = fingerprint_open_local(local_path).await?;
+    upload_to_partial_with_io(
+        &RealPartialTransferIo,
+        ssh,
+        UploadPartialRequest {
+            local_path: local_path.as_ref(),
+            remote_partial_path,
+            offset,
+            chunk_size,
+        },
+        on_fingerprint,
+        control,
+        progress,
+    )
+    .await
+}
+
+async fn upload_to_partial_with_io<I, C, F, Fut, Control, Progress>(
+    io: &I,
+    connection: &C,
+    request: UploadPartialRequest<'_>,
+    on_fingerprint: F,
+    control: Control,
+    progress: Progress,
+) -> Result<CopyOutcome, RemoteError>
+where
+    C: Sync,
+    I: PartialTransferIo<C>,
+    F: FnOnce(SourceFingerprint) -> Fut,
+    Fut: Future<Output = Result<(), RemoteError>>,
+    Control: FnMut() -> ControlDecision,
+    Progress: FnMut(u64, u64),
+{
+    let (mut source, fingerprint) = io.open_local_source(request.local_path).await?;
     let (mut destination, total) = open_after_fingerprint(fingerprint, on_fingerprint, || async {
-        let session = open_sftp(ssh).await?;
-        open_remote_partial(&session, remote_partial_path, resume_partial_from(offset)).await
+        io.open_remote_destination(
+            connection,
+            request.remote_partial_path,
+            resume_partial_from(request.offset),
+        )
+        .await
     })
     .await?;
     let copy_result = copy_with_checkpoint(
         &mut source,
         &mut destination,
-        offset,
+        request.offset,
         total,
-        chunk_size,
+        request.chunk_size,
         control,
         progress,
     )
     .await;
-    let finalize_result =
-        super::finalize_remote_write(&mut destination, "finish resumable upload").await;
+    let finalize_result = io
+        .finalize_remote_destination(&mut destination, "finish resumable upload")
+        .await;
     finish_after_cleanup(copy_result, finalize_result)
 }
 
@@ -263,55 +497,228 @@ where
     C: FnMut() -> ControlDecision,
     P: FnMut(u64, u64),
 {
-    let session = open_sftp(ssh).await?;
-    let (mut source, fingerprint) = fingerprint_open_remote(&session, remote_path).await?;
-    let local_partial_path = local_partial_path.as_ref();
+    download_to_partial_with_io(
+        &RealPartialTransferIo,
+        ssh,
+        DownloadPartialRequest {
+            remote_path,
+            local_partial_path: local_partial_path.as_ref(),
+            offset,
+            chunk_size,
+        },
+        on_fingerprint,
+        control,
+        progress,
+    )
+    .await
+}
+
+async fn download_to_partial_with_io<I, C, F, Fut, Control, Progress>(
+    io: &I,
+    connection: &C,
+    request: DownloadPartialRequest<'_>,
+    on_fingerprint: F,
+    control: Control,
+    progress: Progress,
+) -> Result<CopyOutcome, RemoteError>
+where
+    C: Sync,
+    I: PartialTransferIo<C>,
+    F: FnOnce(SourceFingerprint) -> Fut,
+    Fut: Future<Output = Result<(), RemoteError>>,
+    Control: FnMut() -> ControlDecision,
+    Progress: FnMut(u64, u64),
+{
+    let (mut source, fingerprint) = io
+        .open_remote_source(connection, request.remote_path)
+        .await?;
     let (mut destination, total) = match open_after_fingerprint(fingerprint, on_fingerprint, || {
-        open_local_partial(local_partial_path, resume_partial_from(offset))
+        io.open_local_destination(
+            request.local_partial_path,
+            resume_partial_from(request.offset),
+        )
     })
     .await
     {
         Ok(opened) => opened,
         Err(primary) => {
-            let _ = super::close_remote_file(
-                &mut source,
-                "close remote source after fingerprint or local open failure",
-            )
-            .await;
+            let _ = io
+                .finalize_remote_source(
+                    &mut source,
+                    "close remote source after fingerprint or local open failure",
+                )
+                .await;
             return Err(primary);
         }
     };
     let copy_result = copy_with_checkpoint(
         &mut source,
         &mut destination,
-        offset,
+        request.offset,
         total,
-        chunk_size,
+        request.chunk_size,
         control,
         progress,
     )
     .await;
 
-    let close_result = super::close_remote_file(&mut source, "finish resumable download").await;
-    let local_finalize_result =
-        finalize_local_write(&mut destination, "finish resumable download").await;
+    let close_result = io
+        .finalize_remote_source(&mut source, "finish resumable download")
+        .await;
+    let local_finalize_result = io
+        .finalize_local_destination(&mut destination, "finish resumable download")
+        .await;
     let cleanup_result = close_result.and(local_finalize_result);
     finish_after_cleanup(copy_result, cleanup_result)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, UNIX_EPOCH};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        fingerprint_local_parts, fingerprint_open_local, fingerprint_remote_parts,
-        open_after_fingerprint, open_local_partial, remote_partial_open_flags, resume_partial_from,
-        truncate_local_partial,
+        DownloadPartialRequest, PartialTransferIo, RemotePartialIo, UploadPartialRequest,
+        download_to_partial_with_io, fingerprint_local_parts, fingerprint_open_local,
+        fingerprint_remote_parts, open_after_fingerprint, open_local_partial,
+        remote_partial_open_flags, resume_partial_from, truncate_local_partial,
+        truncate_remote_partial_with_io, upload_to_partial_with_io,
     };
     use russh_sftp::protocol::OpenFlags;
+
+    #[derive(Clone)]
+    struct FakePartialTransferIo {
+        events: Arc<Mutex<Vec<String>>>,
+        local_source: Vec<u8>,
+        remote_source: Vec<u8>,
+        remote_partial: Arc<Mutex<Vec<u8>>>,
+        local_partial: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl FakePartialTransferIo {
+        fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                local_source: b"abcdef".to_vec(),
+                remote_source: b"uvwxyz".to_vec(),
+                remote_partial: Arc::new(Mutex::new(b"abcOLD".to_vec())),
+                local_partial: Arc::new(Mutex::new(b"uvwOLD".to_vec())),
+            }
+        }
+
+        fn record(&self, event: impl Into<String>) {
+            self.events.lock().unwrap().push(event.into());
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RemotePartialIo<()> for FakePartialTransferIo {
+        type RemoteDestination = Cursor<Vec<u8>>;
+
+        async fn open_remote_destination(
+            &self,
+            _connection: &(),
+            _path: &str,
+            resume: bool,
+        ) -> Result<Self::RemoteDestination, crate::error::RemoteError> {
+            self.record(format!("open-remote:{resume}"));
+            let bytes = if resume {
+                self.remote_partial.lock().unwrap().clone()
+            } else {
+                Vec::new()
+            };
+            Ok(Cursor::new(bytes))
+        }
+
+        async fn finalize_remote_destination(
+            &self,
+            destination: &mut Self::RemoteDestination,
+            _operation: &str,
+        ) -> Result<(), crate::error::RemoteError> {
+            self.record("finalize-remote");
+            *self.remote_partial.lock().unwrap() = destination.get_ref().clone();
+            Ok(())
+        }
+
+        async fn set_remote_destination_len(
+            &self,
+            destination: &mut Self::RemoteDestination,
+            checkpoint: u64,
+        ) -> Result<(), crate::error::RemoteError> {
+            self.record(format!("set-remote-len:{checkpoint}"));
+            destination.get_mut().resize(checkpoint as usize, 0);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PartialTransferIo<()> for FakePartialTransferIo {
+        type LocalSource = Cursor<Vec<u8>>;
+        type RemoteSource = Cursor<Vec<u8>>;
+        type LocalDestination = Cursor<Vec<u8>>;
+
+        async fn open_local_source(
+            &self,
+            _path: &Path,
+        ) -> Result<(Self::LocalSource, super::SourceFingerprint), crate::error::RemoteError>
+        {
+            self.record("open-local-source");
+            Ok((
+                Cursor::new(self.local_source.clone()),
+                fingerprint_local_parts(self.local_source.len() as u64, None),
+            ))
+        }
+
+        async fn open_remote_source(
+            &self,
+            _connection: &(),
+            _path: &str,
+        ) -> Result<(Self::RemoteSource, super::SourceFingerprint), crate::error::RemoteError>
+        {
+            self.record("open-remote-source");
+            Ok((
+                Cursor::new(self.remote_source.clone()),
+                fingerprint_remote_parts(self.remote_source.len() as u64, Some(7)),
+            ))
+        }
+
+        async fn finalize_remote_source(
+            &self,
+            _source: &mut Self::RemoteSource,
+            _operation: &str,
+        ) -> Result<(), crate::error::RemoteError> {
+            self.record("finalize-remote-source");
+            Ok(())
+        }
+
+        async fn open_local_destination(
+            &self,
+            _path: &Path,
+            resume: bool,
+        ) -> Result<Self::LocalDestination, crate::error::RemoteError> {
+            self.record(format!("open-local:{resume}"));
+            let bytes = if resume {
+                self.local_partial.lock().unwrap().clone()
+            } else {
+                Vec::new()
+            };
+            Ok(Cursor::new(bytes))
+        }
+
+        async fn finalize_local_destination(
+            &self,
+            destination: &mut Self::LocalDestination,
+            _operation: &str,
+        ) -> Result<(), crate::error::RemoteError> {
+            self.record("finalize-local");
+            *self.local_partial.lock().unwrap() = destination.get_ref().clone();
+            Ok(())
+        }
+    }
 
     #[test]
     fn fresh_and_resumed_wrapper_offsets_select_safe_partial_open_flags() {
@@ -327,6 +734,157 @@ mod tests {
         assert!(resumed.contains(OpenFlags::CREATE));
         assert!(resumed.contains(OpenFlags::WRITE));
         assert!(!resumed.contains(OpenFlags::TRUNCATE));
+    }
+
+    #[test]
+    fn public_wrappers_delegate_to_the_injectable_wiring() {
+        let source = include_str!("sftp_io.rs");
+        for delegation in [
+            [
+                "upload_to_partial_with_io",
+                "(\n        &RealPartialTransferIo",
+            ]
+            .concat(),
+            [
+                "download_to_partial_with_io",
+                "(\n        &RealPartialTransferIo",
+            ]
+            .concat(),
+            [
+                "truncate_remote_partial_with_io",
+                "(&RealSftpSessionPartialIo",
+            ]
+            .concat(),
+        ] {
+            assert!(
+                source.contains(&delegation),
+                "public wrapper is not wired through {delegation}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_wrapper_wiring_uses_offset_to_select_resume_without_truncation() {
+        let io = FakePartialTransferIo::new();
+        let fingerprint_events = Arc::clone(&io.events);
+
+        let outcome = upload_to_partial_with_io(
+            &io,
+            &(),
+            UploadPartialRequest {
+                local_path: Path::new("source.bin"),
+                remote_partial_path: "/partial.bin",
+                offset: 3,
+                chunk_size: 2,
+            },
+            move |_| async move {
+                fingerprint_events
+                    .lock()
+                    .unwrap()
+                    .push("fingerprint".into());
+                Ok(())
+            },
+            || super::ControlDecision::Continue,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            super::CopyOutcome::Completed { bytes: 6 }
+        ));
+        assert_eq!(*io.remote_partial.lock().unwrap(), b"abcdef");
+        assert_eq!(
+            *io.events.lock().unwrap(),
+            vec![
+                "open-local-source",
+                "fingerprint",
+                "open-remote:true",
+                "finalize-remote",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_wrapper_wiring_truncates_a_fresh_partial() {
+        let io = FakePartialTransferIo::new();
+
+        upload_to_partial_with_io(
+            &io,
+            &(),
+            UploadPartialRequest {
+                local_path: Path::new("source.bin"),
+                remote_partial_path: "/partial.bin",
+                offset: 0,
+                chunk_size: 3,
+            },
+            |_| async { Ok(()) },
+            || super::ControlDecision::Continue,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*io.remote_partial.lock().unwrap(), b"abcdef");
+        assert!(
+            io.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event == "open-remote:false")
+        );
+    }
+
+    #[tokio::test]
+    async fn download_wrapper_wiring_uses_offset_to_preserve_the_partial_prefix() {
+        let io = FakePartialTransferIo::new();
+
+        let outcome = download_to_partial_with_io(
+            &io,
+            &(),
+            DownloadPartialRequest {
+                remote_path: "/source.bin",
+                local_partial_path: Path::new("partial.bin"),
+                offset: 3,
+                chunk_size: 2,
+            },
+            |_| async { Ok(()) },
+            || super::ControlDecision::Continue,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            super::CopyOutcome::Completed { bytes: 6 }
+        ));
+        assert_eq!(*io.local_partial.lock().unwrap(), b"uvwxyz");
+        assert_eq!(
+            *io.events.lock().unwrap(),
+            vec![
+                "open-remote-source",
+                "open-local:true",
+                "finalize-remote-source",
+                "finalize-local",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_truncate_wrapper_opens_in_resume_mode_and_sets_the_checkpoint() {
+        let io = FakePartialTransferIo::new();
+
+        truncate_remote_partial_with_io(&io, &(), "/partial.bin", 4)
+            .await
+            .unwrap();
+
+        assert_eq!(*io.remote_partial.lock().unwrap(), b"abcO");
+        assert_eq!(
+            *io.events.lock().unwrap(),
+            vec!["open-remote:true", "set-remote-len:4", "finalize-remote",]
+        );
     }
 
     #[test]

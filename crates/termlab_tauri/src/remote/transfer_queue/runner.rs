@@ -679,7 +679,7 @@ where
     // provably recoverable. Cancellation rolls back to an owned backup when
     // one exists; otherwise it preserves the current final or promotes the
     // sole complete partial before removing any remaining managed artifacts.
-    match recovery_action(job.commit_phase, inventory) {
+    match recovery_action(job.commit_phase, job.commit_backup_expected, inventory) {
         RecoveryAction::ResumeCopy | RecoveryAction::MoveFinalToBackup => io
             .cleanup_owned_artifacts(connection, job, artifacts)
             .await
@@ -775,7 +775,7 @@ where
         });
     }
     let final_exists = inventory.final_exists;
-    if let Err(message) = reporter.commit_phase(CommitPhase::Prepared).await {
+    if let Err(message) = reporter.commit_prepared(final_exists).await {
         return permanent_failure(message);
     }
     if final_exists && let Err(error) = io.move_final_to_backup(connection, job, artifacts).await {
@@ -824,6 +824,7 @@ where
     I: TransferIo<C>,
 {
     let mut phase = job.commit_phase;
+    let mut backup_expected = job.commit_backup_expected;
 
     loop {
         let inventory = match io.inventory(connection, job, artifacts).await {
@@ -831,11 +832,13 @@ where
             Err(error) => return failed(error),
         };
 
-        // Resume is the one explicit extension to the persisted recovery
-        // matrix: after BackupMoved, an Overwrite resolution authorizes one
-        // late destination to become this job's backup. The next inventory is
-        // then interpreted by the shared policy like every other layout.
+        // A commit that began against a fresh destination may encounter one
+        // late final before promotion. Explicit Overwrite authorization lets
+        // that late final become the backup. This extension never applies when
+        // an original backup was promised; a missing authoritative overwrite
+        // backup remains conservative.
         if phase == CommitPhase::BackupMoved
+            && backup_expected == Some(false)
             && inventory.partial_exists
             && inventory.final_exists
             && !inventory.backup_exists
@@ -844,13 +847,17 @@ where
             if let Err(error) = io.move_final_to_backup(connection, job, artifacts).await {
                 return commit_attention(io, connection, job, artifacts, error.message).await;
             }
-            if let Err(message) = reporter.commit_phase(CommitPhase::BackupMoved).await {
+            if let Err(message) = reporter
+                .commit_phase_with_backup_expectation(CommitPhase::BackupMoved, Some(true))
+                .await
+            {
                 return permanent_failure(message);
             }
+            backup_expected = Some(true);
             continue;
         }
 
-        let action = recovery_action(phase, inventory);
+        let action = recovery_action(phase, backup_expected, inventory);
         match action {
             RecoveryAction::ResumeCopy => {
                 return commit_attention(
@@ -1523,11 +1530,25 @@ impl RunnerReporter {
     }
 
     pub async fn commit_phase(&self, phase: CommitPhase) -> Result<(), String> {
+        self.commit_phase_with_backup_expectation(phase, None).await
+    }
+
+    pub(crate) async fn commit_prepared(&self, backup_expected: bool) -> Result<(), String> {
+        self.commit_phase_with_backup_expectation(CommitPhase::Prepared, Some(backup_expected))
+            .await
+    }
+
+    async fn commit_phase_with_backup_expectation(
+        &self,
+        phase: CommitPhase,
+        backup_expected: Option<bool>,
+    ) -> Result<(), String> {
         let (ack, response) = oneshot::channel();
         self.send(RunnerEvent::CommitPhase {
             job_id: self.job_id,
             lease_id: self.lease_id,
             phase,
+            backup_expected,
             ack,
         })?;
         await_ack(response).await
@@ -1675,7 +1696,8 @@ mod tests {
     use super::{
         ConnectionResolver, LiveConnectionIdentity, PromotionError, RunnerControl,
         RunnerControlState, RunnerReporter, RunnerResult, SftpTransferJobRunner, TransferIo,
-        TransferIoError, TransferJobRunner, remove_local_artifact, select_live_connection_key,
+        TransferIoError, TransferJobRunner, recover_commit, remove_local_artifact,
+        select_live_connection_key,
     };
     use crate::remote::transfer_queue::{
         artifacts::ArtifactInventory,
@@ -1683,10 +1705,11 @@ mod tests {
         model::{
             AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ConflictResolution,
             ManagedArtifacts, TransferDirection, TransferEndpoint, TransferJob, TransferJobState,
-            TransferOrigin, TransferPriority, TransferProtocol,
+            TransferOrigin, TransferPriority, TransferProtocol, TransferQueueDocument,
         },
         reducer::{JobEvent, reduce_job},
         scheduler::FailureClass,
+        store::TransferStore,
     };
     use crate::remote::{SshConnection, test_remote_state};
 
@@ -2226,6 +2249,162 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct LocalRecoveryIo {
+        open_source_calls: Arc<AtomicUsize>,
+    }
+
+    impl LocalRecoveryIo {
+        async fn exists(path: &str) -> Result<bool, TransferIoError> {
+            tokio::fs::try_exists(path)
+                .await
+                .map_err(TransferIoError::from_local)
+        }
+
+        async fn remove_if_present(path: &str) -> Result<(), TransferIoError> {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(TransferIoError::from_local(error)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TransferIo<()> for LocalRecoveryIo {
+        type Source = Cursor<Vec<u8>>;
+        type Partial = Cursor<Vec<u8>>;
+
+        async fn open_source(
+            &self,
+            _connection: &(),
+            _job: &TransferJob,
+        ) -> Result<(Self::Source, SourceFingerprint), TransferIoError> {
+            self.open_source_calls.fetch_add(1, Ordering::SeqCst);
+            Err(TransferIoError::permanent(
+                "recovery integration unexpectedly reopened the source",
+            ))
+        }
+
+        async fn inventory(
+            &self,
+            _connection: &(),
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<ArtifactInventory, TransferIoError> {
+            Ok(ArtifactInventory {
+                final_exists: Self::exists(&job.local_path).await?,
+                partial_exists: Self::exists(&artifacts.partial_path).await?,
+                backup_exists: Self::exists(&artifacts.backup_path).await?,
+            })
+        }
+
+        async fn partial_size(
+            &self,
+            _connection: &(),
+            _job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<Option<u64>, TransferIoError> {
+            match tokio::fs::metadata(&artifacts.partial_path).await {
+                Ok(metadata) => Ok(Some(metadata.len())),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(TransferIoError::from_local(error)),
+            }
+        }
+
+        async fn truncate_partial(
+            &self,
+            _connection: &(),
+            _job: &TransferJob,
+            _artifacts: &ManagedArtifacts,
+            _bytes: u64,
+        ) -> Result<(), TransferIoError> {
+            unreachable!("commit recovery must not truncate or recopy")
+        }
+
+        async fn open_partial(
+            &self,
+            _connection: &(),
+            _job: &TransferJob,
+            _artifacts: &ManagedArtifacts,
+            _resume: bool,
+        ) -> Result<Self::Partial, TransferIoError> {
+            unreachable!("commit recovery must not open the partial for copying")
+        }
+
+        async fn finish_source(&self, _source: &mut Self::Source) -> Result<(), TransferIoError> {
+            unreachable!("commit recovery must not open the source")
+        }
+
+        async fn finish_partial(
+            &self,
+            _partial: &mut Self::Partial,
+        ) -> Result<(), TransferIoError> {
+            unreachable!("commit recovery must not open the partial for copying")
+        }
+
+        async fn move_final_to_backup(
+            &self,
+            _connection: &(),
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            tokio::fs::rename(&job.local_path, &artifacts.backup_path)
+                .await
+                .map_err(TransferIoError::from_local)
+        }
+
+        async fn promote_partial_no_replace(
+            &self,
+            _connection: &(),
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), PromotionError> {
+            if Self::exists(&job.local_path)
+                .await
+                .map_err(PromotionError::Failed)?
+            {
+                return Err(PromotionError::DestinationExists {
+                    message: "recovery integration destination already exists".into(),
+                });
+            }
+            tokio::fs::rename(&artifacts.partial_path, &job.local_path)
+                .await
+                .map_err(TransferIoError::from_local)
+                .map_err(PromotionError::Failed)
+        }
+
+        async fn restore_backup(
+            &self,
+            _connection: &(),
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            tokio::fs::rename(&artifacts.backup_path, &job.local_path)
+                .await
+                .map_err(TransferIoError::from_local)
+        }
+
+        async fn delete_backup(
+            &self,
+            _connection: &(),
+            _job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            Self::remove_if_present(&artifacts.backup_path).await
+        }
+
+        async fn cleanup_owned_artifacts(
+            &self,
+            _connection: &(),
+            _job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            Self::remove_if_present(&artifacts.partial_path).await?;
+            Self::remove_if_present(&artifacts.backup_path).await
+        }
+    }
+
     fn fingerprint(size: u64, token: Option<&str>) -> SourceFingerprint {
         SourceFingerprint {
             size,
@@ -2257,13 +2436,14 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: None,
+            speed_bytes_per_second: 0,
             eta_seconds: None,
             retry_attempt: 1,
             max_attempts: 3,
             conflict_policy: ConflictPolicy::Ask,
             artifacts: None,
             commit_phase: CommitPhase::None,
+            commit_backup_expected: None,
             created_at_ms: 1,
             updated_at_ms: 1,
             started_at_ms: Some(1),
@@ -2343,58 +2523,153 @@ mod tests {
         fn on_transfer_progress(&self, _transfer_id: &str, _bytes: u64, _total: Option<u64>) {}
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LiveCommitObservation {
+        phase: CommitPhase,
+        backup_expected: Option<bool>,
+        inventory: ArtifactInventory,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LiveRunObservation {
+        resume_offset: u64,
+        checkpoints: Vec<u64>,
+        progress_bytes: Vec<u64>,
+        commits: Vec<LiveCommitObservation>,
+    }
+
+    async fn observe_live_artifacts(
+        session: &termlab_remote::transfer::SftpSessionHandle,
+        job: &TransferJob,
+    ) -> Result<ArtifactInventory, String> {
+        let artifacts = job
+            .artifacts
+            .as_ref()
+            .ok_or_else(|| "commit phase arrived without managed artifacts".to_string())?;
+        match job.direction {
+            TransferDirection::Upload => Ok(ArtifactInventory {
+                final_exists: session
+                    .try_exists(job.remote_path.clone())
+                    .await
+                    .map_err(|error| format!("inspect live remote final failed: {error}"))?,
+                partial_exists: session
+                    .try_exists(artifacts.partial_path.clone())
+                    .await
+                    .map_err(|error| format!("inspect live remote partial failed: {error}"))?,
+                backup_exists: session
+                    .try_exists(artifacts.backup_path.clone())
+                    .await
+                    .map_err(|error| format!("inspect live remote backup failed: {error}"))?,
+            }),
+            TransferDirection::Download => Ok(ArtifactInventory {
+                final_exists: tokio::fs::try_exists(&job.local_path)
+                    .await
+                    .map_err(|error| format!("inspect live local final failed: {error}"))?,
+                partial_exists: tokio::fs::try_exists(&artifacts.partial_path)
+                    .await
+                    .map_err(|error| format!("inspect live local partial failed: {error}"))?,
+                backup_exists: tokio::fs::try_exists(&artifacts.backup_path)
+                    .await
+                    .map_err(|error| format!("inspect live local backup failed: {error}"))?,
+            }),
+        }
+    }
+
     async fn run_live_transfer(
         runner: &SftpTransferJobRunner,
         job: TransferJob,
         control_state: RunnerControlState,
-    ) -> Result<(RunnerResult, TransferJob), String> {
+        session: Arc<termlab_remote::transfer::SftpSessionHandle>,
+    ) -> Result<(RunnerResult, TransferJob, LiveRunObservation), String> {
+        let observations = Arc::new(StdMutex::new(LiveRunObservation {
+            resume_offset: job.durable_checkpoint,
+            checkpoints: Vec::new(),
+            progress_bytes: Vec::new(),
+            commits: Vec::new(),
+        }));
         let durable_job = Arc::new(StdMutex::new(job.clone()));
         let event_job = Arc::clone(&durable_job);
+        let event_observations = Arc::clone(&observations);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let reporter = RunnerReporter::new(job.id, Uuid::new_v4(), event_tx.clone());
         drop(event_tx);
-        let acknowledger = tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    RunnerEvent::Checking { ack, .. } => {
-                        event_job.lock().unwrap().state = TransferJobState::Checking;
-                        let _ = ack.send(Ok(()));
-                    }
-                    RunnerEvent::Fingerprinted {
-                        fingerprint,
-                        total_bytes,
-                        artifacts,
-                        ack,
-                        ..
-                    } => {
-                        let mut job = event_job.lock().unwrap();
-                        job.state = TransferJobState::Running;
-                        job.source_fingerprint = Some(fingerprint);
-                        job.total_bytes = total_bytes;
-                        job.artifacts = Some(artifacts);
-                        let _ = ack.send(Ok(()));
-                    }
-                    RunnerEvent::DurableCheckpoint { bytes, ack, .. } => {
-                        let mut job = event_job.lock().unwrap();
-                        job.durable_checkpoint = bytes;
-                        job.bytes_transferred = bytes;
-                        let _ = ack.send(Ok(()));
-                    }
-                    RunnerEvent::CommitPhase { phase, ack, .. } => {
-                        event_job.lock().unwrap().commit_phase = phase;
-                        let _ = ack.send(Ok(()));
-                    }
-                    RunnerEvent::ProgressReady { slot, .. } => {
-                        if let Some(progress) = slot.take_latest_and_release_wake() {
+        let acknowledger =
+            tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        RunnerEvent::Checking { ack, .. } => {
+                            event_job.lock().unwrap().state = TransferJobState::Checking;
+                            let _ = ack.send(Ok(()));
+                        }
+                        RunnerEvent::Fingerprinted {
+                            fingerprint,
+                            total_bytes,
+                            artifacts,
+                            ack,
+                            ..
+                        } => {
                             let mut job = event_job.lock().unwrap();
-                            job.bytes_transferred = progress.bytes;
-                            job.speed_bytes_per_second = progress.speed_bytes_per_second;
-                            job.eta_seconds = progress.eta_seconds;
+                            job.state = TransferJobState::Running;
+                            job.source_fingerprint = Some(fingerprint);
+                            job.total_bytes = total_bytes;
+                            job.artifacts = Some(artifacts);
+                            let _ = ack.send(Ok(()));
+                        }
+                        RunnerEvent::DurableCheckpoint { bytes, ack, .. } => {
+                            let mut job = event_job.lock().unwrap();
+                            job.durable_checkpoint = bytes;
+                            job.bytes_transferred = bytes;
+                            event_observations.lock().unwrap().checkpoints.push(bytes);
+                            let _ = ack.send(Ok(()));
+                        }
+                        RunnerEvent::CommitPhase {
+                            phase,
+                            backup_expected,
+                            ack,
+                            ..
+                        } => {
+                            let observed_job = {
+                                let mut job = event_job.lock().unwrap();
+                                job.commit_phase = phase;
+                                if let Some(backup_expected) = backup_expected {
+                                    job.commit_backup_expected = Some(backup_expected);
+                                }
+                                job.clone()
+                            };
+                            let inventory =
+                                match observe_live_artifacts(&session, &observed_job).await {
+                                    Ok(inventory) => inventory,
+                                    Err(error) => {
+                                        let _ = ack.send(Err(error));
+                                        continue;
+                                    }
+                                };
+                            event_observations.lock().unwrap().commits.push(
+                                LiveCommitObservation {
+                                    phase,
+                                    backup_expected,
+                                    inventory,
+                                },
+                            );
+                            let _ = ack.send(Ok(()));
+                        }
+                        RunnerEvent::ProgressReady { slot, .. } => {
+                            if let Some(progress) = slot.take_latest_and_release_wake() {
+                                let mut job = event_job.lock().unwrap();
+                                job.bytes_transferred = progress.bytes;
+                                job.speed_bytes_per_second =
+                                    progress.speed_bytes_per_second.unwrap_or(0);
+                                job.eta_seconds = progress.eta_seconds;
+                                event_observations
+                                    .lock()
+                                    .unwrap()
+                                    .progress_bytes
+                                    .push(progress.bytes);
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
         let (_control_tx, control_rx) = watch::channel(control_state);
         let result = runner
             .run(job, RunnerControl::new(control_rx), reporter)
@@ -2403,7 +2678,8 @@ mod tests {
             .await
             .map_err(|error| format!("live transfer event acknowledger failed: {error}"))?;
         let durable_job = durable_job.lock().unwrap().clone();
-        Ok((result, durable_job))
+        let observations = observations.lock().unwrap().clone();
+        Ok((result, durable_job, observations))
     }
 
     fn live_job(
@@ -2440,13 +2716,14 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: None,
+            speed_bytes_per_second: 0,
             eta_seconds: None,
             retry_attempt: 1,
             max_attempts: 3,
             conflict_policy: ConflictPolicy::Overwrite,
             artifacts: None,
             commit_phase: CommitPhase::None,
+            commit_backup_expected: None,
             created_at_ms: 1,
             updated_at_ms: 1,
             started_at_ms: Some(1),
@@ -2518,6 +2795,83 @@ mod tests {
         condition.then_some(()).ok_or_else(|| message.into())
     }
 
+    fn require_live_resume_and_overwrite_trace(
+        observation: &LiveRunObservation,
+        expected_offset: u64,
+        expected_total: u64,
+    ) -> Result<(), String> {
+        require_live(
+            observation.resume_offset == expected_offset,
+            format!(
+                "ordinary runner resumed from {} instead of durable checkpoint {expected_offset}",
+                observation.resume_offset
+            ),
+        )?;
+        require_live(
+            observation
+                .progress_bytes
+                .first()
+                .is_some_and(|bytes| *bytes > expected_offset),
+            format!(
+                "ordinary runner emitted no progress beyond resume offset {expected_offset}: {:?}",
+                observation.progress_bytes
+            ),
+        )?;
+        require_live(
+            observation.checkpoints.last() == Some(&expected_total),
+            format!(
+                "ordinary runner did not durably checkpoint total {expected_total}: {:?}",
+                observation.checkpoints
+            ),
+        )?;
+
+        let expected_commits = vec![
+            LiveCommitObservation {
+                phase: CommitPhase::Prepared,
+                backup_expected: Some(true),
+                inventory: ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: true,
+                    backup_exists: false,
+                },
+            },
+            LiveCommitObservation {
+                phase: CommitPhase::BackupMoved,
+                backup_expected: None,
+                inventory: ArtifactInventory {
+                    final_exists: false,
+                    partial_exists: true,
+                    backup_exists: true,
+                },
+            },
+            LiveCommitObservation {
+                phase: CommitPhase::PartialPromoted,
+                backup_expected: None,
+                inventory: ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+            },
+            LiveCommitObservation {
+                phase: CommitPhase::Complete,
+                backup_expected: None,
+                inventory: ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: false,
+                },
+            },
+        ];
+        require_live(
+            observation.commits == expected_commits,
+            format!(
+                "ordinary runner did not observe overwrite backup-to-promotion ordering: {:?}",
+                observation.commits
+            ),
+        )
+    }
+
     #[tokio::test]
     #[ignore = "requires an explicitly configured disposable OpenSSH server"]
     async fn live_sftp_queue_roundtrip() {
@@ -2573,9 +2927,11 @@ mod tests {
             .await
             .expect("connect to configured disposable OpenSSH server"),
         );
-        let session = open_sftp_session(ssh_handle.as_ref())
-            .await
-            .expect("open disposable SFTP session");
+        let session = Arc::new(
+            open_sftp_session(ssh_handle.as_ref())
+                .await
+                .expect("open disposable SFTP session"),
+        );
         let remote_directory = format!("/tmp/{live_id}");
         session
             .create_dir(remote_directory.clone())
@@ -2619,8 +2975,13 @@ mod tests {
                 local_upload_path.to_string_lossy().into_owned(),
                 upload_path.clone(),
             );
-            let (paused_result, mut upload) =
-                run_live_transfer(&runner, upload, RunnerControlState::Pause).await?;
+            let (paused_result, mut upload, _) = run_live_transfer(
+                &runner,
+                upload,
+                RunnerControlState::Pause,
+                Arc::clone(&session),
+            )
+            .await?;
             let RunnerResult::Paused { durable_checkpoint } = paused_result else {
                 return Err(format!("upload did not pause: {paused_result:?}"));
             };
@@ -2645,14 +3006,25 @@ mod tests {
             )?;
 
             upload.state = TransferJobState::Connecting;
-            let (upload_result, uploaded) =
-                run_live_transfer(&runner, upload, RunnerControlState::Run).await?;
+            let upload_resume_checkpoint = durable_checkpoint;
+            let (upload_result, uploaded, upload_observation) = run_live_transfer(
+                &runner,
+                upload,
+                RunnerControlState::Run,
+                Arc::clone(&session),
+            )
+            .await?;
             require_live(
                 matches!(
                     upload_result,
                     RunnerResult::Completed(CompletionResult::Transferred)
                 ),
                 format!("resumed upload did not complete: {upload_result:?}"),
+            )?;
+            require_live_resume_and_overwrite_trace(
+                &upload_observation,
+                upload_resume_checkpoint,
+                upload_bytes.len() as u64,
             )?;
             require_live(
                 read_live_remote(&session, &upload_path).await? == upload_bytes,
@@ -2700,8 +3072,13 @@ mod tests {
                 local_download_path.to_string_lossy().into_owned(),
                 remote_source_path.clone(),
             );
-            let (paused_result, mut download) =
-                run_live_transfer(&runner, download, RunnerControlState::Pause).await?;
+            let (paused_result, mut download, _) = run_live_transfer(
+                &runner,
+                download,
+                RunnerControlState::Pause,
+                Arc::clone(&session),
+            )
+            .await?;
             let RunnerResult::Paused { durable_checkpoint } = paused_result else {
                 return Err(format!("download did not pause: {paused_result:?}"));
             };
@@ -2738,14 +3115,25 @@ mod tests {
             )?;
 
             download.state = TransferJobState::Connecting;
-            let (download_result, _) =
-                run_live_transfer(&runner, download, RunnerControlState::Run).await?;
+            let download_resume_checkpoint = durable_checkpoint;
+            let (download_result, _, download_observation) = run_live_transfer(
+                &runner,
+                download,
+                RunnerControlState::Run,
+                Arc::clone(&session),
+            )
+            .await?;
             require_live(
                 matches!(
                     download_result,
                     RunnerResult::Completed(CompletionResult::Transferred)
                 ),
                 format!("resumed download did not complete: {download_result:?}"),
+            )?;
+            require_live_resume_and_overwrite_trace(
+                &download_observation,
+                download_resume_checkpoint,
+                download_bytes.len() as u64,
             )?;
             require_live(
                 tokio::fs::read(&local_download_path)
@@ -2777,8 +3165,13 @@ mod tests {
                 local_upload_path.to_string_lossy().into_owned(),
                 upload_path.clone(),
             );
-            let (second_upload_result, second_upload) =
-                run_live_transfer(&runner, second_upload, RunnerControlState::Run).await?;
+            let (second_upload_result, second_upload, _) = run_live_transfer(
+                &runner,
+                second_upload,
+                RunnerControlState::Run,
+                Arc::clone(&session),
+            )
+            .await?;
             require_live(
                 matches!(
                     second_upload_result,
@@ -2800,8 +3193,13 @@ mod tests {
                 local_download_path.to_string_lossy().into_owned(),
                 remote_source_path.clone(),
             );
-            let (second_download_result, second_download) =
-                run_live_transfer(&runner, second_download, RunnerControlState::Run).await?;
+            let (second_download_result, second_download, _) = run_live_transfer(
+                &runner,
+                second_download,
+                RunnerControlState::Run,
+                Arc::clone(&session),
+            )
+            .await?;
             require_live(
                 matches!(
                     second_download_result,
@@ -2901,6 +3299,7 @@ mod tests {
         job.durable_checkpoint = 4;
         job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
         job.commit_phase = CommitPhase::Prepared;
+        job.commit_backup_expected = Some(true);
 
         let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
 
@@ -3014,6 +3413,7 @@ mod tests {
             job.artifacts =
                 Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
             job.commit_phase = phase;
+            job.commit_backup_expected = (phase != CommitPhase::Complete).then_some(true);
 
             let (result, operations) =
                 run_fake(true, io, job, super::RunnerControlState::Run).await;
@@ -3039,6 +3439,271 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restarted_store_recovers_real_fresh_and_overwrite_artifacts_without_recopying() {
+        struct Case {
+            name: &'static str,
+            phase: CommitPhase,
+            backup_expected: bool,
+            final_bytes: Option<&'static [u8]>,
+            partial_bytes: Option<&'static [u8]>,
+            backup_bytes: Option<&'static [u8]>,
+        }
+
+        let cases = [
+            Case {
+                name: "fresh-prepared-before-promotion",
+                phase: CommitPhase::Prepared,
+                backup_expected: false,
+                final_bytes: None,
+                partial_bytes: Some(b"new"),
+                backup_bytes: None,
+            },
+            Case {
+                name: "fresh-prepared-after-promotion-before-phase-write",
+                phase: CommitPhase::Prepared,
+                backup_expected: false,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: None,
+            },
+            Case {
+                name: "fresh-backup-moved-before-promotion",
+                phase: CommitPhase::BackupMoved,
+                backup_expected: false,
+                final_bytes: None,
+                partial_bytes: Some(b"new"),
+                backup_bytes: None,
+            },
+            Case {
+                name: "fresh-backup-moved-after-promotion-before-phase-write",
+                phase: CommitPhase::BackupMoved,
+                backup_expected: false,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: None,
+            },
+            Case {
+                name: "fresh-partial-promoted",
+                phase: CommitPhase::PartialPromoted,
+                backup_expected: false,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: None,
+            },
+            Case {
+                name: "fresh-cleanup-pending",
+                phase: CommitPhase::CleanupPending,
+                backup_expected: false,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: None,
+            },
+            Case {
+                name: "fresh-complete",
+                phase: CommitPhase::Complete,
+                backup_expected: false,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: None,
+            },
+            Case {
+                name: "overwrite-prepared-before-backup",
+                phase: CommitPhase::Prepared,
+                backup_expected: true,
+                final_bytes: Some(b"old"),
+                partial_bytes: Some(b"new"),
+                backup_bytes: None,
+            },
+            Case {
+                name: "overwrite-prepared-after-backup-before-phase-write",
+                phase: CommitPhase::Prepared,
+                backup_expected: true,
+                final_bytes: None,
+                partial_bytes: Some(b"new"),
+                backup_bytes: Some(b"old"),
+            },
+            Case {
+                name: "overwrite-prepared-after-promotion-before-phase-write",
+                phase: CommitPhase::Prepared,
+                backup_expected: true,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: Some(b"old"),
+            },
+            Case {
+                name: "overwrite-backup-moved",
+                phase: CommitPhase::BackupMoved,
+                backup_expected: true,
+                final_bytes: None,
+                partial_bytes: Some(b"new"),
+                backup_bytes: Some(b"old"),
+            },
+            Case {
+                name: "overwrite-partial-promoted",
+                phase: CommitPhase::PartialPromoted,
+                backup_expected: true,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: Some(b"old"),
+            },
+            Case {
+                name: "overwrite-cleanup-pending",
+                phase: CommitPhase::CleanupPending,
+                backup_expected: true,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: Some(b"old"),
+            },
+            Case {
+                name: "overwrite-complete",
+                phase: CommitPhase::Complete,
+                backup_expected: true,
+                final_bytes: Some(b"new"),
+                partial_bytes: None,
+                backup_bytes: None,
+            },
+        ];
+
+        for case in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let store_path = directory.path().join("transfer-queue.json");
+            let final_path = directory.path().join("final.bin");
+            let mut job = test_job();
+            job.direction = TransferDirection::Download;
+            job.conflict_policy = ConflictPolicy::Overwrite;
+            job.local_path = final_path.to_string_lossy().into_owned();
+            job.remote_path = "/source.bin".into();
+            job.destination_key = format!("configured:server-a:{}", job.local_path);
+            job.state = TransferJobState::Paused;
+            job.source_fingerprint = Some(fingerprint(3, Some("source-v1")));
+            job.durable_checkpoint = 3;
+            job.bytes_transferred = 3;
+            job.total_bytes = 3;
+            let artifacts =
+                ManagedArtifacts::for_local_destination(job.id, final_path.as_path()).unwrap();
+            job.artifacts = Some(artifacts.clone());
+            job.commit_phase = case.phase;
+            job.commit_backup_expected = Some(case.backup_expected);
+
+            for (path, bytes) in [
+                (job.local_path.as_str(), case.final_bytes),
+                (artifacts.partial_path.as_str(), case.partial_bytes),
+                (artifacts.backup_path.as_str(), case.backup_bytes),
+            ] {
+                if let Some(bytes) = bytes {
+                    tokio::fs::write(path, bytes).await.unwrap();
+                }
+            }
+
+            let store = TransferStore::new(store_path.clone());
+            store
+                .save(&TransferQueueDocument {
+                    jobs: vec![job],
+                    ..TransferQueueDocument::default()
+                })
+                .unwrap();
+            drop(store);
+
+            // This load is the process-restart boundary: recovery receives the
+            // actual persisted v1 job, not the in-memory value saved above.
+            let restarted = TransferStore::new(store_path.clone());
+            let document = restarted.load().unwrap().into_document();
+            let restarted_job = document.jobs[0].clone();
+            drop(restarted);
+
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let reporter = RunnerReporter::new(restarted_job.id, Uuid::new_v4(), event_tx.clone());
+            drop(event_tx);
+            let persisted_path = store_path.clone();
+            let acknowledger = tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        RunnerEvent::CommitPhase {
+                            phase,
+                            backup_expected,
+                            ack,
+                            ..
+                        } => {
+                            let result = (|| -> Result<(), String> {
+                                let store = TransferStore::new(persisted_path.clone());
+                                let mut document = store
+                                    .load()
+                                    .map_err(|error| error.to_string())?
+                                    .into_document();
+                                let persisted_job = document
+                                    .jobs
+                                    .first_mut()
+                                    .ok_or_else(|| "restarted job disappeared".to_string())?;
+                                persisted_job.commit_phase = phase;
+                                if let Some(backup_expected) = backup_expected {
+                                    persisted_job.commit_backup_expected = Some(backup_expected);
+                                }
+                                store.save(&document).map_err(|error| error.to_string())
+                            })();
+                            let _ = ack.send(result);
+                        }
+                        other => panic!("unexpected recovery event: {other:?}"),
+                    }
+                }
+            });
+
+            let io = LocalRecoveryIo::default();
+            let result = recover_commit(&io, &(), &restarted_job, &artifacts, &reporter).await;
+            drop(reporter);
+            acknowledger.await.unwrap();
+
+            assert!(
+                matches!(
+                    result,
+                    RunnerResult::Completed(CompletionResult::Transferred)
+                ),
+                "case {} returned {result:?}",
+                case.name
+            );
+            assert_eq!(
+                io.open_source_calls.load(Ordering::SeqCst),
+                0,
+                "case {} recopied the source",
+                case.name
+            );
+            assert_eq!(
+                tokio::fs::read(&final_path).await.unwrap(),
+                b"new",
+                "case {} did not preserve the promoted bytes",
+                case.name
+            );
+            assert!(
+                !tokio::fs::try_exists(&artifacts.partial_path)
+                    .await
+                    .unwrap(),
+                "case {} retained its partial",
+                case.name
+            );
+            assert!(
+                !tokio::fs::try_exists(&artifacts.backup_path).await.unwrap(),
+                "case {} retained its backup",
+                case.name
+            );
+            let completed = TransferStore::new(store_path)
+                .load()
+                .unwrap()
+                .into_document();
+            assert_eq!(
+                completed.jobs[0].commit_phase,
+                CommitPhase::Complete,
+                "case {} did not persist completion",
+                case.name
+            );
+            assert_eq!(
+                completed.jobs[0].commit_backup_expected,
+                Some(case.backup_expected),
+                "case {} lost commit provenance",
+                case.name
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn prepared_ask_recovery_preserves_a_late_final_and_owned_partial() {
         let log = Arc::new(StdMutex::new(Vec::new()));
         let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
@@ -3055,14 +3720,13 @@ mod tests {
         job.durable_checkpoint = 4;
         job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
         job.commit_phase = CommitPhase::Prepared;
+        job.commit_backup_expected = Some(false);
 
         let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
 
         assert!(matches!(
             result,
-            RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
-                resume_available: true
-            })
+            RunnerResult::NeedsAttention(AttentionReason::CommitRecovery { .. })
         ));
         assert_eq!(
             inspected_io.artifact_identities(),
@@ -3093,6 +3757,7 @@ mod tests {
         job.durable_checkpoint = 4;
         job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
         job.commit_phase = CommitPhase::BackupMoved;
+        job.commit_backup_expected = Some(false);
         job.conflict_policy = ConflictPolicy::Overwrite;
 
         let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
@@ -3118,6 +3783,39 @@ mod tests {
             .position(|entry| entry == "promote_partial")
             .unwrap();
         assert!(moved < acknowledged && acknowledged < promoted);
+    }
+
+    #[tokio::test]
+    async fn overwrite_recovery_never_recreates_a_missing_authoritative_backup() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(4),
+        );
+        let mut job = test_job();
+        job.source_fingerprint = Some(fingerprint(4, Some("v1")));
+        job.durable_checkpoint = 4;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+        job.commit_phase = CommitPhase::BackupMoved;
+        job.commit_backup_expected = Some(true);
+        job.conflict_policy = ConflictPolicy::Overwrite;
+
+        let (result, operations) = run_fake(true, io, job, RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::CommitRecovery { .. })
+        ));
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "move_final_to_backup")
+        );
+        assert!(!operations.iter().any(|entry| entry == "promote_partial"));
     }
 
     #[tokio::test]
@@ -3905,6 +4603,7 @@ mod tests {
     async fn inactive_cancel_preserves_a_destination_for_each_recoverable_commit_layout() {
         struct Case {
             phase: CommitPhase,
+            backup_expected: Option<bool>,
             inventory: ArtifactInventory,
             expected_identities: (
                 Option<&'static str>,
@@ -3917,6 +4616,7 @@ mod tests {
         let cases = [
             Case {
                 phase: CommitPhase::None,
+                backup_expected: None,
                 inventory: ArtifactInventory {
                     final_exists: true,
                     partial_exists: true,
@@ -3927,6 +4627,7 @@ mod tests {
             },
             Case {
                 phase: CommitPhase::Prepared,
+                backup_expected: Some(true),
                 inventory: ArtifactInventory {
                     final_exists: true,
                     partial_exists: true,
@@ -3937,6 +4638,7 @@ mod tests {
             },
             Case {
                 phase: CommitPhase::Prepared,
+                backup_expected: Some(false),
                 inventory: ArtifactInventory {
                     final_exists: false,
                     partial_exists: true,
@@ -3947,6 +4649,7 @@ mod tests {
             },
             Case {
                 phase: CommitPhase::BackupMoved,
+                backup_expected: Some(true),
                 inventory: ArtifactInventory {
                     final_exists: false,
                     partial_exists: false,
@@ -3957,6 +4660,7 @@ mod tests {
             },
             Case {
                 phase: CommitPhase::PartialPromoted,
+                backup_expected: Some(true),
                 inventory: ArtifactInventory {
                     final_exists: true,
                     partial_exists: false,
@@ -3967,6 +4671,7 @@ mod tests {
             },
             Case {
                 phase: CommitPhase::PartialPromoted,
+                backup_expected: Some(false),
                 inventory: ArtifactInventory {
                     final_exists: true,
                     partial_exists: false,
@@ -3992,6 +4697,7 @@ mod tests {
             job.artifacts =
                 Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
             job.commit_phase = case.phase;
+            job.commit_backup_expected = case.backup_expected;
 
             let (result, operations) =
                 run_fake(true, io, job, super::RunnerControlState::Cancel).await;

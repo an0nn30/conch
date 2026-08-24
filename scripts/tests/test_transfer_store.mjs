@@ -168,6 +168,29 @@ function loadRuntime(options = {}) {
   assert.deepEqual(plain(store.getSnapshot().jobs), [job('fresh', 'queued')]);
 }
 
+// Schema v1 persists transfer speed as a number for backward compatibility.
+// The frontend projection alone maps the numeric unknown sentinel to null.
+{
+  const store = loadStore();
+  store.hydrate(snapshot(1, [{
+    ...job('idle', 'queued'),
+    speedBytesPerSecond: 0,
+    commitBackupExpected: true,
+  }]));
+  assert.equal(store.getSnapshot().jobs[0].speedBytesPerSecond, null);
+  assert.equal('commitBackupExpected' in store.getSnapshot().jobs[0], false);
+
+  store.applyJobEvent(delta(2, {
+    upserts: [{ ...job('idle', 'running'), speedBytesPerSecond: 768 }],
+  }));
+  assert.equal(store.getSnapshot().jobs[0].speedBytesPerSecond, 768);
+
+  store.applyJobEvent(delta(3, {
+    upserts: [{ ...job('idle', 'paused'), speedBytesPerSecond: 0 }],
+  }));
+  assert.equal(store.getSnapshot().jobs[0].speedBytesPerSecond, null);
+}
+
 // A revision is one complete delta. Applying only its first row, omitting a
 // compaction upsert, or forgetting queue/settings fields would leave the UI at
 // a state that never existed in the backend.

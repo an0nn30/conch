@@ -385,7 +385,7 @@ pub struct TransferJob {
     #[ts(as = "f64")]
     pub total_bytes: u64,
     #[ts(as = "Option<f64>")]
-    pub speed_bytes_per_second: Option<u64>,
+    pub speed_bytes_per_second: u64,
     #[ts(as = "Option<f64>")]
     pub eta_seconds: Option<u64>,
     pub retry_attempt: u8,
@@ -393,6 +393,9 @@ pub struct TransferJob {
     pub conflict_policy: ConflictPolicy,
     pub artifacts: Option<ManagedArtifacts>,
     pub commit_phase: CommitPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub commit_backup_expected: Option<bool>,
     #[ts(as = "f64")]
     pub created_at_ms: u64,
     #[ts(as = "f64")]
@@ -525,6 +528,8 @@ impl From<&TransferQueueDocument> for TransferQueueSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
     use uuid::Uuid;
 
@@ -551,13 +556,14 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: None,
+            speed_bytes_per_second: 0,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
             conflict_policy: ConflictPolicy::Ask,
             artifacts: None,
             commit_phase: CommitPhase::None,
+            commit_backup_expected: None,
             created_at_ms: 10,
             updated_at_ms: 10,
             started_at_ms: None,
@@ -589,8 +595,8 @@ mod tests {
 
         assert!(json.contains("\"state\":{\"kind\":\"needsConnection\""));
         assert!(
-            json.contains("\"speedBytesPerSecond\":null"),
-            "an unavailable transfer rate must remain unknown, not serialize as zero: {json}"
+            json.contains("\"speedBytesPerSecond\":0"),
+            "schema v1 must retain its numeric persisted transfer-rate field: {json}"
         );
         for forbidden in [
             "password",
@@ -604,6 +610,32 @@ mod tests {
                 "serialized job leaked field {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn schema_v1_keeps_numeric_speed_and_accepts_jobs_without_commit_provenance() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldV1JobReader {
+            speed_bytes_per_second: u64,
+        }
+
+        let mut old_v1 = serde_json::to_value(sample_job(TransferJobState::Queued)).unwrap();
+        let object = old_v1.as_object_mut().unwrap();
+        object.insert("speedBytesPerSecond".into(), 0.into());
+        object.remove("commitBackupExpected");
+
+        let mut job: TransferJob = serde_json::from_value(old_v1).unwrap();
+        assert_eq!(job.speed_bytes_per_second, 0);
+        assert_eq!(job.commit_backup_expected, None);
+
+        job.commit_backup_expected = Some(true);
+        let written_v1 = serde_json::to_value(&job).unwrap();
+        assert_eq!(written_v1["commitBackupExpected"], true);
+        let old_reader: OldV1JobReader = serde_json::from_value(written_v1.clone()).unwrap();
+        assert_eq!(old_reader.speed_bytes_per_second, 0);
+        let round_tripped: TransferJob = serde_json::from_value(written_v1).unwrap();
+        assert_eq!(round_tripped.commit_backup_expected, Some(true));
     }
 
     #[test]

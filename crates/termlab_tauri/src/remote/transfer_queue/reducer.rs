@@ -89,7 +89,7 @@ pub fn reduce_job(
             next.source_fingerprint = Some(fingerprint);
             next.total_bytes = total_bytes;
             next.bytes_transferred = next.durable_checkpoint;
-            next.speed_bytes_per_second = None;
+            next.speed_bytes_per_second = 0;
             next.eta_seconds = None;
             next.artifacts = Some(artifacts);
         }
@@ -102,7 +102,7 @@ pub fn reduce_job(
             },
         ) => {
             next.bytes_transferred = bytes;
-            next.speed_bytes_per_second = speed_bytes_per_second;
+            next.speed_bytes_per_second = speed_bytes_per_second.unwrap_or(0);
             next.eta_seconds = eta_seconds;
         }
         (TransferJobState::Running, JobEvent::Checkpoint { bytes }) => {
@@ -264,13 +264,14 @@ fn reset_attempt(job: &mut TransferJob) {
     job.retry_attempt = 0;
     job.artifacts = None;
     job.commit_phase = CommitPhase::None;
+    job.commit_backup_expected = None;
     job.started_at_ms = None;
     job.finished_at_ms = None;
     clear_live_progress(job);
 }
 
 fn clear_live_progress(job: &mut TransferJob) {
-    job.speed_bytes_per_second = None;
+    job.speed_bytes_per_second = 0;
     job.eta_seconds = None;
 }
 
@@ -356,13 +357,14 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: None,
+            speed_bytes_per_second: 0,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
             conflict_policy: ConflictPolicy::Ask,
             artifacts: None,
             commit_phase: CommitPhase::None,
+            commit_backup_expected: None,
             created_at_ms: 10,
             updated_at_ms: 10,
             started_at_ms: None,

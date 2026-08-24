@@ -8,6 +8,24 @@
     return JSON.parse(JSON.stringify(value));
   }
 
+  // Queue schema v1 persists its original numeric speed field. Keep the
+  // unknown sentinel at the frontend ingress boundary so view consumers get
+  // the nullable projection promised by the generated interface.
+  function projectJob(job) {
+    const projected = clone(job);
+    if (projected && projected.speedBytesPerSecond === 0) {
+      projected.speedBytesPerSecond = null;
+    }
+    if (projected) delete projected.commitBackupExpected;
+    return projected;
+  }
+
+  function projectSnapshot(snapshot) {
+    const projected = clone(snapshot);
+    projected.jobs = Array.isArray(projected.jobs) ? projected.jobs.map(projectJob) : [];
+    return projected;
+  }
+
   function emptySnapshot() {
     return {
       revision: 0,
@@ -32,7 +50,7 @@
     let state = emptySnapshot();
 
     function hydrate(snapshot) {
-      state = clone(snapshot);
+      state = projectSnapshot(snapshot);
     }
 
     function getSnapshot() {
@@ -47,8 +65,8 @@
       const jobs = state.jobs.filter((job) => !removed.has(job.id));
       for (const incoming of Array.isArray(event.upserts) ? event.upserts : []) {
         const index = jobs.findIndex((job) => job.id === incoming.id);
-        if (index === -1) jobs.push(clone(incoming));
-        else jobs[index] = clone(incoming);
+        if (index === -1) jobs.push(projectJob(incoming));
+        else jobs[index] = projectJob(incoming);
       }
 
       state = {

@@ -505,9 +505,12 @@ impl QueueActor {
                 job_id,
                 lease_id,
                 phase,
+                backup_expected,
                 ack,
             } => {
-                let result = self.commit_phase(job_id, lease_id, phase).await;
+                let result = self
+                    .commit_phase(job_id, lease_id, phase, backup_expected)
+                    .await;
                 let _ = ack.send(result);
                 true
             }
@@ -864,6 +867,7 @@ impl QueueActor {
         job_id: Uuid,
         lease_id: Uuid,
         phase: CommitPhase,
+        backup_expected: Option<bool>,
     ) -> Result<(), String> {
         self.active_task(job_id, lease_id)?;
         let critical = matches!(
@@ -897,6 +901,9 @@ impl QueueActor {
             .find(|job| job.id == job_id)
             .ok_or_else(|| format!("transfer job {job_id} was not found"))?;
         job.commit_phase = phase;
+        if let Some(backup_expected) = backup_expected {
+            job.commit_backup_expected = Some(backup_expected);
+        }
         job.updated_at_ms = self.clock.now_ms();
         if let Err(error) = self.commit(next).await {
             if let Some((was_critical, deferred, visible)) = control_rollback {
@@ -975,7 +982,7 @@ impl QueueActor {
                 job.state = TransferJobState::Completed { result: *result };
                 job.commit_phase = CommitPhase::Complete;
                 job.finished_at_ms = Some(now_ms);
-                job.speed_bytes_per_second = None;
+                job.speed_bytes_per_second = 0;
                 job.eta_seconds = None;
                 job.updated_at_ms = now_ms;
                 Ok(())
@@ -1170,13 +1177,14 @@ impl QueueActor {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: None,
+            speed_bytes_per_second: 0,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
             conflict_policy,
             artifacts: None,
             commit_phase: CommitPhase::None,
+            commit_backup_expected: None,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             started_at_ms: None,
@@ -1929,13 +1937,14 @@ mod tests {
             durable_checkpoint: 0,
             bytes_transferred: 0,
             total_bytes: 0,
-            speed_bytes_per_second: None,
+            speed_bytes_per_second: 0,
             eta_seconds: None,
             retry_attempt: 0,
             max_attempts: 3,
             conflict_policy: ConflictPolicy::Ask,
             artifacts: None,
             commit_phase: CommitPhase::None,
+            commit_backup_expected: None,
             created_at_ms: 10,
             updated_at_ms: 10,
             started_at_ms: None,
@@ -2460,7 +2469,11 @@ mod tests {
         wait_for_starts(&runner, 1).await;
         let reporter = runner.reporter(id);
 
-        reporter.commit_phase(CommitPhase::Prepared).await.unwrap();
+        reporter.commit_prepared(true).await.unwrap();
+        assert_eq!(
+            harness.handle.snapshot().jobs[0].commit_backup_expected,
+            Some(true)
+        );
         assert!(harness.handle.cancel(id).await.unwrap());
         assert_eq!(runner.control_state(id), RunnerControlState::Run);
         assert!(matches!(
