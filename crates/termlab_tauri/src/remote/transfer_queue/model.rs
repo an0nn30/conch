@@ -42,6 +42,55 @@ pub enum TransferDirection {
     Download,
 }
 
+/// Build the scheduler's serialization key for the destination of a transfer.
+///
+/// The connection scope prevents independent endpoints from blocking each
+/// other, while lexical path normalization makes equivalent paths contend for
+/// the same destination slot without requiring the destination to exist yet.
+pub fn build_destination_key(
+    host_key: &str,
+    direction: &TransferDirection,
+    local_path: &str,
+    remote_path: &str,
+) -> String {
+    let destination = match direction {
+        TransferDirection::Upload => remote_path,
+        TransferDirection::Download => local_path,
+    };
+    format!("{host_key}:{}", normalize_destination_path(destination))
+}
+
+fn normalize_destination_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut components: Vec<&str> = Vec::new();
+
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => match components.last() {
+                Some(previous) if *previous != ".." => {
+                    components.pop();
+                }
+                _ if !absolute => components.push(component),
+                _ => {}
+            },
+            _ => components.push(component),
+        }
+    }
+
+    if absolute {
+        if components.is_empty() {
+            "/".into()
+        } else {
+            format!("/{}", components.join("/"))
+        }
+    } else if components.is_empty() {
+        ".".into()
+    } else {
+        components.join("/")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
     rename_all = "camelCase",

@@ -4,7 +4,7 @@ use termlab_remote::transfer::SourceFingerprint;
 
 use super::model::{
     AttentionReason, CommitPhase, CompletionResult, ConflictResolution, ManagedArtifacts,
-    TransferDirection, TransferJob, TransferJobState,
+    TransferDirection, TransferJob, TransferJobState, build_destination_key,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,7 +162,9 @@ pub fn reduce_job(
             next.finished_at_ms = None;
             clear_live_progress(&mut next);
         }
-        (TransferJobState::NeedsAttention { .. }, JobEvent::Resolve(resolution)) => {
+        (TransferJobState::NeedsAttention { reason }, JobEvent::Resolve(resolution))
+            if resolution_is_legal(reason, &resolution) =>
+        {
             apply_resolution(&mut next, resolution, now_ms);
         }
         (TransferJobState::NeedsAttention { .. }, JobEvent::Restart) => {
@@ -196,6 +198,23 @@ pub fn reduce_job(
     Ok(next)
 }
 
+fn resolution_is_legal(reason: &AttentionReason, resolution: &ConflictResolution) -> bool {
+    match (reason, resolution) {
+        (
+            AttentionReason::DestinationConflict {
+                resume_available: true,
+            },
+            ConflictResolution::Resume,
+        )
+        | (
+            AttentionReason::DestinationConflict { .. },
+            ConflictResolution::Overwrite | ConflictResolution::Rename { .. },
+        )
+        | (_, ConflictResolution::Restart | ConflictResolution::Skip) => true,
+        _ => false,
+    }
+}
+
 fn apply_resolution(job: &mut TransferJob, resolution: ConflictResolution, now_ms: u64) {
     match resolution {
         ConflictResolution::Resume => job.state = TransferJobState::Queued,
@@ -205,7 +224,12 @@ fn apply_resolution(job: &mut TransferJob, resolution: ConflictResolution, now_m
                 TransferDirection::Upload => job.remote_path = destination.clone(),
                 TransferDirection::Download => job.local_path = destination.clone(),
             }
-            job.destination_key = destination;
+            job.destination_key = build_destination_key(
+                &job.host_key,
+                &job.direction,
+                &job.local_path,
+                &job.remote_path,
+            );
             reset_attempt(job);
         }
         ConflictResolution::Skip => {
@@ -470,6 +494,75 @@ mod tests {
         assert_eq!(restarted.source_fingerprint, None);
         assert_eq!(restarted.artifacts, None);
         assert_eq!(restarted.commit_phase, CommitPhase::None);
+    }
+
+    fn assert_resume_is_rejected(reason: AttentionReason) {
+        let mut job = sample_job(TransferJobState::NeedsAttention { reason });
+        job.durable_checkpoint = 4_096;
+        job.source_fingerprint = Some(fingerprint("unixNs:12"));
+        job.artifacts = Some(artifacts());
+
+        let result = reduce_job(&job, JobEvent::Resolve(ConflictResolution::Resume), 62);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn source_changed_cannot_resume_old_attempt_identity() {
+        assert_resume_is_rejected(source_changed());
+    }
+
+    #[test]
+    fn source_that_cannot_be_verified_cannot_resume() {
+        assert_resume_is_rejected(AttentionReason::SourceCannotResume);
+    }
+
+    #[test]
+    fn missing_partial_cannot_resume() {
+        assert_resume_is_rejected(AttentionReason::MissingPartial);
+    }
+
+    #[test]
+    fn rename_uses_the_same_scoped_key_as_an_equivalent_new_job() {
+        let conflict = sample_job(TransferJobState::NeedsAttention {
+            reason: AttentionReason::DestinationConflict {
+                resume_available: false,
+            },
+        });
+        let renamed = reduce_job(
+            &conflict,
+            JobEvent::Resolve(ConflictResolution::Rename {
+                destination: "/srv/releases/.././report.csv".into(),
+            }),
+            63,
+        )
+        .unwrap();
+        let mut equivalent_new_job = sample_job(TransferJobState::Queued);
+        equivalent_new_job.remote_path = "/srv/report.csv".into();
+        equivalent_new_job.destination_key = build_destination_key(
+            &equivalent_new_job.host_key,
+            &equivalent_new_job.direction,
+            &equivalent_new_job.local_path,
+            &equivalent_new_job.remote_path,
+        );
+
+        assert_eq!(
+            renamed.destination_key, equivalent_new_job.destination_key,
+            "equivalent destinations must collide in scheduler serialization"
+        );
+        assert_eq!(
+            renamed.destination_key,
+            "configured:server-1:/srv/report.csv"
+        );
+
+        let mut other_endpoint_job = equivalent_new_job;
+        other_endpoint_job.host_key = "configured:server-2".into();
+        other_endpoint_job.destination_key = build_destination_key(
+            &other_endpoint_job.host_key,
+            &other_endpoint_job.direction,
+            &other_endpoint_job.local_path,
+            &other_endpoint_job.remote_path,
+        );
+        assert_ne!(renamed.destination_key, other_endpoint_job.destination_key);
     }
 
     #[test]
