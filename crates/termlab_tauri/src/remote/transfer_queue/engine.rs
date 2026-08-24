@@ -19,12 +19,14 @@ use super::{
     },
     reducer::{JobEvent, reduce_job},
     runner::{
-        QueueClock, RunnerControl, RunnerControlState, RunnerReporter, RunnerResult,
-        SharedTransferJobRunner, SystemQueueClock, TransferJobRunner,
+        QueueClock, RunnerControl, RunnerControlState, RunnerProgress, RunnerReporter,
+        RunnerResult, SharedTransferJobRunner, SystemQueueClock, TransferJobRunner,
     },
     scheduler::{ActiveLease, FailureClass, retry_delay_ms, select_runnable_jobs_from_document},
     store::{TransferStore, recover_for_startup},
 };
+
+const TERMINAL_PERSISTENCE_RETRY_DELAY_MS: u64 = 250;
 
 pub trait QueueStore: Send + Sync {
     fn load(&self) -> Result<TransferQueueDocument, String>;
@@ -199,6 +201,7 @@ pub struct QueueActor {
     internal_rx: mpsc::UnboundedReceiver<InternalEvent>,
     active: HashMap<Uuid, ActiveTask>,
     pending_progress: HashMap<Uuid, PendingProgress>,
+    persistence_fault: bool,
     snapshot: Arc<RwLock<TransferQueueSnapshot>>,
 }
 
@@ -208,6 +211,8 @@ struct ActiveTask {
     control_tx: watch::Sender<RunnerControlState>,
     commit_critical: bool,
     deferred_control: Option<RunnerControlState>,
+    pending_result: Option<RunnerResult>,
+    terminal_retry_scheduled: bool,
 }
 
 struct PendingProgress {
@@ -233,6 +238,10 @@ enum InternalEvent {
         job_id: Uuid,
         lease_id: Uuid,
         deadline_ms: u64,
+    },
+    TerminalPersistenceWake {
+        job_id: Uuid,
+        lease_id: Uuid,
     },
 }
 
@@ -288,6 +297,7 @@ impl QueueActor {
             internal_rx,
             active: HashMap::new(),
             pending_progress: HashMap::new(),
+            persistence_fault: false,
             snapshot: snapshot.clone(),
         };
         tokio::spawn(actor.run());
@@ -300,23 +310,30 @@ impl QueueActor {
     async fn run(mut self) {
         self.schedule_restored_retry_wakes();
         loop {
-            tokio::select! {
+            let should_dispatch = tokio::select! {
                 command = self.command_rx.recv() => {
                     let Some(command) = command else { break; };
                     self.handle_command(command).await;
+                    true
                 }
                 event = self.runner_event_rx.recv() => {
                     if let Some(event) = event {
-                        self.handle_runner_event(event).await;
+                        self.handle_runner_event(event).await
+                    } else {
+                        false
                     }
                 }
                 event = self.internal_rx.recv() => {
                     if let Some(event) = event {
-                        self.handle_internal_event(event).await;
+                        self.handle_internal_event(event).await
+                    } else {
+                        false
                     }
                 }
+            };
+            if should_dispatch {
+                self.dispatch_runnable().await;
             }
-            self.dispatch_runnable().await;
         }
     }
 
@@ -381,7 +398,7 @@ impl QueueActor {
         }
     }
 
-    async fn handle_runner_event(&mut self, event: RunnerEvent) {
+    async fn handle_runner_event(&mut self, event: RunnerEvent) -> bool {
         match event {
             RunnerEvent::Fingerprinted {
                 job_id,
@@ -395,6 +412,7 @@ impl QueueActor {
                     .fingerprinted(job_id, lease_id, fingerprint, total_bytes, artifacts)
                     .await;
                 let _ = ack.send(result);
+                true
             }
             RunnerEvent::DurableCheckpoint {
                 job_id,
@@ -404,6 +422,7 @@ impl QueueActor {
             } => {
                 let result = self.durable_checkpoint(job_id, lease_id, bytes).await;
                 let _ = ack.send(result);
+                true
             }
             RunnerEvent::CommitPhase {
                 job_id,
@@ -413,18 +432,22 @@ impl QueueActor {
             } => {
                 let result = self.commit_phase(job_id, lease_id, phase).await;
                 let _ = ack.send(result);
+                true
             }
-            RunnerEvent::Progress {
+            RunnerEvent::ProgressReady {
                 job_id,
                 lease_id,
-                bytes,
-                speed_bytes_per_second,
-                eta_seconds,
-            } => self.record_progress(job_id, lease_id, bytes, speed_bytes_per_second, eta_seconds),
+                slot,
+            } => {
+                if let Some(progress) = slot.take_latest_and_release_wake() {
+                    self.record_progress(job_id, lease_id, progress);
+                }
+                false
+            }
         }
     }
 
-    async fn handle_internal_event(&mut self, event: InternalEvent) {
+    async fn handle_internal_event(&mut self, event: InternalEvent) -> bool {
         match event {
             InternalEvent::RunnerFinished {
                 job_id,
@@ -432,6 +455,7 @@ impl QueueActor {
                 result,
             } => {
                 let _ = self.runner_finished(job_id, lease_id, result).await;
+                true
             }
             InternalEvent::RetryWake {
                 job_id,
@@ -448,6 +472,7 @@ impl QueueActor {
                             } if current_attempt == attempt && next_retry_at_ms == deadline_ms
                         )
                 });
+                true
             }
             InternalEvent::ProgressWake {
                 job_id,
@@ -455,6 +480,20 @@ impl QueueActor {
                 deadline_ms,
             } => {
                 let _ = self.flush_progress(job_id, lease_id, deadline_ms).await;
+                false
+            }
+            InternalEvent::TerminalPersistenceWake { job_id, lease_id } => {
+                let retry = self.active.get_mut(&job_id).is_some_and(|task| {
+                    if task.lease_id != lease_id {
+                        return false;
+                    }
+                    task.terminal_retry_scheduled = false;
+                    task.pending_result.is_some()
+                });
+                if retry {
+                    let _ = self.persist_pending_runner_result(job_id, lease_id).await;
+                }
+                true
             }
         }
     }
@@ -484,14 +523,7 @@ impl QueueActor {
         });
     }
 
-    fn record_progress(
-        &mut self,
-        job_id: Uuid,
-        lease_id: Uuid,
-        bytes: u64,
-        speed_bytes_per_second: u64,
-        eta_seconds: Option<u64>,
-    ) {
+    fn record_progress(&mut self, job_id: Uuid, lease_id: Uuid, progress: RunnerProgress) {
         if self.active_task(job_id, lease_id).is_err() {
             return;
         }
@@ -505,9 +537,9 @@ impl QueueActor {
             job_id,
             PendingProgress {
                 lease_id,
-                bytes,
-                speed_bytes_per_second,
-                eta_seconds,
+                bytes: progress.bytes,
+                speed_bytes_per_second: progress.speed_bytes_per_second,
+                eta_seconds: progress.eta_seconds,
                 deadline_ms,
             },
         );
@@ -554,7 +586,7 @@ impl QueueActor {
     }
 
     async fn dispatch_runnable(&mut self) {
-        if self.runner.is_none() {
+        if self.runner.is_none() || self.persistence_fault {
             return;
         }
         let leases: Vec<_> = self
@@ -616,6 +648,8 @@ impl QueueActor {
                 control_tx,
                 commit_critical: false,
                 deferred_control: None,
+                pending_result: None,
+                terminal_retry_scheduled: false,
             },
         );
 
@@ -696,6 +730,30 @@ impl QueueActor {
         phase: CommitPhase,
     ) -> Result<(), String> {
         self.active_task(job_id, lease_id)?;
+        let critical = matches!(
+            phase,
+            CommitPhase::Prepared
+                | CommitPhase::BackupMoved
+                | CommitPhase::PartialPromoted
+                | CommitPhase::CleanupPending
+        );
+        let control_rollback = if critical {
+            let task = self
+                .active
+                .get_mut(&job_id)
+                .expect("validated active task exists");
+            let visible = *task.control_tx.borrow();
+            let previous = (task.commit_critical, task.deferred_control, visible);
+            let deferred = task.deferred_control.unwrap_or(RunnerControlState::Run);
+            let pending = strongest_control(deferred, visible);
+            task.deferred_control = (pending != RunnerControlState::Run).then_some(pending);
+            task.control_tx.send_replace(RunnerControlState::Run);
+            task.commit_critical = true;
+            Some(previous)
+        } else {
+            None
+        };
+
         let mut next = self.document.clone();
         let job = next
             .jobs
@@ -704,15 +762,19 @@ impl QueueActor {
             .ok_or_else(|| format!("transfer job {job_id} was not found"))?;
         job.commit_phase = phase;
         job.updated_at_ms = self.clock.now_ms();
-        self.commit(next).await?;
+        if let Err(error) = self.commit(next).await {
+            if let Some((was_critical, deferred, visible)) = control_rollback {
+                let task = self
+                    .active
+                    .get_mut(&job_id)
+                    .expect("active task remains while commit persistence fails");
+                task.commit_critical = was_critical;
+                task.deferred_control = deferred;
+                task.control_tx.send_replace(visible);
+            }
+            return Err(error);
+        }
 
-        let critical = matches!(
-            phase,
-            CommitPhase::Prepared
-                | CommitPhase::BackupMoved
-                | CommitPhase::PartialPromoted
-                | CommitPhase::CleanupPending
-        );
         if let Some(task) = self.active.get_mut(&job_id) {
             task.commit_critical = critical;
             if !critical {
@@ -731,6 +793,30 @@ impl QueueActor {
         result: RunnerResult,
     ) -> Result<(), String> {
         self.active_task(job_id, lease_id)?;
+        let task = self
+            .active
+            .get_mut(&job_id)
+            .expect("validated active task exists");
+        if task.pending_result.is_some() {
+            return Err(format!(
+                "transfer job {job_id} already has a pending runner result"
+            ));
+        }
+        task.pending_result = Some(result);
+        self.persist_pending_runner_result(job_id, lease_id).await
+    }
+
+    async fn persist_pending_runner_result(
+        &mut self,
+        job_id: Uuid,
+        lease_id: Uuid,
+    ) -> Result<(), String> {
+        self.active_task(job_id, lease_id)?;
+        let result = self
+            .active
+            .get(&job_id)
+            .and_then(|task| task.pending_result.clone())
+            .ok_or_else(|| format!("transfer job {job_id} has no pending runner result"))?;
         let now_ms = self.clock.now_ms();
         let mut next = self.document.clone();
         let job = next
@@ -739,9 +825,9 @@ impl QueueActor {
             .find(|job| job.id == job_id)
             .ok_or_else(|| format!("transfer job {job_id} was not found"))?;
 
-        match result {
+        match &result {
             RunnerResult::Completed(result) => {
-                job.state = TransferJobState::Completed { result };
+                job.state = TransferJobState::Completed { result: *result };
                 job.commit_phase = CommitPhase::Complete;
                 job.finished_at_ms = Some(now_ms);
                 job.speed_bytes_per_second = 0;
@@ -749,26 +835,26 @@ impl QueueActor {
                 job.updated_at_ms = now_ms;
             }
             RunnerResult::Paused { durable_checkpoint } => {
-                job.durable_checkpoint = durable_checkpoint;
-                job.bytes_transferred = job.bytes_transferred.max(durable_checkpoint);
+                job.durable_checkpoint = *durable_checkpoint;
+                job.bytes_transferred = job.bytes_transferred.max(*durable_checkpoint);
                 *job =
                     reduce_job(job, JobEvent::Pause, now_ms).map_err(|error| error.to_string())?;
             }
             RunnerResult::Cancelled { cleanup_error } => {
-                *job = reduce_job(job, JobEvent::Cancel(cleanup_error), now_ms)
+                *job = reduce_job(job, JobEvent::Cancel(cleanup_error.clone()), now_ms)
                     .map_err(|error| error.to_string())?;
             }
             RunnerResult::NeedsConnection(message) => {
-                *job = reduce_job(job, JobEvent::NeedsConnection(message), now_ms)
+                *job = reduce_job(job, JobEvent::NeedsConnection(message.clone()), now_ms)
                     .map_err(|error| error.to_string())?;
             }
             RunnerResult::NeedsAttention(reason) => {
-                *job = reduce_job(job, JobEvent::NeedsAttention(reason), now_ms)
+                *job = reduce_job(job, JobEvent::NeedsAttention(reason.clone()), now_ms)
                     .map_err(|error| error.to_string())?;
             }
             RunnerResult::Failed { class, message } => {
                 let attempt = job.retry_attempt.max(1);
-                if class == FailureClass::Transient && attempt < job.max_attempts.min(3) {
+                if *class == FailureClass::Transient && attempt < job.max_attempts.min(3) {
                     let next_attempt = attempt + 1;
                     let delay = retry_delay_ms(next_attempt)
                         .ok_or_else(|| format!("missing retry delay for attempt {next_attempt}"))?;
@@ -782,15 +868,23 @@ impl QueueActor {
                     )
                     .map_err(|error| error.to_string())?;
                 } else {
-                    *job = reduce_job(job, JobEvent::Fail(message), now_ms)
+                    *job = reduce_job(job, JobEvent::Fail(message.clone()), now_ms)
                         .map_err(|error| error.to_string())?;
                 }
             }
         }
 
-        self.commit(next).await?;
+        if let Err(error) = self.commit(next).await {
+            self.persistence_fault = true;
+            self.schedule_terminal_persistence_retry(job_id, lease_id);
+            return Err(error);
+        }
         self.active.remove(&job_id);
         self.pending_progress.remove(&job_id);
+        self.persistence_fault = self
+            .active
+            .values()
+            .any(|task| task.pending_result.is_some());
         if let Some(job) = self.document.jobs.iter().find(|job| job.id == job_id) {
             if let TransferJobState::RetryWaiting {
                 attempt,
@@ -801,6 +895,30 @@ impl QueueActor {
             }
         }
         Ok(())
+    }
+
+    fn schedule_terminal_persistence_retry(&mut self, job_id: Uuid, lease_id: Uuid) {
+        let Some(task) = self
+            .active
+            .get_mut(&job_id)
+            .filter(|task| task.lease_id == lease_id)
+        else {
+            return;
+        };
+        if task.terminal_retry_scheduled {
+            return;
+        }
+        task.terminal_retry_scheduled = true;
+        let deadline_ms = self
+            .clock
+            .now_ms()
+            .saturating_add(TERMINAL_PERSISTENCE_RETRY_DELAY_MS);
+        let clock = self.clock.clone();
+        let internal_tx = self.internal_tx.clone();
+        tokio::spawn(async move {
+            clock.sleep_until(deadline_ms).await;
+            let _ = internal_tx.send(InternalEvent::TerminalPersistenceWake { job_id, lease_id });
+        });
     }
 
     async fn pause(&mut self, id: Uuid) -> Result<(), String> {
@@ -822,11 +940,12 @@ impl QueueActor {
             .get_mut(&id)
             .ok_or_else(|| format!("active transfer job {id} was not found"))?;
         if task.commit_critical {
-            if task.deferred_control != Some(RunnerControlState::Cancel) {
-                task.deferred_control = Some(requested);
-            }
+            let deferred = task.deferred_control.unwrap_or(RunnerControlState::Run);
+            task.deferred_control = Some(strongest_control(deferred, requested));
         } else {
-            task.control_tx.send_replace(requested);
+            let current = *task.control_tx.borrow();
+            task.control_tx
+                .send_replace(strongest_control(current, requested));
         }
         Ok(())
     }
@@ -1079,6 +1198,19 @@ impl QueueActor {
             })
             .await;
         Ok(())
+    }
+}
+
+fn strongest_control(
+    current: RunnerControlState,
+    requested: RunnerControlState,
+) -> RunnerControlState {
+    use RunnerControlState::{Cancel, Pause, Run};
+
+    match (current, requested) {
+        (Cancel, _) | (_, Cancel) => Cancel,
+        (Pause, _) | (_, Pause) => Pause,
+        (Run, Run) => Run,
     }
 }
 
@@ -1858,6 +1990,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_remains_visible_when_followed_by_per_job_pause() {
+        let id = Uuid::from_u128(8_451);
+        let document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
+        let runner = Arc::new(GatedRunner::default());
+        let _release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        assert!(harness.handle.cancel(id).await.unwrap());
+        harness.handle.pause(id).await.unwrap();
+
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+    }
+
+    #[tokio::test]
+    async fn cancel_remains_visible_when_followed_by_pause_all() {
+        let id = Uuid::from_u128(8_452);
+        let document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
+        let runner = Arc::new(GatedRunner::default());
+        let _release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        assert!(harness.handle.cancel(id).await.unwrap());
+        harness.handle.pause_all().await.unwrap();
+
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+    }
+
+    #[tokio::test]
     async fn cancel_is_deferred_across_commit_swap_until_runner_cleanup_result() {
         let id = Uuid::from_u128(8_501);
         let document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
@@ -1887,6 +2051,33 @@ mod tests {
             matches!(job.state, TransferJobState::Cancelled { .. })
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn prepared_ack_hides_an_already_visible_cancel_until_the_safe_phase() {
+        let id = Uuid::from_u128(8_502);
+        let document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
+        let runner = Arc::new(GatedRunner::default());
+        let _release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+        let reporter = runner.reporter(id);
+
+        assert!(harness.handle.cancel(id).await.unwrap());
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+
+        reporter.commit_phase(CommitPhase::Prepared).await.unwrap();
+        assert_eq!(
+            runner.control_state(id),
+            RunnerControlState::Run,
+            "the Prepared persistence barrier hides control during the swap"
+        );
+
+        harness.handle.pause_all().await.unwrap();
+        assert_eq!(runner.control_state(id), RunnerControlState::Run);
+        reporter.commit_phase(CommitPhase::Complete).await.unwrap();
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
     }
 
     #[tokio::test]
@@ -2539,6 +2730,7 @@ mod tests {
     struct MemoryStore {
         document: Mutex<TransferQueueDocument>,
         fail_saves: AtomicBool,
+        failed_save_count: AtomicU64,
     }
 
     impl QueueStore for MemoryStore {
@@ -2548,6 +2740,7 @@ mod tests {
 
         fn save(&self, document: &TransferQueueDocument) -> Result<(), String> {
             if self.fail_saves.load(Ordering::SeqCst) {
+                self.failed_save_count.fetch_add(1, Ordering::SeqCst);
                 Err("injected save failure".into())
             } else {
                 *self.document.lock().unwrap() = document.clone();
@@ -2574,6 +2767,7 @@ mod tests {
         let store = Arc::new(MemoryStore {
             document: Mutex::new(document.clone()),
             fail_saves: AtomicBool::new(false),
+            failed_save_count: AtomicU64::new(0),
         });
         let snapshot = Arc::new(RwLock::new(TransferQueueSnapshot::from(&document)));
         let (_command_tx, command_rx) = mpsc::unbounded_channel();
@@ -2593,6 +2787,7 @@ mod tests {
                 internal_rx,
                 active: HashMap::new(),
                 pending_progress: HashMap::new(),
+                persistence_fault: false,
                 snapshot,
             },
             store,
@@ -2692,6 +2887,7 @@ mod tests {
         let store = Arc::new(MemoryStore {
             document: Mutex::new(TransferQueueDocument::default()),
             fail_saves: AtomicBool::new(false),
+            failed_save_count: AtomicU64::new(0),
         });
         let events = Arc::new(RecordingEventSink::default());
         let handle =
@@ -2708,6 +2904,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_save_failure_retains_result_blocks_dispatch_and_recovers_once() {
+        let first = Uuid::from_u128(8_801);
+        let second = Uuid::from_u128(8_802);
+        let document = document_with(vec![stored_job(first, TransferJobState::Queued, 1)]);
+        let store = Arc::new(MemoryStore {
+            document: Mutex::new(document),
+            fail_saves: AtomicBool::new(false),
+            failed_save_count: AtomicU64::new(0),
+        });
+        let events = Arc::new(RecordingEventSink::default());
+        let runner = Arc::new(GatedRunner::default());
+        let first_release = runner.gate(first);
+        let _second_release = runner.gate(second);
+        let clock = Arc::new(FakeClock::new(30_000));
+        let handle = QueueActor::spawn_with_runner_services(
+            store.clone(),
+            events.clone(),
+            clock.clone(),
+            runner.clone(),
+        )
+        .unwrap();
+        handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        store.fail_saves.store(true, Ordering::SeqCst);
+        first_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        for _ in 0..100 {
+            if store.failed_save_count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(store.failed_save_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            handle.snapshot().jobs[0].state,
+            TransferJobState::Connecting
+        ));
+
+        store.fail_saves.store(false, Ordering::SeqCst);
+        handle
+            .enqueue(new_job(second, "after-recovery.bin"))
+            .await
+            .unwrap();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            runner.starts(),
+            [first],
+            "a pending terminal result suspends all new dispatch"
+        );
+
+        clock.advance_to(30_250);
+        let completed = wait_for_job(&handle, first, |job| {
+            matches!(
+                job.state,
+                TransferJobState::Completed {
+                    result: CompletionResult::Transferred
+                }
+            )
+        })
+        .await;
+        assert_eq!(completed.commit_phase, CommitPhase::Complete);
+        wait_for_starts(&runner, 2).await;
+        assert_eq!(runner.starts(), [first, second]);
+        let terminal_updates = events
+            .deltas
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|delta| &delta.upserts)
+            .filter(|job| {
+                job.id == first && matches!(job.state, TransferJobState::Completed { .. })
+            })
+            .count();
+        assert_eq!(
+            terminal_updates, 1,
+            "the retained result commits exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_persistence_failure_rejects_ack_and_restores_pending_cancel() {
+        let id = Uuid::from_u128(8_850);
+        let document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
+        let store = Arc::new(MemoryStore {
+            document: Mutex::new(document),
+            fail_saves: AtomicBool::new(false),
+            failed_save_count: AtomicU64::new(0),
+        });
+        let events = Arc::new(RecordingEventSink::default());
+        let runner = Arc::new(GatedRunner::default());
+        let _release = runner.gate(id);
+        let handle = QueueActor::spawn_with_runner_services(
+            store.clone(),
+            events,
+            Arc::new(FixedClock),
+            runner.clone(),
+        )
+        .unwrap();
+        handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+        let reporter = runner.reporter(id);
+        assert!(handle.cancel(id).await.unwrap());
+
+        store.fail_saves.store(true, Ordering::SeqCst);
+        let error = reporter
+            .commit_phase(CommitPhase::Prepared)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("injected save failure"));
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+        assert_eq!(handle.snapshot().jobs[0].commit_phase, CommitPhase::None);
+        assert_eq!(
+            store.document.lock().unwrap().jobs[0].commit_phase,
+            CommitPhase::None
+        );
+    }
+
+    #[tokio::test]
     async fn startup_recovers_and_persists_suspension_without_starting_work() {
         let id = Uuid::from_u128(501);
         let mut document = document_with(vec![stored_job(id, TransferJobState::Running, 1)]);
@@ -2715,6 +3034,7 @@ mod tests {
         let store = Arc::new(MemoryStore {
             document: Mutex::new(document),
             fail_saves: AtomicBool::new(false),
+            failed_save_count: AtomicU64::new(0),
         });
         let events = Arc::new(RecordingEventSink::default());
 

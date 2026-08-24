@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::Serialize;
 use termlab_remote::transfer::SourceFingerprint;
@@ -10,6 +12,7 @@ use super::model::{
     CommitPhase, ManagedArtifacts, QueueSettings, TransferDirection, TransferJob, TransferJobState,
     TransferQueueSummary,
 };
+use super::runner::ProgressSlot;
 
 #[derive(Debug)]
 pub enum RunnerEvent {
@@ -33,12 +36,10 @@ pub enum RunnerEvent {
         phase: CommitPhase,
         ack: oneshot::Sender<Result<(), String>>,
     },
-    Progress {
+    ProgressReady {
         job_id: Uuid,
         lease_id: Uuid,
-        bytes: u64,
-        speed_bytes_per_second: u64,
-        eta_seconds: Option<u64>,
+        slot: Arc<ProgressSlot>,
     },
 }
 
