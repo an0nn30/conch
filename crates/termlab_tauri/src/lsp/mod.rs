@@ -3,4 +3,5 @@
 #![allow(dead_code)]
 
 pub(crate) mod document;
+pub(crate) mod root;
 pub(crate) mod types;
