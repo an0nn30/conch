@@ -5,6 +5,7 @@
   const SUMMARY_EVENT = 'transfer-queue-summary';
   const TERMINAL_KINDS = new Set(['completed', 'failed', 'cancelled']);
   const ATTENTION_KINDS = new Set(['needsAttention', 'needsConnection']);
+  const RESOLUTION_KINDS = new Set(['resume', 'overwrite', 'rename', 'skip', 'restart']);
   const TOAST_WINDOW_MS = 300;
 
   const storeFactory = global.termlabTransferStore;
@@ -147,20 +148,28 @@
     return true;
   }
 
-  function synchronize() {
+  function synchronize(options) {
     if (refreshPromise) return refreshPromise;
     if (!dependencies) return Promise.reject(new Error('Transfer runtime has not started'));
+    const allowFollowup = !options || options.allowFollowup !== false;
+    let needsFollowup = false;
 
     refreshPromise = (async () => {
-      while (true) {
-        const snapshot = await dataService.snapshot(dependencies.invoke);
+      const snapshot = await dataService.snapshot(dependencies.invoke);
+      const current = store.getSnapshot();
+      if (!hydrated || snapshot.revision > current.revision) {
         store.hydrate(snapshot);
         hydrated = true;
         notify();
-        if (replayBuffered()) return store.getSnapshot();
       }
+      needsFollowup = !replayBuffered();
+      return store.getSnapshot();
     })().finally(() => {
       refreshPromise = null;
+      if (needsFollowup && allowFollowup) {
+        synchronize({ allowFollowup: false })
+          .catch((error) => console.error('transfer queue refresh failed', error));
+      }
     });
     return refreshPromise;
   }
@@ -203,6 +212,20 @@
     return dataService[method](dependencies.invoke, ...args);
   }
 
+  function resolveConflict(id, resolution) {
+    if (!resolution || typeof resolution !== 'object' || Array.isArray(resolution)) {
+      return Promise.reject(new TypeError('Conflict resolution must be a tagged object'));
+    }
+    if (!RESOLUTION_KINDS.has(resolution.kind)) {
+      return Promise.reject(new TypeError('Conflict resolution has an invalid kind'));
+    }
+    if (resolution.kind === 'rename'
+        && (typeof resolution.destination !== 'string' || !resolution.destination.trim())) {
+      return Promise.reject(new TypeError('Rename conflict resolution requires a destination'));
+    }
+    return command('resolve', [id, resolution]);
+  }
+
   const runtime = {
     ensureStarted,
     subscribe,
@@ -211,7 +234,7 @@
     resume: (id) => command('resume', [id]),
     cancel: (id) => command('cancel', [id]),
     retry: (id) => command('retry', [id]),
-    resolve: (id, resolution) => command('resolve', [id, resolution]),
+    resolve: resolveConflict,
     pauseAll: () => command('pauseAll', []),
     resumeAll: () => command('resumeAll', []),
     reorder: (id, before) => command('reorder', [id, before]),

@@ -18,6 +18,11 @@
     }
 
     function showCompletionToast(fileName, kind, error) {
+      // The durable transfer runtime owns terminal/attention notifications.
+      // Keep this compatibility path only for partial script graphs where the
+      // authoritative module is genuinely absent; progress UI and pane cleanup
+      // below remain active until the files panel migration is complete.
+      if (global.termlabTransferRuntime) return;
       const arrow = kind === 'download' ? '\u2193' : '\u2191';
       if (error) {
         if (typeof toastApi.error === 'function') toastApi.error(`${arrow} Transfer Failed: ${fileName}`, error);

@@ -306,6 +306,71 @@ function loadRuntime(options = {}) {
   assert.deepEqual(secondSeen, [0, 1]);
 }
 
+// A refresh response can race a newer applied event. An older snapshot must
+// not roll the public projection backward or notify subscribers with stale
+// state.
+{
+  const stale = deferred();
+  const harness = loadRuntime({ snapshots: [snapshot(5, [job('a', 'paused')]), stale.promise] });
+  const seen = [];
+  harness.runtime.subscribe((value) => seen.push([value.revision, value.jobs[0] && value.jobs[0].state.kind]));
+  await harness.runtime.ensureStarted({ invoke: harness.invoke, listen: harness.listen, toast: harness.toast });
+
+  const refreshing = harness.runtime.refresh();
+  stale.resolve(snapshot(4, [job('a', 'running')]));
+  await refreshing;
+
+  assert.deepEqual(seen, [[0, undefined], [5, 'paused']]);
+  assert.deepEqual(
+    plain(harness.runtime.getSnapshot()),
+    snapshot(5, [job('a', 'paused')]),
+    'an older refresh response must leave the newer projection byte-for-byte intact',
+  );
+}
+
+// If a stale response cannot close a buffered gap, finish that refresh, retain
+// the gap, then start one coalesced follow-up. The first promise must not loop
+// recursively while the later authoritative response is pending.
+{
+  const stale = deferred();
+  const authoritative = deferred();
+  const harness = loadRuntime({
+    snapshots: [snapshot(5, [job('a', 'running')]), stale.promise, authoritative.promise],
+  });
+  const seen = [];
+  harness.runtime.subscribe((value) => seen.push(value.revision));
+  await harness.runtime.ensureStarted({ invoke: harness.invoke, listen: harness.listen, toast: harness.toast });
+
+  harness.emit('transfer-job-updated', delta(7, { upserts: [job('gap', 'queued')] }));
+  const staleRefresh = harness.runtime.refresh();
+  let staleSettled = false;
+  staleRefresh.then(() => { staleSettled = true; });
+  assert.equal(harness.calls.filter((call) => call.command === 'transfer_queue_snapshot').length, 2);
+
+  stale.resolve(snapshot(5, [job('a', 'running')]));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(staleSettled, true, 'the stale refresh must settle before its one follow-up response');
+  assert.equal(harness.runtime.getSnapshot().revision, 5);
+  assert.deepEqual(seen, [0, 5], 'an equal stale response must not publish a duplicate snapshot');
+  assert.equal(
+    harness.calls.filter((call) => call.command === 'transfer_queue_snapshot').length,
+    3,
+    'one later authoritative refresh is started after the stale request clears',
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    harness.calls.filter((call) => call.command === 'transfer_queue_snapshot').length,
+    3,
+    'the unresolved follow-up must not create overlapping or recursive requests',
+  );
+
+  authoritative.resolve(snapshot(7, [job('a', 'running'), job('gap', 'queued')]));
+  await harness.runtime.refresh();
+  assert.equal(harness.runtime.getSnapshot().revision, 7);
+  assert.deepEqual(seen, [0, 5, 7]);
+}
+
 // Commands delegate exactly once through the focused data service and never
 // mutate queue lifecycle optimistically. The event is the state transition.
 {
@@ -324,7 +389,13 @@ function loadRuntime(options = {}) {
   await harness.runtime.resume('a');
   await harness.runtime.cancel('a');
   await harness.runtime.retry('a');
-  await harness.runtime.resolve('a', 'overwrite');
+  await assert.rejects(
+    harness.runtime.resolve('a', 'overwrite'),
+    /tagged object/,
+    'the Rust internally-tagged enum must never receive a bare string',
+  );
+  await harness.runtime.resolve('a', { kind: 'overwrite' });
+  await harness.runtime.resolve('a', { kind: 'rename', destination: '/srv/renamed.txt' });
   await harness.runtime.pauseAll();
   await harness.runtime.resumeAll();
   await harness.runtime.reorder('a', 'b');
@@ -337,7 +408,11 @@ function loadRuntime(options = {}) {
       { command: 'transfer_resume', args: { transferId: 'a' } },
       { command: 'transfer_cancel', args: { transferId: 'a' } },
       { command: 'transfer_retry', args: { transferId: 'a' } },
-      { command: 'transfer_resolve', args: { transferId: 'a', resolution: 'overwrite' } },
+      { command: 'transfer_resolve', args: { transferId: 'a', resolution: { kind: 'overwrite' } } },
+      {
+        command: 'transfer_resolve',
+        args: { transferId: 'a', resolution: { kind: 'rename', destination: '/srv/renamed.txt' } },
+      },
       { command: 'transfer_pause_all' },
       { command: 'transfer_resume_all' },
       { command: 'transfer_reorder', args: { transferId: 'a', before: 'b' } },
