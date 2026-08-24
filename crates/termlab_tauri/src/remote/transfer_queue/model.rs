@@ -302,6 +302,7 @@ pub struct TransferQueueDocument {
     pub queue_paused: bool,
     pub settings: QueueSettings,
     pub jobs: Vec<TransferJob>,
+    #[serde(default)]
     pub recovery_error: Option<String>,
 }
 
