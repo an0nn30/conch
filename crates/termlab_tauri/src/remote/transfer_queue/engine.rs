@@ -276,6 +276,8 @@ struct ActiveTask {
     control_tx: watch::Sender<RunnerControlState>,
     commit_critical: bool,
     deferred_control: Option<RunnerControlState>,
+    /// Resume All superseded a pause request that the runner may already have observed.
+    resume_after_pause: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -289,6 +291,8 @@ struct PendingTerminalResult {
     lease_id: Uuid,
     result: RunnerResult,
     ownership: JobOwnership,
+    /// Preserved across terminal-result persistence retries.
+    resume_after_pause: bool,
     retry_scheduled: bool,
 }
 
@@ -444,7 +448,7 @@ impl QueueActor {
                 let _ = reply.send(result);
             }
             QueueCommand::Retry { id, reply } => {
-                let result = self.apply_lifecycle_event(id, JobEvent::ManualRetry).await;
+                let result = self.retry(id).await;
                 let _ = reply.send(result);
             }
             QueueCommand::Resolve {
@@ -791,6 +795,7 @@ impl QueueActor {
                 control_tx,
                 commit_critical: false,
                 deferred_control: None,
+                resume_after_pause: false,
             },
         );
 
@@ -1001,6 +1006,7 @@ impl QueueActor {
                 lease_id,
                 result,
                 ownership: task.ownership,
+                resume_after_pause: task.resume_after_pause,
                 retry_scheduled: false,
             },
         );
@@ -1012,11 +1018,17 @@ impl QueueActor {
         job_id: Uuid,
         lease_id: Uuid,
     ) -> Result<(), String> {
-        let (result, ownership) = self
+        let (result, ownership, resume_after_pause) = self
             .pending_terminal_results
             .get(&job_id)
             .filter(|pending| pending.lease_id == lease_id)
-            .map(|pending| (pending.result.clone(), pending.ownership.clone()))
+            .map(|pending| {
+                (
+                    pending.result.clone(),
+                    pending.ownership.clone(),
+                    pending.resume_after_pause,
+                )
+            })
             .ok_or_else(|| format!("transfer job {job_id} has no pending runner result"))?;
         let now_ms = self.clock.now_ms();
         let mut next = self.document.clone();
@@ -1071,6 +1083,13 @@ impl QueueActor {
                     paused.durable_checkpoint = *durable_checkpoint;
                     paused.bytes_transferred = paused.bytes_transferred.max(*durable_checkpoint);
                     reduce_job(&paused, JobEvent::Pause, now_ms)
+                        .and_then(|paused| {
+                            if resume_after_pause && !self.document.queue_paused {
+                                reduce_job(&paused, JobEvent::Resume, now_ms)
+                            } else {
+                                Ok(paused)
+                            }
+                        })
                         .map(|reduced| *job = reduced)
                         .map_err(|error| error.to_string())
                 }
@@ -1213,6 +1232,9 @@ impl QueueActor {
             .active
             .get_mut(&id)
             .ok_or_else(|| format!("active transfer job {id} was not found"))?;
+        if requested == RunnerControlState::Pause {
+            task.resume_after_pause = false;
+        }
         if task.commit_critical {
             let deferred = task.deferred_control.unwrap_or(RunnerControlState::Run);
             task.deferred_control = Some(strongest_control(deferred, requested));
@@ -1222,6 +1244,26 @@ impl QueueActor {
                 .send_replace(strongest_control(current, requested));
         }
         Ok(())
+    }
+
+    fn resume_active_pause(&mut self, id: Uuid) {
+        let Some(task) = self.active.get_mut(&id) else {
+            return;
+        };
+        let pending = if task.commit_critical {
+            task.deferred_control.unwrap_or(RunnerControlState::Run)
+        } else {
+            *task.control_tx.borrow()
+        };
+        if pending != RunnerControlState::Pause {
+            return;
+        }
+        task.resume_after_pause = true;
+        if task.commit_critical {
+            task.deferred_control = None;
+        } else {
+            task.control_tx.send_replace(RunnerControlState::Run);
+        }
     }
 
     async fn enqueue(&mut self, request: NewTransferJob) -> Result<Uuid, String> {
@@ -1308,11 +1350,6 @@ impl QueueActor {
         self.commit(next).await
     }
 
-    async fn apply_lifecycle_event(&mut self, id: Uuid, event: JobEvent) -> Result<(), String> {
-        self.ensure_lifecycle_mutation_allowed(id)?;
-        self.apply_job_event(id, event).await
-    }
-
     fn cancellation_cleanup_owns(&self, id: Uuid) -> bool {
         let active_cleanup = self
             .active
@@ -1379,6 +1416,15 @@ impl QueueActor {
         Ok(())
     }
 
+    async fn retry(&mut self, id: Uuid) -> Result<(), String> {
+        self.ensure_lifecycle_mutation_allowed(id)?;
+        self.apply_job_event(id, JobEvent::ManualRetry).await?;
+        if self.startup_suspended && self.document.queue_paused {
+            self.startup_authorized.insert(id);
+        }
+        Ok(())
+    }
+
     async fn resume_all(&mut self) -> Result<(), String> {
         let now_ms = self.clock.now_ms();
         let mut next = self.document.clone();
@@ -1393,6 +1439,10 @@ impl QueueActor {
         }
         if changed {
             self.commit(next).await?;
+        }
+        let active_ids: Vec<_> = self.active.keys().copied().collect();
+        for id in active_ids {
+            self.resume_active_pause(id);
         }
         self.startup_suspended = false;
         self.startup_authorized.clear();
@@ -2368,6 +2418,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_authorizes_only_that_restored_job_during_startup_suspension() {
+        let configured = Uuid::from_u128(8_012);
+        let ad_hoc = Uuid::from_u128(8_013);
+        let unrelated = Uuid::from_u128(8_014);
+        let configured_job = stored_job(
+            configured,
+            TransferJobState::NeedsConnection {
+                message: "reconnect configured server".into(),
+            },
+            1,
+        );
+        let mut ad_hoc_job = stored_job(
+            ad_hoc,
+            TransferJobState::Failed {
+                error: "retry ad-hoc server".into(),
+            },
+            2,
+        );
+        ad_hoc_job.endpoint = TransferEndpoint::AdHoc {
+            host: "example.test".into(),
+            port: 22,
+            user: "tester".into(),
+            proxy_command: None,
+            proxy_jump: None,
+        };
+        ad_hoc_job.host_key = "adhoc:tester@example.test:22".into();
+        ad_hoc_job.destination_key = "adhoc:tester@example.test:22:/srv/ad-hoc.bin".into();
+        let document = document_with(vec![
+            configured_job,
+            ad_hoc_job,
+            stored_job(unrelated, TransferJobState::Paused, 3),
+        ]);
+        let runner = Arc::new(GatedRunner::default());
+        let configured_release = runner.gate(configured);
+        let ad_hoc_release = runner.gate(ad_hoc);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.retry(configured).await.unwrap();
+        harness.handle.retry(ad_hoc).await.unwrap();
+        wait_for_starts(&runner, 2).await;
+
+        assert_eq!(runner.starts(), [configured, ad_hoc]);
+        assert!(harness.handle.snapshot().queue_paused);
+        assert_eq!(
+            harness
+                .handle
+                .snapshot()
+                .jobs
+                .iter()
+                .find(|job| job.id == unrelated)
+                .unwrap()
+                .state,
+            TransferJobState::Paused
+        );
+        configured_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        ad_hoc_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn cross_host_downloads_to_one_local_destination_never_overlap() {
         let first = Uuid::from_u128(8_009);
         let second = Uuid::from_u128(8_010);
@@ -2805,6 +2918,65 @@ mod tests {
         })
         .await;
         assert_eq!(paused.durable_checkpoint, 4_096);
+    }
+
+    #[tokio::test]
+    async fn resume_all_supersedes_an_unacknowledged_pause_all() {
+        let id = Uuid::from_u128(8_402);
+        let document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
+        let runner = Arc::new(GatedRunner::default());
+        let first_release = runner.gate(id);
+        let second_release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        harness.handle.pause_all().await.unwrap();
+        assert_eq!(runner.control_state(id), RunnerControlState::Pause);
+        harness.handle.resume_all().await.unwrap();
+        assert_eq!(runner.control_state(id), RunnerControlState::Run);
+
+        first_release
+            .send(RunnerResult::Paused {
+                durable_checkpoint: 512,
+            })
+            .unwrap();
+        wait_for_starts(&runner, 2).await;
+        assert_eq!(runner.control_state(id), RunnerControlState::Run);
+        assert_eq!(runner.starts(), [id, id]);
+        assert!(!harness.handle.snapshot().queue_paused);
+
+        second_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_later_pause_supersedes_resume_all_intent() {
+        let id = Uuid::from_u128(8_403);
+        let document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        harness.handle.pause_all().await.unwrap();
+        harness.handle.resume_all().await.unwrap();
+        harness.handle.pause(id).await.unwrap();
+        assert_eq!(runner.control_state(id), RunnerControlState::Pause);
+
+        release
+            .send(RunnerResult::Paused {
+                durable_checkpoint: 768,
+            })
+            .unwrap();
+        let paused = wait_for_job(&harness.handle, id, |job| {
+            matches!(job.state, TransferJobState::Paused)
+        })
+        .await;
+        assert_eq!(paused.durable_checkpoint, 768);
+        assert_eq!(runner.starts(), [id]);
     }
 
     #[tokio::test]
@@ -4501,6 +4673,7 @@ mod tests {
                 control_tx,
                 commit_critical: false,
                 deferred_control: None,
+                resume_after_pause: false,
             },
         );
         actor.pending_progress.insert(

@@ -178,6 +178,13 @@ impl TransferIoError {
         Self::permanent(error.to_string())
     }
 
+    fn from_local_source(error: RemoteError) -> Self {
+        match error {
+            RemoteError::SourceNotFound(message) => Self::source_missing(message),
+            error => Self::from_local(error),
+        }
+    }
+
     fn from_remote_operation(operation: &str, error: impl fmt::Display) -> Self {
         let error = error.to_string();
         let class = classify_transport_failure(&error);
@@ -1190,7 +1197,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
             TransferDirection::Upload => fingerprint_open_local(&job.local_path)
                 .await
                 .map(|(file, fingerprint)| (RealSource::Local(file), fingerprint))
-                .map_err(TransferIoError::from_local),
+                .map_err(TransferIoError::from_local_source),
             TransferDirection::Download => {
                 let session = open_sftp_session(&connection.ssh_handle)
                     .await
@@ -1802,7 +1809,8 @@ mod tests {
         config::ServerEntry,
         ssh::{SshCredentials, connect_and_auth},
         transfer::{
-            ControlDecision, SourceFingerprint, copy::copy_with_checkpoint_typed, open_sftp_session,
+            ControlDecision, SourceFingerprint, copy::copy_with_checkpoint_typed,
+            fingerprint_open_local, open_sftp_session,
         },
     };
     use tokio::{
@@ -1814,7 +1822,7 @@ mod tests {
     use super::{
         ConnectionResolver, LiveConnectionIdentity, PromotionError, RealPartial, RunnerControl,
         RunnerControlState, RunnerReporter, RunnerResult, SftpTransferJobRunner, TransferIo,
-        TransferIoError, TransferJobRunner, recover_commit, remove_local_artifact,
+        TransferIoError, TransferJobRunner, failed, recover_commit, remove_local_artifact,
         select_live_connection_key,
     };
     use crate::remote::transfer_queue::{
@@ -5159,6 +5167,20 @@ mod tests {
                 run_fake(true, io, restarted, super::RunnerControlState::Run).await;
             assert!(matches!(restored_result, RunnerResult::Completed(_)));
         }
+    }
+
+    #[tokio::test]
+    async fn real_local_upload_source_missing_maps_to_source_missing_attention() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-upload-source.bin");
+
+        let error = fingerprint_open_local(&missing).await.unwrap_err();
+        let result = failed(TransferIoError::from_local_source(error));
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::SourceMissing)
+        ));
     }
 
     #[test]
