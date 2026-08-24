@@ -245,6 +245,8 @@ const progress = (id, status, extra = {}) => ({
     paneId: 4,
     remotePath: '/home/me/notes.txt',
     localPath: h.tempPathFor('me@example.com', '/home/me/notes.txt'),
+    origin: 'editor',
+    conflictPolicy: { kind: 'overwrite' },
   });
 
   // The two non-terminal statuses must not settle anything.
@@ -488,6 +490,8 @@ for (const [status, expected] of [['failed', /disk full/], ['cancelled', /Transf
     paneId: 4,
     localPath: pane.filePath,
     remotePath: '/home/me/notes.txt',
+    origin: 'editor',
+    conflictPolicy: { kind: 'overwrite' },
   });
   assert.strictEqual(pane.dirty, true, 'still dirty while the upload is in flight');
 

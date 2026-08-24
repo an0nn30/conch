@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use tauri::Manager;
 use uuid::Uuid;
 
@@ -31,6 +32,42 @@ struct TransferSessionSnapshot {
     user: String,
     proxy_command: Option<String>,
     proxy_jump: Option<String>,
+}
+
+/// Compatibility shape accepted only at the Tauri command boundary.
+/// Durable jobs and events continue to use the canonical tagged enum.
+#[derive(Debug)]
+pub(crate) struct TransferOriginCommand(TransferOrigin);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TransferOriginWire {
+    Name(String),
+    Tagged(TransferOrigin),
+}
+
+impl<'de> Deserialize<'de> for TransferOriginCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match TransferOriginWire::deserialize(deserializer)? {
+            TransferOriginWire::Name(name) if name == "filesPanel" => {
+                Ok(Self(TransferOrigin::FilesPanel))
+            }
+            TransferOriginWire::Name(name) if name == "editor" => Ok(Self(TransferOrigin::Editor)),
+            TransferOriginWire::Name(name) => Err(D::Error::custom(format!(
+                "invalid transfer origin '{name}'; expected 'filesPanel', 'editor', or a tagged origin object"
+            ))),
+            TransferOriginWire::Tagged(origin) => Ok(Self(origin)),
+        }
+    }
+}
+
+impl TransferOriginCommand {
+    fn into_origin(self) -> TransferOrigin {
+        self.0
+    }
 }
 
 trait TransferSessionLookup {
@@ -179,7 +216,7 @@ pub(crate) async fn transfer_download(
     pane_id: u32,
     remote_path: String,
     local_path: String,
-    origin: Option<TransferOrigin>,
+    origin: Option<TransferOriginCommand>,
     conflict_policy: Option<ConflictPolicy>,
 ) -> Result<String, String> {
     let id = Uuid::new_v4();
@@ -197,7 +234,7 @@ pub(crate) async fn transfer_download(
             TransferDirection::Download,
             local_path,
             remote_path,
-            origin,
+            origin.map(TransferOriginCommand::into_origin),
             conflict_policy,
         )?
     };
@@ -212,7 +249,7 @@ pub(crate) async fn transfer_upload(
     pane_id: u32,
     local_path: String,
     remote_path: String,
-    origin: Option<TransferOrigin>,
+    origin: Option<TransferOriginCommand>,
     conflict_policy: Option<ConflictPolicy>,
 ) -> Result<String, String> {
     let id = Uuid::new_v4();
@@ -230,7 +267,7 @@ pub(crate) async fn transfer_upload(
             TransferDirection::Upload,
             local_path,
             remote_path,
-            origin,
+            origin.map(TransferOriginCommand::into_origin),
             conflict_policy,
         )?
     };
@@ -417,6 +454,38 @@ mod tests {
             user: "dustin".into(),
             proxy_command: Some("ssh -W %h:%p edge".into()),
             proxy_jump: Some("edge.example.com".into()),
+        }
+    }
+
+    #[test]
+    fn command_origin_accepts_approved_string_and_legacy_tagged_json_shapes() {
+        let files: TransferOriginCommand = serde_json::from_str(r#""filesPanel""#).unwrap();
+        let editor: TransferOriginCommand = serde_json::from_str(r#""editor""#).unwrap();
+        let tagged: TransferOriginCommand =
+            serde_json::from_str(r#"{"kind":"filesPanel"}"#).unwrap();
+        let other: TransferOriginCommand =
+            serde_json::from_str(r#"{"kind":"other","name":"commandPalette"}"#).unwrap();
+
+        assert_eq!(files.into_origin(), TransferOrigin::FilesPanel);
+        assert_eq!(editor.into_origin(), TransferOrigin::Editor);
+        assert_eq!(tagged.into_origin(), TransferOrigin::FilesPanel);
+        assert_eq!(
+            other.into_origin(),
+            TransferOrigin::Other {
+                name: "commandPalette".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn command_origin_rejects_invalid_strings_with_a_clear_error() {
+        for invalid in [r#""files_panel""#, r#""""#, r#""other""#] {
+            let error = serde_json::from_str::<TransferOriginCommand>(invalid).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("filesPanel") && message.contains("editor"),
+                "{message}"
+            );
         }
     }
 

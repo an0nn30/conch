@@ -1680,8 +1680,12 @@ pub(crate) type SharedTransferJobRunner = Arc<dyn TransferJobRunner>;
 mod tests {
     use std::{
         io::{Cursor, Error, ErrorKind, SeekFrom},
+        path::PathBuf,
         pin::Pin,
-        sync::{Arc, Mutex as StdMutex},
+        sync::{
+            Arc, Mutex as StdMutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         task::{Context, Poll},
     };
 
@@ -1846,6 +1850,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeIo {
         state: Arc<StdMutex<FakeIoState>>,
+        active_sources: Arc<AtomicUsize>,
     }
 
     struct FakeIoState {
@@ -1860,10 +1865,50 @@ mod tests {
         partial_identity: Option<&'static str>,
         backup_identity: Option<&'static str>,
         fail_at: Option<&'static str>,
+        source_bytes: Vec<u8>,
+        local_source_path: Option<PathBuf>,
+        pending_partial_bytes: Vec<u8>,
+        completed_bytes: Vec<u8>,
+        opened_fingerprints: Vec<SourceFingerprint>,
+    }
+
+    struct TrackedSource {
+        cursor: Cursor<Vec<u8>>,
+        active_sources: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for TrackedSource {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.cursor).poll_read(context, buffer)
+        }
+    }
+
+    impl AsyncSeek for TrackedSource {
+        fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+            Pin::new(&mut self.cursor).start_seek(position)
+        }
+
+        fn poll_complete(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<std::io::Result<u64>> {
+            Pin::new(&mut self.cursor).poll_complete(context)
+        }
+    }
+
+    impl Drop for TrackedSource {
+        fn drop(&mut self) {
+            self.active_sources.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     impl FakeIo {
         fn new(log: Arc<StdMutex<Vec<String>>>, fingerprint: SourceFingerprint) -> Self {
+            let source_bytes = vec![b'x'; fingerprint.size as usize];
             Self {
                 state: Arc::new(StdMutex::new(FakeIoState {
                     log,
@@ -1881,8 +1926,37 @@ mod tests {
                     partial_identity: None,
                     backup_identity: None,
                     fail_at: None,
+                    source_bytes,
+                    local_source_path: None,
+                    pending_partial_bytes: Vec::new(),
+                    completed_bytes: Vec::new(),
+                    opened_fingerprints: Vec::new(),
                 })),
+                active_sources: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn with_local_source(self, path: PathBuf) -> Self {
+            self.state.lock().unwrap().local_source_path = Some(path);
+            self
+        }
+
+        fn replace_remote_source(&self, bytes: &[u8], modified_token: &str) {
+            let mut state = self.state.lock().unwrap();
+            state.source_bytes = bytes.to_vec();
+            state.fingerprint = fingerprint(bytes.len() as u64, Some(modified_token));
+        }
+
+        fn completed_bytes(&self) -> Vec<u8> {
+            self.state.lock().unwrap().completed_bytes.clone()
+        }
+
+        fn opened_fingerprints(&self) -> Vec<SourceFingerprint> {
+            self.state.lock().unwrap().opened_fingerprints.clone()
+        }
+
+        fn active_source_count(&self) -> usize {
+            self.active_sources.load(Ordering::SeqCst)
         }
 
         fn with_inventory(self, inventory: ArtifactInventory, partial_len: Option<u64>) -> Self {
@@ -1950,7 +2024,7 @@ mod tests {
 
     #[async_trait]
     impl TransferIo<TestConnection> for FakeIo {
-        type Source = Cursor<Vec<u8>>;
+        type Source = TrackedSource;
         type Partial = Cursor<Vec<u8>>;
 
         async fn open_source(
@@ -1959,9 +2033,33 @@ mod tests {
             _job: &TransferJob,
         ) -> Result<(Self::Source, SourceFingerprint), TransferIoError> {
             self.record("open_source")?;
-            let fingerprint = self.state.lock().unwrap().fingerprint.clone();
+            let (bytes, fingerprint) = {
+                let mut state = self.state.lock().unwrap();
+                let (bytes, fingerprint) = if let Some(path) = &state.local_source_path {
+                    let bytes = std::fs::read(path).map_err(TransferIoError::from_local)?;
+                    let metadata = std::fs::metadata(path).map_err(TransferIoError::from_local)?;
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|value| format!("{}:{}", value.as_nanos(), metadata.len()));
+                    let fingerprint = SourceFingerprint {
+                        size: metadata.len(),
+                        modified_token: modified,
+                    };
+                    (bytes, fingerprint)
+                } else {
+                    (state.source_bytes.clone(), state.fingerprint.clone())
+                };
+                state.opened_fingerprints.push(fingerprint.clone());
+                (bytes, fingerprint)
+            };
+            self.active_sources.fetch_add(1, Ordering::SeqCst);
             Ok((
-                Cursor::new(vec![b'x'; fingerprint.size as usize]),
+                TrackedSource {
+                    cursor: Cursor::new(bytes),
+                    active_sources: Arc::clone(&self.active_sources),
+                },
                 fingerprint,
             ))
         }
@@ -2026,6 +2124,7 @@ mod tests {
             self.record("finish_partial")?;
             let mut state = self.state.lock().unwrap();
             state.partial_len = Some(partial.get_ref().len() as u64);
+            state.pending_partial_bytes = partial.get_ref().clone();
             if state.final_after_finish_partial {
                 state.inventory.final_exists = true;
                 state.final_identity = Some("late-final");
@@ -2075,6 +2174,7 @@ mod tests {
             state.inventory.partial_exists = false;
             state.inventory.final_exists = true;
             state.final_identity = state.partial_identity.take();
+            state.completed_bytes = std::mem::take(&mut state.pending_partial_bytes);
             state.partial_len = None;
             Ok(())
         }
@@ -2546,6 +2646,134 @@ mod tests {
             operations,
             vec!["resolve", "checking", "open_source", "finish_source"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_upload_reopens_the_local_path_and_uses_its_latest_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.txt");
+        std::fs::write(&source_path, b"old").unwrap();
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(0, None)).with_local_source(source_path.clone());
+        let inspected_io = io.clone();
+        let mut first = test_job();
+        first.local_path = source_path.to_string_lossy().into_owned();
+        first.conflict_policy = ConflictPolicy::Overwrite;
+
+        let (first_result, _) =
+            run_fake(true, io.clone(), first, super::RunnerControlState::Run).await;
+
+        assert!(matches!(first_result, RunnerResult::Completed(_)));
+        assert_eq!(inspected_io.completed_bytes(), b"old");
+        assert_eq!(inspected_io.active_source_count(), 0);
+
+        std::fs::write(&source_path, b"new version").unwrap();
+        let mut second = test_job();
+        second.id = Uuid::from_u128(0xaaab);
+        second.local_path = source_path.to_string_lossy().into_owned();
+        second.conflict_policy = ConflictPolicy::Overwrite;
+        let (second_result, _) = run_fake(true, io, second, super::RunnerControlState::Run).await;
+
+        assert!(matches!(second_result, RunnerResult::Completed(_)));
+        assert_eq!(inspected_io.completed_bytes(), b"new version");
+        let fingerprints = inspected_io.opened_fingerprints();
+        assert_eq!(fingerprints.len(), 2);
+        assert_ne!(fingerprints[0], fingerprints[1]);
+        assert_eq!(fingerprints[1].size, 11);
+        assert_eq!(inspected_io.active_source_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_second_download_reopens_the_remote_path_and_uses_its_latest_bytes() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(3, Some("remote-v1")));
+        io.replace_remote_source(b"old", "remote-v1");
+        let inspected_io = io.clone();
+        let mut first = test_job();
+        first.direction = TransferDirection::Download;
+        first.local_path = "/tmp/downloaded.txt".into();
+        first.conflict_policy = ConflictPolicy::Overwrite;
+
+        let (first_result, _) =
+            run_fake(true, io.clone(), first, super::RunnerControlState::Run).await;
+
+        assert!(matches!(first_result, RunnerResult::Completed(_)));
+        assert_eq!(inspected_io.completed_bytes(), b"old");
+        assert_eq!(inspected_io.active_source_count(), 0);
+
+        inspected_io.replace_remote_source(b"new remote version", "remote-v2");
+        let mut second = test_job();
+        second.id = Uuid::from_u128(0xaaac);
+        second.direction = TransferDirection::Download;
+        second.local_path = "/tmp/downloaded.txt".into();
+        second.conflict_policy = ConflictPolicy::Overwrite;
+        let (second_result, _) = run_fake(true, io, second, super::RunnerControlState::Run).await;
+
+        assert!(matches!(second_result, RunnerResult::Completed(_)));
+        assert_eq!(inspected_io.completed_bytes(), b"new remote version");
+        assert_eq!(
+            inspected_io.opened_fingerprints(),
+            vec![
+                fingerprint(3, Some("remote-v1")),
+                fingerprint(18, Some("remote-v2")),
+            ]
+        );
+        assert_eq!(inspected_io.active_source_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn paused_source_change_requires_attention_until_restart_clears_the_attempt() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v2"))).with_inventory(
+            ArtifactInventory {
+                final_exists: false,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(2),
+        );
+        io.replace_remote_source(b"bbbb", "v2");
+        let inspected_io = io.clone();
+        let mut paused = test_job();
+        paused.state = TransferJobState::Paused;
+        paused.source_fingerprint = Some(fingerprint(4, Some("v1")));
+        paused.durable_checkpoint = 2;
+        paused.artifacts =
+            Some(ManagedArtifacts::for_destination(paused.id, &paused.remote_path).unwrap());
+        paused.conflict_policy = ConflictPolicy::Overwrite;
+
+        let (result, _) = run_fake(
+            true,
+            io.clone(),
+            paused.clone(),
+            super::RunnerControlState::Run,
+        )
+        .await;
+
+        let RunnerResult::NeedsAttention(reason @ AttentionReason::SourceChanged { .. }) = result
+        else {
+            panic!("paused source mutation must require an explicit restart")
+        };
+        assert_eq!(inspected_io.active_source_count(), 0);
+
+        paused.state = TransferJobState::NeedsAttention { reason };
+        let restarted =
+            reduce_job(&paused, JobEvent::Resolve(ConflictResolution::Restart), 2).unwrap();
+        assert_eq!(restarted.source_fingerprint, None);
+        assert_eq!(restarted.durable_checkpoint, 0);
+        assert_eq!(restarted.artifacts, None);
+
+        let (result, operations) =
+            run_fake(true, io, restarted, super::RunnerControlState::Run).await;
+
+        assert!(matches!(result, RunnerResult::Completed(_)));
+        assert_eq!(inspected_io.completed_bytes(), b"bbbb");
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation == "truncate_partial")
+        );
+        assert_eq!(inspected_io.active_source_count(), 0);
     }
 
     #[tokio::test]

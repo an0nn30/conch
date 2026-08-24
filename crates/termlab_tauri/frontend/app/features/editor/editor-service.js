@@ -236,7 +236,13 @@
   const opensInFlight = new Map();
 
   async function downloadAndOpen(paneId, remotePath, hostLabel, localPath) {
-    await runTransfer(() => invoke('transfer_download', { paneId, remotePath, localPath }));
+    await runTransfer(() => invoke('transfer_download', {
+      paneId,
+      remotePath,
+      localPath,
+      origin: 'editor',
+      conflictPolicy: { kind: 'overwrite' },
+    }));
 
     // The guards run a second time here, against the bytes rather than the
     // directory listing: a stale size and binary contents are both only
@@ -593,6 +599,8 @@
       paneId: remote.paneId,
       localPath,
       remotePath: remote.remotePath,
+      origin: 'editor',
+      conflictPolicy: { kind: 'overwrite' },
     }));
   }
 

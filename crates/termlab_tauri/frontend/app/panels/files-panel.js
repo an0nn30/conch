@@ -20,6 +20,11 @@
   let fitActiveTabFn = null;
   let getActiveTabFn = null;
   let transferController = null;
+  let unsubscribeTransferRuntime = null;
+  const FILES_TRANSFER_OPTIONS = Object.freeze({
+    origin: 'filesPanel',
+    conflictPolicy: Object.freeze({ kind: 'ask' }),
+  });
 
   // Navigation icons — PNG assets from icons/ directory
   const ICON_BACK = '<img src="icons/go-previous-dark.png" width="12" height="12" class="fp-icon">';
@@ -428,15 +433,23 @@
         localPane,
         remotePane,
         loadEntries,
-        formatSize: window.utils && window.utils.formatSize,
-        toast: window.toast,
-        cancelTransfer: (transferId) => (
-          filesDataService && typeof filesDataService.transferCancel === 'function'
-            ? filesDataService.transferCancel(invoke, transferId)
-            : Promise.reject(new Error('Files data service unavailable: transferCancel'))
-        ),
+        renderTransferStatus: (pane) => {
+          const selector = pane && pane.isLocal ? '#fp-local' : '#fp-remote';
+          renderPane(pane, getPaneRoot(selector));
+        },
       })
       : null;
+
+    if (typeof unsubscribeTransferRuntime === 'function') unsubscribeTransferRuntime();
+    unsubscribeTransferRuntime = null;
+    const transferRuntime = window.termlabTransferRuntime;
+    if (transferRuntime && typeof transferRuntime.subscribe === 'function'
+        && transferController
+        && typeof transferController.handleTransferSnapshot === 'function') {
+      unsubscribeTransferRuntime = transferRuntime.subscribe((snapshot) => {
+        transferController.handleTransferSnapshot(snapshot);
+      });
+    }
 
     if (!panelEl) {
       console.warn('filesPanel.init called without a panel element');
@@ -986,7 +999,13 @@
       if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
         throw new Error('Files data service unavailable: transferDownload');
       }
-      const transferId = await filesDataService.transferDownload(invoke, activeRemotePaneId, remotePath, localPath);
+      const transferId = await filesDataService.transferDownload(
+        invoke,
+        activeRemotePaneId,
+        remotePath,
+        localPath,
+        FILES_TRANSFER_OPTIONS,
+      );
       // Mark as transferring in local pane
       localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
     } catch (e) {
@@ -1005,7 +1024,13 @@
       if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
         throw new Error('Files data service unavailable: transferUpload');
       }
-      const transferId = await filesDataService.transferUpload(invoke, activeRemotePaneId, localPath, remotePath);
+      const transferId = await filesDataService.transferUpload(
+        invoke,
+        activeRemotePaneId,
+        localPath,
+        remotePath,
+        FILES_TRANSFER_OPTIONS,
+      );
       // Mark as transferring in remote pane
       remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
     } catch (e) {
@@ -1028,7 +1053,13 @@
           if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
             throw new Error('Files data service unavailable: transferUpload');
           }
-          const transferId = await filesDataService.transferUpload(invoke, activeRemotePaneId, localPath, remotePath);
+          const transferId = await filesDataService.transferUpload(
+            invoke,
+            activeRemotePaneId,
+            localPath,
+            remotePath,
+            FILES_TRANSFER_OPTIONS,
+          );
           remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
         } catch (e) {
           window.toast.error('Upload Failed', String(e));
@@ -1052,7 +1083,13 @@
           if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
             throw new Error('Files data service unavailable: transferDownload');
           }
-          const transferId = await filesDataService.transferDownload(invoke, activeRemotePaneId, remotePath, localPath);
+          const transferId = await filesDataService.transferDownload(
+            invoke,
+            activeRemotePaneId,
+            remotePath,
+            localPath,
+            FILES_TRANSFER_OPTIONS,
+          );
           localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
         } catch (e) {
           window.toast.error('Download Failed', String(e));

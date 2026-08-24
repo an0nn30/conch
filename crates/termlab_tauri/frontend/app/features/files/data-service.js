@@ -41,12 +41,25 @@
     return invoke('sftp_stat', { paneId, path });
   }
 
-  async function transferDownload(invoke, paneId, remotePath, localPath) {
-    return invoke('transfer_download', { paneId, remotePath, localPath });
+  function transferArgs(paths, options) {
+    const result = { ...paths };
+    if (options && options.origin) result.origin = options.origin;
+    if (options && options.conflictPolicy) result.conflictPolicy = options.conflictPolicy;
+    return result;
   }
 
-  async function transferUpload(invoke, paneId, localPath, remotePath) {
-    return invoke('transfer_upload', { paneId, localPath, remotePath });
+  async function transferDownload(invoke, paneId, remotePath, localPath, options) {
+    return invoke('transfer_download', transferArgs(
+      { paneId, remotePath, localPath },
+      options,
+    ));
+  }
+
+  async function transferUpload(invoke, paneId, localPath, remotePath, options) {
+    return invoke('transfer_upload', transferArgs(
+      { paneId, localPath, remotePath },
+      options,
+    ));
   }
 
   async function transferCancel(invoke, transferId) {

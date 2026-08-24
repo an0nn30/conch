@@ -3,137 +3,115 @@
 
   function createController(deps) {
     const d = deps || {};
-    const activeTransferToasts = new Map();
-    const formatSize = typeof d.formatSize === 'function'
-      ? d.formatSize
-      : ((value) => String(value || 0));
-    const toastApi = d.toast || global.toast || {};
+    const terminalKinds = new Set(['completed', 'failed', 'cancelled']);
+    const attentionKinds = new Set(['needsAttention', 'needsConnection']);
+    let previousJobs = new Map();
 
-    function removeTransferToast(transferId) {
-      const toast = activeTransferToasts.get(transferId);
-      if (!toast) return;
-      toast.classList.remove('visible');
-      activeTransferToasts.delete(transferId);
-      setTimeout(() => toast.remove(), 300);
+    function paneForDirection(direction) {
+      return direction === 'download' ? d.localPane : d.remotePane;
     }
 
-    function showCompletionToast(fileName, kind, error) {
-      // The durable transfer runtime owns terminal/attention notifications.
-      // Keep this compatibility path only for partial script graphs where the
-      // authoritative module is genuinely absent; progress UI and pane cleanup
-      // below remain active until the files panel migration is complete.
-      if (global.termlabTransferRuntime) return;
-      const arrow = kind === 'download' ? '\u2193' : '\u2191';
-      if (error) {
-        if (typeof toastApi.error === 'function') toastApi.error(`${arrow} Transfer Failed: ${fileName}`, error);
-      } else if (typeof toastApi.success === 'function') {
-        toastApi.success(`${arrow} Transfer Complete: ${fileName}`);
-      }
+    function clearBadge(pane, fileName, transferId) {
+      if (!pane || !pane.transferStatus) return false;
+      const current = pane.transferStatus[fileName];
+      if (!current || (current.transferId && current.transferId !== transferId)) return false;
+      delete pane.transferStatus[fileName];
+      return true;
     }
 
-    function updateOrCreateTransferToast(progress) {
-      let toast = activeTransferToasts.get(progress.transfer_id);
-
-      if (!toast) {
-        toast = document.createElement('div');
-        toast.className = 'fp-progress-toast';
-        toast.innerHTML = `
-          <div class="fp-pt-header">
-            <span class="fp-pt-kind">${progress.kind === 'download' ? '\u2193' : '\u2191'}</span>
-            <span class="fp-pt-filename"></span>
-            <button class="fp-pt-cancel" title="Cancel transfer">\u2715</button>
-          </div>
-          <div class="fp-pt-bar-wrap"><div class="fp-pt-bar"></div></div>
-          <div class="fp-pt-details">
-            <span class="fp-pt-bytes"></span>
-            <span class="fp-pt-speed"></span>
-          </div>
-        `;
-        toast.querySelector('.fp-pt-cancel').addEventListener('click', () => {
-          if (typeof d.cancelTransfer === 'function') {
-            Promise.resolve(d.cancelTransfer(progress.transfer_id)).catch(() => {});
-          }
-          removeTransferToast(progress.transfer_id);
-        });
-        toast._startTime = Date.now();
-        toast._startBytes = 0;
-        toast._lastBytes = 0;
-        toast._lastTime = Date.now();
-
-        let container = document.getElementById('toast-container');
-        if (!container) {
-          container = document.createElement('div');
-          container.id = 'toast-container';
-          document.body.appendChild(container);
-        }
-        container.appendChild(toast);
-        requestAnimationFrame(() => toast.classList.add('visible'));
-        activeTransferToasts.set(progress.transfer_id, toast);
-      }
-
-      toast.querySelector('.fp-pt-filename').textContent = progress.file_name;
-      const pct = progress.total_bytes > 0
-        ? Math.round((progress.bytes_transferred / progress.total_bytes) * 100)
-        : 0;
-      toast.querySelector('.fp-pt-bar').style.width = pct + '%';
-
-      const bytesStr = formatSize(progress.bytes_transferred) + ' / ' + formatSize(progress.total_bytes);
-      toast.querySelector('.fp-pt-bytes').textContent = bytesStr;
-
-      const now = Date.now();
-      const elapsed = (now - toast._lastTime) / 1000;
-      if (elapsed > 0.05) {
-        const bytesDelta = progress.bytes_transferred - toast._lastBytes;
-        const speed = bytesDelta / elapsed;
-        toast.querySelector('.fp-pt-speed').textContent = formatSize(Math.round(speed)) + '/s';
-        toast._lastBytes = progress.bytes_transferred;
-        toast._lastTime = now;
-      }
+    function renderTransferStatus(pane) {
+      if (typeof d.renderTransferStatus === 'function') d.renderTransferStatus(pane);
     }
 
+    // Legacy byte progress remains the compatibility source for percentages.
+    // Lifecycle notifications and committed completion come from the durable
+    // runtime snapshot below, so this path never creates a toast or refreshes
+    // a directory from an event that can race the final handle close.
     function handleTransferProgress(event) {
       const progress = event && event.payload;
       if (!progress || !progress.transfer_id) return;
 
-      const pane = progress.kind === 'download' ? d.localPane : d.remotePane;
+      const pane = paneForDirection(progress.kind);
       if (!pane) return;
 
       const pct = progress.total_bytes > 0
         ? Math.round((progress.bytes_transferred / progress.total_bytes) * 100)
         : 0;
 
-      if (progress.status === 'completed') {
-        removeTransferToast(progress.transfer_id);
-        showCompletionToast(progress.file_name, progress.kind);
-        pane.transferStatus[progress.file_name] = { status: 'completed', percent: 100 };
-        // A source file can change outside TermLab while its directory remains
-        // open. Refresh both sides only after the backend has flushed and
-        // closed the transfer handles, so neither pane keeps the snapshot it
-        // had before this transfer.
-        if (typeof d.loadEntries === 'function') {
-          if (d.localPane) d.loadEntries(d.localPane);
-          if (d.remotePane && d.remotePane !== d.localPane) d.loadEntries(d.remotePane);
+      if (terminalKinds.has(progress.status)) {
+        if (clearBadge(pane, progress.file_name, progress.transfer_id)) {
+          renderTransferStatus(pane);
         }
         return;
       }
 
-      if (progress.status === 'failed' || progress.status === 'cancelled') {
-        removeTransferToast(progress.transfer_id);
-        delete pane.transferStatus[progress.file_name];
-        if (progress.status === 'failed') {
-          showCompletionToast(progress.file_name, progress.kind, progress.error);
+      pane.transferStatus[progress.file_name] = {
+        status: 'in_progress',
+        percent: pct,
+        transferId: progress.transfer_id,
+      };
+    }
+
+    function handleTransferSnapshot(snapshot) {
+      const jobs = Array.isArray(snapshot && snapshot.jobs) ? snapshot.jobs : [];
+      const currentJobs = new Map();
+      const panesToRender = new Set();
+      let refreshAfterCommit = false;
+
+      for (const job of jobs) {
+        if (!job || !job.id || !job.origin || job.origin.kind !== 'filesPanel') continue;
+        currentJobs.set(job.id, job);
+        const kind = job.state && job.state.kind;
+        const pane = paneForDirection(job.direction);
+        if (!pane || !job.fileName) continue;
+
+        if (attentionKinds.has(kind)) {
+          pane.transferStatus[job.fileName] = {
+            status: 'attention',
+            percent: 0,
+            transferId: job.id,
+          };
+          panesToRender.add(pane);
+        } else if (terminalKinds.has(kind)) {
+          if (clearBadge(pane, job.fileName, job.id)) panesToRender.add(pane);
+        } else {
+          const current = pane.transferStatus[job.fileName];
+          if (!current || current.transferId === job.id) {
+            pane.transferStatus[job.fileName] = {
+              status: 'in_progress',
+              percent: current && Number(current.percent) ? Number(current.percent) : 0,
+              transferId: job.id,
+            };
+            panesToRender.add(pane);
+          }
         }
-        return;
+
+        const previous = previousJobs.get(job.id);
+        const previousKind = previous && previous.state && previous.state.kind;
+        if (kind === 'completed' && previousKind && previousKind !== 'completed') {
+          refreshAfterCommit = true;
+        }
       }
 
-      pane.transferStatus[progress.file_name] = { status: 'in_progress', percent: pct };
-      updateOrCreateTransferToast(progress);
+      // History compaction/removal must not leave a badge behind.
+      for (const [id, job] of previousJobs) {
+        if (currentJobs.has(id)) continue;
+        const pane = paneForDirection(job.direction);
+        if (pane && clearBadge(pane, job.fileName, id)) panesToRender.add(pane);
+      }
+      previousJobs = currentJobs;
+
+      if (refreshAfterCommit && typeof d.loadEntries === 'function') {
+        if (d.localPane) d.loadEntries(d.localPane);
+        if (d.remotePane && d.remotePane !== d.localPane) d.loadEntries(d.remotePane);
+        return;
+      }
+      panesToRender.forEach(renderTransferStatus);
     }
 
     return {
       handleTransferProgress,
-      removeTransferToast,
-      showCompletionToast,
+      handleTransferSnapshot,
     };
   }
 

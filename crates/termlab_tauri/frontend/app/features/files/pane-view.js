@@ -1,6 +1,17 @@
 (function initTermLabFilesPaneView(global) {
   'use strict';
 
+  function transferBadgeHtml(status) {
+    if (!status) return '';
+    if (status.status === 'attention') {
+      return '<span class="fp-transfer-pct" role="status">Needs attention</span>';
+    }
+    if (status.status === 'in_progress') {
+      return `<span class="fp-transfer-pct">${status.percent || 0}%</span>`;
+    }
+    return '';
+  }
+
   function renderPane(pane, el, deps) {
     if (!el || !pane) return;
     const d = deps || {};
@@ -65,9 +76,7 @@
 
       const icon = fileIcons ? fileIcons.iconFor(entry.name, entry.is_dir, !pane.isLocal) : '';
       let cells = `<td class="fp-cell-name">${icon} <span>${esc(entry.name)}</span>`;
-      if (ts && ts.status === 'in_progress') {
-        cells += `<span class="fp-transfer-pct">${ts.percent || 0}%</span>`;
-      }
+      cells += transferBadgeHtml(ts);
       cells += '</td>';
       if (pane.colExt) cells += `<td class="fp-cell-ext">${esc(extOf(entry.name))}</td>`;
       if (pane.colSize) cells += `<td class="fp-cell-size">${entry.is_dir ? '' : formatSize(entry.size)}</td>`;
@@ -264,6 +273,7 @@
 
   global.termlabFilesPaneView = {
     renderPane,
+    transferBadgeHtml,
     showColumnMenu,
     showRowContextMenu,
   };

@@ -365,6 +365,8 @@ await checkAsync('(c) a remote Save As rebinds every field only after the upload
     paneId: NEW.paneId,
     localPath: tempPathFor(NEW.hostLabel, NEW.remotePath),
     remotePath: NEW.remotePath,
+    origin: 'editor',
+    conflictPolicy: { kind: 'overwrite' },
   }, 'the upload goes to the NEW pane id and path');
 
   h.emit(progress(upload.id, 'completed'));
@@ -457,6 +459,8 @@ await checkAsync('(d) after a failed Save As, a plain save still goes to the OLD
     paneId: OLD.paneId,
     localPath: tempPathFor(OLD.hostLabel, OLD.remotePath),
     remotePath: OLD.remotePath,
+    origin: 'editor',
+    conflictPolicy: { kind: 'overwrite' },
   }, 'and uploads to the OLD host and path');
   h.emit(progress(upload.id, 'completed'));
   await settles(savingAgain, 'the plain save after a failed Save As');
