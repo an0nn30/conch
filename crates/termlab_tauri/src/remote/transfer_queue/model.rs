@@ -60,7 +60,7 @@ pub fn build_destination_key(
     format!("{host_key}:{}", normalize_destination_path(destination))
 }
 
-fn normalize_destination_path(path: &str) -> String {
+pub(super) fn normalize_destination_path(path: &str) -> String {
     let absolute = path.starts_with('/');
     let mut components: Vec<&str> = Vec::new();
 
