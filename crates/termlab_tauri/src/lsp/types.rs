@@ -1,5 +1,45 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(type = "string")]
+pub(crate) struct ReservationId(Uuid);
+
+impl ReservationId {
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(type = "string")]
+pub(crate) struct DocumentId(Uuid);
+
+impl DocumentId {
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum ReserveResult {
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Reserved { reservation_id: ReservationId },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    FocusPending { window_label: String },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    FocusOwner {
+        document_id: DocumentId,
+        window_label: String,
+        pane_id: String,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]

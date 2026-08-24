@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod document;
+pub(crate) mod ownership;
 pub(crate) mod root;
 pub(crate) mod trust;
 pub(crate) mod types;
