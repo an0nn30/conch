@@ -3,8 +3,8 @@ use std::fmt;
 use termlab_remote::transfer::SourceFingerprint;
 
 use super::model::{
-    AttentionReason, CommitPhase, CompletionResult, ConflictResolution, ManagedArtifacts,
-    TransferDirection, TransferJob, TransferJobState, build_destination_key,
+    AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ConflictResolution,
+    ManagedArtifacts, TransferDirection, TransferJob, TransferJobState, build_destination_key,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,8 +217,14 @@ fn resolution_is_legal(reason: &AttentionReason, resolution: &ConflictResolution
 
 fn apply_resolution(job: &mut TransferJob, resolution: ConflictResolution, now_ms: u64) {
     match resolution {
-        ConflictResolution::Resume => job.state = TransferJobState::Queued,
-        ConflictResolution::Overwrite => reset_attempt(job),
+        ConflictResolution::Resume => {
+            job.state = TransferJobState::Queued;
+            job.conflict_policy = ConflictPolicy::Overwrite;
+        }
+        ConflictResolution::Overwrite => {
+            reset_attempt(job);
+            job.conflict_policy = ConflictPolicy::Overwrite;
+        }
         ConflictResolution::Rename { destination } => {
             match job.direction {
                 TransferDirection::Upload => job.remote_path = destination.clone(),
@@ -231,6 +237,7 @@ fn apply_resolution(job: &mut TransferJob, resolution: ConflictResolution, now_m
                 &job.remote_path,
             );
             reset_attempt(job);
+            job.conflict_policy = ConflictPolicy::Ask;
         }
         ConflictResolution::Skip => {
             job.state = TransferJobState::Completed {
@@ -522,12 +529,54 @@ mod tests {
     }
 
     #[test]
-    fn rename_uses_the_same_scoped_key_as_an_equivalent_new_job() {
-        let conflict = sample_job(TransferJobState::NeedsAttention {
+    fn overwrite_resolution_resets_identity_and_persists_overwrite_authorization() {
+        let mut job = sample_job(TransferJobState::NeedsAttention {
             reason: AttentionReason::DestinationConflict {
                 resume_available: false,
             },
         });
+        job.source_fingerprint = Some(fingerprint("unixNs:12"));
+        job.durable_checkpoint = 4_096;
+        job.artifacts = Some(artifacts());
+
+        let resolved =
+            reduce_job(&job, JobEvent::Resolve(ConflictResolution::Overwrite), 63).unwrap();
+
+        assert_eq!(resolved.state, TransferJobState::Queued);
+        assert_eq!(resolved.conflict_policy, ConflictPolicy::Overwrite);
+        assert_eq!(resolved.source_fingerprint, None);
+        assert_eq!(resolved.durable_checkpoint, 0);
+        assert_eq!(resolved.artifacts, None);
+    }
+
+    #[test]
+    fn resume_resolution_retains_identity_and_persists_overwrite_authorization() {
+        let mut job = sample_job(TransferJobState::NeedsAttention {
+            reason: AttentionReason::DestinationConflict {
+                resume_available: true,
+            },
+        });
+        job.source_fingerprint = Some(fingerprint("unixNs:12"));
+        job.durable_checkpoint = 4_096;
+        job.artifacts = Some(artifacts());
+
+        let resolved = reduce_job(&job, JobEvent::Resolve(ConflictResolution::Resume), 63).unwrap();
+
+        assert_eq!(resolved.state, TransferJobState::Queued);
+        assert_eq!(resolved.conflict_policy, ConflictPolicy::Overwrite);
+        assert_eq!(resolved.source_fingerprint, job.source_fingerprint);
+        assert_eq!(resolved.durable_checkpoint, 4_096);
+        assert_eq!(resolved.artifacts, job.artifacts);
+    }
+
+    #[test]
+    fn rename_uses_the_same_scoped_key_as_an_equivalent_new_job() {
+        let mut conflict = sample_job(TransferJobState::NeedsAttention {
+            reason: AttentionReason::DestinationConflict {
+                resume_available: false,
+            },
+        });
+        conflict.conflict_policy = ConflictPolicy::Overwrite;
         let renamed = reduce_job(
             &conflict,
             JobEvent::Resolve(ConflictResolution::Rename {
@@ -553,6 +602,7 @@ mod tests {
             renamed.destination_key,
             "configured:server-1:/srv/report.csv"
         );
+        assert_eq!(renamed.conflict_policy, ConflictPolicy::Ask);
 
         let mut other_endpoint_job = equivalent_new_job;
         other_endpoint_job.host_key = "configured:server-2".into();

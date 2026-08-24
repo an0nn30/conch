@@ -28,7 +28,7 @@ use super::{
         AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ManagedArtifacts,
         TransferDirection, TransferEndpoint, TransferJob,
     },
-    scheduler::{FailureClass, classify_failure},
+    scheduler::FailureClass,
 };
 use crate::remote::RemoteState;
 
@@ -131,19 +131,88 @@ impl TransferIoError {
     }
 
     fn from_remote(error: RemoteError) -> Self {
+        let class = match &error {
+            RemoteError::Connection(_) => FailureClass::Transient,
+            RemoteError::Io(error) => classify_io_failure(error.kind()),
+            RemoteError::Sftp(message) | RemoteError::Transfer(message) => {
+                classify_transport_failure(message)
+            }
+            RemoteError::Auth(_)
+            | RemoteError::Tunnel(_)
+            | RemoteError::KnownHosts(_)
+            | RemoteError::Other(_) => FailureClass::Permanent,
+        };
         let message = error.to_string();
+        Self { class, message }
+    }
+
+    fn from_operation(class: FailureClass, operation: &str, error: impl fmt::Display) -> Self {
         Self {
-            class: classify_failure(&message),
-            message,
+            class,
+            message: format!("{operation} failed: {error}"),
         }
     }
 
-    fn from_operation(operation: &str, error: impl fmt::Display) -> Self {
-        let message = format!("{operation} failed: {error}");
-        Self {
-            class: classify_failure(&message),
-            message,
-        }
+    fn from_local(error: impl fmt::Display) -> Self {
+        Self::permanent(error.to_string())
+    }
+
+    fn from_remote_operation(operation: &str, error: impl fmt::Display) -> Self {
+        let error = error.to_string();
+        let class = classify_transport_failure(&error);
+        Self::from_operation(class, operation, error)
+    }
+
+    fn from_io_operation(operation: &str, error: std::io::Error) -> Self {
+        let class = classify_io_failure(error.kind());
+        Self::from_operation(class, operation, error)
+    }
+}
+
+fn classify_io_failure(kind: std::io::ErrorKind) -> FailureClass {
+    match kind {
+        std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted
+        | std::io::ErrorKind::NotConnected
+        | std::io::ErrorKind::BrokenPipe
+        | std::io::ErrorKind::TimedOut
+        | std::io::ErrorKind::UnexpectedEof => FailureClass::Transient,
+        _ => FailureClass::Permanent,
+    }
+}
+
+/// Classify only the raw error supplied by remote transport infrastructure.
+/// Operation context and user-controlled paths must be appended after this.
+fn classify_transport_failure(error: &str) -> FailureClass {
+    let error = error.to_ascii_lowercase();
+    let cause = error
+        .rsplit_once(": ")
+        .map_or(error.as_str(), |(_, cause)| cause);
+    let explicit_disconnect = cause.starts_with("disconnect")
+        || cause.contains(" disconnected")
+        || cause.contains("connection lost");
+    let explicit_timeout = cause == "timeout"
+        || cause.starts_with("timeout ")
+        || cause.contains("timed out")
+        || cause.contains("connection timeout")
+        || cause.contains("i/o timeout");
+    if explicit_disconnect
+        || explicit_timeout
+        || [
+            "connection reset",
+            "connection aborted",
+            "channel closed",
+            "connection closed",
+            "broken pipe",
+            "not connected",
+            "unexpected eof",
+        ]
+        .iter()
+        .any(|indicator| cause.contains(indicator))
+    {
+        FailureClass::Transient
+    } else {
+        FailureClass::Permanent
     }
 }
 
@@ -303,6 +372,16 @@ where
             Ok(artifacts) => artifacts,
             Err(message) => return permanent_failure(message),
         };
+        if job.durable_checkpoint > 0
+            && (job
+                .source_fingerprint
+                .as_ref()
+                .and_then(|fingerprint| fingerprint.modified_token.as_ref())
+                .is_none()
+                || job.artifacts.as_ref() != Some(&artifacts))
+        {
+            return RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume);
+        }
         if let Some(persisted) = &job.artifacts
             && persisted != &artifacts
         {
@@ -319,6 +398,10 @@ where
             Ok(opened) => opened,
             Err(error) => return failed(error),
         };
+        if job.durable_checkpoint > 0 && actual.modified_token.is_none() {
+            let _ = self.io.finish_source(&mut source).await;
+            return RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume);
+        }
         if let Some(expected) = &job.source_fingerprint
             && expected != &actual
         {
@@ -327,10 +410,6 @@ where
                 expected: expected.clone(),
                 actual,
             });
-        }
-        if job.durable_checkpoint > 0 && actual.modified_token.is_none() {
-            let _ = self.io.finish_source(&mut source).await;
-            return RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume);
         }
         if let Err(message) = reporter
             .fingerprinted(actual.clone(), actual.size, artifacts.clone())
@@ -355,11 +434,6 @@ where
                 ),
             });
         }
-        if inventory.partial_exists && actual.modified_token.is_none() {
-            let _ = self.io.finish_source(&mut source).await;
-            return RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume);
-        }
-
         let resume_available = inventory.partial_exists
             && job.durable_checkpoint > 0
             && job.artifacts.as_ref() == Some(&artifacts)
@@ -474,15 +548,7 @@ where
                 actual.size
             )),
             CopyOutcome::Completed { .. } => {
-                commit_fresh(
-                    &self.io,
-                    &connection,
-                    &job,
-                    &artifacts,
-                    inventory.final_exists,
-                    &reporter,
-                )
-                .await
+                commit_fresh(&self.io, &connection, &job, &artifacts, &actual, &reporter).await
             }
         }
     }
@@ -517,13 +583,30 @@ async fn commit_fresh<C, I>(
     connection: &C,
     job: &TransferJob,
     artifacts: &ManagedArtifacts,
-    final_exists: bool,
+    source_fingerprint: &SourceFingerprint,
     reporter: &RunnerReporter,
 ) -> RunnerResult
 where
     C: Send + Sync,
     I: TransferIo<C>,
 {
+    let inventory = match io.inventory(connection, job, artifacts).await {
+        Ok(inventory) => inventory,
+        Err(error) => return failed(error),
+    };
+    if inventory.backup_exists {
+        return RunnerResult::NeedsAttention(AttentionReason::CommitRecovery {
+            message: format!(
+                "backup appeared immediately before commit with persisted None phase ({inventory}); preserve all artifacts and resolve explicitly"
+            ),
+        });
+    }
+    if inventory.final_exists && job.conflict_policy == ConflictPolicy::Ask {
+        return RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
+            resume_available: source_fingerprint.modified_token.is_some(),
+        });
+    }
+    let final_exists = inventory.final_exists;
     if let Err(message) = reporter.commit_phase(CommitPhase::Prepared).await {
         return permanent_failure(message);
     }
@@ -811,7 +894,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
             TransferDirection::Upload => fingerprint_open_local(&job.local_path)
                 .await
                 .map(|(file, fingerprint)| (RealSource::Local(file), fingerprint))
-                .map_err(TransferIoError::from_remote),
+                .map_err(TransferIoError::from_local),
             TransferDirection::Download => {
                 let session = open_sftp_session(&connection.ssh_handle)
                     .await
@@ -864,14 +947,16 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
                     Ok(metadata) => Ok(metadata.size),
                     Err(error) => match remote_exists(&session, &artifacts.partial_path).await {
                         Ok(false) => Ok(None),
-                        Ok(true) => {
-                            Err(TransferIoError::from_operation("stat remote partial", error))
-                        }
+                        Ok(true) => Err(TransferIoError::from_remote_operation(
+                            "stat remote partial",
+                            error,
+                        )),
                         Err(probe_error) => Err(probe_error),
                     },
                 }
             }
-            TransferDirection::Download => match tokio::fs::metadata(&artifacts.partial_path).await {
+            TransferDirection::Download => match tokio::fs::metadata(&artifacts.partial_path).await
+            {
                 Ok(metadata) => Ok(Some(metadata.len())),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(TransferIoError::permanent(format!(
@@ -899,7 +984,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
             }
             TransferDirection::Download => truncate_local_partial(&artifacts.partial_path, bytes)
                 .await
-                .map_err(TransferIoError::from_remote),
+                .map_err(TransferIoError::from_local),
         }
     }
 
@@ -923,15 +1008,15 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
             TransferDirection::Download => open_local_partial(&artifacts.partial_path, resume)
                 .await
                 .map(RealPartial::Local)
-                .map_err(TransferIoError::from_remote),
+                .map_err(TransferIoError::from_local),
         }
     }
 
     async fn finish_source(&self, source: &mut Self::Source) -> Result<(), TransferIoError> {
         if let RealSource::Remote(file) = source {
-            file.shutdown()
-                .await
-                .map_err(|error| TransferIoError::from_operation("close remote source", error))?;
+            file.shutdown().await.map_err(|error| {
+                TransferIoError::from_io_operation("close remote source", error)
+            })?;
         }
         Ok(())
     }
@@ -948,14 +1033,14 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
             }
             RealPartial::Remote(file) => {
                 file.flush().await.map_err(|error| {
-                    TransferIoError::from_operation("flush remote partial", error)
+                    TransferIoError::from_io_operation("flush remote partial", error)
                 })?;
                 file.sync_all().await.map_err(|error| {
-                    TransferIoError::from_operation("sync remote partial", error)
+                    TransferIoError::from_remote_operation("sync remote partial", error)
                 })?;
-                file.shutdown()
-                    .await
-                    .map_err(|error| TransferIoError::from_operation("close remote partial", error))
+                file.shutdown().await.map_err(|error| {
+                    TransferIoError::from_io_operation("close remote partial", error)
+                })
             }
         }
     }
@@ -1023,7 +1108,7 @@ async fn local_exists(path: &str) -> Result<bool, TransferIoError> {
 
 async fn remote_exists(session: &SftpSessionHandle, path: &str) -> Result<bool, TransferIoError> {
     session.try_exists(path.to_owned()).await.map_err(|error| {
-        TransferIoError::from_operation(&format!("inspect remote artifact {path}"), error)
+        TransferIoError::from_remote_operation(&format!("inspect remote artifact {path}"), error)
     })
 }
 
@@ -1041,7 +1126,9 @@ async fn rename_artifact(
             session
                 .rename(from.to_owned(), to.to_owned())
                 .await
-                .map_err(|error| TransferIoError::from_operation("rename remote artifact", error))
+                .map_err(|error| {
+                    TransferIoError::from_remote_operation("rename remote artifact", error)
+                })
         }
         TransferDirection::Download => tokio::fs::rename(from, to).await.map_err(|error| {
             TransferIoError::permanent(format!("rename local artifact failed: {error}"))
@@ -1063,10 +1150,9 @@ async fn remove_artifact(
             if missing_ok && !remote_exists(&session, path).await? {
                 return Ok(());
             }
-            session
-                .remove_file(path.to_owned())
-                .await
-                .map_err(|error| TransferIoError::from_operation("delete remote artifact", error))
+            session.remove_file(path.to_owned()).await.map_err(|error| {
+                TransferIoError::from_remote_operation("delete remote artifact", error)
+            })
         }
         TransferDirection::Download => {
             if missing_ok && !local_exists(path).await? {
@@ -1333,10 +1419,11 @@ mod tests {
         artifacts::ArtifactInventory,
         events::RunnerEvent,
         model::{
-            AttentionReason, CommitPhase, ConflictPolicy, ManagedArtifacts, TransferDirection,
-            TransferEndpoint, TransferJob, TransferJobState, TransferOrigin, TransferPriority,
-            TransferProtocol,
+            AttentionReason, CommitPhase, ConflictPolicy, ConflictResolution, ManagedArtifacts,
+            TransferDirection, TransferEndpoint, TransferJob, TransferJobState, TransferOrigin,
+            TransferPriority, TransferProtocol,
         },
+        reducer::{JobEvent, reduce_job},
         scheduler::FailureClass,
     };
 
@@ -1368,6 +1455,7 @@ mod tests {
         fingerprint: SourceFingerprint,
         inventory: ArtifactInventory,
         partial_len: Option<u64>,
+        final_after_finish_partial: bool,
         fail_at: Option<&'static str>,
     }
 
@@ -1383,6 +1471,7 @@ mod tests {
                         backup_exists: false,
                     },
                     partial_len: None,
+                    final_after_finish_partial: false,
                     fail_at: None,
                 })),
             }
@@ -1399,6 +1488,11 @@ mod tests {
 
         fn failing_at(self, operation: &'static str) -> Self {
             self.state.lock().unwrap().fail_at = Some(operation);
+            self
+        }
+
+        fn with_final_appearing_after_copy(self) -> Self {
+            self.state.lock().unwrap().final_after_finish_partial = true;
             self
         }
 
@@ -1493,7 +1587,11 @@ mod tests {
 
         async fn finish_partial(&self, partial: &mut Self::Partial) -> Result<(), TransferIoError> {
             self.record("finish_partial")?;
-            self.state.lock().unwrap().partial_len = Some(partial.get_ref().len() as u64);
+            let mut state = self.state.lock().unwrap();
+            state.partial_len = Some(partial.get_ref().len() as u64);
+            if state.final_after_finish_partial {
+                state.inventory.final_exists = true;
+            }
             Ok(())
         }
 
@@ -1711,6 +1809,7 @@ mod tests {
                 "finish_source",
                 "finish_partial",
                 "checkpoint:4",
+                "inventory",
                 "phase:Prepared",
                 "move_final_to_backup",
                 "phase:BackupMoved",
@@ -1856,8 +1955,7 @@ mod tests {
         job.durable_checkpoint = 2;
         job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
 
-        let (result, operations) =
-            run_fake(true, io, job, super::RunnerControlState::Run).await;
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
 
         assert!(matches!(
             result,
@@ -1876,8 +1974,7 @@ mod tests {
             backup_path: "/srv/not-this-jobs-backup".into(),
         });
 
-        let (result, operations) =
-            run_fake(true, io, job, super::RunnerControlState::Run).await;
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
 
         assert!(matches!(
             result,
@@ -1893,6 +1990,7 @@ mod tests {
         let mut job = test_job();
         job.source_fingerprint = Some(fingerprint(4, Some("v1")));
         job.durable_checkpoint = 2;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
 
         let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
 
@@ -1920,6 +2018,7 @@ mod tests {
         let mut job = test_job();
         job.source_fingerprint = Some(fingerprint(4, None));
         job.durable_checkpoint = 2;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
 
         let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
 
@@ -1927,10 +2026,116 @@ mod tests {
             result,
             RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume)
         ));
-        assert_eq!(
-            operations,
-            vec!["resolve", "checking", "open_source", "finish_source"]
+        assert_eq!(operations, vec!["resolve", "checking"]);
+    }
+
+    #[tokio::test]
+    async fn checkpointed_resume_without_a_persisted_fingerprint_is_rejected_before_partial_io() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: false,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(2),
         );
+        let mut job = test_job();
+        job.durable_checkpoint = 2;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume)
+        ));
+        assert_eq!(operations, vec!["resolve", "checking"]);
+    }
+
+    #[tokio::test]
+    async fn checkpointed_resume_without_persisted_owned_artifacts_is_rejected_before_partial_io() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: false,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(2),
+        );
+        let mut job = test_job();
+        job.source_fingerprint = Some(fingerprint(4, Some("v1")));
+        job.durable_checkpoint = 2;
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume)
+        ));
+        assert_eq!(operations, vec!["resolve", "checking"]);
+    }
+
+    #[tokio::test]
+    async fn checkpointed_resume_with_mismatched_owned_artifacts_is_rejected_before_partial_io() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: false,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(2),
+        );
+        let mut job = test_job();
+        job.source_fingerprint = Some(fingerprint(4, Some("v1")));
+        job.durable_checkpoint = 2;
+        job.artifacts = Some(ManagedArtifacts {
+            partial_path: "/srv/not-this-jobs-partial".into(),
+            backup_path: "/srv/not-this-jobs-backup".into(),
+        });
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::SourceCannotResume)
+        ));
+        assert_eq!(operations, vec!["resolve", "checking"]);
+    }
+
+    #[tokio::test]
+    async fn tokenless_attention_restart_recreates_owned_partial_as_a_fresh_copy() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, None)).with_inventory(
+            ArtifactInventory {
+                final_exists: false,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(2),
+        );
+        let mut job = test_job();
+        job.state = TransferJobState::NeedsAttention {
+            reason: AttentionReason::SourceCannotResume,
+        };
+        job.source_fingerprint = Some(fingerprint(4, None));
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+        let job = reduce_job(&job, JobEvent::Resolve(ConflictResolution::Restart), 2).unwrap();
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(result, RunnerResult::Completed(_)));
+        let truncate = operations
+            .iter()
+            .position(|entry| entry == "truncate_partial")
+            .unwrap();
+        let open = operations
+            .iter()
+            .position(|entry| entry == "open_partial")
+            .unwrap();
+        assert!(truncate < open);
     }
 
     #[tokio::test]
@@ -1964,6 +2169,132 @@ mod tests {
                 "inventory",
                 "finish_source"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_rechecks_and_preserves_a_final_that_appears_during_copy() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_final_appearing_after_copy();
+
+        let (result, operations) =
+            run_fake(true, io, test_job(), super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
+                resume_available: true
+            })
+        ));
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|entry| *entry == "inventory")
+                .count(),
+            2
+        );
+        assert!(!operations.iter().any(|entry| entry == "phase:Prepared"));
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "move_final_to_backup")
+        );
+        assert!(!operations.iter().any(|entry| entry == "promote_partial"));
+    }
+
+    #[tokio::test]
+    async fn overwrite_rechecks_and_backs_up_a_final_that_appears_during_copy() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_final_appearing_after_copy();
+        let mut job = test_job();
+        job.conflict_policy = ConflictPolicy::Overwrite;
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(result, RunnerResult::Completed(_)));
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|entry| *entry == "inventory")
+                .count(),
+            2
+        );
+        let moved = operations
+            .iter()
+            .position(|entry| entry == "move_final_to_backup")
+            .unwrap();
+        let promoted = operations
+            .iter()
+            .position(|entry| entry == "promote_partial")
+            .unwrap();
+        assert!(moved < promoted);
+    }
+
+    #[tokio::test]
+    async fn overwrite_resolution_redispatches_through_the_runner_without_conflict_looping() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: false,
+                backup_exists: false,
+            },
+            None,
+        );
+        let mut job = test_job();
+        job.state = TransferJobState::NeedsAttention {
+            reason: AttentionReason::DestinationConflict {
+                resume_available: false,
+            },
+        };
+        let job = reduce_job(&job, JobEvent::Resolve(ConflictResolution::Overwrite), 2).unwrap();
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::Completed(super::CompletionResult::Transferred)
+        ));
+        assert!(
+            operations
+                .iter()
+                .any(|entry| entry == "move_final_to_backup")
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_resolution_redispatches_owned_checkpoint_without_conflict_looping() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(6, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(2),
+        );
+        let mut job = test_job();
+        job.state = TransferJobState::NeedsAttention {
+            reason: AttentionReason::DestinationConflict {
+                resume_available: true,
+            },
+        };
+        job.source_fingerprint = Some(fingerprint(6, Some("v1")));
+        job.durable_checkpoint = 2;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+        let job = reduce_job(&job, JobEvent::Resolve(ConflictResolution::Resume), 2).unwrap();
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::Completed(super::CompletionResult::Transferred)
+        ));
+        assert!(operations.iter().any(|entry| entry == "partial_size"));
+        assert!(
+            operations
+                .iter()
+                .any(|entry| entry == "move_final_to_backup")
         );
     }
 
@@ -2132,14 +2463,42 @@ mod tests {
 
     #[test]
     fn contextual_sftp_operation_preserves_disconnect_classification() {
-        let error =
-            TransferIoError::from_operation("inspect remote artifact", "channel closed by server");
+        let error = TransferIoError::from_remote_operation(
+            "inspect remote artifact",
+            "channel closed by server",
+        );
 
         assert_eq!(error.class, FailureClass::Transient);
         assert_eq!(
             error.message,
             "inspect remote artifact failed: channel closed by server"
         );
+    }
+
+    #[test]
+    fn local_permission_failure_stays_permanent_when_its_path_says_timeout_and_disconnect() {
+        let error = TransferIoError::from_operation(
+            FailureClass::Permanent,
+            "open local source /tmp/timeout/disconnect.bin",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+        );
+
+        assert_eq!(error.class, FailureClass::Permanent);
+        assert!(error.message.contains("timeout/disconnect.bin"));
+
+        let already_contextualized = TransferIoError::from_remote(RemoteError::Transfer(
+            "open local source /tmp/timeout/disconnect.bin failed: permission denied".into(),
+        ));
+        assert_eq!(already_contextualized.class, FailureClass::Permanent);
+    }
+
+    #[test]
+    fn structured_remote_disconnect_is_transient() {
+        let error = TransferIoError::from_remote(RemoteError::Connection(
+            "remote peer disconnected".into(),
+        ));
+
+        assert_eq!(error.class, FailureClass::Transient);
     }
 
     #[test]

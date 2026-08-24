@@ -1400,6 +1400,7 @@ mod tests {
     #[derive(Default)]
     struct GatedRunner {
         starts: Mutex<Vec<Uuid>>,
+        jobs: Mutex<Vec<TransferJob>>,
         gates: Mutex<HashMap<Uuid, VecDeque<oneshot::Receiver<RunnerResult>>>>,
         controls: Mutex<HashMap<Uuid, RunnerControl>>,
         reporters: Mutex<HashMap<Uuid, RunnerReporter>>,
@@ -1419,6 +1420,10 @@ mod tests {
 
         fn starts(&self) -> Vec<Uuid> {
             self.starts.lock().unwrap().clone()
+        }
+
+        fn jobs(&self) -> Vec<TransferJob> {
+            self.jobs.lock().unwrap().clone()
         }
 
         fn control_state(&self, id: Uuid) -> RunnerControlState {
@@ -1441,6 +1446,7 @@ mod tests {
             self.controls.lock().unwrap().insert(job.id, control);
             self.reporters.lock().unwrap().insert(job.id, reporter);
             self.starts.lock().unwrap().push(job.id);
+            self.jobs.lock().unwrap().push(job.clone());
             let gate = {
                 let mut gates = self.gates.lock().unwrap();
                 gates
@@ -2406,6 +2412,7 @@ mod tests {
                 ConflictResolution::Rename { destination } => {
                     assert_eq!(job.remote_path, destination);
                     assert_eq!(job.state, TransferJobState::Queued);
+                    assert_eq!(job.conflict_policy, ConflictPolicy::Ask);
                 }
                 _ => assert_eq!(job.state, TransferJobState::Queued),
             }
@@ -2460,6 +2467,58 @@ mod tests {
             harness.handle.snapshot().jobs[0].state,
             TransferJobState::Queued
         );
+    }
+
+    #[tokio::test]
+    async fn overwrite_and_resume_redispatch_persisted_authorization_to_the_runner() {
+        for (id, resolution, resume) in [
+            (Uuid::from_u128(202), ConflictResolution::Overwrite, false),
+            (Uuid::from_u128(203), ConflictResolution::Resume, true),
+        ] {
+            let mut job = stored_job(
+                id,
+                TransferJobState::NeedsAttention {
+                    reason: AttentionReason::DestinationConflict {
+                        resume_available: resume,
+                    },
+                },
+                1,
+            );
+            let expected_fingerprint = SourceFingerprint {
+                size: 8_192,
+                modified_token: Some("source-v1".into()),
+            };
+            let expected_artifacts = ManagedArtifacts {
+                partial_path: format!("/srv/.{id}.part"),
+                backup_path: format!("/srv/.{id}.backup"),
+            };
+            job.source_fingerprint = Some(expected_fingerprint.clone());
+            job.durable_checkpoint = 4_096;
+            job.artifacts = Some(expected_artifacts.clone());
+
+            let runner = Arc::new(GatedRunner::default());
+            let release = runner.gate(id);
+            let harness = ActorHarness::with_runner(document_with(vec![job]), runner.clone());
+            harness.handle.resume_all().await.unwrap();
+            harness.handle.resolve(id, resolution).await.unwrap();
+            wait_for_starts(&runner, 1).await;
+
+            let dispatched = runner.jobs().pop().unwrap();
+            assert_eq!(dispatched.conflict_policy, ConflictPolicy::Overwrite);
+            if resume {
+                assert_eq!(dispatched.source_fingerprint, Some(expected_fingerprint));
+                assert_eq!(dispatched.durable_checkpoint, 4_096);
+                assert_eq!(dispatched.artifacts, Some(expected_artifacts));
+            } else {
+                assert_eq!(dispatched.source_fingerprint, None);
+                assert_eq!(dispatched.durable_checkpoint, 0);
+                assert_eq!(dispatched.artifacts, None);
+            }
+
+            release
+                .send(RunnerResult::Completed(CompletionResult::Transferred))
+                .unwrap();
+        }
     }
 
     #[tokio::test]
