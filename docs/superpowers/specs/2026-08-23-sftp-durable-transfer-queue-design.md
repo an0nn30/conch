@@ -1,6 +1,6 @@
 # SFTP Durable Transfer Queue and Transfer Center — Design
 
-**Status:** Draft for implementation-plan review
+**Status:** Approved
 **Date:** 2026-08-23
 **Scope:** Replace the current fire-and-forget SFTP transfer registry with a Rust-owned, durable, resumable queue and expose it through a desktop-native Transfer Center. The design is SFTP-first, while keeping persisted job records extensible enough for later FTP/FTPS/SCP adapters.
 
