@@ -11,6 +11,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use unicode_normalization::UnicodeNormalization;
+
 use super::types::{DocumentId, ReservationId, ReserveResult};
 
 const RESERVATION_TTL: Duration = Duration::from_secs(30);
@@ -31,28 +33,85 @@ pub(crate) enum OwnershipError {
     OwnerMismatch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaseSensitivity {
+    Sensitive,
+    Insensitive,
+}
+
+pub(crate) trait PathIdentityPolicy {
+    fn key_for(&self, path: &CanonicalLocalPath) -> Result<PathBuf, OwnershipError>;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SystemPathIdentityPolicy;
+
+impl PathIdentityPolicy for SystemPathIdentityPolicy {
+    fn key_for(&self, path: &CanonicalLocalPath) -> Result<PathBuf, OwnershipError> {
+        let sensitivity = system_case_sensitivity(&path.volume_probe)?;
+        identity_key(&path.io_path, sensitivity)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct FixedPathIdentityPolicy {
+    sensitivity: CaseSensitivity,
+}
+
+#[cfg(test)]
+impl FixedPathIdentityPolicy {
+    pub(crate) fn new(sensitivity: CaseSensitivity) -> Self {
+        Self { sensitivity }
+    }
+}
+
+#[cfg(test)]
+impl PathIdentityPolicy for FixedPathIdentityPolicy {
+    fn key_for(&self, path: &CanonicalLocalPath) -> Result<PathBuf, OwnershipError> {
+        identity_key(&path.io_path, self.sensitivity)
+    }
+}
+
 #[derive(Debug)]
 enum UriLease {
     Reserved {
         token: ReservationId,
+        canonical_path: PathBuf,
         window_label: String,
         expires_at: Instant,
     },
     Owned {
         document_id: DocumentId,
+        canonical_path: PathBuf,
         window_label: String,
         pane_id: String,
     },
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct OwnershipRegistry {
+pub(crate) struct OwnershipRegistry<P = SystemPathIdentityPolicy> {
     leases: HashMap<PathBuf, UriLease>,
+    path_identity: P,
 }
 
-impl OwnershipRegistry {
+impl Default for OwnershipRegistry<SystemPathIdentityPolicy> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OwnershipRegistry<SystemPathIdentityPolicy> {
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self::with_policy(SystemPathIdentityPolicy)
+    }
+}
+
+impl<P: PathIdentityPolicy> OwnershipRegistry<P> {
+    pub(crate) fn with_policy(path_identity: P) -> Self {
+        Self {
+            leases: HashMap::new(),
+            path_identity,
+        }
     }
 
     pub(crate) fn reserve(
@@ -69,15 +128,16 @@ impl OwnershipRegistry {
         window_label: &str,
         now: Instant,
     ) -> Result<ReserveResult, OwnershipError> {
-        let path = match identifier {
+        let canonical = match identifier {
             DocumentIdentifier::Local(path) => canonical_local_path(&path)?,
             DocumentIdentifier::Untitled | DocumentIdentifier::Remote(_) => {
                 return Err(OwnershipError::NonLocalIdentifier);
             }
         };
+        let key = self.path_identity.key_for(&canonical)?;
         self.cleanup_expired_at(now);
 
-        match self.leases.get(&path) {
+        match self.leases.get(&key) {
             Some(UriLease::Reserved { window_label, .. }) => Ok(ReserveResult::FocusPending {
                 window_label: window_label.clone(),
             }),
@@ -85,6 +145,7 @@ impl OwnershipRegistry {
                 document_id,
                 window_label,
                 pane_id,
+                ..
             }) => Ok(ReserveResult::FocusOwner {
                 document_id: *document_id,
                 window_label: window_label.clone(),
@@ -92,15 +153,20 @@ impl OwnershipRegistry {
             }),
             None => {
                 let reservation_id = ReservationId::new();
+                let canonical_path = canonical_path_string(&canonical.io_path)?;
                 self.leases.insert(
-                    path,
+                    key,
                     UriLease::Reserved {
                         token: reservation_id,
+                        canonical_path: canonical.io_path,
                         window_label: window_label.to_owned(),
                         expires_at: now + RESERVATION_TTL,
                     },
                 );
-                Ok(ReserveResult::Reserved { reservation_id })
+                Ok(ReserveResult::Reserved {
+                    reservation_id,
+                    canonical_path,
+                })
             }
         }
     }
@@ -119,16 +185,17 @@ impl OwnershipRegistry {
         pane_id: &str,
         now: Instant,
     ) -> Result<DocumentId, OwnershipError> {
-        let (path, window_label) = self
+        let (key, canonical_path, window_label) = self
             .leases
             .iter()
-            .find_map(|(path, lease)| match lease {
+            .find_map(|(key, lease)| match lease {
                 UriLease::Reserved {
                     token: candidate,
+                    canonical_path,
                     window_label,
                     expires_at,
                 } if *candidate == token && now < *expires_at => {
-                    Some((path.clone(), window_label.clone()))
+                    Some((key.clone(), canonical_path.clone(), window_label.clone()))
                 }
                 _ => None,
             })
@@ -136,9 +203,10 @@ impl OwnershipRegistry {
 
         let document_id = DocumentId::new();
         self.leases.insert(
-            path,
+            key,
             UriLease::Owned {
                 document_id,
+                canonical_path,
                 window_label,
                 pane_id: pane_id.to_owned(),
             },
@@ -149,19 +217,19 @@ impl OwnershipRegistry {
     /// Releases only the still-uncommitted reservation identified by `token`.
     /// A stale token, a repeated release, or a token already committed is a no-op.
     pub(crate) fn release(&mut self, token: ReservationId) -> bool {
-        let path = self.leases.iter().find_map(|(path, lease)| match lease {
+        let key = self.leases.iter().find_map(|(key, lease)| match lease {
             UriLease::Reserved {
                 token: candidate, ..
-            } if *candidate == token => Some(path.clone()),
+            } if *candidate == token => Some(key.clone()),
             _ => None,
         });
-        path.is_some_and(|path| self.leases.remove(&path).is_some())
+        key.is_some_and(|key| self.leases.remove(&key).is_some())
     }
 
     /// Releases a committed local URI after its matching document closes.
     pub(crate) fn close(&mut self, document_id: DocumentId) -> bool {
-        let path = self.owned_path(document_id).cloned();
-        path.is_some_and(|path| self.leases.remove(&path).is_some())
+        let key = self.owned_key(document_id).cloned();
+        key.is_some_and(|key| self.leases.remove(&key).is_some())
     }
 
     /// Models local-to-remote Save As without accepting or storing a remote URI.
@@ -185,31 +253,33 @@ impl OwnershipRegistry {
         target_token: ReservationId,
         now: Instant,
     ) -> Result<(), OwnershipError> {
-        let (source_path, source_window, source_pane) = self
+        let (source_key, source_window, source_pane) = self
             .leases
             .iter()
-            .find_map(|(path, lease)| match lease {
+            .find_map(|(key, lease)| match lease {
                 UriLease::Owned {
                     document_id,
                     window_label,
                     pane_id,
+                    ..
                 } if *document_id == source_document => {
-                    Some((path.clone(), window_label.clone(), pane_id.clone()))
+                    Some((key.clone(), window_label.clone(), pane_id.clone()))
                 }
                 _ => None,
             })
             .ok_or(OwnershipError::DocumentNotOwned)?;
 
-        let (target_path, target_window) = self
+        let (target_key, target_path, target_window) = self
             .leases
             .iter()
-            .find_map(|(path, lease)| match lease {
+            .find_map(|(key, lease)| match lease {
                 UriLease::Reserved {
                     token,
+                    canonical_path,
                     window_label,
                     expires_at,
                 } if *token == target_token && now < *expires_at => {
-                    Some((path.clone(), window_label.clone()))
+                    Some((key.clone(), canonical_path.clone(), window_label.clone()))
                 }
                 _ => None,
             })
@@ -219,11 +289,12 @@ impl OwnershipRegistry {
             return Err(OwnershipError::OwnerMismatch);
         }
 
-        self.leases.remove(&source_path);
+        self.leases.remove(&source_key);
         self.leases.insert(
-            target_path,
+            target_key,
             UriLease::Owned {
                 document_id: source_document,
+                canonical_path: target_path,
                 window_label: source_window,
                 pane_id: source_pane,
             },
@@ -238,14 +309,124 @@ impl OwnershipRegistry {
         });
     }
 
-    fn owned_path(&self, document_id: DocumentId) -> Option<&PathBuf> {
-        self.leases.iter().find_map(|(path, lease)| match lease {
+    pub(crate) fn canonical_path(&self, document_id: DocumentId) -> Option<&Path> {
+        self.leases.values().find_map(|lease| match lease {
+            UriLease::Owned {
+                document_id: candidate,
+                canonical_path,
+                ..
+            } if *candidate == document_id => Some(canonical_path.as_path()),
+            _ => None,
+        })
+    }
+
+    fn owned_key(&self, document_id: DocumentId) -> Option<&PathBuf> {
+        self.leases.iter().find_map(|(key, lease)| match lease {
             UriLease::Owned {
                 document_id: candidate,
                 ..
-            } if *candidate == document_id => Some(path),
+            } if *candidate == document_id => Some(key),
             _ => None,
         })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CanonicalLocalPath {
+    io_path: PathBuf,
+    volume_probe: PathBuf,
+}
+
+fn canonical_path_string(path: &Path) -> Result<String, OwnershipError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or(OwnershipError::CanonicalizationFailed(
+            io::ErrorKind::InvalidData,
+        ))
+}
+
+fn identity_key(
+    canonical_path: &Path,
+    sensitivity: CaseSensitivity,
+) -> Result<PathBuf, OwnershipError> {
+    match sensitivity {
+        CaseSensitivity::Sensitive => Ok(canonical_path.to_path_buf()),
+        CaseSensitivity::Insensitive => {
+            let path = canonical_path
+                .to_str()
+                .ok_or(OwnershipError::CanonicalizationFailed(
+                    io::ErrorKind::InvalidData,
+                ))?;
+            let lowercase: String = path.nfc().flat_map(char::to_lowercase).collect();
+            Ok(PathBuf::from(lowercase.nfc().collect::<String>()))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_case_sensitivity(_volume_probe: &Path) -> Result<CaseSensitivity, OwnershipError> {
+    Ok(CaseSensitivity::Sensitive)
+}
+
+#[cfg(target_os = "macos")]
+fn system_case_sensitivity(volume_probe: &Path) -> Result<CaseSensitivity, OwnershipError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct VolumeCapabilitiesBuffer {
+        length: u32,
+        capabilities: libc::vol_capabilities_attr_t,
+    }
+
+    let path = CString::new(volume_probe.as_os_str().as_bytes())
+        .map_err(|_| OwnershipError::CanonicalizationFailed(io::ErrorKind::InvalidInput))?;
+    let mut attributes = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut buffer = VolumeCapabilitiesBuffer {
+        length: 0,
+        capabilities: libc::vol_capabilities_attr_t {
+            capabilities: [0; 4],
+            valid: [0; 4],
+        },
+    };
+
+    // SAFETY: `path` is NUL-terminated, both pointers refer to initialized
+    // C-compatible structs for the duration of this read-only syscall, and
+    // the supplied buffer size exactly matches `buffer`.
+    let result = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&mut attributes as *mut libc::attrlist).cast(),
+            (&mut buffer as *mut VolumeCapabilitiesBuffer).cast(),
+            std::mem::size_of::<VolumeCapabilitiesBuffer>(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(OwnershipError::CanonicalizationFailed(
+            io::Error::last_os_error().kind(),
+        ));
+    }
+
+    let index = libc::VOL_CAPABILITIES_FORMAT;
+    let mask = libc::VOL_CAP_FMT_CASE_SENSITIVE;
+    if buffer.capabilities.valid[index] & mask == 0 {
+        return Err(OwnershipError::CanonicalizationFailed(
+            io::ErrorKind::Unsupported,
+        ));
+    }
+    if buffer.capabilities.capabilities[index] & mask == 0 {
+        Ok(CaseSensitivity::Insensitive)
+    } else {
+        Ok(CaseSensitivity::Sensitive)
     }
 }
 
@@ -258,7 +439,7 @@ enum MissingComponent {
 /// Canonicalizes existing paths through the filesystem. For a prospective Save
 /// As target, the deepest existing ancestor is canonicalized first (resolving
 /// symlinks), then missing normal/parent components are normalized onto it.
-fn canonical_local_path(path: &Path) -> Result<PathBuf, OwnershipError> {
+fn canonical_local_path(path: &Path) -> Result<CanonicalLocalPath, OwnershipError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -268,7 +449,12 @@ fn canonical_local_path(path: &Path) -> Result<PathBuf, OwnershipError> {
     };
 
     match fs::canonicalize(&absolute) {
-        Ok(path) => return Ok(path),
+        Ok(path) => {
+            return Ok(CanonicalLocalPath {
+                volume_probe: path.clone(),
+                io_path: path,
+            });
+        }
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             return Err(OwnershipError::CanonicalizationFailed(error.kind()));
         }
@@ -308,7 +494,7 @@ fn canonical_local_path(path: &Path) -> Result<PathBuf, OwnershipError> {
             ))?;
     };
 
-    let mut canonical = canonical_ancestor;
+    let mut canonical = canonical_ancestor.clone();
     for component in missing.into_iter().rev() {
         match component {
             MissingComponent::Normal(value) => canonical.push(value),
@@ -317,7 +503,10 @@ fn canonical_local_path(path: &Path) -> Result<PathBuf, OwnershipError> {
             }
         }
     }
-    Ok(canonical)
+    Ok(CanonicalLocalPath {
+        io_path: canonical,
+        volume_probe: canonical_ancestor,
+    })
 }
 
 #[cfg(test)]
@@ -328,7 +517,10 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{DocumentIdentifier, OwnershipError, OwnershipRegistry};
+    use super::{
+        CaseSensitivity, DocumentIdentifier, FixedPathIdentityPolicy, OwnershipError,
+        OwnershipRegistry,
+    };
     use crate::lsp::types::{DocumentId, ReserveResult};
 
     fn local(path: impl AsRef<Path>) -> DocumentIdentifier {
@@ -337,7 +529,17 @@ mod tests {
 
     fn reserved(result: ReserveResult) -> crate::lsp::types::ReservationId {
         match result {
-            ReserveResult::Reserved { reservation_id } => reservation_id,
+            ReserveResult::Reserved { reservation_id, .. } => reservation_id,
+            other => panic!("expected a new reservation, got {other:?}"),
+        }
+    }
+
+    fn reservation(result: ReserveResult) -> (crate::lsp::types::ReservationId, PathBuf) {
+        match result {
+            ReserveResult::Reserved {
+                reservation_id,
+                canonical_path,
+            } => (reservation_id, PathBuf::from(canonical_path)),
             other => panic!("expected a new reservation, got {other:?}"),
         }
     }
@@ -727,6 +929,113 @@ mod tests {
                 document_id,
                 window_label: "main".into(),
                 pane_id: "pane".into(),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaf_symlink_reservation_uses_referent_for_atomic_editor_io_and_committed_identity() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let referent = fixture_file(&temp, "referent.ts");
+        let alias = temp.path().join("alias.ts");
+        symlink(&referent, &alias).unwrap();
+        let now = Instant::now();
+        let mut registry = OwnershipRegistry::new();
+
+        let (token, canonical_path) =
+            reservation(registry.reserve_at(local(&alias), "main", now).unwrap());
+        assert_eq!(canonical_path, fs::canonicalize(&referent).unwrap());
+        let document_id = registry.commit_at(token, "pane", now).unwrap();
+        assert_eq!(
+            registry.canonical_path(document_id),
+            Some(canonical_path.as_path())
+        );
+
+        crate::editor_fs::write_text_file(canonical_path.to_str().unwrap(), "updated").unwrap();
+        assert!(
+            fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&referent).unwrap(), "updated");
+
+        let expected = ReserveResult::FocusOwner {
+            document_id,
+            window_label: "main".into(),
+            pane_id: "pane".into(),
+        };
+        assert_eq!(
+            registry.reserve_at(local(&alias), "popup", now).unwrap(),
+            expected
+        );
+        assert_eq!(
+            registry.reserve_at(local(&referent), "popup", now).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn injected_case_sensitive_policy_keeps_prospective_case_variants_distinct() {
+        let temp = TempDir::new().unwrap();
+        let now = Instant::now();
+        let mut registry = OwnershipRegistry::with_policy(FixedPathIdentityPolicy::new(
+            CaseSensitivity::Sensitive,
+        ));
+
+        reserved(
+            registry
+                .reserve_at(local(temp.path().join("New.ts")), "main", now)
+                .unwrap(),
+        );
+        assert!(matches!(
+            registry
+                .reserve_at(local(temp.path().join("new.ts")), "popup", now)
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
+    }
+
+    #[test]
+    fn injected_case_insensitive_policy_collapses_case_and_unicode_equivalent_targets() {
+        let temp = TempDir::new().unwrap();
+        let now = Instant::now();
+        let mut registry = OwnershipRegistry::with_policy(FixedPathIdentityPolicy::new(
+            CaseSensitivity::Insensitive,
+        ));
+
+        reserved(
+            registry
+                .reserve_at(local(temp.path().join("New.ts")), "case-owner", now)
+                .unwrap(),
+        );
+        assert_eq!(
+            registry
+                .reserve_at(local(temp.path().join("new.ts")), "popup", now)
+                .unwrap(),
+            ReserveResult::FocusPending {
+                window_label: "case-owner".into(),
+            }
+        );
+
+        reserved(
+            registry
+                .reserve_at(
+                    local(temp.path().join("Caf\u{e9}.ts")),
+                    "unicode-owner",
+                    now,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            registry
+                .reserve_at(local(temp.path().join("Cafe\u{301}.ts")), "popup", now,)
+                .unwrap(),
+            ReserveResult::FocusPending {
+                window_label: "unicode-owner".into(),
             }
         );
     }

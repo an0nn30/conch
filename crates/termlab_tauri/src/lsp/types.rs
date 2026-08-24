@@ -28,7 +28,10 @@ impl DocumentId {
 pub(crate) enum ReserveResult {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
-    Reserved { reservation_id: ReservationId },
+    Reserved {
+        reservation_id: ReservationId,
+        canonical_path: String,
+    },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     FocusPending { window_label: String },
