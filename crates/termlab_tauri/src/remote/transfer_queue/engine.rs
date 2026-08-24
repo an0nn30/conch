@@ -22,7 +22,7 @@ use super::{
         QueueClock, RunnerControl, RunnerControlState, RunnerProgress, RunnerReporter,
         RunnerResult, SharedTransferJobRunner, SystemQueueClock, TransferJobRunner,
     },
-    scheduler::{ActiveLease, FailureClass, retry_delay_ms, select_runnable_jobs_from_document},
+    scheduler::{ActiveLease, FailureClass, retry_delay_ms, select_scheduled_jobs_from_document},
     store::{TransferStore, recover_for_startup},
 };
 
@@ -229,6 +229,7 @@ impl QueueBootstrap {
             internal_tx,
             internal_rx,
             active: HashMap::new(),
+            pending_cancel_cleanup: HashSet::new(),
             pending_progress: HashMap::new(),
             persistence_fault: false,
             snapshot: self.snapshot,
@@ -248,6 +249,7 @@ pub struct QueueActor {
     internal_tx: mpsc::UnboundedSender<InternalEvent>,
     internal_rx: mpsc::UnboundedReceiver<InternalEvent>,
     active: HashMap<Uuid, ActiveTask>,
+    pending_cancel_cleanup: HashSet<Uuid>,
     pending_progress: HashMap<Uuid, PendingProgress>,
     persistence_fault: bool,
     snapshot: Arc<RwLock<TransferQueueSnapshot>>,
@@ -654,11 +656,23 @@ impl QueueActor {
             .values()
             .map(|task| task.lease.clone())
             .collect();
-        let selected =
-            select_runnable_jobs_from_document(&self.document, &leases, self.clock.now_ms());
+        let selected = select_scheduled_jobs_from_document(
+            &self.document,
+            &leases,
+            &self.pending_cancel_cleanup,
+            self.clock.now_ms(),
+        );
         for id in selected {
-            if let Err(error) = self.start_job(id).await {
+            let start = if self.pending_cancel_cleanup.contains(&id) {
+                self.start_cancel_cleanup(id)
+            } else {
+                self.start_job(id).await
+            };
+            if let Err(error) = start {
+                self.pending_cancel_cleanup.remove(&id);
                 let _ = self.apply_job_event(id, JobEvent::Fail(error)).await;
+            } else {
+                self.pending_cancel_cleanup.remove(&id);
             }
         }
     }
@@ -1149,7 +1163,10 @@ impl QueueActor {
             || job.durable_checkpoint != 0
             || job.commit_phase != CommitPhase::None
         {
-            self.start_cancel_cleanup(id)?;
+            if self.runner.is_none() {
+                return Err("transfer runner is unavailable".into());
+            }
+            self.pending_cancel_cleanup.insert(id);
             return Ok(true);
         }
         self.apply_job_event(id, JobEvent::Cancel(None)).await?;
@@ -1785,6 +1802,20 @@ mod tests {
             started_at_ms: None,
             finished_at_ms: None,
         }
+    }
+
+    fn durable_cancel_job(id: Uuid, host: &str, queue_order: u64) -> TransferJob {
+        let mut job = on_host_with_destination(
+            stored_job(id, TransferJobState::Paused, queue_order),
+            host,
+            &format!("{host}:/srv/{id}.bin"),
+        );
+        job.durable_checkpoint = 512;
+        job.artifacts = Some(
+            ManagedArtifacts::for_destination(job.id, &job.remote_path)
+                .expect("stored destination has valid managed paths"),
+        );
+        job
     }
 
     fn document_with(jobs: Vec<TransferJob>) -> TransferQueueDocument {
@@ -2941,6 +2972,7 @@ mod tests {
                 internal_tx,
                 internal_rx,
                 active: HashMap::new(),
+                pending_cancel_cleanup: Default::default(),
                 pending_progress: HashMap::new(),
                 persistence_fault: false,
                 snapshot,
@@ -3078,6 +3110,141 @@ mod tests {
             )
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn inactive_cancel_can_quarantine_an_unsafe_cleanup_result() {
+        let id = Uuid::from_u128(746);
+        let job = durable_cancel_job(id, "host-a", 1);
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document_with(vec![job]), runner.clone());
+
+        assert!(harness.handle.cancel(id).await.unwrap());
+        wait_for_starts(&runner, 1).await;
+        release
+            .send(RunnerResult::NeedsAttention(
+                AttentionReason::CommitRecovery {
+                    message: "mismatched managed paths were preserved".into(),
+                },
+            ))
+            .unwrap();
+
+        let quarantined = wait_for_job(&harness.handle, id, |job| {
+            matches!(
+                job.state,
+                TransferJobState::NeedsAttention {
+                    reason: AttentionReason::CommitRecovery { .. }
+                }
+            )
+        })
+        .await;
+        let TransferJobState::NeedsAttention {
+            reason: AttentionReason::CommitRecovery { message },
+        } = quarantined.state
+        else {
+            unreachable!()
+        };
+        assert!(message.contains("preserved"));
+    }
+
+    #[tokio::test]
+    async fn pending_cancel_cleanup_obeys_global_capacity_and_releases_it() {
+        let ordinary = Uuid::from_u128(741);
+        let cleanup = Uuid::from_u128(742);
+        let mut document = document_with(vec![
+            on_host_with_destination(
+                stored_job(ordinary, TransferJobState::Queued, 1),
+                "host-a",
+                "host-a:/srv/ordinary.bin",
+            ),
+            durable_cancel_job(cleanup, "host-b", 2),
+        ]);
+        document.queue_paused = false;
+        document.settings = QueueSettings {
+            global_limit: 1,
+            per_host_limit: 1,
+        };
+        let runner = Arc::new(GatedRunner::default());
+        let ordinary_release = runner.gate(ordinary);
+        let cleanup_release = runner.gate(cleanup);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+        assert_eq!(runner.starts(), [ordinary]);
+        assert_eq!(runner.control_state(ordinary), RunnerControlState::Run);
+        assert!(harness.handle.cancel(cleanup).await.unwrap());
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runner.starts(), [ordinary]);
+
+        ordinary_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        wait_for_starts(&runner, 2).await;
+        assert_eq!(runner.starts(), [ordinary, cleanup]);
+        assert_eq!(runner.control_state(cleanup), RunnerControlState::Cancel);
+        cleanup_release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_cancel_cleanup_obeys_per_host_capacity() {
+        let first_host_a = Uuid::from_u128(743);
+        let second_host_a = Uuid::from_u128(744);
+        let host_b = Uuid::from_u128(745);
+        let mut document = document_with(vec![
+            on_host_with_destination(
+                stored_job(first_host_a, TransferJobState::Queued, 1),
+                "host-a",
+                "host-a:/srv/ordinary.bin",
+            ),
+            durable_cancel_job(second_host_a, "host-a", 2),
+            durable_cancel_job(host_b, "host-b", 3),
+        ]);
+        document.queue_paused = false;
+        document.settings = QueueSettings {
+            global_limit: 2,
+            per_host_limit: 1,
+        };
+        let runner = Arc::new(GatedRunner::default());
+        let first_release = runner.gate(first_host_a);
+        let second_release = runner.gate(second_host_a);
+        let host_b_release = runner.gate(host_b);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+        assert_eq!(runner.starts(), [first_host_a]);
+        assert!(harness.handle.cancel(second_host_a).await.unwrap());
+        assert!(harness.handle.cancel(host_b).await.unwrap());
+        wait_for_starts(&runner, 2).await;
+        assert_eq!(runner.starts(), [first_host_a, host_b]);
+
+        first_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        wait_for_starts(&runner, 3).await;
+        assert_eq!(runner.starts(), [first_host_a, host_b, second_host_a]);
+        assert_eq!(
+            runner.control_state(second_host_a),
+            RunnerControlState::Cancel
+        );
+        host_b_release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
+        second_release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
     }
 
     #[tokio::test]

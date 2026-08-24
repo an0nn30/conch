@@ -130,7 +130,12 @@ pub fn reduce_job(
             clear_live_progress(&mut next);
         }
         (
-            TransferJobState::Checking | TransferJobState::Running,
+            TransferJobState::Queued
+            | TransferJobState::Checking
+            | TransferJobState::Running
+            | TransferJobState::Paused
+            | TransferJobState::NeedsConnection { .. }
+            | TransferJobState::NeedsAttention { .. },
             JobEvent::NeedsAttention(reason),
         ) => {
             next.state = TransferJobState::NeedsAttention { reason };

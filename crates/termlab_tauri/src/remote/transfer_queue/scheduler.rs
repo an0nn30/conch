@@ -31,6 +31,17 @@ pub fn select_runnable_jobs(
     settings: &QueueSettings,
     now_ms: u64,
 ) -> Vec<Uuid> {
+    select_jobs(jobs, active, settings, now_ms, &HashSet::new(), true)
+}
+
+fn select_jobs(
+    jobs: &[TransferJob],
+    active: &[ActiveLease],
+    settings: &QueueSettings,
+    now_ms: u64,
+    pending_cancel_cleanup: &HashSet<Uuid>,
+    ordinary_work_enabled: bool,
+) -> Vec<Uuid> {
     let mut reservations = Reservations::default();
     let mut leased_job_ids = HashSet::new();
 
@@ -48,7 +59,11 @@ pub fn select_runnable_jobs(
 
     let mut candidates: Vec<&TransferJob> = jobs
         .iter()
-        .filter(|job| !leased_job_ids.contains(&job.id) && is_eligible(job, now_ms))
+        .filter(|job| {
+            !leased_job_ids.contains(&job.id)
+                && (pending_cancel_cleanup.contains(&job.id)
+                    || (ordinary_work_enabled && is_eligible(job, now_ms)))
+        })
         .collect();
     candidates.sort_by_key(|job| {
         (
@@ -74,11 +89,33 @@ pub fn select_runnable_jobs_from_document(
     active: &[ActiveLease],
     now_ms: u64,
 ) -> Vec<Uuid> {
-    if document.queue_paused {
-        Vec::new()
-    } else {
-        select_runnable_jobs(&document.jobs, active, &document.settings, now_ms)
-    }
+    select_jobs(
+        &document.jobs,
+        active,
+        &document.settings,
+        now_ms,
+        &HashSet::new(),
+        !document.queue_paused,
+    )
+}
+
+/// Select ordinary jobs and requested cancellation cleanup through one set of
+/// reservations. Cleanup remains eligible while the queue is paused because
+/// pausing new transfers must not strand a destructive command indefinitely.
+pub fn select_scheduled_jobs_from_document(
+    document: &TransferQueueDocument,
+    active: &[ActiveLease],
+    pending_cancel_cleanup: &HashSet<Uuid>,
+    now_ms: u64,
+) -> Vec<Uuid> {
+    select_jobs(
+        &document.jobs,
+        active,
+        &document.settings,
+        now_ms,
+        pending_cancel_cleanup,
+        !document.queue_paused,
+    )
 }
 
 /// Classify text received from transfer infrastructure conservatively: only

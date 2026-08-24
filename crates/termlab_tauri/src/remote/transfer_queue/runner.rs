@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use super::{
-    artifacts::ArtifactInventory,
+    artifacts::{ArtifactInventory, RecoveryAction, recovery_action},
     events::RunnerEvent,
     model::{
         AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ManagedArtifacts,
@@ -438,20 +438,23 @@ where
                     | TransferJobState::NeedsAttention { .. }
             )
         {
-            let artifacts = match job
-                .artifacts
-                .clone()
-                .or_else(|| expected_artifacts(&job).ok())
-            {
-                Some(artifacts) => artifacts,
-                None => {
+            let artifacts = match expected_artifacts(&job) {
+                Ok(artifacts) => artifacts,
+                Err(message) => {
                     return RunnerResult::Cancelled {
-                        cleanup_error: Some(
-                            "managed transfer artifacts could not be resolved".into(),
-                        ),
+                        cleanup_error: Some(format!(
+                            "managed transfer artifacts could not be resolved: {message}"
+                        )),
                     };
                 }
             };
+            if job.artifacts.as_ref() != Some(&artifacts) {
+                return RunnerResult::NeedsAttention(AttentionReason::CommitRecovery {
+                    message:
+                        "persisted managed artifacts are missing or do not match the current destination; all artifacts were preserved"
+                            .into(),
+                });
+            }
             let Some(connection) = self.resolver.resolve(&job.endpoint) else {
                 return RunnerResult::Cancelled {
                     cleanup_error: Some(
@@ -460,13 +463,12 @@ where
                     ),
                 };
             };
-            let cleanup_error = self
-                .io
-                .cleanup_owned_artifacts(&connection, &job, &artifacts)
-                .await
-                .err()
-                .map(|error| error.message);
-            return RunnerResult::Cancelled { cleanup_error };
+            return match cancel_inactive_artifacts(&self.io, &connection, &job, &artifacts).await {
+                Ok(()) => RunnerResult::Cancelled {
+                    cleanup_error: None,
+                },
+                Err(reason) => RunnerResult::NeedsAttention(reason),
+            };
         }
         let Some(connection) = self.resolver.resolve(&job.endpoint) else {
             return RunnerResult::NeedsConnection(
@@ -659,6 +661,67 @@ where
                 commit_fresh(&self.io, &connection, &job, &artifacts, &actual, &reporter).await
             }
         }
+    }
+}
+
+async fn cancel_inactive_artifacts<C, I>(
+    io: &I,
+    connection: &C,
+    job: &TransferJob,
+    artifacts: &ManagedArtifacts,
+) -> Result<(), AttentionReason>
+where
+    C: Send + Sync,
+    I: TransferIo<C>,
+{
+    let inventory = io
+        .inventory(connection, job, artifacts)
+        .await
+        .map_err(cleanup_attention)?;
+    // The shared recovery policy is the authority for which layouts are
+    // provably recoverable. Cancellation rolls back to an owned backup when
+    // one exists; otherwise it preserves the current final or promotes the
+    // sole complete partial before removing any remaining managed artifacts.
+    match recovery_action(job.commit_phase, inventory) {
+        RecoveryAction::ResumeCopy | RecoveryAction::MoveFinalToBackup => io
+            .cleanup_owned_artifacts(connection, job, artifacts)
+            .await
+            .map_err(cleanup_attention),
+        RecoveryAction::PromotePartial if inventory.backup_exists => {
+            io.restore_backup(connection, job, artifacts)
+                .await
+                .map_err(cleanup_attention)?;
+            io.cleanup_owned_artifacts(connection, job, artifacts)
+                .await
+                .map_err(cleanup_attention)
+        }
+        RecoveryAction::PromotePartial => io
+            .promote_partial_no_replace(connection, job, artifacts)
+            .await
+            .map_err(PromotionError::into_transfer_error)
+            .map_err(cleanup_attention),
+        RecoveryAction::RestoreBackup => {
+            io.restore_backup(connection, job, artifacts)
+                .await
+                .map_err(cleanup_attention)?;
+            io.cleanup_owned_artifacts(connection, job, artifacts)
+                .await
+                .map_err(cleanup_attention)
+        }
+        RecoveryAction::DeleteBackupAndComplete => io
+            .delete_backup(connection, job, artifacts)
+            .await
+            .map_err(cleanup_attention),
+        RecoveryAction::Complete => Ok(()),
+        RecoveryAction::NeedsAttention { message } => {
+            Err(AttentionReason::CommitRecovery { message })
+        }
+    }
+}
+
+fn cleanup_attention(error: TransferIoError) -> AttentionReason {
+    AttentionReason::Cleanup {
+        message: error.message,
     }
 }
 
@@ -2995,6 +3058,210 @@ mod tests {
             assert!(!operations.iter().any(|entry| entry == "open_source"));
             assert!(!operations.iter().any(|entry| entry == "open_partial"));
         }
+    }
+
+    #[tokio::test]
+    async fn inactive_cancel_preserves_a_destination_for_each_recoverable_commit_layout() {
+        struct Case {
+            phase: CommitPhase,
+            inventory: ArtifactInventory,
+            expected_identities: (
+                Option<&'static str>,
+                Option<&'static str>,
+                Option<&'static str>,
+            ),
+            required_operation: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                phase: CommitPhase::None,
+                inventory: ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: true,
+                    backup_exists: false,
+                },
+                expected_identities: (Some("existing-final"), None, None),
+                required_operation: Some("cleanup_owned_artifacts"),
+            },
+            Case {
+                phase: CommitPhase::Prepared,
+                inventory: ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: true,
+                    backup_exists: false,
+                },
+                expected_identities: (Some("existing-final"), None, None),
+                required_operation: Some("cleanup_owned_artifacts"),
+            },
+            Case {
+                phase: CommitPhase::Prepared,
+                inventory: ArtifactInventory {
+                    final_exists: false,
+                    partial_exists: true,
+                    backup_exists: false,
+                },
+                expected_identities: (Some("copied-source"), None, None),
+                required_operation: Some("promote_partial"),
+            },
+            Case {
+                phase: CommitPhase::BackupMoved,
+                inventory: ArtifactInventory {
+                    final_exists: false,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+                expected_identities: (Some("owned-backup"), None, None),
+                required_operation: Some("restore_backup"),
+            },
+            Case {
+                phase: CommitPhase::PartialPromoted,
+                inventory: ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+                expected_identities: (Some("existing-final"), None, None),
+                required_operation: Some("delete_backup"),
+            },
+            Case {
+                phase: CommitPhase::PartialPromoted,
+                inventory: ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: false,
+                },
+                expected_identities: (Some("existing-final"), None, None),
+                required_operation: None,
+            },
+        ];
+
+        for case in cases {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let io = FakeIo::new(log, fingerprint(6, Some("v1")))
+                .with_inventory(case.inventory, case.inventory.partial_exists.then_some(6));
+            let inspected_io = io.clone();
+            let mut job = test_job();
+            job.state = TransferJobState::NeedsAttention {
+                reason: AttentionReason::CommitRecovery {
+                    message: "recover before cancellation".into(),
+                },
+            };
+            job.durable_checkpoint = 6;
+            job.artifacts =
+                Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+            job.commit_phase = case.phase;
+
+            let (result, operations) =
+                run_fake(true, io, job, super::RunnerControlState::Cancel).await;
+
+            assert!(matches!(
+                result,
+                RunnerResult::Cancelled {
+                    cleanup_error: None
+                }
+            ));
+            assert_eq!(
+                inspected_io.artifact_identities(),
+                case.expected_identities,
+                "phase {:?}, inventory {:?}, operations {operations:?}",
+                case.phase,
+                case.inventory
+            );
+            assert!(operations.iter().any(|entry| entry == "inventory"));
+            if let Some(required) = case.required_operation {
+                assert!(
+                    operations.iter().any(|entry| entry == required),
+                    "phase {:?}, inventory {:?}, operations {operations:?}",
+                    case.phase,
+                    case.inventory
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inactive_cancel_never_touches_mismatched_persisted_artifact_paths() {
+        for persisted in [
+            None,
+            Some(
+                ManagedArtifacts::for_destination(Uuid::from_u128(0xbbbb), "/srv/final.bin")
+                    .unwrap(),
+            ),
+        ] {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let io = FakeIo::new(log, fingerprint(6, Some("v1"))).with_inventory(
+                ArtifactInventory {
+                    final_exists: false,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+                None,
+            );
+            let inspected_io = io.clone();
+            let mut job = test_job();
+            job.state = TransferJobState::Paused;
+            job.durable_checkpoint = 6;
+            job.artifacts = persisted;
+            job.commit_phase = CommitPhase::BackupMoved;
+
+            let (result, operations) =
+                run_fake(true, io, job, super::RunnerControlState::Cancel).await;
+
+            assert!(matches!(
+                result,
+                RunnerResult::NeedsAttention(AttentionReason::CommitRecovery { .. })
+            ));
+            assert!(
+                operations.is_empty(),
+                "mismatch performed I/O: {operations:?}"
+            );
+            assert_eq!(
+                inspected_io.artifact_identities(),
+                (None, None, Some("owned-backup"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inactive_cancel_quarantines_a_backup_when_restore_fails() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(6, Some("v1")))
+            .with_inventory(
+                ArtifactInventory {
+                    final_exists: false,
+                    partial_exists: false,
+                    backup_exists: true,
+                },
+                None,
+            )
+            .failing_at("restore_backup");
+        let inspected_io = io.clone();
+        let mut job = test_job();
+        job.state = TransferJobState::NeedsAttention {
+            reason: AttentionReason::CommitRecovery {
+                message: "restore required".into(),
+            },
+        };
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+        job.commit_phase = CommitPhase::BackupMoved;
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Cancel).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::Cleanup { .. })
+        ));
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (None, None, Some("owned-backup"))
+        );
+        assert!(operations.iter().any(|entry| entry == "restore_backup"));
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "cleanup_owned_artifacts")
+        );
     }
 
     #[tokio::test]
