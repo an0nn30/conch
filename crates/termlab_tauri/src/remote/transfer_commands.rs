@@ -559,10 +559,7 @@ mod tests {
             }
         );
         assert_eq!(request.host_key, "adhoc:dustin@shell.example.com:2202");
-        assert_eq!(
-            request.destination_key,
-            "adhoc:dustin@shell.example.com:2202:/tmp/downloads/report.csv"
-        );
+        assert_eq!(request.destination_key, "local:/tmp/downloads/report.csv");
         assert_eq!(request.conflict_policy, ConflictPolicy::Overwrite);
     }
 

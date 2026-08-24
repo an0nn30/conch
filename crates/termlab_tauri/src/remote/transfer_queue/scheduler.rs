@@ -31,7 +31,15 @@ pub fn select_runnable_jobs(
     settings: &QueueSettings,
     now_ms: u64,
 ) -> Vec<Uuid> {
-    select_jobs(jobs, active, settings, now_ms, &HashSet::new(), true)
+    select_jobs(
+        jobs,
+        active,
+        settings,
+        now_ms,
+        &HashSet::new(),
+        &HashSet::new(),
+        true,
+    )
 }
 
 fn select_jobs(
@@ -40,6 +48,7 @@ fn select_jobs(
     settings: &QueueSettings,
     now_ms: u64,
     pending_cancel_cleanup: &HashSet<Uuid>,
+    authorized_while_paused: &HashSet<Uuid>,
     ordinary_work_enabled: bool,
 ) -> Vec<Uuid> {
     let mut reservations = Reservations::default();
@@ -62,7 +71,8 @@ fn select_jobs(
         .filter(|job| {
             !leased_job_ids.contains(&job.id)
                 && (pending_cancel_cleanup.contains(&job.id)
-                    || (ordinary_work_enabled && is_eligible(job, now_ms)))
+                    || ((ordinary_work_enabled || authorized_while_paused.contains(&job.id))
+                        && is_eligible(job, now_ms)))
         })
         .collect();
     candidates.sort_by_key(|job| {
@@ -95,6 +105,7 @@ pub fn select_runnable_jobs_from_document(
         &document.settings,
         now_ms,
         &HashSet::new(),
+        &HashSet::new(),
         !document.queue_paused,
     )
 }
@@ -106,6 +117,7 @@ pub fn select_scheduled_jobs_from_document(
     document: &TransferQueueDocument,
     active: &[ActiveLease],
     pending_cancel_cleanup: &HashSet<Uuid>,
+    authorized_while_paused: &HashSet<Uuid>,
     now_ms: u64,
 ) -> Vec<Uuid> {
     select_jobs(
@@ -114,32 +126,9 @@ pub fn select_scheduled_jobs_from_document(
         &document.settings,
         now_ms,
         pending_cancel_cleanup,
+        authorized_while_paused,
         !document.queue_paused,
     )
-}
-
-/// Classify text received from transfer infrastructure conservatively: only
-/// established transport interruptions are retried automatically.
-pub fn classify_failure(error: &str) -> FailureClass {
-    let error = error.to_ascii_lowercase();
-    if [
-        "disconnect",
-        "timed out",
-        "timeout",
-        "connection reset",
-        "connection aborted",
-        "channel closed",
-        "broken pipe",
-        "not connected",
-        "unexpected eof",
-    ]
-    .iter()
-    .any(|indicator| error.contains(indicator))
-    {
-        FailureClass::Transient
-    } else {
-        FailureClass::Permanent
-    }
 }
 
 /// Return the delay before an automatic retry attempt, if it is allowed.
@@ -198,8 +187,7 @@ impl Reservations {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveLease, FailureClass, classify_failure, retry_delay_ms, select_runnable_jobs,
-        select_runnable_jobs_from_document,
+        ActiveLease, retry_delay_ms, select_runnable_jobs, select_runnable_jobs_from_document,
     };
     use crate::remote::transfer_queue::model::{
         CommitPhase, ConflictPolicy, QueueSettings, TransferDirection, TransferEndpoint,
@@ -620,27 +608,6 @@ mod tests {
         document.queue_paused = true;
 
         assert!(select_runnable_jobs_from_document(&document, &[], 100).is_empty());
-    }
-
-    #[test]
-    fn failure_classification_separates_retryable_transport_errors() {
-        for error in [
-            "Disconnected from remote",
-            "connection timed out",
-            "Connection reset by peer",
-        ] {
-            assert_eq!(classify_failure(error), FailureClass::Transient);
-        }
-        for error in [
-            "authentication failed",
-            "permission denied",
-            "source mismatch",
-            "destination conflict",
-            "missing partial",
-            "commit ambiguity",
-        ] {
-            assert_eq!(classify_failure(error), FailureClass::Permanent);
-        }
     }
 
     #[test]

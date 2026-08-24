@@ -147,10 +147,11 @@ Restart behavior is deterministic:
 - `Running`, `Connecting`, and `Checking` restore as `Paused`.
 - `Queued`, `Paused`, `Needs connection`, `Needs attention`, and `Retry waiting` remain represented without starting work.
 - No restored job reconnects, retries, or transfers until the user resumes the queue or the individual job.
+- Startup suspension is a runtime authorization boundary over the durable paused queue. `Resume All` atomically requeues every restored `Paused` job and clears the global suspension. Row Resume and an explicit resolution authorize only that row; a newly enqueued job is also deliberate new work and may run without releasing unrelated restored rows. Choosing Pause All converts this boundary into ordinary durable manual pause semantics.
 - Missing managed partials, changed sources, and ambiguous commit artifacts become typed attention states.
 - Active jobs are never evicted. Terminal history is capped at the newest 500 jobs after compaction.
 
-If the JSON store cannot be parsed or migrated, it is renamed to a timestamped quarantine file. The app starts with an empty inactive queue and surfaces a persistent recovery error that names the quarantine location. It must never silently overwrite the only corrupted copy or initiate network work after a failed restore.
+If the JSON store cannot be parsed or is parseable but violates semantic invariants such as concurrency limits, unique job IDs, or active queue order, it is renamed to a timestamped quarantine file. Unsupported future schema versions remain a typed migration error and are not moved. After quarantine, the app starts with an empty inactive queue and surfaces a persistent recovery error that names the quarantine location. It must never silently overwrite the only corrupted copy or initiate network work after a failed restore.
 
 ### Scheduler
 
@@ -164,7 +165,7 @@ Jobs that need input, connection, or a future retry time are skipped without blo
 
 A normalized destination key is locked for the full attempt, including commit. Upload keys identify the remote endpoint and normalized remote destination path. Download keys identify the normalized absolute local destination path. Two jobs with the same destination never execute concurrently even if they use different windows or were enqueued by different producers.
 
-Pause All stops dispatching new work and cooperatively pauses active jobs. Resume All makes eligible paused/queued jobs runnable; jobs requiring connection or attention remain untouched. Reordering changes only eligible queue order and never interrupts an active commit.
+Pause All stops dispatching new work and cooperatively pauses active jobs. Resume All atomically makes eligible paused/queued jobs runnable; jobs requiring connection or attention remain untouched. During restart suspension, a row Resume or explicit resolution authorizes only that job, while enqueue is treated as deliberate new work. Reordering changes only eligible queue order and never interrupts an active commit.
 
 ### Pause, resume, cancel, and retry
 
@@ -189,6 +190,8 @@ An arbitrary pre-existing destination is never treated as a resumable partial an
 - **Resume:** continue only the compatible managed partial.
 
 Conflict resolution affects only the selected job or an explicitly selected batch. Dialogs must not stall the scheduler thread or block unrelated jobs.
+
+Any resolution that abandons an existing attempt (`Overwrite`, `Rename`, `Restart`, or `Skip`) first acquires the job's scheduler lease and routes the old managed partial/backup/commit inventory through the authoritative cleanup/recovery policy. The durable job retains its old destination and artifact identity until cleanup acknowledgement. Only then may Rename/reset or completed-with-skip be persisted. A cleanup failure returns to typed attention with the exact leftover artifact identity, and competing lifecycle actions remain rejected while cleanup owns the job.
 
 ### Recoverable commit protocol
 
@@ -261,7 +264,7 @@ The frontend maintains only ephemeral presentation state such as the selected ro
 
 ## Failure behavior
 
-- Source missing or changed: `Needs attention` with Restart/Skip.
+- Source missing or changed: `Needs attention` with Restart/Skip. Local `NotFound` and SFTP `NoSuchFile` retain typed provenance, never use automatic transient retry, and do not expose the source path in the UI reason. After restoring the source, Restart begins a fresh checking pass.
 - Destination conflict: `Needs attention` with the valid conflict actions.
 - No authenticated session: `Needs connection`, with no automatic prompt.
 - Transient disconnect/time-out: persisted exponential retry, then `Failed` after exhaustion.
@@ -269,7 +272,7 @@ The frontend maintains only ephemeral presentation state such as the selected ro
 - Disk full: close handles, preserve the managed partial and checkpoint, and fail with actionable detail.
 - Managed partial missing or incompatible: `Needs attention`; never append to an arbitrary destination.
 - Commit failure: recover or restore from the persisted phase; ambiguous cases require attention.
-- Corrupt queue store: quarantine and report; start no work.
+- Syntactically or semantically corrupt queue store: quarantine the original bytes and report; start no work.
 
 Errors and logs may contain job IDs, endpoint labels, paths, states, and transport diagnostics, but never credentials or secret material.
 

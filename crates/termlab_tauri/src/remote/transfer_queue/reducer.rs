@@ -35,7 +35,7 @@ pub enum JobEvent {
     RetryReady,
     ManualRetry,
     Resolve(ConflictResolution),
-    Restart,
+    ResolveAfterCleanup(ConflictResolution),
     Complete(CompletionResult),
     Fail(String),
     Cancel(Option<String>),
@@ -168,12 +168,18 @@ pub fn reduce_job(
             clear_live_progress(&mut next);
         }
         (TransferJobState::NeedsAttention { reason }, JobEvent::Resolve(resolution))
-            if resolution_is_legal(reason, &resolution) =>
+            if resolution_is_legal(reason, &resolution)
+                && (!resolution_abandons_attempt(&resolution) || !job_owns_attempt(job)) =>
         {
             apply_resolution(&mut next, resolution, now_ms);
         }
-        (TransferJobState::NeedsAttention { .. }, JobEvent::Restart) => {
-            reset_attempt(&mut next);
+        (
+            TransferJobState::NeedsAttention { reason },
+            JobEvent::ResolveAfterCleanup(resolution),
+        ) if resolution_is_legal(reason, &resolution)
+            && resolution_abandons_attempt(&resolution) =>
+        {
+            apply_resolution(&mut next, resolution, now_ms);
         }
         (TransferJobState::Running, JobEvent::Complete(result)) => {
             next.state = TransferJobState::Completed { result };
@@ -203,7 +209,10 @@ pub fn reduce_job(
     Ok(next)
 }
 
-fn resolution_is_legal(reason: &AttentionReason, resolution: &ConflictResolution) -> bool {
+pub(crate) fn resolution_is_legal(
+    reason: &AttentionReason,
+    resolution: &ConflictResolution,
+) -> bool {
     match (reason, resolution) {
         (
             AttentionReason::DestinationConflict {
@@ -218,6 +227,14 @@ fn resolution_is_legal(reason: &AttentionReason, resolution: &ConflictResolution
         | (_, ConflictResolution::Restart | ConflictResolution::Skip) => true,
         _ => false,
     }
+}
+
+pub(crate) fn resolution_abandons_attempt(resolution: &ConflictResolution) -> bool {
+    !matches!(resolution, ConflictResolution::Resume)
+}
+
+pub(crate) fn job_owns_attempt(job: &TransferJob) -> bool {
+    job.artifacts.is_some() || job.durable_checkpoint != 0 || job.commit_phase != CommitPhase::None
 }
 
 fn apply_resolution(job: &mut TransferJob, resolution: ConflictResolution, now_ms: u64) {
@@ -245,11 +262,11 @@ fn apply_resolution(job: &mut TransferJob, resolution: ConflictResolution, now_m
             job.conflict_policy = ConflictPolicy::Ask;
         }
         ConflictResolution::Skip => {
+            clear_attempt_identity(job);
             job.state = TransferJobState::Completed {
                 result: CompletionResult::Skipped,
             };
             job.finished_at_ms = Some(now_ms);
-            clear_live_progress(job);
         }
         ConflictResolution::Restart => reset_attempt(job),
     }
@@ -257,6 +274,10 @@ fn apply_resolution(job: &mut TransferJob, resolution: ConflictResolution, now_m
 
 fn reset_attempt(job: &mut TransferJob) {
     job.state = TransferJobState::Queued;
+    clear_attempt_identity(job);
+}
+
+fn clear_attempt_identity(job: &mut TransferJob) {
     job.source_fingerprint = None;
     job.durable_checkpoint = 0;
     job.bytes_transferred = 0;
@@ -306,7 +327,7 @@ fn event_name(event: &JobEvent) -> &'static str {
         JobEvent::RetryReady => "retryReady",
         JobEvent::ManualRetry => "manualRetry",
         JobEvent::Resolve(_) => "resolve",
-        JobEvent::Restart => "restart",
+        JobEvent::ResolveAfterCleanup(_) => "resolveAfterCleanup",
         JobEvent::Complete(_) => "complete",
         JobEvent::Fail(_) => "fail",
         JobEvent::Cancel(_) => "cancel",
@@ -500,7 +521,12 @@ mod tests {
         job.commit_phase = CommitPhase::Prepared;
 
         let attention = reduce_job(&job, JobEvent::NeedsAttention(source_changed()), 60).unwrap();
-        let restarted = reduce_job(&attention, JobEvent::Restart, 61).unwrap();
+        let restarted = reduce_job(
+            &attention,
+            JobEvent::ResolveAfterCleanup(ConflictResolution::Restart),
+            61,
+        )
+        .unwrap();
 
         assert_eq!(restarted.state, TransferJobState::Queued);
         assert_eq!(restarted.durable_checkpoint, 0);
@@ -546,8 +572,16 @@ mod tests {
         job.durable_checkpoint = 4_096;
         job.artifacts = Some(artifacts());
 
-        let resolved =
-            reduce_job(&job, JobEvent::Resolve(ConflictResolution::Overwrite), 63).unwrap();
+        assert!(
+            reduce_job(&job, JobEvent::Resolve(ConflictResolution::Overwrite), 63).is_err(),
+            "owned attempt identity may only be abandoned after cleanup acknowledges"
+        );
+        let resolved = reduce_job(
+            &job,
+            JobEvent::ResolveAfterCleanup(ConflictResolution::Overwrite),
+            63,
+        )
+        .unwrap();
 
         assert_eq!(resolved.state, TransferJobState::Queued);
         assert_eq!(resolved.conflict_policy, ConflictPolicy::Overwrite);

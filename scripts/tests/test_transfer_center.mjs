@@ -742,6 +742,10 @@ function dialogButton(dialog, label) {
       title: 'Resume unavailable', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['cannot be safely resumed'],
     },
     {
+      reason: { kind: 'sourceMissing' },
+      title: 'Source missing', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['source path no longer exists'],
+    },
+    {
       reason: { kind: 'missingPartial' },
       title: 'Partial file missing', buttons: ['Cancel', 'Skip', 'Restart'], copy: ['managed partial file is missing'],
     },

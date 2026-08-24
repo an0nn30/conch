@@ -27,6 +27,13 @@ not record credentials, private-key material, or reusable server secrets.
 
 ## Durable pause, restart, and reconnect
 
+- [ ] Relaunch with at least two formerly active jobs. Confirm no network work
+  starts. Resume one row and confirm only it runs; relaunch again and choose
+  `Resume All`, confirming every restored `Paused` row becomes runnable in one
+  queue update. While startup remains suspended, enqueue a fresh editor/file
+  transfer and confirm it runs without releasing unrelated restored rows.
+  Evidence:
+
 - [ ] Upload: pause after measurable progress, quit TermLab, relaunch, and
   confirm the queue is suspended and performs no network work. Explicitly
   reconnect, resume, and verify the final bytes and resumed offset. Evidence:
@@ -38,12 +45,22 @@ not record credentials, private-key material, or reusable server secrets.
 - [ ] While a download is paused, change its remote source. Resume and confirm
   TermLab requires `Restart`; verify Resume cannot append the changed source to
   the old partial. Evidence:
+- [ ] Remove a queued upload's local source before it starts. Confirm it enters
+  `Needs attention` as Source missing without automatic retry and offers only
+  Restart/Skip. Restore the exact source path, choose Restart, and verify a
+  fresh checking pass completes. Repeat by removing a queued remote download
+  source and restoring it on the SFTP server. Evidence:
 
 ## Conflicts and independent work
 
 - [ ] Exercise `Overwrite`, `Rename`, and `Skip` in both directions. Confirm
   the requested result, that no unrelated destination changes, and that owned
   partial/backup files are removed after success. Evidence:
+- [ ] Repeat Rename and Skip with an owned partial/backup or interrupted commit.
+  Confirm the old destination and managed-artifact identity remain persisted
+  until cleanup acknowledges. Inject a cleanup failure and confirm the row
+  remains `Needs attention`, names the exact leftover artifact, and rejects a
+  competing resolution. Evidence:
 - [ ] Exercise compatible `Resume` with a durable partial. While the conflict
   is awaiting a choice, verify unrelated queued jobs continue within the
   configured limits. Evidence:
@@ -57,6 +74,10 @@ not record credentials, private-key material, or reusable server secrets.
 - [ ] Enqueue two jobs targeting the same canonical destination from different
   windows. Confirm destination serialization permits only one owner at a time.
   Evidence:
+- [ ] From two different remote hosts, download to the same normalized local
+  destination and confirm only one attempt owns it at a time. Then download to
+  two distinct local destinations and confirm cross-host work may overlap
+  within the global limit. Evidence:
 
 ## Commit interruption recovery
 

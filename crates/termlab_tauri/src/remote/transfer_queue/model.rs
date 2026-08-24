@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use termlab_remote::transfer::SourceFingerprint;
 use ts_rs::TS;
@@ -44,20 +46,23 @@ pub enum TransferDirection {
 
 /// Build the scheduler's serialization key for the destination of a transfer.
 ///
-/// The connection scope prevents independent endpoints from blocking each
-/// other, while lexical path normalization makes equivalent paths contend for
-/// the same destination slot without requiring the destination to exist yet.
+/// Uploads are scoped to the remote endpoint. Downloads deliberately are not:
+/// their destination is a local path, so two hosts writing the same local file
+/// must contend for one lock.
 pub fn build_destination_key(
     host_key: &str,
     direction: &TransferDirection,
     local_path: &str,
     remote_path: &str,
 ) -> String {
-    let destination = match direction {
-        TransferDirection::Upload => normalize_destination_path(remote_path),
-        TransferDirection::Download => normalize_local_destination_path(local_path),
-    };
-    format!("{host_key}:{destination}")
+    match direction {
+        TransferDirection::Upload => {
+            format!("{host_key}:{}", normalize_destination_path(remote_path))
+        }
+        TransferDirection::Download => {
+            format!("local:{}", normalize_local_destination_path(local_path))
+        }
+    }
 }
 
 /// Build the stable connection identity used by scheduling and destination
@@ -254,6 +259,7 @@ pub enum AttentionReason {
         actual: SourceFingerprint,
     },
     SourceCannotResume,
+    SourceMissing,
     MissingPartial,
     CommitRecovery {
         message: String,
@@ -356,6 +362,36 @@ impl Default for QueueSettings {
             per_host_limit: 2,
         }
     }
+}
+
+pub(super) fn validate_queue_settings(settings: &QueueSettings) -> Result<(), String> {
+    if !(1..=32).contains(&settings.global_limit) {
+        return Err("global transfer limit must be between 1 and 32".into());
+    }
+    if !(1..=32).contains(&settings.per_host_limit) {
+        return Err("per-host transfer limit must be between 1 and 32".into());
+    }
+    Ok(())
+}
+
+/// Validate persisted invariants before a document can become actor-owned.
+/// This belongs with the model so load recovery and every actor commit enforce
+/// one semantic contract rather than allowing bootstrap-only validation gaps.
+pub(super) fn validate_document_semantics(document: &TransferQueueDocument) -> Result<(), String> {
+    validate_queue_settings(&document.settings)?;
+    let mut ids = HashSet::new();
+    let mut active_orders = HashSet::new();
+    for job in &document.jobs {
+        if !ids.insert(job.id) {
+            return Err(format!("transfer queue contains duplicate job {}", job.id));
+        }
+        if !job.state.is_terminal()
+            && (job.queue_order == 0 || !active_orders.insert(job.queue_order))
+        {
+            return Err("active transfer queue orders must be unique and non-zero".into());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -672,7 +708,7 @@ mod tests {
             "/unused",
         );
 
-        assert_eq!(canonical, r"configured:server:C:\build\app.tar");
+        assert_eq!(canonical, r"local:C:\build\app.tar");
         assert_eq!(equivalent, canonical);
     }
 
@@ -691,11 +727,34 @@ mod tests {
             "/unused",
         );
 
-        assert_eq!(
-            canonical,
-            r"configured:server:\\server\share\releases\app.tar"
-        );
+        assert_eq!(canonical, r"local:\\server\share\releases\app.tar");
         assert_eq!(equivalent, canonical);
+    }
+
+    #[test]
+    fn download_destination_key_is_local_only_across_remote_hosts() {
+        let first_host = build_destination_key(
+            "configured:first",
+            &TransferDirection::Download,
+            "/tmp/downloads/../report.csv",
+            "/srv/first.csv",
+        );
+        let second_host = build_destination_key(
+            "configured:second",
+            &TransferDirection::Download,
+            "/tmp/report.csv",
+            "/srv/second.csv",
+        );
+        let other_destination = build_destination_key(
+            "configured:second",
+            &TransferDirection::Download,
+            "/tmp/other.csv",
+            "/srv/second.csv",
+        );
+
+        assert_eq!(first_host, "local:/tmp/report.csv");
+        assert_eq!(second_host, first_host);
+        assert_ne!(other_destination, first_host);
     }
 
     #[test]

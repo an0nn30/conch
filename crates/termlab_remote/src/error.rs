@@ -13,6 +13,8 @@ pub enum RemoteError {
     Sftp(String),
     #[error("transfer failed: {0}")]
     Transfer(String),
+    #[error("source not found: {0}")]
+    SourceNotFound(String),
     #[error("tunnel error: {0}")]
     Tunnel(String),
     #[error("host key error: {0}")]

@@ -114,6 +114,7 @@ impl ConnectionResolver for LiveConnectionResolver {
 struct TransferIoError {
     class: FailureClass,
     message: String,
+    source_missing: bool,
 }
 
 impl TransferIoError {
@@ -121,6 +122,7 @@ impl TransferIoError {
         Self {
             class: FailureClass::Transient,
             message: message.into(),
+            source_missing: false,
         }
     }
 
@@ -128,28 +130,47 @@ impl TransferIoError {
         Self {
             class: FailureClass::Permanent,
             message: message.into(),
+            source_missing: false,
+        }
+    }
+
+    fn source_missing(message: impl Into<String>) -> Self {
+        Self {
+            class: FailureClass::Permanent,
+            message: message.into(),
+            source_missing: true,
         }
     }
 
     fn from_remote(error: RemoteError) -> Self {
+        let error = match error {
+            RemoteError::SourceNotFound(message) => return Self::source_missing(message),
+            error => error,
+        };
         let class = match &error {
             RemoteError::Connection(_) => FailureClass::Transient,
             RemoteError::Io(error) => classify_io_failure(error.kind()),
             RemoteError::Sftp(message) => classify_transport_failure(message),
             RemoteError::Transfer(_) => FailureClass::Permanent,
+            RemoteError::SourceNotFound(_) => unreachable!("handled above"),
             RemoteError::Auth(_)
             | RemoteError::Tunnel(_)
             | RemoteError::KnownHosts(_)
             | RemoteError::Other(_) => FailureClass::Permanent,
         };
         let message = error.to_string();
-        Self { class, message }
+        Self {
+            class,
+            message,
+            source_missing: false,
+        }
     }
 
     fn from_operation(class: FailureClass, operation: &str, error: impl fmt::Display) -> Self {
         Self {
             class,
             message: format!("{operation} failed: {error}"),
+            source_missing: false,
         }
     }
 
@@ -180,6 +201,7 @@ impl TransferIoError {
         Self {
             class,
             message: error.to_string(),
+            source_missing: false,
         }
     }
 }
@@ -745,9 +767,13 @@ fn expected_artifacts(job: &TransferJob) -> Result<ManagedArtifacts, String> {
 }
 
 fn failed(error: TransferIoError) -> RunnerResult {
-    RunnerResult::Failed {
-        class: error.class,
-        message: error.message,
+    if error.source_missing {
+        RunnerResult::NeedsAttention(AttentionReason::SourceMissing)
+    } else {
+        RunnerResult::Failed {
+            class: error.class,
+            message: error.message,
+        }
     }
 }
 
@@ -4207,8 +4233,12 @@ mod tests {
         assert_eq!(inspected_io.active_source_count(), 0);
 
         paused.state = TransferJobState::NeedsAttention { reason };
-        let restarted =
-            reduce_job(&paused, JobEvent::Resolve(ConflictResolution::Restart), 2).unwrap();
+        let restarted = reduce_job(
+            &paused,
+            JobEvent::ResolveAfterCleanup(ConflictResolution::Restart),
+            2,
+        )
+        .unwrap();
         assert_eq!(restarted.source_fingerprint, None);
         assert_eq!(restarted.durable_checkpoint, 0);
         assert_eq!(restarted.artifacts, None);
@@ -4344,7 +4374,12 @@ mod tests {
         };
         job.source_fingerprint = Some(fingerprint(4, None));
         job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
-        let job = reduce_job(&job, JobEvent::Resolve(ConflictResolution::Restart), 2).unwrap();
+        let job = reduce_job(
+            &job,
+            JobEvent::ResolveAfterCleanup(ConflictResolution::Restart),
+            2,
+        )
+        .unwrap();
 
         let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
 
@@ -5088,6 +5123,42 @@ mod tests {
             }
         ));
         assert_eq!(operations, vec!["resolve", "checking", "open_source"]);
+    }
+
+    #[tokio::test]
+    async fn missing_source_needs_attention_and_restart_succeeds_after_restoration() {
+        for direction in [TransferDirection::Upload, TransferDirection::Download] {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let io = FakeIo::new(log, fingerprint(6, Some("v1"))).failing_at_with(
+                "open_source",
+                TransferIoError::source_missing("source is no longer present"),
+            );
+            let mut job = test_job();
+            job.direction = direction;
+
+            let (result, operations) = run_fake(
+                true,
+                io.clone(),
+                job.clone(),
+                super::RunnerControlState::Run,
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                RunnerResult::NeedsAttention(AttentionReason::SourceMissing)
+            ));
+            assert_eq!(operations, vec!["resolve", "checking", "open_source"]);
+
+            job.state = TransferJobState::NeedsAttention {
+                reason: AttentionReason::SourceMissing,
+            };
+            let restarted =
+                reduce_job(&job, JobEvent::Resolve(ConflictResolution::Restart), 2).unwrap();
+            let (restored_result, _) =
+                run_fake(true, io, restarted, super::RunnerControlState::Run).await;
+            assert!(matches!(restored_result, RunnerResult::Completed(_)));
+        }
     }
 
     #[test]

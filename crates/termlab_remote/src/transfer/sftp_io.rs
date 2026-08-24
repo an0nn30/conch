@@ -3,9 +3,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
-use russh_sftp::protocol::{FileAttributes, OpenFlags};
+use russh_sftp::client::{SftpSession, error::Error as SftpClientError};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt};
 
 use super::SourceFingerprint;
@@ -42,19 +42,26 @@ pub fn fingerprint_remote_parts(size: u64, modified_seconds: Option<u64>) -> Sou
 pub async fn fingerprint_open_local(
     path: impl AsRef<Path>,
 ) -> Result<(tokio::fs::File, SourceFingerprint), RemoteError> {
-    let file = tokio::fs::File::open(path.as_ref())
-        .await
-        .map_err(|error| {
+    let path = path.as_ref();
+    let file = tokio::fs::File::open(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RemoteError::SourceNotFound(format!("local source {} does not exist", path.display()))
+        } else {
             RemoteError::Transfer(format!(
                 "open local source {} failed: {error}",
-                path.as_ref().display()
+                path.display()
             ))
-        })?;
+        }
+    })?;
     let metadata = file.metadata().await.map_err(|error| {
-        RemoteError::Transfer(format!(
-            "stat open local source {} failed: {error}",
-            path.as_ref().display()
-        ))
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RemoteError::SourceNotFound(format!("local source {} disappeared", path.display()))
+        } else {
+            RemoteError::Transfer(format!(
+                "stat open local source {} failed: {error}",
+                path.display()
+            ))
+        }
     })?;
     let fingerprint = fingerprint_local_parts(metadata.len(), metadata.modified().ok());
     Ok((file, fingerprint))
@@ -67,11 +74,11 @@ pub async fn fingerprint_open_remote(
     let mut file = session
         .open(path)
         .await
-        .map_err(|error| RemoteError::Transfer(format!("open remote source failed: {error}")))?;
+        .map_err(|error| map_remote_source_open_error(path, error))?;
     let metadata = match file.metadata().await {
         Ok(metadata) => metadata,
         Err(error) => {
-            let primary = RemoteError::Transfer(format!("stat open remote source failed: {error}"));
+            let primary = map_remote_source_stat_error(path, error);
             let _ =
                 super::close_remote_file(&mut file, "close remote source after stat failure").await;
             return Err(primary);
@@ -90,6 +97,25 @@ pub async fn fingerprint_open_remote(
     };
     let fingerprint = fingerprint_remote_parts(size, metadata.mtime.map(u64::from));
     Ok((file, fingerprint))
+}
+
+fn map_remote_source_open_error(path: &str, error: SftpClientError) -> RemoteError {
+    map_remote_source_error("open", path, error)
+}
+
+fn map_remote_source_stat_error(path: &str, error: SftpClientError) -> RemoteError {
+    map_remote_source_error("stat open", path, error)
+}
+
+fn map_remote_source_error(operation: &str, path: &str, error: SftpClientError) -> RemoteError {
+    if matches!(
+        &error,
+        SftpClientError::Status(status) if status.status_code == StatusCode::NoSuchFile
+    ) {
+        RemoteError::SourceNotFound(format!("remote source {path} does not exist"))
+    } else {
+        RemoteError::Transfer(format!("{operation} remote source failed: {error}"))
+    }
 }
 
 pub async fn open_local_partial(
@@ -584,11 +610,15 @@ mod tests {
     use super::{
         DownloadPartialRequest, PartialTransferIo, RemotePartialIo, UploadPartialRequest,
         download_to_partial_with_io, fingerprint_local_parts, fingerprint_open_local,
-        fingerprint_remote_parts, open_after_fingerprint, open_local_partial,
-        remote_partial_open_flags, resume_partial_from, truncate_local_partial,
+        fingerprint_remote_parts, map_remote_source_open_error, open_after_fingerprint,
+        open_local_partial, remote_partial_open_flags, resume_partial_from, truncate_local_partial,
         truncate_remote_partial_with_io, upload_to_partial_with_io,
     };
     use russh_sftp::protocol::OpenFlags;
+    use russh_sftp::{
+        client::error::Error as SftpClientError,
+        protocol::{Status, StatusCode},
+    };
 
     #[derive(Clone)]
     struct FakePartialTransferIo {
@@ -613,6 +643,39 @@ mod tests {
         fn record(&self, event: impl Into<String>) {
             self.events.lock().unwrap().push(event.into());
         }
+    }
+
+    #[tokio::test]
+    async fn missing_local_source_has_typed_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-source.bin");
+
+        let error = fingerprint_open_local(&missing).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::error::RemoteError::SourceNotFound(message)
+                if message.contains("missing-source.bin")
+        ));
+    }
+
+    #[test]
+    fn remote_no_such_file_status_has_typed_provenance() {
+        let error = map_remote_source_open_error(
+            "/srv/missing-source.bin",
+            SftpClientError::Status(Status {
+                id: 1,
+                status_code: StatusCode::NoSuchFile,
+                error_message: "not present".into(),
+                language_tag: "en".into(),
+            }),
+        );
+
+        assert!(matches!(
+            error,
+            crate::error::RemoteError::SourceNotFound(message)
+                if message.contains("/srv/missing-source.bin")
+        ));
     }
 
     #[async_trait::async_trait]

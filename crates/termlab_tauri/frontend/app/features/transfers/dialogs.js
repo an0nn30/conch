@@ -136,6 +136,13 @@
           description: 'The source identity cannot be verified, so this transfer cannot be safely resumed.',
           restartable: true,
         };
+      case 'sourceMissing':
+        return {
+          title: 'Source missing',
+          ariaLabel: 'Resolve missing transfer source',
+          description: 'The source path no longer exists. Restore it and restart from the beginning, or skip this transfer.',
+          restartable: true,
+        };
       case 'missingPartial':
         return {
           title: 'Partial file missing',

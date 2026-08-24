@@ -7,6 +7,7 @@ use std::{
 
 use crate::remote::transfer_queue::model::{
     TRANSFER_HISTORY_LIMIT, TRANSFER_STORE_VERSION, TransferJobState, TransferQueueDocument,
+    validate_document_semantics,
 };
 
 #[derive(Debug)]
@@ -14,6 +15,7 @@ pub enum StoreError {
     Io(io::Error),
     Json(serde_json::Error),
     Migration(MigrationError),
+    Semantic(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,7 @@ impl fmt::Display for StoreError {
             Self::Io(error) => write!(formatter, "transfer queue store I/O error: {error}"),
             Self::Json(error) => write!(formatter, "transfer queue store JSON error: {error}"),
             Self::Migration(error) => error.fmt(formatter),
+            Self::Semantic(error) => write!(formatter, "invalid transfer queue document: {error}"),
         }
     }
 }
@@ -105,7 +108,10 @@ impl TransferStore {
             Ok(document) => document,
             Err(_) => return self.quarantine(),
         };
-        validate_document(&document)?;
+        validate_version(&document)?;
+        if validate_document_semantics(&document).is_err() {
+            return self.quarantine();
+        }
         recover_for_startup(&mut document);
         Ok(LoadOutcome::Loaded(document))
     }
@@ -129,6 +135,11 @@ impl TransferStore {
 }
 
 fn validate_document(document: &TransferQueueDocument) -> Result<(), StoreError> {
+    validate_version(document)?;
+    validate_document_semantics(document).map_err(StoreError::Semantic)
+}
+
+fn validate_version(document: &TransferQueueDocument) -> Result<(), StoreError> {
     if document.version != TRANSFER_STORE_VERSION {
         return Err(StoreError::Migration(MigrationError::UnsupportedVersion {
             version: document.version,
@@ -484,6 +495,58 @@ mod tests {
                 .unwrap()
                 .contains(quarantine_name.as_ref())
         );
+    }
+
+    fn assert_semantic_corruption_is_quarantined(document: TransferQueueDocument) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transfers.json");
+        let original = serde_json::to_vec_pretty(&document).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let outcome = TransferStore::new(path.clone()).load().unwrap();
+        let LoadOutcome::Quarantined {
+            document,
+            path: quarantine_path,
+        } = outcome
+        else {
+            panic!("semantically invalid queue must be quarantined");
+        };
+
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&quarantine_path).unwrap(), original);
+        assert!(document.queue_paused);
+        assert!(document.jobs.is_empty());
+        assert!(document.recovery_error.is_some());
+    }
+
+    #[test]
+    fn zero_global_limit_is_semantic_corruption_and_is_quarantined() {
+        let mut document = TransferQueueDocument::default();
+        document.settings.global_limit = 0;
+
+        assert_semantic_corruption_is_quarantined(document);
+    }
+
+    #[test]
+    fn duplicate_job_ids_are_semantic_corruption_and_are_quarantined() {
+        let mut first = sample_job(TransferJobState::Queued);
+        first.queue_order = 1;
+        let mut duplicate = first.clone();
+        duplicate.queue_order = 2;
+        let document = TransferQueueDocument {
+            jobs: vec![first, duplicate],
+            ..TransferQueueDocument::default()
+        };
+
+        assert_semantic_corruption_is_quarantined(document);
+    }
+
+    #[test]
+    fn invalid_active_queue_order_is_semantic_corruption_and_is_quarantined() {
+        let mut job = sample_job(TransferJobState::Paused);
+        job.queue_order = 0;
+
+        assert_semantic_corruption_is_quarantined(document_with(job));
     }
 
     #[test]

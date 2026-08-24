@@ -16,9 +16,11 @@ use super::{
         AttentionReason, CommitPhase, ConflictResolution, ManagedArtifacts, NewTransferJob,
         QueueSettings, TRANSFER_HISTORY_LIMIT, TransferEndpoint, TransferJob, TransferJobState,
         TransferPriority, TransferQueueDocument, TransferQueueSnapshot, build_destination_key,
-        build_host_key,
+        build_host_key, validate_document_semantics, validate_queue_settings,
     },
-    reducer::{JobEvent, reduce_job},
+    reducer::{
+        JobEvent, job_owns_attempt, reduce_job, resolution_abandons_attempt, resolution_is_legal,
+    },
     runner::{
         QueueClock, RunnerControl, RunnerControlState, RunnerProgress, RunnerReporter,
         RunnerResult, SharedTransferJobRunner, SystemQueueClock, TransferJobRunner,
@@ -231,6 +233,9 @@ impl QueueBootstrap {
             internal_rx,
             active: HashMap::new(),
             pending_cancel_cleanup: HashSet::new(),
+            pending_artifact_resolutions: HashMap::new(),
+            startup_suspended: true,
+            startup_authorized: HashSet::new(),
             pending_terminal_results: HashMap::new(),
             pending_progress: HashMap::new(),
             persistence_fault: false,
@@ -252,6 +257,12 @@ pub struct QueueActor {
     internal_rx: mpsc::UnboundedReceiver<InternalEvent>,
     active: HashMap<Uuid, ActiveTask>,
     pending_cancel_cleanup: HashSet<Uuid>,
+    pending_artifact_resolutions: HashMap<Uuid, ConflictResolution>,
+    /// Runtime-only authorization boundary created by startup recovery. It is
+    /// intentionally never persisted: another restart must return to a
+    /// no-network state even if one row was explicitly resumed before exit.
+    startup_suspended: bool,
+    startup_authorized: HashSet<Uuid>,
     pending_terminal_results: HashMap<Uuid, PendingTerminalResult>,
     pending_progress: HashMap<Uuid, PendingProgress>,
     persistence_fault: bool,
@@ -267,10 +278,11 @@ struct ActiveTask {
     deferred_control: Option<RunnerControlState>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum JobOwnership {
     Transfer,
     CancellationCleanup,
+    ArtifactResolution(ConflictResolution),
 }
 
 struct PendingTerminalResult {
@@ -358,7 +370,7 @@ impl QueueActor {
     ) -> Result<(QueueBootstrap, TransferQueueHandle), String> {
         let mut document = store.load()?;
         recover_for_startup(&mut document);
-        validate_document(&document)?;
+        validate_document_semantics(&document)?;
         store.save(&document)?;
         let snapshot = Arc::new(RwLock::new(TransferQueueSnapshot::from(&document)));
         let (command_tx, command_rx) = mpsc::unbounded_channel();
@@ -416,7 +428,7 @@ impl QueueActor {
                 let _ = reply.send(result);
             }
             QueueCommand::Resume { id, reply } => {
-                let result = self.apply_lifecycle_event(id, JobEvent::Resume).await;
+                let result = self.resume(id).await;
                 let _ = reply.send(result);
             }
             QueueCommand::PauseAll { reply } => {
@@ -424,7 +436,7 @@ impl QueueActor {
                 let _ = reply.send(result);
             }
             QueueCommand::ResumeAll { reply } => {
-                let result = self.set_queue_paused(false).await;
+                let result = self.resume_all().await;
                 let _ = reply.send(result);
             }
             QueueCommand::Cancel { id, reply } => {
@@ -677,23 +689,40 @@ impl QueueActor {
             .values()
             .map(|task| task.lease.clone())
             .collect();
+        let pending_cleanup: HashSet<_> = self
+            .pending_cancel_cleanup
+            .iter()
+            .copied()
+            .chain(self.pending_artifact_resolutions.keys().copied())
+            .collect();
         let selected = select_scheduled_jobs_from_document(
             &self.document,
             &leases,
-            &self.pending_cancel_cleanup,
+            &pending_cleanup,
+            &self.startup_authorized,
             self.clock.now_ms(),
         );
         for id in selected {
+            let artifact_resolution = self.pending_artifact_resolutions.get(&id).cloned();
             let start = if self.pending_cancel_cleanup.contains(&id) {
                 self.start_cancel_cleanup(id)
+            } else if let Some(resolution) = artifact_resolution.clone() {
+                self.start_artifact_resolution(id, resolution)
             } else {
                 self.start_job(id).await
             };
             if let Err(error) = start {
                 self.pending_cancel_cleanup.remove(&id);
-                let _ = self.apply_job_event(id, JobEvent::Fail(error)).await;
+                self.pending_artifact_resolutions.remove(&id);
+                let event = if artifact_resolution.is_some() {
+                    JobEvent::NeedsAttention(AttentionReason::Cleanup { message: error })
+                } else {
+                    JobEvent::Fail(error)
+                };
+                let _ = self.apply_job_event(id, event).await;
             } else {
                 self.pending_cancel_cleanup.remove(&id);
+                self.pending_artifact_resolutions.remove(&id);
             }
         }
     }
@@ -728,13 +757,14 @@ impl QueueActor {
             .expect("started job remains in committed document")
             .clone();
 
-        self.spawn_runner(job, RunnerControlState::Run)
+        self.spawn_runner(job, RunnerControlState::Run, JobOwnership::Transfer)
     }
 
     fn spawn_runner(
         &mut self,
         job: TransferJob,
         initial_control: RunnerControlState,
+        ownership: JobOwnership,
     ) -> Result<(), String> {
         let id = job.id;
         if self.active.contains_key(&id) {
@@ -757,11 +787,7 @@ impl QueueActor {
             ActiveTask {
                 lease_id,
                 lease,
-                ownership: if initial_control == RunnerControlState::Cancel {
-                    JobOwnership::CancellationCleanup
-                } else {
-                    JobOwnership::Transfer
-                },
+                ownership,
                 control_tx,
                 commit_critical: false,
                 deferred_control: None,
@@ -803,7 +829,30 @@ impl QueueActor {
             .find(|job| job.id == id)
             .ok_or_else(|| format!("transfer job {id} was not found"))?
             .clone();
-        self.spawn_runner(job, RunnerControlState::Cancel)
+        self.spawn_runner(
+            job,
+            RunnerControlState::Cancel,
+            JobOwnership::CancellationCleanup,
+        )
+    }
+
+    fn start_artifact_resolution(
+        &mut self,
+        id: Uuid,
+        resolution: ConflictResolution,
+    ) -> Result<(), String> {
+        let job = self
+            .document
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| format!("transfer job {id} was not found"))?
+            .clone();
+        self.spawn_runner(
+            job,
+            RunnerControlState::Cancel,
+            JobOwnership::ArtifactResolution(resolution),
+        )
     }
 
     fn active_task(&self, job_id: Uuid, lease_id: Uuid) -> Result<&ActiveTask, String> {
@@ -963,11 +1012,11 @@ impl QueueActor {
         job_id: Uuid,
         lease_id: Uuid,
     ) -> Result<(), String> {
-        let result = self
+        let (result, ownership) = self
             .pending_terminal_results
             .get(&job_id)
             .filter(|pending| pending.lease_id == lease_id)
-            .map(|pending| pending.result.clone())
+            .map(|pending| (pending.result.clone(), pending.ownership.clone()))
             .ok_or_else(|| format!("transfer job {job_id} has no pending runner result"))?;
         let now_ms = self.clock.now_ms();
         let mut next = self.document.clone();
@@ -977,59 +1026,91 @@ impl QueueActor {
             .find(|job| job.id == job_id)
             .ok_or_else(|| format!("transfer job {job_id} was not found"))?;
 
-        let application = match &result {
-            RunnerResult::Completed(result) => {
-                job.state = TransferJobState::Completed { result: *result };
-                job.commit_phase = CommitPhase::Complete;
-                job.finished_at_ms = Some(now_ms);
-                job.speed_bytes_per_second = 0;
-                job.eta_seconds = None;
-                job.updated_at_ms = now_ms;
-                Ok(())
-            }
-            RunnerResult::Paused { durable_checkpoint } => {
-                let mut paused = job.clone();
-                paused.durable_checkpoint = *durable_checkpoint;
-                paused.bytes_transferred = paused.bytes_transferred.max(*durable_checkpoint);
-                reduce_job(&paused, JobEvent::Pause, now_ms)
-                    .map(|reduced| *job = reduced)
-                    .map_err(|error| error.to_string())
-            }
-            RunnerResult::Cancelled { cleanup_error } => {
-                reduce_job(job, JobEvent::Cancel(cleanup_error.clone()), now_ms)
-                    .map(|reduced| *job = reduced)
-                    .map_err(|error| error.to_string())
-            }
-            RunnerResult::NeedsConnection(message) => {
-                reduce_job(job, JobEvent::NeedsConnection(message.clone()), now_ms)
-                    .map(|reduced| *job = reduced)
-                    .map_err(|error| error.to_string())
-            }
-            RunnerResult::NeedsAttention(reason) => {
-                reduce_job(job, JobEvent::NeedsAttention(reason.clone()), now_ms)
-                    .map(|reduced| *job = reduced)
-                    .map_err(|error| error.to_string())
-            }
-            RunnerResult::Failed { class, message } => {
-                let attempt = job.retry_attempt.max(1);
-                if *class == FailureClass::Transient && attempt < job.max_attempts.min(3) {
-                    let next_attempt = attempt + 1;
-                    let delay = retry_delay_ms(next_attempt)
-                        .ok_or_else(|| format!("missing retry delay for attempt {next_attempt}"))?;
-                    reduce_job(
-                        job,
-                        JobEvent::RetryScheduled {
-                            attempt: next_attempt,
-                            next_retry_at_ms: now_ms.saturating_add(delay),
-                        },
-                        now_ms,
-                    )
-                    .map(|reduced| *job = reduced)
-                    .map_err(|error| error.to_string())
-                } else {
-                    reduce_job(job, JobEvent::Fail(message.clone()), now_ms)
+        let application = if let JobOwnership::ArtifactResolution(resolution) = &ownership {
+            match &result {
+                RunnerResult::Cancelled {
+                    cleanup_error: None,
+                } => reduce_job(
+                    job,
+                    JobEvent::ResolveAfterCleanup(resolution.clone()),
+                    now_ms,
+                )
+                .map(|reduced| *job = reduced)
+                .map_err(|error| error.to_string()),
+                RunnerResult::Cancelled {
+                    cleanup_error: Some(message),
+                } => reduce_job(
+                    job,
+                    JobEvent::NeedsAttention(AttentionReason::Cleanup {
+                        message: message.clone(),
+                    }),
+                    now_ms,
+                )
+                .map(|reduced| *job = reduced)
+                .map_err(|error| error.to_string()),
+                RunnerResult::NeedsAttention(reason) => {
+                    reduce_job(job, JobEvent::NeedsAttention(reason.clone()), now_ms)
                         .map(|reduced| *job = reduced)
                         .map_err(|error| error.to_string())
+                }
+                _ => Err("artifact cleanup returned an invalid runner result".into()),
+            }
+        } else {
+            match &result {
+                RunnerResult::Completed(result) => {
+                    job.state = TransferJobState::Completed { result: *result };
+                    job.commit_phase = CommitPhase::Complete;
+                    job.finished_at_ms = Some(now_ms);
+                    job.speed_bytes_per_second = 0;
+                    job.eta_seconds = None;
+                    job.updated_at_ms = now_ms;
+                    Ok(())
+                }
+                RunnerResult::Paused { durable_checkpoint } => {
+                    let mut paused = job.clone();
+                    paused.durable_checkpoint = *durable_checkpoint;
+                    paused.bytes_transferred = paused.bytes_transferred.max(*durable_checkpoint);
+                    reduce_job(&paused, JobEvent::Pause, now_ms)
+                        .map(|reduced| *job = reduced)
+                        .map_err(|error| error.to_string())
+                }
+                RunnerResult::Cancelled { cleanup_error } => {
+                    reduce_job(job, JobEvent::Cancel(cleanup_error.clone()), now_ms)
+                        .map(|reduced| *job = reduced)
+                        .map_err(|error| error.to_string())
+                }
+                RunnerResult::NeedsConnection(message) => {
+                    reduce_job(job, JobEvent::NeedsConnection(message.clone()), now_ms)
+                        .map(|reduced| *job = reduced)
+                        .map_err(|error| error.to_string())
+                }
+                RunnerResult::NeedsAttention(reason) => {
+                    reduce_job(job, JobEvent::NeedsAttention(reason.clone()), now_ms)
+                        .map(|reduced| *job = reduced)
+                        .map_err(|error| error.to_string())
+                }
+                RunnerResult::Failed { class, message } => {
+                    let attempt = job.retry_attempt.max(1);
+                    if *class == FailureClass::Transient && attempt < job.max_attempts.min(3) {
+                        let next_attempt = attempt + 1;
+                        let delay = retry_delay_ms(next_attempt).ok_or_else(|| {
+                            format!("missing retry delay for attempt {next_attempt}")
+                        })?;
+                        reduce_job(
+                            job,
+                            JobEvent::RetryScheduled {
+                                attempt: next_attempt,
+                                next_retry_at_ms: now_ms.saturating_add(delay),
+                            },
+                            now_ms,
+                        )
+                        .map(|reduced| *job = reduced)
+                        .map_err(|error| error.to_string())
+                    } else {
+                        reduce_job(job, JobEvent::Fail(message.clone()), now_ms)
+                            .map(|reduced| *job = reduced)
+                            .map_err(|error| error.to_string())
+                    }
                 }
             }
         };
@@ -1062,6 +1143,18 @@ impl QueueActor {
         }
         self.pending_terminal_results.remove(&job_id);
         self.persistence_fault = !self.pending_terminal_results.is_empty();
+        if matches!(ownership, JobOwnership::ArtifactResolution(_))
+            && self.startup_suspended
+            && self.document.queue_paused
+            && self
+                .document
+                .jobs
+                .iter()
+                .find(|job| job.id == job_id)
+                .is_some_and(|job| matches!(job.state, TransferJobState::Queued))
+        {
+            self.startup_authorized.insert(job_id);
+        }
         if let Some(job) = self.document.jobs.iter().find(|job| job.id == job_id) {
             if let TransferJobState::RetryWaiting {
                 attempt,
@@ -1099,6 +1192,10 @@ impl QueueActor {
     }
 
     async fn pause(&mut self, id: Uuid) -> Result<(), String> {
+        if self.cancellation_cleanup_owns(id) {
+            return Ok(());
+        }
+        self.ensure_lifecycle_mutation_allowed(id)?;
         if self.active.contains_key(&id) {
             self.request_runner_control(id, RunnerControlState::Pause)?;
             Ok(())
@@ -1194,6 +1291,9 @@ impl QueueActor {
         let mut next = self.document.clone();
         next.jobs.push(job);
         self.commit(next).await?;
+        if self.startup_suspended && self.document.queue_paused {
+            self.startup_authorized.insert(id);
+        }
         Ok(id)
     }
 
@@ -1225,10 +1325,28 @@ impl QueueActor {
         self.pending_cancel_cleanup.contains(&id) || active_cleanup || terminal_cleanup
     }
 
+    fn artifact_resolution_owns(&self, id: Uuid) -> bool {
+        let active_cleanup = self
+            .active
+            .get(&id)
+            .is_some_and(|task| matches!(&task.ownership, JobOwnership::ArtifactResolution(_)));
+        let terminal_cleanup = self
+            .pending_terminal_results
+            .get(&id)
+            .is_some_and(|pending| {
+                matches!(&pending.ownership, JobOwnership::ArtifactResolution(_))
+            });
+        self.pending_artifact_resolutions.contains_key(&id) || active_cleanup || terminal_cleanup
+    }
+
     fn ensure_lifecycle_mutation_allowed(&self, id: Uuid) -> Result<(), String> {
         if self.cancellation_cleanup_owns(id) {
             Err(format!(
                 "cancellation cleanup owns transfer job {id} until runner acknowledgement"
+            ))
+        } else if self.artifact_resolution_owns(id) {
+            Err(format!(
+                "artifact resolution cleanup owns transfer job {id} until runner acknowledgement"
             ))
         } else {
             Ok(())
@@ -1242,6 +1360,8 @@ impl QueueActor {
             self.commit(next).await?;
         }
         if paused {
+            self.startup_suspended = false;
+            self.startup_authorized.clear();
             let active_ids: Vec<_> = self.active.keys().copied().collect();
             for id in active_ids {
                 self.request_runner_control(id, RunnerControlState::Pause)?;
@@ -1250,10 +1370,40 @@ impl QueueActor {
         Ok(())
     }
 
+    async fn resume(&mut self, id: Uuid) -> Result<(), String> {
+        self.ensure_lifecycle_mutation_allowed(id)?;
+        self.apply_job_event(id, JobEvent::Resume).await?;
+        if self.startup_suspended && self.document.queue_paused {
+            self.startup_authorized.insert(id);
+        }
+        Ok(())
+    }
+
+    async fn resume_all(&mut self) -> Result<(), String> {
+        let now_ms = self.clock.now_ms();
+        let mut next = self.document.clone();
+        let mut changed = next.queue_paused;
+        next.queue_paused = false;
+        for job in &mut next.jobs {
+            if matches!(job.state, TransferJobState::Paused) {
+                *job =
+                    reduce_job(job, JobEvent::Resume, now_ms).map_err(|error| error.to_string())?;
+                changed = true;
+            }
+        }
+        if changed {
+            self.commit(next).await?;
+        }
+        self.startup_suspended = false;
+        self.startup_authorized.clear();
+        Ok(())
+    }
+
     async fn cancel(&mut self, id: Uuid) -> Result<bool, String> {
         if self.cancellation_cleanup_owns(id) {
             return Ok(true);
         }
+        self.ensure_lifecycle_mutation_allowed(id)?;
         if self.active.contains_key(&id) {
             self.active
                 .get_mut(&id)
@@ -1290,8 +1440,39 @@ impl QueueActor {
         ) {
             return Err("rename destination must not be empty".into());
         }
+        let job = self
+            .document
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| format!("transfer job {id} was not found"))?;
+        let TransferJobState::NeedsAttention { reason } = &job.state else {
+            return Err(format!("transfer job {id} is not awaiting a resolution"));
+        };
+        if !resolution_is_legal(reason, &resolution) {
+            return Err("resolution is not legal for this attention reason".into());
+        }
+        if resolution_abandons_attempt(&resolution) && job_owns_attempt(job) {
+            if self.runner.is_none() {
+                return Err("transfer runner is unavailable".into());
+            }
+            self.pending_artifact_resolutions.insert(id, resolution);
+            return Ok(());
+        }
         self.apply_job_event(id, JobEvent::Resolve(resolution))
-            .await
+            .await?;
+        if self.startup_suspended
+            && self.document.queue_paused
+            && self
+                .document
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .is_some_and(|job| matches!(job.state, TransferJobState::Queued))
+        {
+            self.startup_authorized.insert(id);
+        }
+        Ok(())
     }
 
     async fn reorder(&mut self, id: Uuid, before: Option<Uuid>) -> Result<(), String> {
@@ -1383,7 +1564,7 @@ impl QueueActor {
     }
 
     async fn update_settings(&mut self, settings: QueueSettings) -> Result<(), String> {
-        validate_settings(&settings)?;
+        validate_queue_settings(&settings)?;
         if self.document.settings == settings {
             return Ok(());
         }
@@ -1394,7 +1575,7 @@ impl QueueActor {
 
     async fn commit(&mut self, mut next: TransferQueueDocument) -> Result<(), String> {
         compact_history(&mut next);
-        validate_document(&next)?;
+        validate_document_semantics(&next)?;
         next.revision = self
             .document
             .revision
@@ -1503,33 +1684,6 @@ fn validate_new_job(request: &NewTransferJob) -> Result<(), String> {
     );
     if request.destination_key != expected_destination_key {
         return Err("transfer destination key is not canonical".into());
-    }
-    Ok(())
-}
-
-fn validate_settings(settings: &QueueSettings) -> Result<(), String> {
-    if !(1..=32).contains(&settings.global_limit) {
-        return Err("global transfer limit must be between 1 and 32".into());
-    }
-    if !(1..=32).contains(&settings.per_host_limit) {
-        return Err("per-host transfer limit must be between 1 and 32".into());
-    }
-    Ok(())
-}
-
-fn validate_document(document: &TransferQueueDocument) -> Result<(), String> {
-    validate_settings(&document.settings)?;
-    let mut ids = HashSet::new();
-    let mut active_orders = HashSet::new();
-    for job in &document.jobs {
-        if !ids.insert(job.id) {
-            return Err(format!("transfer queue contains duplicate job {}", job.id));
-        }
-        if !job.state.is_terminal()
-            && (job.queue_order == 0 || !active_orders.insert(job.queue_order))
-        {
-            return Err("active transfer queue orders must be unique and non-zero".into());
-        }
     }
     Ok(())
 }
@@ -1959,6 +2113,10 @@ mod tests {
             &format!("{host}:/srv/{id}.bin"),
         );
         job.durable_checkpoint = 512;
+        job.source_fingerprint = Some(SourceFingerprint {
+            size: 1_024,
+            modified_token: Some("source-v1".into()),
+        });
         job.artifacts = Some(
             ManagedArtifacts::for_destination(job.id, &job.remote_path)
                 .expect("stored destination has valid managed paths"),
@@ -2077,6 +2235,195 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_all_requeues_every_recovered_paused_job_and_releases_startup_suspension() {
+        let first = Uuid::from_u128(8_003);
+        let second = Uuid::from_u128(8_004);
+        let document = document_with(vec![
+            stored_job(first, TransferJobState::Paused, 1),
+            stored_job(second, TransferJobState::Paused, 2),
+        ]);
+        let runner = Arc::new(GatedRunner::default());
+        let first_release = runner.gate(first);
+        let second_release = runner.gate(second);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        assert!(harness.handle.snapshot().queue_paused);
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 2).await;
+
+        assert!(!harness.handle.snapshot().queue_paused);
+        assert_eq!(runner.starts(), [first, second]);
+        first_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        second_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn row_resume_authorizes_only_that_recovered_job_during_startup_suspension() {
+        let resumed = Uuid::from_u128(8_005);
+        let still_paused = Uuid::from_u128(8_006);
+        let document = document_with(vec![
+            stored_job(resumed, TransferJobState::Paused, 1),
+            stored_job(still_paused, TransferJobState::Paused, 2),
+        ]);
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(resumed);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume(resumed).await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        let snapshot = harness.handle.snapshot();
+        assert!(snapshot.queue_paused);
+        assert_eq!(runner.starts(), [resumed]);
+        assert!(matches!(
+            snapshot
+                .jobs
+                .iter()
+                .find(|job| job.id == still_paused)
+                .unwrap()
+                .state,
+            TransferJobState::Paused
+        ));
+        release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn enqueue_is_explicit_authorization_during_startup_suspension() {
+        let restored = Uuid::from_u128(8_007);
+        let fresh = Uuid::from_u128(8_008);
+        let document = document_with(vec![stored_job(restored, TransferJobState::Paused, 1)]);
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(fresh);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+        let mut request = new_job(fresh, "editor-save.bin");
+        request.origin = TransferOrigin::Editor;
+        request.priority = TransferPriority::Interactive;
+
+        harness.handle.enqueue(request).await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        let snapshot = harness.handle.snapshot();
+        assert!(snapshot.queue_paused);
+        assert_eq!(runner.starts(), [fresh]);
+        assert!(matches!(
+            snapshot
+                .jobs
+                .iter()
+                .find(|job| job.id == restored)
+                .unwrap()
+                .state,
+            TransferJobState::Paused
+        ));
+        release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_resolution_authorizes_only_that_job_during_startup_suspension() {
+        let missing = Uuid::from_u128(8_010);
+        let unrelated = Uuid::from_u128(8_011);
+        let document = document_with(vec![
+            stored_job(
+                missing,
+                TransferJobState::NeedsAttention {
+                    reason: AttentionReason::SourceMissing,
+                },
+                1,
+            ),
+            stored_job(unrelated, TransferJobState::Paused, 2),
+        ]);
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(missing);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness
+            .handle
+            .resolve(missing, ConflictResolution::Restart)
+            .await
+            .unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        assert_eq!(runner.starts(), [missing]);
+        assert_eq!(
+            harness
+                .handle
+                .snapshot()
+                .jobs
+                .iter()
+                .find(|job| job.id == unrelated)
+                .unwrap()
+                .state,
+            TransferJobState::Paused
+        );
+        release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cross_host_downloads_to_one_local_destination_never_overlap() {
+        let first = Uuid::from_u128(8_009);
+        let second = Uuid::from_u128(8_010);
+        let mut first_job = stored_job(first, TransferJobState::Queued, 1);
+        first_job.direction = TransferDirection::Download;
+        first_job.host_key = "configured:first".into();
+        first_job.endpoint = TransferEndpoint::Configured {
+            server_entry_id: "first".into(),
+            label: "First".into(),
+        };
+        first_job.local_path = "/tmp/shared-download.bin".into();
+        first_job.destination_key = super::build_destination_key(
+            &first_job.host_key,
+            &first_job.direction,
+            &first_job.local_path,
+            &first_job.remote_path,
+        );
+        let mut second_job = stored_job(second, TransferJobState::Queued, 2);
+        second_job.direction = TransferDirection::Download;
+        second_job.host_key = "configured:second".into();
+        second_job.endpoint = TransferEndpoint::Configured {
+            server_entry_id: "second".into(),
+            label: "Second".into(),
+        };
+        second_job.local_path = "/tmp/shared-download.bin".into();
+        second_job.destination_key = super::build_destination_key(
+            &second_job.host_key,
+            &second_job.direction,
+            &second_job.local_path,
+            &second_job.remote_path,
+        );
+        let mut document = document_with(vec![first_job, second_job]);
+        document.settings = QueueSettings {
+            global_limit: 2,
+            per_host_limit: 2,
+        };
+        let runner = Arc::new(GatedRunner::default());
+        let first_release = runner.gate(first);
+        let second_release = runner.gate(second);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+        assert_eq!(runner.starts(), [first]);
+
+        first_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+        wait_for_starts(&runner, 2).await;
+        assert_eq!(runner.starts(), [first, second]);
+        second_release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn restored_due_retry_stays_suspended_until_explicit_resume() {
         let id = Uuid::from_u128(8_002);
         let mut document = document_with(vec![stored_job(
@@ -2111,6 +2458,40 @@ mod tests {
         release
             .send(RunnerResult::Completed(CompletionResult::Transferred))
             .unwrap();
+    }
+
+    #[test]
+    fn bootstrap_surfaces_semantic_store_corruption_without_aborting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transfers.json");
+        let mut document = TransferQueueDocument::default();
+        document.settings.global_limit = 0;
+        let original = serde_json::to_vec_pretty(&document).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let (_bootstrap, handle) = QueueActor::bootstrap(TransferStore::new(path.clone())).unwrap();
+        let snapshot = handle.snapshot();
+
+        assert!(snapshot.queue_paused);
+        assert!(snapshot.jobs.is_empty());
+        assert!(snapshot.recovery_error.is_some());
+        let replacement: TransferQueueDocument =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(replacement.queue_paused);
+        assert!(replacement.jobs.is_empty());
+        assert!(replacement.recovery_error.is_some());
+        let quarantined = std::fs::read_dir(directory.path())
+            .unwrap()
+            .find_map(|entry| {
+                let entry = entry.unwrap();
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".corrupt-")
+                    .then_some(entry.path())
+            })
+            .expect("semantic corruption was quarantined");
+        assert_eq!(std::fs::read(quarantined).unwrap(), original);
     }
 
     #[tokio::test]
@@ -2913,11 +3294,24 @@ mod tests {
             job.artifacts = Some(expected_artifacts.clone());
 
             let runner = Arc::new(GatedRunner::default());
-            let release = runner.gate(id);
+            let cleanup_release = (!resume).then(|| runner.gate(id));
+            let transfer_release = runner.gate(id);
             let harness = ActorHarness::with_runner(document_with(vec![job]), runner.clone());
             harness.handle.resume_all().await.unwrap();
             harness.handle.resolve(id, resolution).await.unwrap();
             wait_for_starts(&runner, 1).await;
+
+            if let Some(cleanup_release) = cleanup_release {
+                let cleanup_job = runner.jobs().pop().unwrap();
+                assert_eq!(cleanup_job.conflict_policy, ConflictPolicy::Ask);
+                assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+                cleanup_release
+                    .send(RunnerResult::Cancelled {
+                        cleanup_error: None,
+                    })
+                    .unwrap();
+                wait_for_starts(&runner, 2).await;
+            }
 
             let dispatched = runner.jobs().pop().unwrap();
             assert_eq!(dispatched.conflict_policy, ConflictPolicy::Overwrite);
@@ -2931,7 +3325,7 @@ mod tests {
                 assert_eq!(dispatched.artifacts, None);
             }
 
-            release
+            transfer_release
                 .send(RunnerResult::Completed(CompletionResult::Transferred))
                 .unwrap();
         }
@@ -3281,6 +3675,9 @@ mod tests {
                 internal_rx,
                 active: HashMap::new(),
                 pending_cancel_cleanup: Default::default(),
+                pending_artifact_resolutions: Default::default(),
+                startup_suspended: false,
+                startup_authorized: Default::default(),
                 pending_terminal_results: HashMap::new(),
                 pending_progress: HashMap::new(),
                 persistence_fault: false,
@@ -3389,6 +3786,10 @@ mod tests {
         let id = Uuid::from_u128(740);
         let mut paused = stored_job(id, TransferJobState::Paused, 1);
         paused.durable_checkpoint = 512;
+        paused.source_fingerprint = Some(SourceFingerprint {
+            size: 1_024,
+            modified_token: Some("source-v1".into()),
+        });
         paused.artifacts = Some(ManagedArtifacts {
             partial_path: "/tmp/.paused.partial".into(),
             backup_path: "/tmp/.paused.backup".into(),
@@ -3419,6 +3820,126 @@ mod tests {
             )
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn skip_waits_for_owned_commit_cleanup_before_persisting_completion() {
+        let id = Uuid::from_u128(747);
+        let mut job = durable_cancel_job(id, "host-a", 1);
+        job.state = TransferJobState::NeedsAttention {
+            reason: AttentionReason::CommitRecovery {
+                message: "owned backup and partial require reconciliation".into(),
+            },
+        };
+        job.commit_phase = CommitPhase::BackupMoved;
+        job.commit_backup_expected = Some(true);
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document_with(vec![job]), runner.clone());
+        let original = harness.handle.snapshot().jobs[0].clone();
+
+        harness
+            .handle
+            .resolve(id, ConflictResolution::Skip)
+            .await
+            .unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        assert_eq!(runner.control_state(id), RunnerControlState::Cancel);
+        assert_eq!(harness.handle.snapshot().jobs[0], original);
+        assert_eq!(
+            harness.store.load().unwrap().into_document().jobs[0],
+            original,
+            "the durable document must keep ownership until cleanup acknowledges"
+        );
+        assert!(
+            harness
+                .handle
+                .resolve(
+                    id,
+                    ConflictResolution::Rename {
+                        destination: "/srv/racing.bin".into(),
+                    },
+                )
+                .await
+                .unwrap_err()
+                .contains("cleanup owns")
+        );
+
+        release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
+        let skipped = wait_for_job(&harness.handle, id, |job| {
+            matches!(
+                job.state,
+                TransferJobState::Completed {
+                    result: CompletionResult::Skipped
+                }
+            )
+        })
+        .await;
+        assert_eq!(skipped.artifacts, None);
+        assert_eq!(skipped.source_fingerprint, None);
+        assert_eq!(skipped.durable_checkpoint, 0);
+        assert_eq!(skipped.commit_phase, CommitPhase::None);
+        assert_eq!(
+            harness.store.load().unwrap().into_document().jobs[0],
+            skipped
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_cleanup_failure_preserves_old_destination_and_exact_artifact_identity() {
+        let id = Uuid::from_u128(748);
+        let mut job = durable_cancel_job(id, "host-a", 1);
+        job.state = TransferJobState::NeedsAttention {
+            reason: AttentionReason::DestinationConflict {
+                resume_available: true,
+            },
+        };
+        let original_destination = job.remote_path.clone();
+        let original_artifacts = job.artifacts.clone();
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document_with(vec![job]), runner.clone());
+
+        harness
+            .handle
+            .resolve(
+                id,
+                ConflictResolution::Rename {
+                    destination: "/srv/renamed.bin".into(),
+                },
+            )
+            .await
+            .unwrap();
+        wait_for_starts(&runner, 1).await;
+        release
+            .send(RunnerResult::NeedsAttention(AttentionReason::Cleanup {
+                message: "/srv/.owned.termlab-backup-id could not be removed".into(),
+            }))
+            .unwrap();
+
+        let attention = wait_for_job(&harness.handle, id, |job| {
+            matches!(
+                job.state,
+                TransferJobState::NeedsAttention {
+                    reason: AttentionReason::Cleanup { .. }
+                }
+            )
+        })
+        .await;
+        assert_eq!(attention.remote_path, original_destination);
+        assert_eq!(attention.artifacts, original_artifacts);
+        let TransferJobState::NeedsAttention {
+            reason: AttentionReason::Cleanup { message },
+        } = attention.state
+        else {
+            unreachable!()
+        };
+        assert!(message.contains("/srv/.owned.termlab-backup-id"));
     }
 
     #[tokio::test]
@@ -3513,8 +4034,20 @@ mod tests {
                 "host-a",
                 "host-a:/srv/ordinary.bin",
             ),
-            durable_cancel_job(second_host_a, "host-a", 2),
-            durable_cancel_job(host_b, "host-b", 3),
+            {
+                let mut job = durable_cancel_job(second_host_a, "host-a", 2);
+                job.state = TransferJobState::NeedsAttention {
+                    reason: AttentionReason::MissingPartial,
+                };
+                job
+            },
+            {
+                let mut job = durable_cancel_job(host_b, "host-b", 3);
+                job.state = TransferJobState::NeedsAttention {
+                    reason: AttentionReason::MissingPartial,
+                };
+                job
+            },
         ]);
         document.queue_paused = false;
         document.settings = QueueSettings {
