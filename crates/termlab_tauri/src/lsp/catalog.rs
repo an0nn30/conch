@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -12,9 +13,18 @@ const ARM64: u32 = 0x0100_000c;
 const X86_64: u32 = 0x0100_0007;
 const MACHO_64_LE: u32 = 0xfeed_facf;
 const LC_BUILD_VERSION: u32 = 0x32;
+const LC_SEGMENT_64: u32 = 0x19;
+const LC_MAIN: u32 = 0x8000_0028;
+const LC_UNIXTHREAD: u32 = 0x5;
 const PLATFORM_MACOS: u32 = 1;
 const MH_EXECUTE: u32 = 2;
 const INSTALLED_RECEIPT_SCHEMA: u32 = 1;
+const MACH_HEADER_64_SIZE: usize = 32;
+const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+const MAX_RESOURCE_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_LOAD_COMMANDS: u32 = 1024;
+const MAX_LOAD_COMMAND_BYTES: u32 = 1024 * 1024;
+const HASH_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PocAvailability {
@@ -712,26 +722,44 @@ fn validate_host(host: HostPlatform, adapter_id: &str) -> Result<(), CatalogUnav
     Ok(())
 }
 
-fn load_receipt(root: &Path, adapter_id: &str) -> Result<InstalledLspReceipt, CatalogUnavailable> {
-    let receipt_path = root.join("manifest.json");
-    let contents = match fs::read(&receipt_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+fn load_receipt(
+    architecture_root: &Path,
+    adapter_id: &str,
+) -> Result<InstalledLspReceipt, CatalogUnavailable> {
+    let corrupt = || CatalogUnavailable::CorruptResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: PathBuf::from("manifest.json"),
+    };
+    let lsp_root = architecture_root.parent().ok_or_else(corrupt)?;
+    let lsp_root = lsp_root.canonicalize().map_err(|_| corrupt())?;
+    let receipt_path = lsp_root.join("manifest.json");
+    let metadata = match fs::symlink_metadata(&receipt_path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Err(corrupt()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
             return Err(CatalogUnavailable::MissingReceipt {
                 adapter_id: adapter_id.to_owned(),
             });
         }
-        Err(_) => {
-            return Err(CatalogUnavailable::CorruptResource {
-                adapter_id: adapter_id.to_owned(),
-                relative_path: PathBuf::from("manifest.json"),
-            });
-        }
+        Err(_) => return Err(corrupt()),
     };
-    serde_json::from_slice(&contents).map_err(|_| CatalogUnavailable::CorruptResource {
-        adapter_id: adapter_id.to_owned(),
-        relative_path: PathBuf::from("manifest.json"),
-    })
+    if metadata.len() > MAX_RECEIPT_BYTES
+        || !receipt_path
+            .canonicalize()
+            .map_err(|_| corrupt())?
+            .starts_with(&lsp_root)
+    {
+        return Err(corrupt());
+    }
+    let file = fs::File::open(&receipt_path).map_err(|_| corrupt())?;
+    let mut contents = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_RECEIPT_BYTES + 1)
+        .read_to_end(&mut contents)
+        .map_err(|_| corrupt())?;
+    if contents.len() as u64 != metadata.len() || contents.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(corrupt());
+    }
+    serde_json::from_slice(&contents).map_err(|_| corrupt())
 }
 
 fn validate_receipt_identity(
@@ -741,10 +769,7 @@ fn validate_receipt_identity(
     if receipt.schema != INSTALLED_RECEIPT_SCHEMA
         || receipt.platform != "macos"
         || receipt.architecture != "arm64"
-        || receipt
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.id.is_empty() || artifact.version.is_empty())
+        || receipt.artifacts.len() != 4
         || ![
             ("node", "24.19.0"),
             ("typescript-language-server", "6.0.0"),
@@ -756,7 +781,9 @@ fn validate_receipt_identity(
             receipt
                 .artifacts
                 .iter()
-                .any(|artifact| artifact.id == *id && artifact.version == *version)
+                .filter(|artifact| artifact.id == *id && artifact.version == *version)
+                .count()
+                == 1
         })
         || receipt
             .files
@@ -789,12 +816,15 @@ fn validate_receipt_file(
             relative_path: relative_path.to_owned(),
         });
     };
+    let declared_size = file.size;
+    let metadata = fs::metadata(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
     if files.next().is_some()
-        || file.size == 0
-        || file.size
-            != fs::metadata(path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(u64::MAX)
+        || declared_size == 0
+        || declared_size > MAX_RESOURCE_FILE_BYTES
+        || declared_size != metadata.len()
         || !is_sha256(&file.sha256)
     {
         return Err(CatalogUnavailable::CorruptResource {
@@ -802,17 +832,46 @@ fn validate_receipt_file(
             relative_path: relative_path.to_owned(),
         });
     }
-    let contents = fs::read(path).map_err(|_| CatalogUnavailable::MissingResource {
-        adapter_id: adapter_id.to_owned(),
-        relative_path: relative_path.to_owned(),
-    })?;
-    if format!("{:x}", Sha256::digest(contents)) != file.sha256 {
+    let actual_hash = stream_sha256(path, declared_size, adapter_id, relative_path)?;
+    if actual_hash != file.sha256.to_ascii_lowercase() {
         return Err(CatalogUnavailable::CorruptResource {
             adapter_id: adapter_id.to_owned(),
             relative_path: relative_path.to_owned(),
         });
     }
     Ok(())
+}
+
+fn stream_sha256(
+    path: &Path,
+    declared_size: u64,
+    adapter_id: &str,
+    relative_path: &Path,
+) -> Result<String, CatalogUnavailable> {
+    let mut file = fs::File::open(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; HASH_BUFFER_SIZE];
+    let mut total = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| corrupt_executable(adapter_id, relative_path))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .filter(|size| *size <= declared_size && *size <= MAX_RESOURCE_FILE_BYTES)
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        hasher.update(&buffer[..read]);
+    }
+    if total != declared_size {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -981,6 +1040,9 @@ fn require_executable(
     #[cfg(not(unix))]
     {
         let _ = path;
+        let _ = relative_path;
+        let _ = adapter_id;
+        return Ok(());
     }
     Err(CatalogUnavailable::ProgramNotExecutable {
         adapter_id: adapter_id.to_owned(),
@@ -993,15 +1055,26 @@ fn validate_macos_arm64_executable(
     relative_path: &Path,
     adapter_id: &str,
 ) -> Result<(), CatalogUnavailable> {
-    let bytes = fs::read(path).map_err(|_| CatalogUnavailable::MissingResource {
+    let metadata = fs::metadata(path).map_err(|_| CatalogUnavailable::MissingResource {
         adapter_id: adapter_id.to_owned(),
         relative_path: relative_path.to_owned(),
     })?;
-    if read_u32(&bytes, 0) != Some(MACHO_64_LE) {
+    let file_size = metadata.len();
+    if file_size > MAX_RESOURCE_FILE_BYTES || file_size < MACH_HEADER_64_SIZE as u64 {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    let mut file = fs::File::open(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
+    let mut header = [0u8; MACH_HEADER_64_SIZE];
+    file.read_exact(&mut header)
+        .map_err(|_| corrupt_executable(adapter_id, relative_path))?;
+    if read_u32(&header, 0) != Some(MACHO_64_LE) {
         return Err(corrupt_executable(adapter_id, relative_path));
     }
     let cpu_type =
-        read_u32(&bytes, 4).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        read_u32(&header, 4).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
     if cpu_type != ARM64 {
         return Err(CatalogUnavailable::UnsupportedArchitecture {
             adapter_id: adapter_id.to_owned(),
@@ -1009,41 +1082,83 @@ fn validate_macos_arm64_executable(
             actual: cpu_type_name(cpu_type).to_owned(),
         });
     }
-    if read_u32(&bytes, 12) != Some(MH_EXECUTE) {
+    if read_u32(&header, 12) != Some(MH_EXECUTE) {
         return Err(corrupt_executable(adapter_id, relative_path));
     }
     let ncmds =
-        read_u32(&bytes, 16).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        read_u32(&header, 16).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
     let sizeofcmds =
-        read_u32(&bytes, 20).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
-    if ncmds == 0 || ncmds > 1_024 || sizeofcmds < ncmds.saturating_mul(8) {
+        read_u32(&header, 20).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+    if ncmds == 0
+        || ncmds > MAX_LOAD_COMMANDS
+        || sizeofcmds > MAX_LOAD_COMMAND_BYTES
+        || sizeofcmds < ncmds.saturating_mul(8)
+        || sizeofcmds % 8 != 0
+    {
         return Err(corrupt_executable(adapter_id, relative_path));
     }
-    let command_table_end = 32usize
-        .checked_add(sizeofcmds as usize)
-        .filter(|end| *end <= bytes.len())
+    let command_table_end = (MACH_HEADER_64_SIZE as u64)
+        .checked_add(sizeofcmds as u64)
+        .filter(|end| *end <= file_size)
         .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
-    let mut offset = 32usize;
+    let mut table = vec![0u8; sizeofcmds as usize];
+    file.read_exact(&mut table)
+        .map_err(|_| corrupt_executable(adapter_id, relative_path))?;
+    let mut offset = 0usize;
     let mut platform = None;
+    let mut build_versions = 0usize;
+    let mut has_executable_text = false;
+    let mut has_entry = false;
     for _ in 0..ncmds {
-        let command = read_u32(&bytes, offset)
+        let command = read_u32(&table, offset)
             .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
-        let size = read_u32(&bytes, offset + 4)
+        let size = read_u32(&table, offset + 4)
             .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?
             as usize;
         let command_end = offset
             .checked_add(size)
-            .filter(|end| size >= 8 && *end <= command_table_end)
+            .filter(|end| size >= 8 && size % 8 == 0 && *end <= table.len())
             .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        let command_bytes = &table[offset..command_end];
         if command == LC_BUILD_VERSION {
-            if size < 24 {
+            if size < 24 || read_u32(command_bytes, 20).is_none() {
                 return Err(corrupt_executable(adapter_id, relative_path));
             }
-            platform = read_u32(&bytes, offset + 8);
+            let ntools = read_u32(command_bytes, 20).unwrap() as usize;
+            if 24usize.checked_add(
+                ntools
+                    .checked_mul(8)
+                    .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?,
+            ) != Some(size)
+            {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            build_versions += 1;
+            platform = read_u32(command_bytes, 8);
+        } else if command == LC_SEGMENT_64 {
+            if structurally_valid_executable_text_segment(command_bytes, file_size) {
+                has_executable_text = true;
+            } else {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+        } else if command == LC_MAIN {
+            if size != 24 || read_u64(command_bytes, 8).is_none_or(|entry| entry >= file_size) {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            has_entry = true;
+        } else if command == LC_UNIXTHREAD {
+            if !structurally_valid_unixthread(command_bytes) {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            has_entry = true;
         }
         offset = command_end;
     }
-    if offset != command_table_end {
+    if offset as u64 != command_table_end - MACH_HEADER_64_SIZE as u64
+        || build_versions != 1
+        || !has_executable_text
+        || !has_entry
+    {
         return Err(corrupt_executable(adapter_id, relative_path));
     }
     match platform {
@@ -1055,6 +1170,66 @@ fn validate_macos_arm64_executable(
         }),
         None => Err(corrupt_executable(adapter_id, relative_path)),
     }
+}
+
+fn structurally_valid_executable_text_segment(bytes: &[u8], file_size: u64) -> bool {
+    const SEGMENT_64_SIZE: usize = 72;
+    const SECTION_64_SIZE: usize = 80;
+    const VM_PROT_EXECUTE: u32 = 0x4;
+    if bytes.len() < SEGMENT_64_SIZE
+        || bytes.len()
+            != SEGMENT_64_SIZE + read_u32(bytes, 64).unwrap_or(u32::MAX) as usize * SECTION_64_SIZE
+    {
+        return false;
+    }
+    let fileoff = read_u64(bytes, 40).unwrap_or(u64::MAX);
+    let filesize = read_u64(bytes, 48).unwrap_or(u64::MAX);
+    if c_string(&bytes[8..24]) != b"__TEXT"
+        || read_u32(bytes, 60).unwrap_or(0) & VM_PROT_EXECUTE == 0
+        || fileoff
+            .checked_add(filesize)
+            .is_none_or(|end| end > file_size)
+    {
+        return false;
+    }
+    let nsects = read_u32(bytes, 64).unwrap_or(0) as usize;
+    nsects > 0
+        && (0..nsects).any(|index| {
+            let section = &bytes[SEGMENT_64_SIZE + index * SECTION_64_SIZE
+                ..SEGMENT_64_SIZE + (index + 1) * SECTION_64_SIZE];
+            let offset = read_u32(section, 48).unwrap_or(u32::MAX) as u64;
+            let size = read_u64(section, 40).unwrap_or(u64::MAX);
+            c_string(&section[..16]) == b"__text"
+                && c_string(&section[16..32]) == b"__TEXT"
+                && read_u32(section, 52).is_some_and(|align| align <= 31)
+                && offset.checked_add(size).is_some_and(|end| end <= file_size)
+        })
+}
+
+fn c_string(bytes: &[u8]) -> &[u8] {
+    bytes.split(|byte| *byte == 0).next().unwrap_or(bytes)
+}
+
+fn structurally_valid_unixthread(bytes: &[u8]) -> bool {
+    let mut offset = 8usize;
+    let mut has_state = false;
+    while offset < bytes.len() {
+        let Some(count) = read_u32(bytes, offset + 4) else {
+            return false;
+        };
+        let Some(next) = offset
+            .checked_add(8)
+            .and_then(|value| value.checked_add(count as usize * 4))
+        else {
+            return false;
+        };
+        if count == 0 || next > bytes.len() {
+            return false;
+        }
+        has_state = true;
+        offset = next;
+    }
+    has_state && offset == bytes.len()
 }
 
 fn corrupt_executable(adapter_id: &str, relative_path: &Path) -> CatalogUnavailable {
@@ -1069,6 +1244,13 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
         .get(offset..offset + 4)
         .and_then(|slice| slice.try_into().ok())
         .map(u32::from_le_bytes)
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    bytes
+        .get(offset..offset + 8)
+        .and_then(|slice| slice.try_into().ok())
+        .map(u64::from_le_bytes)
 }
 
 fn cpu_type_name(cpu_type: u32) -> &'static str {
@@ -1276,7 +1458,8 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "typescript-language-server 6.0.0; typescript 7.0.2; node 24.19.0",
-            upstream_url: "https://github.com/typescript-language-server/typescript-language-server",
+            upstream_url:
+                "https://github.com/typescript-language-server/typescript-language-server",
             license: "MIT; TypeScript Apache-2.0; Node MIT",
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
@@ -1471,9 +1654,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        BundledServerCatalog, CatalogUnavailable, HostArchitecture, HostOperatingSystem,
-        HostPlatform, ResourceResolutionMode, ResourceRootCandidates, ResourceRootResolver,
-        resource_path,
+        resource_path, BundledServerCatalog, CatalogUnavailable, HostArchitecture,
+        HostOperatingSystem, HostPlatform, ResourceResolutionMode, ResourceRootCandidates,
+        ResourceRootResolver, ARM64, LC_BUILD_VERSION, LC_MAIN, LC_SEGMENT_64, MH_EXECUTE,
+        PLATFORM_MACOS,
     };
     use crate::lsp::root::LanguageId;
 
@@ -1483,7 +1667,7 @@ mod tests {
         let catalog = BundledServerCatalog::new();
 
         let command = catalog
-            .resolve(LanguageId::TypeScript, resources.root())
+            .resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host())
             .expect("resolve TypeScript command");
         let root = resources.canonical_root();
 
@@ -1537,20 +1721,16 @@ mod tests {
             "json"
         );
         assert_eq!(catalog.descriptor(LanguageId::Go).root_strategy.id(), "go");
-        assert!(
-            catalog
-                .descriptor(LanguageId::C)
-                .root_strategy
-                .markers()
-                .contains(&".clangd")
-        );
-        assert!(
-            catalog
-                .descriptor(LanguageId::Java)
-                .root_strategy
-                .markers()
-                .contains(&".project")
-        );
+        assert!(catalog
+            .descriptor(LanguageId::C)
+            .root_strategy
+            .markers()
+            .contains(&".clangd"));
+        assert!(catalog
+            .descriptor(LanguageId::Java)
+            .root_strategy
+            .markers()
+            .contains(&".project"));
         assert_eq!(
             catalog.normalize_completion_triggers(
                 LanguageId::TypeScript,
@@ -1580,7 +1760,7 @@ mod tests {
         let catalog = BundledServerCatalog::new();
 
         let command = catalog
-            .resolve(LanguageId::Rust, resources.root())
+            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
             .expect("resolve Rust command");
         let root = resources.canonical_root();
 
@@ -1605,7 +1785,7 @@ mod tests {
             (LanguageId::Java, "java"),
         ] {
             assert_eq!(
-                catalog.resolve(language, resources.root()),
+                catalog.resolve_for_host(language, resources.root(), poc_host()),
                 Err(CatalogUnavailable::NotBundledYet {
                     adapter_id: adapter_id.to_owned(),
                 })
@@ -1619,7 +1799,7 @@ mod tests {
         let catalog = BundledServerCatalog::new();
 
         let command = catalog
-            .resolve(LanguageId::Rust, resources.root())
+            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
             .expect("resolve bundled Rust command");
 
         assert_eq!(
@@ -1639,7 +1819,7 @@ mod tests {
             .expect("remove bundled program");
 
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, resources.root()),
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::MissingResource {
                 adapter_id: "rust".to_owned(),
                 relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
@@ -1648,13 +1828,18 @@ mod tests {
 
         resources.install_rust_analyzer(false);
         resources.write_receipt();
+        #[cfg(unix)]
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, resources.root()),
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::ProgramNotExecutable {
                 adapter_id: "rust".to_owned(),
                 relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
             })
         );
+        #[cfg(not(unix))]
+        assert!(catalog
+            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+            .is_ok());
     }
 
     #[test]
@@ -1663,7 +1848,7 @@ mod tests {
         let catalog = BundledServerCatalog::new();
 
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, resources.root()),
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::MissingReceipt {
                 adapter_id: "rust".to_owned(),
             })
@@ -1678,7 +1863,7 @@ mod tests {
         )
         .expect("corrupt TypeScript runtime");
         assert_eq!(
-            catalog.resolve(LanguageId::TypeScript, resources.root()),
+            catalog.resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host()),
             Err(CatalogUnavailable::CorruptResource {
                 adapter_id: "typescript".to_owned(),
                 relative_path: PathBuf::from(
@@ -1697,7 +1882,11 @@ mod tests {
         .expect("empty TypeScript language server CLI");
         empty_cli_resources.write_receipt();
         assert_eq!(
-            catalog.resolve(LanguageId::TypeScript, empty_cli_resources.root()),
+            catalog.resolve_for_host(
+                LanguageId::TypeScript,
+                empty_cli_resources.root(),
+                poc_host()
+            ),
             Err(CatalogUnavailable::CorruptResource {
                 adapter_id: "typescript".to_owned(),
                 relative_path: PathBuf::from(
@@ -1726,7 +1915,7 @@ mod tests {
         resources.install_rust_analyzer_bytes(&macho_header_only(), true);
         resources.write_receipt();
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, resources.root()),
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::CorruptResource {
                 adapter_id: "rust".to_owned(),
                 relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
@@ -1736,12 +1925,101 @@ mod tests {
         resources.install_rust_analyzer_bytes(&macho_with_file_type(1), true);
         resources.write_receipt();
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, resources.root()),
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::CorruptResource {
                 adapter_id: "rust".to_owned(),
                 relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
             })
         );
+    }
+
+    #[test]
+    fn receipt_is_loaded_only_from_the_lsp_parent_and_requires_the_exact_artifact_set() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        let receipt_path = resources.lsp_root().join("manifest.json");
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        receipt["artifacts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "node", "version": "24.19.0"
+            }));
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(matches!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+
+        resources.write_receipt();
+        fs::remove_file(&receipt_path).unwrap();
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::MissingReceipt {
+                adapter_id: "rust".into()
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_symlink_escape_is_rejected() {
+        let resources = ResourceTree::new();
+        let outside = TempDir::new().unwrap();
+        let receipt_path = resources.lsp_root().join("manifest.json");
+        fs::remove_file(&receipt_path).unwrap();
+        fs::write(outside.path().join("manifest.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("manifest.json"), &receipt_path).unwrap();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_structurally_incomplete_macho_load_commands() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        let cases = [
+            ("missing segment", 32usize, 0u32),
+            ("bad command alignment", 36usize, 151u32),
+            ("build tools overflow", 204usize, 1u32),
+            ("duplicate build version", 208usize, LC_BUILD_VERSION),
+            ("missing entry", 208usize, 0u32),
+        ];
+        for (_, offset, value) in cases {
+            let mut bytes = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            resources.install_rust_analyzer_bytes(&bytes, true);
+            resources.write_receipt();
+            assert!(matches!(
+                catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+                Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("rust-analyzer/rust-analyzer")
+            ));
+        }
+        let mut bytes = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+        bytes[80..88].copy_from_slice(&9999u64.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+        assert!(matches!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn actual_host_resolution_is_gated_without_impersonating_macos_arm64() {
+        let resources = ResourceTree::new();
+        let result = BundledServerCatalog::new().resolve(LanguageId::Rust, resources.root());
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(result.is_ok());
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        assert!(matches!(
+            result,
+            Err(CatalogUnavailable::UnsupportedPlatform { .. })
+                | Err(CatalogUnavailable::UnsupportedArchitecture { .. })
+        ));
     }
 
     #[test]
@@ -1785,7 +2063,7 @@ mod tests {
             .expect("replace program with directory");
 
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, &root),
+            catalog.resolve_for_host(LanguageId::Rust, &root, poc_host()),
             Err(CatalogUnavailable::ResourceIsNotAFile {
                 adapter_id: "rust".to_owned(),
                 relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
@@ -1808,7 +2086,7 @@ mod tests {
         resources.install_rust_analyzer_with_header(0x0100_0007, 1, true);
         resources.write_receipt();
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, resources.root()),
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::UnsupportedArchitecture {
                 adapter_id: "rust".to_owned(),
                 expected: "arm64".to_owned(),
@@ -1819,7 +2097,7 @@ mod tests {
         resources.install_rust_analyzer_with_header(0x0100_000c, 2, true);
         resources.write_receipt();
         assert_eq!(
-            catalog.resolve(LanguageId::Rust, resources.root()),
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::UnsupportedPlatform {
                 adapter_id: "rust".to_owned(),
                 expected: "macOS".to_owned(),
@@ -1934,6 +2212,7 @@ mod tests {
 
     struct ResourceTree {
         directory: TempDir,
+        architecture_root: PathBuf,
     }
 
     impl ResourceTree {
@@ -1944,8 +2223,10 @@ mod tests {
         }
 
         fn new_without_receipt() -> Self {
+            let directory = TempDir::new().expect("resource directory");
             let tree = Self {
-                directory: TempDir::new().expect("resource directory"),
+                architecture_root: directory.path().join("arm64"),
+                directory,
             };
             tree.install_node();
             tree.install_typescript_files();
@@ -1954,6 +2235,10 @@ mod tests {
         }
 
         fn root(&self) -> &Path {
+            &self.architecture_root
+        }
+
+        fn lsp_root(&self) -> &Path {
             self.directory.path()
         }
 
@@ -2004,7 +2289,7 @@ mod tests {
         }
 
         fn write_receipt(&self) {
-            write_receipt(self.root());
+            write_receipt(self.lsp_root(), self.root());
         }
     }
 
@@ -2029,13 +2314,39 @@ mod tests {
     }
 
     fn macho_bytes(cpu_type: u32, file_type: u32, platform: u32) -> Vec<u8> {
+        let segment_size = 72 + 80;
+        let build_size = 24;
+        let main_size = 24;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
         bytes.extend_from_slice(&cpu_type.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&file_type.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&((segment_size + build_size + main_size) as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
+        bytes.extend_from_slice(&(segment_size as u32).to_le_bytes());
+        bytes.extend_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        bytes.extend_from_slice(&0x1_0000_0000u64.to_le_bytes());
+        bytes.extend_from_slice(&512u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&512u64.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"__text\0\0\0\0\0\0\0\0\0\0");
+        bytes.extend_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        bytes.extend_from_slice(&0x1_0000_00e8u64.to_le_bytes());
+        bytes.extend_from_slice(&16u64.to_le_bytes());
+        bytes.extend_from_slice(&232u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0x32u32.to_le_bytes());
@@ -2044,7 +2355,16 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&LC_MAIN.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&232u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.resize(512, 0);
         bytes
+    }
+
+    fn poc_host() -> HostPlatform {
+        HostPlatform::new(HostOperatingSystem::MacOs, HostArchitecture::Arm64)
     }
 
     fn set_executable(path: &Path, executable: bool) {
@@ -2062,7 +2382,7 @@ mod tests {
         let _ = (path, executable);
     }
 
-    fn write_receipt(root: &Path) {
+    fn write_receipt(lsp_root: &Path, root: &Path) {
         let files = [
             "node/bin/node",
             "typescript/node_modules/typescript-language-server/lib/cli.mjs",
@@ -2080,7 +2400,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
         fs::write(
-            root.join("manifest.json"),
+            lsp_root.join("manifest.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "schema": 1,
                 "platform": "macos",

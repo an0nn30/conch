@@ -340,6 +340,8 @@ pub(crate) struct LspStatus {
     pub project_root_uri: Option<String>,
     pub state: LspSessionState,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub unavailable_reason: Option<LspUnavailableReason>,
     pub capabilities: LspCapabilities,
     pub error_count: u32,
@@ -486,8 +488,67 @@ mod tests {
         };
 
         assert_eq!(
-            serde_json::to_value(status).unwrap()["unavailableReason"],
-            serde_json::json!({ "kind": "notBundledYet", "adapterId": "json" })
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({
+                "revision": 1,
+                "documentId": null,
+                "sessionId": null,
+                "adapterId": "json",
+                "projectRootUri": null,
+                "state": "unavailable",
+                "message": null,
+                "unavailableReason": { "kind": "notBundledYet", "adapterId": "json" },
+                "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "diagnostics": false },
+                "errorCount": 0,
+                "warningCount": 0,
+            })
+        );
+
+        let without_reason = LspStatus {
+            revision: 2,
+            document_id: None,
+            session_id: None,
+            adapter_id: None,
+            project_root_uri: None,
+            state: LspSessionState::Disabled,
+            message: None,
+            unavailable_reason: None,
+            capabilities: LspCapabilities {
+                completion: false,
+                hover: false,
+                signature_help: false,
+                definition: false,
+                diagnostics: false,
+            },
+            error_count: 0,
+            warning_count: 0,
+        };
+        let serialized = serde_json::to_value(&without_reason).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "revision": 2,
+                "documentId": null,
+                "sessionId": null,
+                "adapterId": null,
+                "projectRootUri": null,
+                "state": "disabled",
+                "message": null,
+                "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "diagnostics": false },
+                "errorCount": 0,
+                "warningCount": 0,
+            })
+        );
+        let restored: LspStatus = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.unavailable_reason, None);
+
+        assert_eq!(
+            LspUnavailableReason::decl(&ts_rs::Config::default()),
+            "type LspUnavailableReason = { \"kind\": \"notBundledYet\", adapterId: string, } | { \"kind\": \"missingResource\", adapterId: string, relativePath: string, } | { \"kind\": \"corruptResource\", adapterId: string, relativePath: string, } | { \"kind\": \"unsupportedPlatform\", expected: string, actual: string, } | { \"kind\": \"unsupportedArchitecture\", expected: string, actual: string, };"
+        );
+        assert_eq!(
+            LspStatus::decl(&ts_rs::Config::default()),
+            "type LspStatus = { revision: number, documentId: string | null, sessionId: string | null, adapterId: string | null, projectRootUri: string | null, state: LspSessionState, message: string | null, unavailableReason?: LspUnavailableReason, capabilities: LspCapabilities, errorCount: number, warningCount: number, };"
         );
     }
 
