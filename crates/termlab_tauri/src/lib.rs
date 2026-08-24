@@ -14,6 +14,7 @@ pub(crate) mod extended_ansi;
 pub(crate) mod font_metrics;
 pub(crate) mod fonts;
 mod ipc;
+pub(crate) mod lsp;
 pub(crate) mod menu;
 pub(crate) mod panel_host;
 pub mod platform;

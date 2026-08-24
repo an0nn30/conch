@@ -14,6 +14,11 @@ name = "termlab_tauri"
 path = "src/lib.rs"
 
 [dependencies]
+async-lsp = { version = "0.2.4", default-features = false, features = ["omni-trait", "tokio"] }
+futures = "0.3"
+ropey = "1.6.1"
+toml = { workspace = true }
+tower = "0.5"
 ttf-parser = "0.25"
 termlab_core = { workspace = true }
 termlab_plugin = { workspace = true }
