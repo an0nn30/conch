@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -146,9 +146,9 @@ impl ProjectTrustStore {
         }
     }
 
-    /// Looks up the most-specific workspace scope using path components, never
-    /// raw string prefixes. At the winning scope an adapter-specific decision
-    /// wins; otherwise the unscoped decision applies to every adapter.
+    /// Looks up consent for exactly the selected canonical root. An
+    /// adapter-specific decision wins; otherwise an unscoped decision for that
+    /// same root applies to every adapter.
     pub(crate) fn binding_for(&self, path: &Path) -> Option<RootBinding> {
         let path = canonical_path(path).ok()?;
         self.bindings
@@ -162,24 +162,13 @@ impl ProjectTrustStore {
         let path = canonical_path(path).ok()?;
         self.trust
             .iter()
-            .filter(|record| path.starts_with(&record.workspace))
-            .map(|record| record.workspace.components().count())
-            .max()
-            .and_then(|scope_depth| {
-                self.trust
-                    .iter()
-                    .filter(|record| {
-                        path.starts_with(&record.workspace)
-                            && record.workspace.components().count() == scope_depth
-                    })
-                    .find(|record| record.adapter_id.as_deref() == adapter_id)
-                    .or_else(|| {
-                        self.trust.iter().find(|record| {
-                            path.starts_with(&record.workspace)
-                                && record.workspace.components().count() == scope_depth
-                                && record.adapter_id.is_none()
-                        })
-                    })
+            .find(|record| record.workspace == path && record.adapter_id.as_deref() == adapter_id)
+            .or_else(|| {
+                adapter_id.and_then(|_| {
+                    self.trust
+                        .iter()
+                        .find(|record| record.workspace == path && record.adapter_id.is_none())
+                })
             })
     }
 
@@ -318,14 +307,18 @@ fn canonical_path(path: &Path) -> io::Result<PathBuf> {
 
 fn canonical_stored_path(value: &str) -> io::Result<PathBuf> {
     let supplied = Path::new(value);
-    let canonical = canonical_path(supplied)?;
-    if canonical != supplied {
+    if !supplied.is_absolute()
+        || value.split(['/', '\\']).any(|component| component == ".")
+        || supplied
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("path is not canonical: {value}"),
+            format!("path is not absolute and lexically normalized: {value}"),
         ));
     }
-    Ok(canonical)
+    Ok(supplied.to_path_buf())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -539,6 +532,34 @@ mod tests {
     }
 
     #[test]
+    fn parent_trust_does_not_authorize_or_record_use_for_a_nested_selected_root() {
+        // Prefix lookup would incorrectly reuse the parent consent for api.
+        let temp = TempDir::new().expect("temp directory");
+        let repo = project(&temp, "repo");
+        let api = project(&temp, "repo/crates/api");
+        let mut store = store(&temp);
+        store
+            .set_root_binding(&repo, RootBinding::Root(repo.clone()))
+            .unwrap();
+        store
+            .set_root_binding(&api, RootBinding::Root(api.clone()))
+            .unwrap();
+        store
+            .set_trust(&repo, None, TrustDecision::Trusted, 10)
+            .unwrap();
+
+        assert_eq!(
+            store.binding_for(&api),
+            Some(RootBinding::Root(api.clone()))
+        );
+        assert_eq!(store.trust_for(&api, Some("rust-analyzer")), None);
+        store
+            .mark_trust_used(&api, Some("rust-analyzer"), 20)
+            .unwrap();
+        assert_eq!(store.trust_for(&repo, None).unwrap().last_used_at_ms, None);
+    }
+
+    #[test]
     fn trust_usage_updates_last_used_without_changing_decision_timestamp() {
         // Updating the decision timestamp during use would blur two distinct events.
         let temp = TempDir::new().expect("temp directory");
@@ -620,6 +641,63 @@ last_used_at_ms = 9
         assert_eq!(trust.decision, TrustDecision::Revoked);
         assert_eq!(trust.updated_at_ms, 7);
         assert_eq!(trust.last_used_at_ms, Some(9));
+    }
+
+    #[test]
+    fn reload_keeps_unmounted_project_records_without_authorizing_a_different_root() {
+        // Canonicalizing disk records would discard every decision with one missing project.
+        let temp = TempDir::new().expect("temp directory");
+        let mounted = project(&temp, "mounted");
+        let unmounted = project(&temp, "unmounted");
+        let mut store = store(&temp);
+        store
+            .set_trust(&mounted, None, TrustDecision::Trusted, 10)
+            .unwrap();
+        store
+            .set_trust(&unmounted, None, TrustDecision::Denied, 11)
+            .unwrap();
+        store.save().expect("persist two project decisions");
+        fs::remove_dir_all(&unmounted).expect("unmount one project");
+
+        let loaded = ProjectTrustStore::load(temp.path());
+        assert_eq!(loaded.warning, None);
+        assert_eq!(loaded.store.trust.len(), 2);
+        assert!(loaded
+            .store
+            .trust
+            .iter()
+            .any(|record| record.workspace == unmounted));
+        assert_eq!(
+            loaded
+                .store
+                .trust_for(&mounted, Some("rust-analyzer"))
+                .unwrap()
+                .decision,
+            TrustDecision::Trusted
+        );
+    }
+
+    #[test]
+    fn relative_or_parent_traversal_paths_fail_closed_on_load() {
+        // Accepting lexical aliases would bypass the canonical-path persistence invariant.
+        let temp = TempDir::new().expect("temp directory");
+        let project = project(&temp, "repo");
+        for workspace in [
+            "repo".to_owned(),
+            format!("{}/repo/../repo", temp.path().display()),
+        ] {
+            fs::write(
+                temp.path().join("lsp-projects.toml"),
+                format!(
+                    "schema_version = 1\n[[trust]]\nworkspace = \"{workspace}\"\ndecision = \"trusted\"\nupdated_at_ms = 1\n"
+                ),
+            )
+            .expect("write invalid path record");
+
+            let loaded = ProjectTrustStore::load(temp.path());
+            assert_eq!(loaded.warning.unwrap().kind, LoadWarningKind::InvalidRecord);
+            assert_eq!(loaded.store.trust_for(&project, None), None);
+        }
     }
 
     #[test]
