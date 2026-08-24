@@ -1,12 +1,46 @@
 use async_trait::async_trait;
 use serde::Serialize;
+use termlab_remote::transfer::SourceFingerprint;
 use termlab_remote::transfer::{TransferKind, TransferProgress, TransferStatus};
+use tokio::sync::oneshot;
 use ts_rs::TS;
 use uuid::Uuid;
 
 use super::model::{
-    QueueSettings, TransferDirection, TransferJob, TransferJobState, TransferQueueSummary,
+    CommitPhase, ManagedArtifacts, QueueSettings, TransferDirection, TransferJob, TransferJobState,
+    TransferQueueSummary,
 };
+
+#[derive(Debug)]
+pub enum RunnerEvent {
+    Fingerprinted {
+        job_id: Uuid,
+        lease_id: Uuid,
+        fingerprint: SourceFingerprint,
+        total_bytes: u64,
+        artifacts: ManagedArtifacts,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    DurableCheckpoint {
+        job_id: Uuid,
+        lease_id: Uuid,
+        bytes: u64,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    CommitPhase {
+        job_id: Uuid,
+        lease_id: Uuid,
+        phase: CommitPhase,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    Progress {
+        job_id: Uuid,
+        lease_id: Uuid,
+        bytes: u64,
+        speed_bytes_per_second: u64,
+        eta_seconds: Option<u64>,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
