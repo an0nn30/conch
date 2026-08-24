@@ -16,6 +16,9 @@ use crate::handler::TermLabSshHandler;
 use crate::sftp;
 use crate::sftp::open_sftp;
 
+mod fingerprint;
+pub use fingerprint::SourceFingerprint;
+
 /// Flush and close a remote file before the transfer is reported complete.
 ///
 /// `russh-sftp::client::File` documents that callers must explicitly shut the

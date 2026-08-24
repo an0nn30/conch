@@ -16,6 +16,7 @@ pub(crate) mod server_commands;
 pub(crate) mod sftp_commands;
 pub(crate) mod ssh_commands;
 pub(crate) mod transfer_commands;
+pub(crate) mod transfer_queue;
 pub(crate) mod tunnel_commands;
 
 use std::collections::HashMap;
