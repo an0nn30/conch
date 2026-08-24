@@ -10,6 +10,7 @@ pub mod store;
 pub(crate) use engine::{QueueActor, QueueCommand, TransferQueueHandle};
 pub(crate) use events::{QueueEventPayload, QueueSummaryPayload, RunnerEvent, TransferEventSink};
 pub(crate) use runner::{
-    QueueClock, RunnerControl, RunnerControlState, RunnerReporter, RunnerResult, SystemQueueClock,
-    TransferJobRunner,
+    QueueClock, ResolvedSftpConnection, RunnerControl, RunnerControlState, RunnerReporter,
+    RunnerResult, SftpTransferJobRunner, SystemQueueClock, TransferJobRunner,
+    resolve_live_sftp_connection,
 };

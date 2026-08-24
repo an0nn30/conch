@@ -16,6 +16,11 @@ use super::runner::ProgressSlot;
 
 #[derive(Debug)]
 pub enum RunnerEvent {
+    Checking {
+        job_id: Uuid,
+        lease_id: Uuid,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     Fingerprinted {
         job_id: Uuid,
         lease_id: Uuid,

@@ -85,9 +85,19 @@ pub fn select_runnable_jobs_from_document(
 /// established transport interruptions are retried automatically.
 pub fn classify_failure(error: &str) -> FailureClass {
     let error = error.to_ascii_lowercase();
-    if ["disconnect", "timed out", "timeout", "connection reset"]
-        .iter()
-        .any(|indicator| error.contains(indicator))
+    if [
+        "disconnect",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection aborted",
+        "channel closed",
+        "broken pipe",
+        "not connected",
+        "unexpected eof",
+    ]
+    .iter()
+    .any(|indicator| error.contains(indicator))
     {
         FailureClass::Transient
     } else {

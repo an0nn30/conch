@@ -478,9 +478,12 @@ impl PendingPrompts {
 /// A shared SSH connection that may serve multiple pane channels.
 pub(crate) struct SshConnection {
     pub ssh_handle: Arc<termlab_remote::russh::client::Handle<TermLabSshHandler>>,
+    pub server_entry_id: Option<String>,
     pub host: String,
     pub user: String,
     pub port: u16,
+    pub proxy_command: Option<String>,
+    pub proxy_jump: Option<String>,
     pub ref_count: u32,
 }
 
@@ -755,6 +758,7 @@ async fn establish_ssh_session(
     remote: &Arc<Mutex<RemoteState>>,
     pane_id: u32,
     server: &ServerEntry,
+    server_entry_id: Option<&str>,
     credentials: &SshCredentials,
     cols: u16,
     rows: u16,
@@ -799,9 +803,12 @@ async fn establish_ssh_session(
             conn_key.clone(),
             SshConnection {
                 ssh_handle: Arc::new(ssh_handle),
+                server_entry_id: server_entry_id.map(str::to_owned),
                 host: server.host.clone(),
                 user: credentials.username.clone(),
                 port: server.port,
+                proxy_command: server.proxy_command.clone(),
+                proxy_jump: server.proxy_jump.clone(),
                 ref_count: 1,
             },
         );

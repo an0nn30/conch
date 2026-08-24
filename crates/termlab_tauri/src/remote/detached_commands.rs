@@ -386,9 +386,12 @@ fn register_detached_session(
         conn_key.clone(),
         SshConnection {
             ssh_handle: Arc::new(ssh_handle),
+            server_entry_id: Some(server.id.clone()),
             host: server.host.clone(),
             user: credentials.username.clone(),
             port: server.port,
+            proxy_command: server.proxy_command.clone(),
+            proxy_jump: server.proxy_jump.clone(),
             ref_count: 1,
         },
     );

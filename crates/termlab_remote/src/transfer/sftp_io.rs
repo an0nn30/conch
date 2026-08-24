@@ -13,6 +13,15 @@ use crate::error::RemoteError;
 use crate::handler::TermLabSshHandler;
 use crate::sftp::open_sftp;
 
+pub type SftpFileHandle = SftpFile;
+pub type SftpSessionHandle = SftpSession;
+
+pub async fn open_sftp_session(
+    ssh: &russh::client::Handle<TermLabSshHandler>,
+) -> Result<SftpSessionHandle, RemoteError> {
+    open_sftp(ssh).await
+}
+
 pub fn fingerprint_local_parts(size: u64, modified: Option<SystemTime>) -> SourceFingerprint {
     SourceFingerprint {
         size,

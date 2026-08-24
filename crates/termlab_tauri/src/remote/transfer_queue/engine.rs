@@ -400,6 +400,15 @@ impl QueueActor {
 
     async fn handle_runner_event(&mut self, event: RunnerEvent) -> bool {
         match event {
+            RunnerEvent::Checking {
+                job_id,
+                lease_id,
+                ack,
+            } => {
+                let result = self.checking(job_id, lease_id).await;
+                let _ = ack.send(result);
+                true
+            }
             RunnerEvent::Fingerprinted {
                 job_id,
                 lease_id,
@@ -710,6 +719,11 @@ impl QueueActor {
         )
         .map_err(|error| error.to_string())?;
         self.commit(next).await
+    }
+
+    async fn checking(&mut self, job_id: Uuid, lease_id: Uuid) -> Result<(), String> {
+        self.active_task(job_id, lease_id)?;
+        self.apply_job_event(job_id, JobEvent::BeginCheck).await
     }
 
     async fn durable_checkpoint(
@@ -1897,6 +1911,11 @@ mod tests {
         harness.handle.resume_all().await.unwrap();
         wait_for_starts(&runner, 1).await;
         let reporter = runner.reporter(id);
+        reporter.checking().await.unwrap();
+        assert!(matches!(
+            harness.handle.snapshot().jobs[0].state,
+            TransferJobState::Checking
+        ));
         reporter
             .fingerprinted(
                 SourceFingerprint {

@@ -32,6 +32,16 @@ pub struct ArtifactInventory {
     pub backup_exists: bool,
 }
 
+impl fmt::Display for ArtifactInventory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "final={}, partial={}, backup={}",
+            self.final_exists, self.partial_exists, self.backup_exists
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryAction {
     ResumeCopy,

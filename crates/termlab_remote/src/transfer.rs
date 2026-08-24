@@ -23,9 +23,10 @@ pub mod copy;
 pub mod sftp_io;
 pub use copy::{ControlDecision, CopyOutcome, copy_with_checkpoint};
 pub use sftp_io::{
-    download_to_partial, fingerprint_local_parts, fingerprint_open_local, fingerprint_open_remote,
-    fingerprint_remote_parts, open_local_partial, open_remote_partial, truncate_local_partial,
-    truncate_remote_partial, upload_to_partial,
+    SftpFileHandle, SftpSessionHandle, download_to_partial, fingerprint_local_parts,
+    fingerprint_open_local, fingerprint_open_remote, fingerprint_remote_parts, open_local_partial,
+    open_remote_partial, open_sftp_session, truncate_local_partial, truncate_remote_partial,
+    upload_to_partial,
 };
 
 /// Flush and close a remote file before the transfer is reported complete.
