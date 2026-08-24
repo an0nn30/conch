@@ -18,6 +18,21 @@
     const getPluginViewPaneById = deps.getPluginViewPaneById;
     const registeredPluginToolWindows = new Set();
     let resizeDragDepth = 0;
+    let transferRuntimeStartup = null;
+
+    function ensureTransferRuntimeStarted() {
+      if (transferRuntimeStartup) return transferRuntimeStartup;
+      if (!global.termlabTransferRuntime
+          || typeof global.termlabTransferRuntime.ensureStarted !== 'function') {
+        return Promise.resolve();
+      }
+      transferRuntimeStartup = Promise.resolve(global.termlabTransferRuntime.ensureStarted({
+        invoke,
+        listen: listenOnCurrentWindow,
+        toast: global.toast,
+      }));
+      return transferRuntimeStartup;
+    }
 
     function refreshShortcutFallbacks() {
       if (typeof global.__termlabRefreshKeyboardShortcutFallbacks === 'function') {
@@ -79,7 +94,7 @@
       }
     }
 
-    // The four built-in tool windows, in registration order (the order is
+    // The five built-in tool windows, in registration order (the order is
     // load-bearing — see the comment on 'notifications'). Shared verbatim
     // between the main window's init() and a panel host's registrationsOnly
     // boot: a host mounts a panel through the SAME renderFn the docked panel
@@ -104,6 +119,27 @@
               layoutService,
               fitActiveTab: debouncedFitAndResize,
               getActiveTab: () => getCurrentTab(),
+            });
+          }
+        },
+      });
+
+      // Registered after SFTP so file-explorer remains the first/default
+      // active window in the bottom zone for existing layouts.
+      global.toolWindowManager.register('transfer-center', {
+        title: 'Transfers',
+        icon: null,
+        type: 'built-in',
+        defaultZone: 'bottom',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'transfer-center-panel';
+          container.appendChild(panelEl);
+          if (global.transferCenterPanel) {
+            global.transferCenterPanel.init({
+              panelEl,
+              invoke,
+              listen: listenOnCurrentWindow,
             });
           }
         },
@@ -292,6 +328,7 @@
         throw new Error('registerAll requires { registrationsOnly: true }');
       }
       if (!global.toolWindowManager) return;
+      await ensureTransferRuntimeStarted();
       registerBuiltInToolWindows();
       refreshShortcutFallbacks();
       // `chrome: false` — a host has no app titlebar to refresh, and asking
@@ -301,14 +338,7 @@
     }
 
     async function init() {
-      if (global.termlabTransferRuntime
-          && typeof global.termlabTransferRuntime.ensureStarted === 'function') {
-        await global.termlabTransferRuntime.ensureStarted({
-          invoke,
-          listen: listenOnCurrentWindow,
-          toast: global.toast,
-        });
-      }
+      await ensureTransferRuntimeStarted();
 
       const bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
       const bottomZoneResizeEl = document.getElementById('bottom-zone-resize');

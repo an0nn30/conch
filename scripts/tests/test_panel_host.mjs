@@ -913,6 +913,7 @@ async function loadRuntime(savedLayout) {
   const twm = makeFakeManager();
   const invokeCalls = [];
   const listeners = new Map();
+  const transferPanelInits = [];
   const elements = new Map([
     ['bottom-zone-wrap', makeElement('div')],
     ['bottom-zone-resize', makeElement('div')],
@@ -945,6 +946,9 @@ async function loadRuntime(savedLayout) {
       return Promise.resolve();
     },
   };
+  sandbox.transferCenterPanel = {
+    init(options) { transferPanelInits.push(options); },
+  };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(RUNTIME_PATH, 'utf8'), sandbox, { filename: RUNTIME_PATH });
 
@@ -969,7 +973,7 @@ async function loadRuntime(savedLayout) {
   const emit = (name, payload) => {
     for (const fn of listeners.get(name) || []) fn({ payload });
   };
-  return { twm, invokeCalls, listeners, emit, result };
+  return { twm, invokeCalls, listeners, emit, result, transferPanelInits };
 }
 
 // --- 14j. Main-window transfer state starts before panels can consume it ---
@@ -983,6 +987,30 @@ async function loadRuntime(savedLayout) {
   assert.equal(typeof options.invoke, 'function');
   assert.equal(typeof options.listen, 'function');
   assert.ok(options.toast && typeof options.toast === 'object');
+}
+
+// --- 14k. Transfers registers after SFTP and mounts through one renderFn ---
+{
+  const { twm, transferPanelInits } = await loadRuntime({});
+  const registrations = twm.calls.filter((call) => call.name === 'register');
+  const ids = registrations.map((call) => call.args[0]);
+  assert.strictEqual(ids[0], 'file-explorer',
+    'SFTP remains the first/default active bottom window for existing layouts');
+  assert.strictEqual(ids[1], 'transfer-center',
+    'Transfers registers immediately after SFTP without taking the default slot');
+
+  const registration = registrations[1].args[1];
+  assert.deepStrictEqual(
+    plain({ title: registration.title, icon: registration.icon, type: registration.type, defaultZone: registration.defaultZone }),
+    { title: 'Transfers', icon: null, type: 'built-in', defaultZone: 'bottom' },
+  );
+  const container = makeElement('div');
+  registration.renderFn(container);
+  assert.strictEqual(container.children[0].id, 'transfer-center-panel');
+  assert.strictEqual(transferPanelInits.length, 1);
+  assert.strictEqual(transferPanelInits[0].panelEl, container.children[0]);
+  assert.strictEqual(typeof transferPanelInits[0].invoke, 'function');
+  assert.strictEqual(typeof transferPanelInits[0].listen, 'function');
 }
 
 // --- 15. The save payload carries the view modes ---------------------------
@@ -1211,6 +1239,7 @@ function makeHostSandbox(config) {
   const uiConfigApplies = [];
   const appearanceSyncs = [];
   const panelInits = [];
+  const transferRuntimeStarts = [];
 
   const body = makeElement('body');
   const appEl = makeElement('div');
@@ -1259,7 +1288,7 @@ function makeHostSandbox(config) {
   sandbox.window = sandbox;
   sandbox.global = sandbox;
 
-  // The four built-in panels, stubbed at their init boundary so a render is
+  // The five built-in panels, stubbed at their init boundary so a render is
   // observable without dragging the real panels into the harness.
   const filesPanelOnTabChangedCalls = [];
   const panelStub = (name) => ({
@@ -1277,6 +1306,13 @@ function makeHostSandbox(config) {
   sandbox.sshPanel = panelStub('ssh-sessions');
   sandbox.tunnelsPanel = panelStub('tunnels');
   sandbox.notificationsPanel = panelStub('notifications');
+  sandbox.transferCenterPanel = panelStub('transfer-center');
+  sandbox.termlabTransferRuntime = {
+    ensureStarted(options) {
+      transferRuntimeStarts.push(options);
+      return Promise.resolve();
+    },
+  };
 
   sandbox.pluginWidgets = {
     init: (opts) => { pluginWidgetsInits.push(opts); },
@@ -1396,6 +1432,7 @@ function makeHostSandbox(config) {
     uiConfigApplies,
     appearanceSyncs,
     panelInits,
+    transferRuntimeStarts,
     titlebarRefreshes,
     routerRegistrations,
     warnCalls,
@@ -1543,13 +1580,13 @@ function makeHostSandbox(config) {
   }
 }
 
-// --- 22. Registrations only: all four built-ins, no zone/strip DOM -------
+// --- 22. Registrations only: all five built-ins, no zone/strip DOM --------
 {
   const host = makeHostSandbox();
   await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
   const twm = host.sandbox.toolWindowManager;
 
-  for (const id of ['file-explorer', 'ssh-sessions', 'tunnels', 'notifications']) {
+  for (const id of ['file-explorer', 'transfer-center', 'ssh-sessions', 'tunnels', 'notifications']) {
     assert.ok(twm.getRegistration(id), `${id} must be registered in a host too`);
   }
   // toolWindowManager.init is a throwing canary in this harness, so simply
@@ -1563,7 +1600,7 @@ function makeHostSandbox(config) {
     assert.strictEqual(host.byId.get(stripId).children.length, 0,
       `${stripId} must stay empty — a host builds no rails`);
   }
-  // Only the ONE requested panel rendered; the other three registrations are
+  // Only the ONE requested panel rendered; the other four registrations are
   // inert bookkeeping.
   assert.deepStrictEqual(host.panelInits.map((p) => p.name), ['ssh-sessions']);
 
@@ -1573,6 +1610,32 @@ function makeHostSandbox(config) {
     'already-loaded plugin panels are replayed');
   assert.ok(host.listens.app.has('plugin-panel-registered'));
   assert.ok(host.listens.app.has('plugin-panels-removed'));
+}
+
+// --- 22b. A host starts and mounts the same Transfer Center registration --
+{
+  const host = makeHostSandbox({
+    answers: {
+      get_panel_host_request: () => Promise.resolve({
+        reqId: 8,
+        toolWindowId: 'transfer-center',
+        parentLabel: 'window-1',
+        title: 'Transfers',
+      }),
+    },
+  });
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.status, 'mounted');
+  assert.strictEqual(host.transferRuntimeStarts.length, 1,
+    'the host window starts its own idempotent transfer projection exactly once');
+  assert.strictEqual(host.transferRuntimeStarts[0].listen, host.bootDeps.listenOnCurrentWindow,
+    'host transfer events listen on that host window, not app-global');
+  assert.deepStrictEqual(host.panelInits.map((item) => item.name), ['transfer-center']);
+  const init = host.panelInits[0].opts;
+  assert.strictEqual(init.panelEl.id, 'transfer-center-panel');
+  assert.strictEqual(init.panelEl.parentNode, result.renderRootEl,
+    'the shared renderFn mounts into the panel host content root');
 }
 
 // --- 23. A plugin panel that is already loaded registers and can mount ---
