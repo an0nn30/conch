@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use unicode_casefold::{Locale, UnicodeCaseFold, Variant};
 use unicode_normalization::UnicodeNormalization;
 
 use super::types::{DocumentId, ReservationId, ReserveResult};
@@ -357,8 +358,14 @@ fn identity_key(
                 .ok_or(OwnershipError::CanonicalizationFailed(
                     io::ErrorKind::InvalidData,
                 ))?;
-            let lowercase: String = path.nfc().flat_map(char::to_lowercase).collect();
-            Ok(PathBuf::from(lowercase.nfc().collect::<String>()))
+            // Canonical caseless key order is deliberate: decompose equivalent
+            // spellings, apply the Unicode data table's full non-Turkic fold
+            // (including multi-scalar mappings), then recompose a stable key.
+            let decomposed: String = path.nfd().collect();
+            let folded: String = decomposed
+                .case_fold_with(Variant::Full, Locale::NonTurkic)
+                .collect();
+            Ok(PathBuf::from(folded.nfc().collect::<String>()))
         }
     }
 }
@@ -436,6 +443,22 @@ enum MissingComponent {
     Parent,
 }
 
+fn deepest_existing_canonical_ancestor(path: &Path) -> Result<PathBuf, OwnershipError> {
+    let mut candidate = Some(path);
+    while let Some(path) = candidate {
+        match fs::canonicalize(path) {
+            Ok(canonical) => return Ok(canonical),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                candidate = path.parent();
+            }
+            Err(error) => return Err(OwnershipError::CanonicalizationFailed(error.kind())),
+        }
+    }
+    Err(OwnershipError::CanonicalizationFailed(
+        io::ErrorKind::NotFound,
+    ))
+}
+
 /// Canonicalizes existing paths through the filesystem. For a prospective Save
 /// As target, the deepest existing ancestor is canonicalized first (resolving
 /// symlinks), then missing normal/parent components are normalized onto it.
@@ -503,23 +526,26 @@ fn canonical_local_path(path: &Path) -> Result<CanonicalLocalPath, OwnershipErro
             }
         }
     }
+    let volume_probe = deepest_existing_canonical_ancestor(&canonical)?;
     Ok(CanonicalLocalPath {
         io_path: canonical,
-        volume_probe: canonical_ancestor,
+        volume_probe,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 
     use super::{
-        CaseSensitivity, DocumentIdentifier, FixedPathIdentityPolicy, OwnershipError,
-        OwnershipRegistry,
+        CanonicalLocalPath, CaseSensitivity, DocumentIdentifier, FixedPathIdentityPolicy,
+        OwnershipError, OwnershipRegistry, PathIdentityPolicy,
     };
     use crate::lsp::types::{DocumentId, ReserveResult};
 
@@ -997,6 +1023,28 @@ mod tests {
                 .unwrap(),
             ReserveResult::Reserved { .. }
         ));
+        reserved(
+            registry
+                .reserve_at(local(temp.path().join("sigma-\u{3c3}.ts")), "main", now)
+                .unwrap(),
+        );
+        assert!(matches!(
+            registry
+                .reserve_at(local(temp.path().join("sigma-\u{3c2}.ts")), "popup", now)
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
+        reserved(
+            registry
+                .reserve_at(local(temp.path().join("stra\u{df}e.ts")), "main", now)
+                .unwrap(),
+        );
+        assert!(matches!(
+            registry
+                .reserve_at(local(temp.path().join("strasse.ts")), "popup", now)
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
     }
 
     #[test]
@@ -1037,6 +1085,88 @@ mod tests {
             ReserveResult::FocusPending {
                 window_label: "unicode-owner".into(),
             }
+        );
+
+        reserved(
+            registry
+                .reserve_at(
+                    local(temp.path().join("sigma-\u{3c3}.ts")),
+                    "sigma-owner",
+                    now,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            registry
+                .reserve_at(local(temp.path().join("sigma-\u{3c2}.ts")), "popup", now)
+                .unwrap(),
+            ReserveResult::FocusPending {
+                window_label: "sigma-owner".into(),
+            }
+        );
+
+        reserved(
+            registry
+                .reserve_at(
+                    local(temp.path().join("stra\u{df}e.ts")),
+                    "eszett-owner",
+                    now,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            registry
+                .reserve_at(local(temp.path().join("strasse.ts")), "popup", now)
+                .unwrap(),
+            ReserveResult::FocusPending {
+                window_label: "eszett-owner".into(),
+            }
+        );
+    }
+
+    #[derive(Debug)]
+    struct RecordingPathIdentityPolicy {
+        probes: Rc<RefCell<Vec<PathBuf>>>,
+    }
+
+    impl PathIdentityPolicy for RecordingPathIdentityPolicy {
+        fn key_for(&self, path: &CanonicalLocalPath) -> Result<PathBuf, OwnershipError> {
+            self.probes.borrow_mut().push(path.volume_probe.clone());
+            Ok(path.io_path.clone())
+        }
+    }
+
+    #[test]
+    fn missing_tail_parent_normalization_probes_the_final_existing_ancestor() {
+        let temp = TempDir::new().unwrap();
+        let original = temp.path().join("original-volume");
+        let final_volume = temp.path().join("final-volume");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&final_volume).unwrap();
+        let target = original
+            .join("missing")
+            .join("..")
+            .join("..")
+            .join("final-volume")
+            .join("new.ts");
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        let mut registry = OwnershipRegistry::with_policy(RecordingPathIdentityPolicy {
+            probes: Rc::clone(&probes),
+        });
+
+        let (_, canonical_path) = reservation(
+            registry
+                .reserve_at(local(&target), "main", Instant::now())
+                .unwrap(),
+        );
+
+        assert_eq!(
+            canonical_path,
+            fs::canonicalize(&final_volume).unwrap().join("new.ts")
+        );
+        assert_eq!(
+            probes.borrow().as_slice(),
+            [fs::canonicalize(&final_volume).unwrap()]
         );
     }
 
