@@ -1,11 +1,11 @@
-use std::{
-    fmt,
-    path::{Component, Path, PathBuf},
-};
+use std::{fmt, path::Path};
 
 use uuid::Uuid;
 
-use super::model::{CommitPhase, ManagedArtifacts, normalize_destination_path};
+use super::model::{
+    CommitPhase, ManagedArtifacts, is_windows_drive_path, normalize_destination_path,
+    normalize_local_destination_path, uses_windows_path_semantics,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactPathError {
@@ -115,33 +115,33 @@ impl ManagedArtifacts {
             .as_os_str()
             .to_str()
             .ok_or(ArtifactPathError::InvalidLocalDestination)?;
-        if destination_text.is_empty() || has_trailing_local_separator(destination_text) {
+        let windows_path = uses_windows_path_semantics(destination_text);
+        if destination_text.is_empty()
+            || has_trailing_local_separator(destination_text, windows_path)
+        {
             return Err(ArtifactPathError::InvalidLocalDestination);
         }
 
-        if matches!(local_final_component(destination_text), "." | "..") {
+        if matches!(
+            local_final_component(destination_text, windows_path),
+            "." | ".."
+        ) {
             return Err(ArtifactPathError::InvalidLocalDestination);
         }
 
-        let destination = normalize_local_path(destination);
-        let file_name = destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
+        let destination = normalize_local_destination_path(destination_text);
+        let file_name = local_final_component(&destination, windows_path);
+        if windows_path && !windows_path_has_final_component(&destination) {
+            return Err(ArtifactPathError::InvalidLocalDestination);
+        }
+        let file_name = (!file_name.is_empty())
+            .then_some(file_name)
             .ok_or(ArtifactPathError::InvalidLocalDestination)?;
-        let parent = destination.parent().unwrap_or_else(|| Path::new(""));
-        let partial_path = parent.join(managed_name(file_name, "part", id));
-        let backup_path = parent.join(managed_name(file_name, "backup", id));
+        let prefix = &destination[..destination.len() - file_name.len()];
 
         Ok(Self {
-            partial_path: partial_path
-                .to_str()
-                .ok_or(ArtifactPathError::InvalidLocalDestination)?
-                .to_owned(),
-            backup_path: backup_path
-                .to_str()
-                .ok_or(ArtifactPathError::InvalidLocalDestination)?
-                .to_owned(),
+            partial_path: format!("{prefix}{}", managed_name(file_name, "part", id)),
+            backup_path: format!("{prefix}{}", managed_name(file_name, "backup", id)),
         })
     }
 }
@@ -158,45 +158,31 @@ fn remote_sibling(parent: &str, file_name: &str) -> String {
     }
 }
 
-fn has_trailing_local_separator(path: &str) -> bool {
-    path.ends_with(std::path::MAIN_SEPARATOR)
-        || (cfg!(windows) && (path.ends_with('/') || path.ends_with('\\')))
+fn has_trailing_local_separator(path: &str, windows_path: bool) -> bool {
+    path.ends_with('/') || (windows_path && path.ends_with('\\'))
 }
 
-#[cfg(not(windows))]
-fn local_final_component(path: &str) -> &str {
-    path.rsplit(std::path::MAIN_SEPARATOR)
-        .next()
-        .unwrap_or(path)
-}
-
-#[cfg(windows)]
-fn local_final_component(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
-fn normalize_local_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let can_pop = matches!(
-                    normalized.components().next_back(),
-                    Some(Component::Normal(_))
-                );
-                if can_pop {
-                    normalized.pop();
-                } else if !normalized.has_root() {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
+fn local_final_component(path: &str, windows_path: bool) -> &str {
+    let component = if windows_path {
+        path.rsplit(['/', '\\']).next().unwrap_or(path)
+    } else {
+        path.rsplit('/').next().unwrap_or(path)
+    };
+    if windows_path && component == path && is_windows_drive_path(path) {
+        &path[2..]
+    } else {
+        component
     }
-    normalized
+}
+
+fn windows_path_has_final_component(path: &str) -> bool {
+    if let Some(rest) = path.strip_prefix(r"\\") {
+        rest.split('\\').filter(|part| !part.is_empty()).count() >= 3
+    } else if is_windows_drive_path(path) {
+        !path[2..].trim_start_matches('\\').is_empty()
+    } else {
+        !local_final_component(path, true).is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +294,46 @@ mod tests {
             ManagedArtifacts::for_local_destination(id, &equivalent).unwrap();
 
         assert_eq!(equivalent_artifacts, canonical_artifacts);
+    }
+
+    #[test]
+    fn windows_drive_destinations_share_artifacts_across_separator_forms() {
+        let id = Uuid::parse_str(JOB_ID).unwrap();
+        let canonical = Path::new(r"C:\build\app.tar");
+        let equivalent = Path::new("C:/build/output/../app.tar");
+
+        let canonical_artifacts = ManagedArtifacts::for_local_destination(id, canonical).unwrap();
+        let equivalent_artifacts = ManagedArtifacts::for_local_destination(id, equivalent).unwrap();
+
+        assert_eq!(equivalent_artifacts, canonical_artifacts);
+        assert_eq!(
+            canonical_artifacts.partial_path,
+            r"C:\build\.app.tar.termlab-part-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
+        assert_eq!(
+            canonical_artifacts.backup_path,
+            r"C:\build\.app.tar.termlab-backup-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn windows_unc_destinations_normalize_to_job_owned_siblings() {
+        let id = Uuid::parse_str(JOB_ID).unwrap();
+        let canonical = Path::new(r"\\server\share\releases\app.tar");
+        let equivalent = Path::new(r"\\server\share\releases\staging\..\app.tar");
+
+        let canonical_artifacts = ManagedArtifacts::for_local_destination(id, canonical).unwrap();
+        let equivalent_artifacts = ManagedArtifacts::for_local_destination(id, equivalent).unwrap();
+
+        assert_eq!(equivalent_artifacts, canonical_artifacts);
+        assert_eq!(
+            canonical_artifacts.partial_path,
+            r"\\server\share\releases\.app.tar.termlab-part-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
+        assert_eq!(
+            canonical_artifacts.backup_path,
+            r"\\server\share\releases\.app.tar.termlab-backup-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
     }
 
     #[test]

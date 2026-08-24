@@ -54,10 +54,10 @@ pub fn build_destination_key(
     remote_path: &str,
 ) -> String {
     let destination = match direction {
-        TransferDirection::Upload => remote_path,
-        TransferDirection::Download => local_path,
+        TransferDirection::Upload => normalize_destination_path(remote_path),
+        TransferDirection::Download => normalize_local_destination_path(local_path),
     };
-    format!("{host_key}:{}", normalize_destination_path(destination))
+    format!("{host_key}:{destination}")
 }
 
 pub(super) fn normalize_destination_path(path: &str) -> String {
@@ -88,6 +88,95 @@ pub(super) fn normalize_destination_path(path: &str) -> String {
         ".".into()
     } else {
         components.join("/")
+    }
+}
+
+pub(super) fn normalize_local_destination_path(path: &str) -> String {
+    if uses_windows_path_semantics(path) {
+        normalize_windows_path(path)
+    } else {
+        normalize_destination_path(path)
+    }
+}
+
+/// Select local path rules without depending on the host running recovery.
+///
+/// Native Windows builds use Windows rules for every local path. Other hosts
+/// recognize drive-prefixed and backslash-UNC forms so persisted Windows jobs
+/// retain the same identity during inspection or recovery. All other forms use
+/// the existing POSIX lexical rules, including literal backslashes on Unix.
+pub(super) fn uses_windows_path_semantics(path: &str) -> bool {
+    cfg!(windows) || is_windows_drive_path(path) || path.starts_with(r"\\")
+}
+
+pub(super) fn is_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+fn normalize_windows_path(path: &str) -> String {
+    let path = path.replace('/', r"\");
+    let mut absolute = false;
+    let mut prefix = String::new();
+    let components: Vec<&str>;
+
+    if let Some(rest) = path.strip_prefix(r"\\") {
+        absolute = true;
+        let mut parts = rest.split('\\').filter(|part| !part.is_empty());
+        prefix.push_str(r"\\");
+        if let Some(server) = parts.next() {
+            prefix.push_str(server);
+        }
+        if let Some(share) = parts.next() {
+            prefix.push('\\');
+            prefix.push_str(share);
+        }
+        components = parts.collect();
+    } else if is_windows_drive_path(&path) {
+        let drive = (path.as_bytes()[0] as char).to_ascii_uppercase();
+        prefix.push(drive);
+        prefix.push(':');
+        let rest = &path[2..];
+        absolute = rest.starts_with('\\');
+        if absolute {
+            prefix.push('\\');
+        }
+        components = rest.split('\\').filter(|part| !part.is_empty()).collect();
+    } else if let Some(rest) = path.strip_prefix('\\') {
+        absolute = true;
+        prefix.push('\\');
+        components = rest.split('\\').filter(|part| !part.is_empty()).collect();
+    } else {
+        components = path.split('\\').filter(|part| !part.is_empty()).collect();
+    }
+
+    let mut normalized = Vec::new();
+    for component in components {
+        match component {
+            "." => {}
+            ".." => match normalized.last() {
+                Some(previous) if *previous != ".." => {
+                    normalized.pop();
+                }
+                _ if !absolute => normalized.push(component),
+                _ => {}
+            },
+            _ => normalized.push(component),
+        }
+    }
+
+    if normalized.is_empty() {
+        if prefix.is_empty() {
+            ".".into()
+        } else {
+            prefix
+        }
+    } else if prefix.is_empty() {
+        normalized.join(r"\")
+    } else if prefix.ends_with('\\') || !absolute {
+        format!("{prefix}{}", normalized.join(r"\"))
+    } else {
+        format!("{prefix}\\{}", normalized.join(r"\"))
     }
 }
 
@@ -500,5 +589,58 @@ mod tests {
         assert_eq!(summary.queued, 1);
         assert_eq!(summary.active, 1);
         assert_eq!(summary.history, 2);
+    }
+
+    #[test]
+    fn download_destination_key_normalizes_windows_drive_and_backslash_paths() {
+        let canonical = build_destination_key(
+            "configured:server",
+            &TransferDirection::Download,
+            r"C:\build\app.tar",
+            "/unused",
+        );
+        let equivalent = build_destination_key(
+            "configured:server",
+            &TransferDirection::Download,
+            "C:/build/output/../app.tar",
+            "/unused",
+        );
+
+        assert_eq!(canonical, r"configured:server:C:\build\app.tar");
+        assert_eq!(equivalent, canonical);
+    }
+
+    #[test]
+    fn download_destination_key_normalizes_windows_unc_paths() {
+        let canonical = build_destination_key(
+            "configured:server",
+            &TransferDirection::Download,
+            r"\\server\share\releases\app.tar",
+            "/unused",
+        );
+        let equivalent = build_destination_key(
+            "configured:server",
+            &TransferDirection::Download,
+            r"\\server\share\releases\staging\..\app.tar",
+            "/unused",
+        );
+
+        assert_eq!(
+            canonical,
+            r"configured:server:\\server\share\releases\app.tar"
+        );
+        assert_eq!(equivalent, canonical);
+    }
+
+    #[test]
+    fn upload_destination_key_keeps_windows_like_sftp_names_posix_literal() {
+        let key = build_destination_key(
+            "configured:server",
+            &TransferDirection::Upload,
+            "/unused",
+            r"C:\build\output\..\app.tar",
+        );
+
+        assert_eq!(key, r"configured:server:C:\build\output\..\app.tar");
     }
 }
