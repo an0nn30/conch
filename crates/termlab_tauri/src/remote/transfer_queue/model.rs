@@ -493,6 +493,19 @@ pub struct TransferQueueSnapshot {
     pub recovery_error: Option<String>,
 }
 
+impl From<&TransferQueueDocument> for TransferQueueSnapshot {
+    fn from(document: &TransferQueueDocument) -> Self {
+        Self {
+            revision: document.revision,
+            queue_paused: document.queue_paused,
+            settings: document.settings.clone(),
+            jobs: document.jobs.clone(),
+            summary: TransferQueueSummary::from_jobs(&document.jobs, document.queue_paused),
+            recovery_error: document.recovery_error.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
