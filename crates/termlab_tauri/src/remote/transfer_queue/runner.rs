@@ -13,8 +13,9 @@ use termlab_remote::{
     error::RemoteError,
     transfer::{
         ControlDecision, CopyOutcome, SftpFileHandle, SftpSessionHandle, SourceFingerprint,
-        copy_with_checkpoint, fingerprint_open_local, fingerprint_open_remote, open_local_partial,
-        open_remote_partial, open_sftp_session, truncate_local_partial, truncate_remote_partial,
+        copy::{CopyError, CopyStage, copy_with_checkpoint_typed},
+        fingerprint_open_local, fingerprint_open_remote, open_local_partial, open_remote_partial,
+        open_sftp_session, truncate_local_partial, truncate_remote_partial,
     },
 };
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -134,9 +135,8 @@ impl TransferIoError {
         let class = match &error {
             RemoteError::Connection(_) => FailureClass::Transient,
             RemoteError::Io(error) => classify_io_failure(error.kind()),
-            RemoteError::Sftp(message) | RemoteError::Transfer(message) => {
-                classify_transport_failure(message)
-            }
+            RemoteError::Sftp(message) => classify_transport_failure(message),
+            RemoteError::Transfer(_) => FailureClass::Permanent,
             RemoteError::Auth(_)
             | RemoteError::Tunnel(_)
             | RemoteError::KnownHosts(_)
@@ -167,6 +167,47 @@ impl TransferIoError {
         let class = classify_io_failure(error.kind());
         Self::from_operation(class, operation, error)
     }
+
+    fn from_copy(direction: &TransferDirection, error: CopyError) -> Self {
+        let class = match &error {
+            CopyError::Io { stage, kind, cause } if copy_stage_is_remote(direction, *stage) => {
+                classify_remote_io_failure(*kind, cause)
+            }
+            CopyError::InvalidChunkSize
+            | CopyError::OffsetBeyondSource { .. }
+            | CopyError::Io { .. } => FailureClass::Permanent,
+        };
+        Self {
+            class,
+            message: error.to_string(),
+        }
+    }
+}
+
+fn copy_stage_is_remote(direction: &TransferDirection, stage: CopyStage) -> bool {
+    match direction {
+        TransferDirection::Upload => matches!(
+            stage,
+            CopyStage::SeekDestination | CopyStage::WriteDestination
+        ),
+        TransferDirection::Download => {
+            matches!(stage, CopyStage::SeekSource | CopyStage::ReadSource)
+        }
+    }
+}
+
+fn classify_remote_io_failure(kind: std::io::ErrorKind, raw_cause: &str) -> FailureClass {
+    match kind {
+        std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted
+        | std::io::ErrorKind::NotConnected
+        | std::io::ErrorKind::BrokenPipe
+        | std::io::ErrorKind::TimedOut
+        | std::io::ErrorKind::Interrupted
+        | std::io::ErrorKind::UnexpectedEof => FailureClass::Transient,
+        std::io::ErrorKind::Other => classify_transport_failure(raw_cause),
+        _ => FailureClass::Permanent,
+    }
 }
 
 fn classify_io_failure(kind: std::io::ErrorKind) -> FailureClass {
@@ -176,6 +217,7 @@ fn classify_io_failure(kind: std::io::ErrorKind) -> FailureClass {
         | std::io::ErrorKind::NotConnected
         | std::io::ErrorKind::BrokenPipe
         | std::io::ErrorKind::TimedOut
+        | std::io::ErrorKind::Interrupted
         | std::io::ErrorKind::UnexpectedEof => FailureClass::Transient,
         _ => FailureClass::Permanent,
     }
@@ -185,9 +227,7 @@ fn classify_io_failure(kind: std::io::ErrorKind) -> FailureClass {
 /// Operation context and user-controlled paths must be appended after this.
 fn classify_transport_failure(error: &str) -> FailureClass {
     let error = error.to_ascii_lowercase();
-    let cause = error
-        .rsplit_once(": ")
-        .map_or(error.as_str(), |(_, cause)| cause);
+    let cause = error.as_str();
     let explicit_disconnect = cause.starts_with("disconnect")
         || cause.contains(" disconnected")
         || cause.contains("connection lost");
@@ -219,6 +259,35 @@ fn classify_transport_failure(error: &str) -> FailureClass {
 impl fmt::Display for TransferIoError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
+    }
+}
+
+#[derive(Debug)]
+enum PromotionError {
+    DestinationExists { message: String },
+    Ambiguous { message: String },
+    Failed(TransferIoError),
+}
+
+impl PromotionError {
+    fn message(&self) -> &str {
+        match self {
+            Self::DestinationExists { message } | Self::Ambiguous { message } => message,
+            Self::Failed(error) => &error.message,
+        }
+    }
+
+    fn allows_backup_restore(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    fn into_transfer_error(self) -> TransferIoError {
+        match self {
+            Self::DestinationExists { message } | Self::Ambiguous { message } => {
+                TransferIoError::permanent(message)
+            }
+            Self::Failed(error) => error,
+        }
     }
 }
 
@@ -266,12 +335,12 @@ trait TransferIo<C>: Send + Sync {
         job: &TransferJob,
         artifacts: &ManagedArtifacts,
     ) -> Result<(), TransferIoError>;
-    async fn promote_partial(
+    async fn promote_partial_no_replace(
         &self,
         connection: &C,
         job: &TransferJob,
         artifacts: &ManagedArtifacts,
-    ) -> Result<(), TransferIoError>;
+    ) -> Result<(), PromotionError>;
     async fn restore_backup(
         &self,
         connection: &C,
@@ -493,7 +562,7 @@ where
                 return failed(error);
             }
         };
-        let copy_result = copy_with_checkpoint(
+        let copy_result = copy_with_checkpoint_typed(
             &mut source,
             &mut partial,
             offset,
@@ -510,7 +579,7 @@ where
             },
         )
         .await
-        .map_err(TransferIoError::from_remote);
+        .map_err(|error| TransferIoError::from_copy(&job.direction, error));
 
         let source_finish = self.io.finish_source(&mut source).await;
         let partial_finish = self.io.finish_partial(&mut partial).await;
@@ -616,11 +685,21 @@ where
     if let Err(message) = reporter.commit_phase(CommitPhase::BackupMoved).await {
         return permanent_failure(message);
     }
-    if let Err(error) = io.promote_partial(connection, job, artifacts).await {
-        if final_exists {
+    if let Err(error) = io
+        .promote_partial_no_replace(connection, job, artifacts)
+        .await
+    {
+        if matches!(error, PromotionError::DestinationExists { .. })
+            && job.conflict_policy == ConflictPolicy::Ask
+        {
+            return RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
+                resume_available: source_fingerprint.modified_token.is_some(),
+            });
+        }
+        if final_exists && error.allows_backup_restore() {
             let _ = io.restore_backup(connection, job, artifacts).await;
         }
-        return commit_attention(io, connection, job, artifacts, error.message).await;
+        return commit_attention(io, connection, job, artifacts, error.message()).await;
     }
     if let Err(message) = reporter.commit_phase(CommitPhase::PartialPromoted).await {
         return permanent_failure(message);
@@ -665,6 +744,18 @@ where
             )
             .await;
         }
+        if inventory.final_exists
+            && !inventory.backup_exists
+            && job.conflict_policy == ConflictPolicy::Ask
+        {
+            return RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
+                resume_available: job
+                    .source_fingerprint
+                    .as_ref()
+                    .and_then(|fingerprint| fingerprint.modified_token.as_ref())
+                    .is_some(),
+            });
+        }
         if inventory.final_exists && !inventory.backup_exists {
             if let Err(error) = io.move_final_to_backup(connection, job, artifacts).await {
                 return commit_attention(io, connection, job, artifacts, error.message).await;
@@ -690,12 +781,34 @@ where
     }
 
     if phase == CommitPhase::BackupMoved {
+        if inventory.partial_exists
+            && inventory.final_exists
+            && !inventory.backup_exists
+            && job.conflict_policy == ConflictPolicy::Overwrite
+        {
+            if let Err(error) = io.move_final_to_backup(connection, job, artifacts).await {
+                return commit_attention(io, connection, job, artifacts, error.message).await;
+            }
+            // A Resume resolution can authorize one late final after the
+            // original BackupMoved acknowledgement. Acknowledge the same
+            // phase again only after that controlled move; never loop.
+            if let Err(message) = reporter.commit_phase(CommitPhase::BackupMoved).await {
+                return permanent_failure(message);
+            }
+            inventory = match io.inventory(connection, job, artifacts).await {
+                Ok(inventory) => inventory,
+                Err(error) => return failed(error),
+            };
+        }
         if inventory.partial_exists && !inventory.final_exists {
-            if let Err(error) = io.promote_partial(connection, job, artifacts).await {
-                if inventory.backup_exists {
+            if let Err(error) = io
+                .promote_partial_no_replace(connection, job, artifacts)
+                .await
+            {
+                if inventory.backup_exists && error.allows_backup_restore() {
                     let _ = io.restore_backup(connection, job, artifacts).await;
                 }
-                return commit_attention(io, connection, job, artifacts, error.message).await;
+                return commit_attention(io, connection, job, artifacts, error.message()).await;
             }
         } else if !inventory.partial_exists && inventory.final_exists {
             // Promotion completed before its durable phase acknowledgement.
@@ -1054,13 +1167,13 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
         rename_artifact(connection, job, final_path(job), &artifacts.backup_path).await
     }
 
-    async fn promote_partial(
+    async fn promote_partial_no_replace(
         &self,
         connection: &ResolvedSftpConnection,
         job: &TransferJob,
         artifacts: &ManagedArtifacts,
-    ) -> Result<(), TransferIoError> {
-        rename_artifact(connection, job, &artifacts.partial_path, final_path(job)).await
+    ) -> Result<(), PromotionError> {
+        rename_artifact_no_replace(connection, job, &artifacts.partial_path, final_path(job)).await
     }
 
     async fn restore_backup(
@@ -1069,7 +1182,9 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
         job: &TransferJob,
         artifacts: &ManagedArtifacts,
     ) -> Result<(), TransferIoError> {
-        rename_artifact(connection, job, &artifacts.backup_path, final_path(job)).await
+        rename_artifact_no_replace(connection, job, &artifacts.backup_path, final_path(job))
+            .await
+            .map_err(PromotionError::into_transfer_error)
     }
 
     async fn delete_backup(
@@ -1133,6 +1248,67 @@ async fn rename_artifact(
         TransferDirection::Download => tokio::fs::rename(from, to).await.map_err(|error| {
             TransferIoError::permanent(format!("rename local artifact failed: {error}"))
         }),
+    }
+}
+
+async fn rename_artifact_no_replace(
+    connection: &ResolvedSftpConnection,
+    job: &TransferJob,
+    from: &str,
+    to: &str,
+) -> Result<(), PromotionError> {
+    match job.direction {
+        TransferDirection::Upload => {
+            let session = open_sftp_session(&connection.ssh_handle)
+                .await
+                .map_err(TransferIoError::from_remote)
+                .map_err(PromotionError::Failed)?;
+            // russh-sftp sends the base SSH_FXP_RENAME request here. SFTP v3
+            // requires that request to fail when `to` already exists; it does
+            // not use the overwrite-capable POSIX rename extension.
+            match session.rename(from.to_owned(), to.to_owned()).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let failure = TransferIoError::from_remote_operation(
+                        "rename remote artifact without replacement",
+                        error,
+                    );
+                    match remote_exists(&session, to).await {
+                        Ok(true) => Err(PromotionError::DestinationExists {
+                            message: format!(
+                                "destination appeared before non-replacing remote promotion: {to}"
+                            ),
+                        }),
+                        Ok(false) | Err(_) => Err(PromotionError::Failed(failure)),
+                    }
+                }
+            }
+        }
+        TransferDirection::Download => {
+            match tokio::fs::hard_link(from, to).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(PromotionError::DestinationExists {
+                        message: format!(
+                            "destination appeared before non-replacing local promotion: {to}"
+                        ),
+                    });
+                }
+                Err(error) => {
+                    return Err(PromotionError::Failed(TransferIoError::permanent(format!(
+                        "link local artifact without replacement failed: {error}"
+                    ))));
+                }
+            }
+            if let Err(error) = tokio::fs::remove_file(from).await {
+                return Err(PromotionError::Ambiguous {
+                    message: format!(
+                        "linked local artifact to {to}, but could not unlink owned source {from}: {error}; both names may reference the same intact artifact"
+                    ),
+                });
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1401,18 +1577,26 @@ pub(crate) type SharedTransferJobRunner = Arc<dyn TransferJobRunner>;
 #[cfg(test)]
 mod tests {
     use std::{
-        io::Cursor,
+        io::{Cursor, Error, ErrorKind, SeekFrom},
+        pin::Pin,
         sync::{Arc, Mutex as StdMutex},
+        task::{Context, Poll},
     };
 
     use async_trait::async_trait;
-    use termlab_remote::{RemoteError, transfer::SourceFingerprint};
-    use tokio::sync::mpsc;
+    use termlab_remote::{
+        RemoteError,
+        transfer::{ControlDecision, SourceFingerprint, copy::copy_with_checkpoint_typed},
+    };
+    use tokio::{
+        io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
+        sync::mpsc,
+    };
     use uuid::Uuid;
 
     use super::{
-        ConnectionResolver, LiveConnectionIdentity, RunnerControl, RunnerReporter, RunnerResult,
-        SftpTransferJobRunner, TransferIo, TransferIoError, TransferJobRunner,
+        ConnectionResolver, LiveConnectionIdentity, PromotionError, RunnerControl, RunnerReporter,
+        RunnerResult, SftpTransferJobRunner, TransferIo, TransferIoError, TransferJobRunner,
         select_live_connection_key,
     };
     use crate::remote::transfer_queue::{
@@ -1429,6 +1613,118 @@ mod tests {
 
     #[derive(Clone, Copy)]
     struct TestConnection;
+
+    struct FailingRead {
+        kind: ErrorKind,
+        cause: &'static str,
+    }
+
+    impl AsyncRead for FailingRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(Error::new(self.kind, self.cause)))
+        }
+    }
+
+    impl AsyncSeek for FailingRead {
+        fn start_seek(self: Pin<&mut Self>, _position: SeekFrom) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn poll_complete(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<std::io::Result<u64>> {
+            Poll::Ready(Ok(0))
+        }
+    }
+
+    struct FailingWrite {
+        kind: ErrorKind,
+        cause: &'static str,
+    }
+
+    impl AsyncWrite for FailingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(Error::new(self.kind, self.cause)))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncSeek for FailingWrite {
+        fn start_seek(self: Pin<&mut Self>, _position: SeekFrom) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn poll_complete(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<std::io::Result<u64>> {
+            Poll::Ready(Ok(0))
+        }
+    }
+
+    async fn classify_copy_read_failure(
+        direction: TransferDirection,
+        kind: ErrorKind,
+        cause: &'static str,
+    ) -> TransferIoError {
+        let mut source = FailingRead { kind, cause };
+        let mut destination = Cursor::new(Vec::new());
+        let error = copy_with_checkpoint_typed(
+            &mut source,
+            &mut destination,
+            0,
+            1,
+            1,
+            || ControlDecision::Continue,
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        TransferIoError::from_copy(&direction, error)
+    }
+
+    async fn classify_copy_write_failure(
+        direction: TransferDirection,
+        kind: ErrorKind,
+        cause: &'static str,
+    ) -> TransferIoError {
+        let mut source = Cursor::new(b"x".to_vec());
+        let mut destination = FailingWrite { kind, cause };
+        let error = copy_with_checkpoint_typed(
+            &mut source,
+            &mut destination,
+            0,
+            1,
+            1,
+            || ControlDecision::Continue,
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        TransferIoError::from_copy(&direction, error)
+    }
 
     #[derive(Clone)]
     struct FakeResolver {
@@ -1456,6 +1752,11 @@ mod tests {
         inventory: ArtifactInventory,
         partial_len: Option<u64>,
         final_after_finish_partial: bool,
+        final_before_promotion: bool,
+        ambiguous_promotion: bool,
+        final_identity: Option<&'static str>,
+        partial_identity: Option<&'static str>,
+        backup_identity: Option<&'static str>,
         fail_at: Option<&'static str>,
     }
 
@@ -1472,6 +1773,11 @@ mod tests {
                     },
                     partial_len: None,
                     final_after_finish_partial: false,
+                    final_before_promotion: false,
+                    ambiguous_promotion: false,
+                    final_identity: None,
+                    partial_identity: None,
+                    backup_identity: None,
                     fail_at: None,
                 })),
             }
@@ -1482,6 +1788,9 @@ mod tests {
                 let mut state = self.state.lock().unwrap();
                 state.inventory = inventory;
                 state.partial_len = partial_len;
+                state.final_identity = inventory.final_exists.then_some("existing-final");
+                state.partial_identity = inventory.partial_exists.then_some("copied-source");
+                state.backup_identity = inventory.backup_exists.then_some("owned-backup");
             }
             self
         }
@@ -1494,6 +1803,31 @@ mod tests {
         fn with_final_appearing_after_copy(self) -> Self {
             self.state.lock().unwrap().final_after_finish_partial = true;
             self
+        }
+
+        fn with_final_appearing_before_promotion(self) -> Self {
+            self.state.lock().unwrap().final_before_promotion = true;
+            self
+        }
+
+        fn with_ambiguous_promotion(self) -> Self {
+            self.state.lock().unwrap().ambiguous_promotion = true;
+            self
+        }
+
+        fn artifact_identities(
+            &self,
+        ) -> (
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+        ) {
+            let state = self.state.lock().unwrap();
+            (
+                state.final_identity,
+                state.partial_identity,
+                state.backup_identity,
+            )
         }
 
         fn record(&self, operation: &'static str) -> Result<(), TransferIoError> {
@@ -1578,6 +1912,7 @@ mod tests {
                 0
             };
             state.inventory.partial_exists = true;
+            state.partial_identity = Some("copied-source");
             Ok(Cursor::new(vec![0; len as usize]))
         }
 
@@ -1591,6 +1926,7 @@ mod tests {
             state.partial_len = Some(partial.get_ref().len() as u64);
             if state.final_after_finish_partial {
                 state.inventory.final_exists = true;
+                state.final_identity = Some("late-final");
             }
             Ok(())
         }
@@ -1605,19 +1941,38 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.inventory.final_exists = false;
             state.inventory.backup_exists = true;
+            state.backup_identity = state.final_identity.take();
             Ok(())
         }
 
-        async fn promote_partial(
+        async fn promote_partial_no_replace(
             &self,
             _connection: &TestConnection,
             _job: &TransferJob,
             _artifacts: &ManagedArtifacts,
-        ) -> Result<(), TransferIoError> {
-            self.record("promote_partial")?;
+        ) -> Result<(), PromotionError> {
+            self.record("promote_partial")
+                .map_err(PromotionError::Failed)?;
             let mut state = self.state.lock().unwrap();
+            if state.final_before_promotion {
+                state.inventory.final_exists = true;
+                state.final_identity = Some("late-final");
+            }
+            if state.inventory.final_exists {
+                return Err(PromotionError::DestinationExists {
+                    message: "destination appeared before fake no-replace promotion".into(),
+                });
+            }
+            if state.ambiguous_promotion {
+                state.inventory.final_exists = true;
+                state.final_identity = state.partial_identity;
+                return Err(PromotionError::Ambiguous {
+                    message: "linked final, but could not unlink the owned partial".into(),
+                });
+            }
             state.inventory.partial_exists = false;
             state.inventory.final_exists = true;
+            state.final_identity = state.partial_identity.take();
             state.partial_len = None;
             Ok(())
         }
@@ -1632,6 +1987,7 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.inventory.backup_exists = false;
             state.inventory.final_exists = true;
+            state.final_identity = state.backup_identity.take();
             Ok(())
         }
 
@@ -1642,7 +1998,9 @@ mod tests {
             _artifacts: &ManagedArtifacts,
         ) -> Result<(), TransferIoError> {
             self.record("delete_backup")?;
-            self.state.lock().unwrap().inventory.backup_exists = false;
+            let mut state = self.state.lock().unwrap();
+            state.inventory.backup_exists = false;
+            state.backup_identity = None;
             Ok(())
         }
 
@@ -1658,6 +2016,8 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.inventory.partial_exists = false;
             state.inventory.backup_exists = false;
+            state.partial_identity = None;
+            state.backup_identity = None;
             state.partial_len = None;
             Ok(())
         }
@@ -1861,6 +2221,88 @@ mod tests {
                 "phase:Complete",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_ask_recovery_preserves_a_late_final_and_owned_partial() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(4),
+        );
+        let inspected_io = io.clone();
+        let mut job = test_job();
+        job.source_fingerprint = Some(fingerprint(4, Some("v1")));
+        job.durable_checkpoint = 4;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+        job.commit_phase = CommitPhase::Prepared;
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
+                resume_available: true
+            })
+        ));
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (Some("existing-final"), Some("copied-source"), None)
+        );
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "move_final_to_backup")
+        );
+        assert!(!operations.iter().any(|entry| entry == "promote_partial"));
+    }
+
+    #[tokio::test]
+    async fn resume_authorization_moves_one_late_final_then_recovers_backup_moved_commit() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: true,
+                backup_exists: false,
+            },
+            Some(4),
+        );
+        let inspected_io = io.clone();
+        let mut job = test_job();
+        job.source_fingerprint = Some(fingerprint(4, Some("v1")));
+        job.durable_checkpoint = 4;
+        job.artifacts = Some(ManagedArtifacts::for_destination(job.id, &job.remote_path).unwrap());
+        job.commit_phase = CommitPhase::BackupMoved;
+        job.conflict_policy = ConflictPolicy::Overwrite;
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::Completed(super::CompletionResult::Transferred)
+        ));
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (Some("copied-source"), None, None)
+        );
+        let moved = operations
+            .iter()
+            .position(|entry| entry == "move_final_to_backup")
+            .unwrap();
+        let acknowledged = operations
+            .iter()
+            .position(|entry| entry == "phase:BackupMoved")
+            .unwrap();
+        let promoted = operations
+            .iter()
+            .position(|entry| entry == "promote_partial")
+            .unwrap();
+        assert!(moved < acknowledged && acknowledged < promoted);
     }
 
     #[tokio::test]
@@ -2231,6 +2673,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_no_replace_promotion_preserves_a_final_that_appears_after_prepared() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io =
+            FakeIo::new(log, fingerprint(4, Some("v1"))).with_final_appearing_before_promotion();
+        let inspected_io = io.clone();
+
+        let (result, operations) =
+            run_fake(true, io, test_job(), super::RunnerControlState::Run).await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::NeedsAttention(AttentionReason::DestinationConflict {
+                resume_available: true
+            })
+        ));
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (Some("late-final"), Some("copied-source"), None)
+        );
+        assert!(operations.iter().any(|entry| entry == "phase:Prepared"));
+        assert!(operations.iter().any(|entry| entry == "phase:BackupMoved"));
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "phase:PartialPromoted")
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_no_replace_promotion_preserves_a_final_that_appears_after_backup_move() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1")))
+            .with_inventory(
+                ArtifactInventory {
+                    final_exists: true,
+                    partial_exists: false,
+                    backup_exists: false,
+                },
+                None,
+            )
+            .with_final_appearing_before_promotion();
+        let inspected_io = io.clone();
+        let mut job = test_job();
+        job.conflict_policy = ConflictPolicy::Overwrite;
+
+        let (result, operations) = run_fake(true, io, job, super::RunnerControlState::Run).await;
+
+        let RunnerResult::NeedsAttention(AttentionReason::CommitRecovery { message }) = result
+        else {
+            panic!("late overwrite final must require conservative commit recovery")
+        };
+        assert!(
+            message.contains("final=true, partial=true, backup=true"),
+            "unexpected recovery inventory: {message}"
+        );
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (
+                Some("late-final"),
+                Some("copied-source"),
+                Some("existing-final")
+            )
+        );
+        assert!(operations.iter().any(|entry| entry == "phase:Prepared"));
+        assert!(operations.iter().any(|entry| entry == "phase:BackupMoved"));
+        assert!(!operations.iter().any(|entry| entry == "restore_backup"));
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "phase:PartialPromoted")
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_local_promotion_preserves_both_links_and_requires_inventory_attention() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_ambiguous_promotion();
+        let inspected_io = io.clone();
+
+        let (result, operations) =
+            run_fake(true, io, test_job(), super::RunnerControlState::Run).await;
+
+        let RunnerResult::NeedsAttention(AttentionReason::CommitRecovery { message }) = result
+        else {
+            panic!("ambiguous promotion must require exact-inventory recovery")
+        };
+        assert!(
+            message.contains("final=true, partial=true, backup=false"),
+            "unexpected recovery inventory: {message}"
+        );
+        assert_eq!(
+            inspected_io.artifact_identities(),
+            (Some("copied-source"), Some("copied-source"), None)
+        );
+        assert!(
+            !operations
+                .iter()
+                .any(|entry| entry == "phase:PartialPromoted")
+        );
+        assert!(!operations.iter().any(|entry| entry == "delete_backup"));
+    }
+
+    #[tokio::test]
     async fn overwrite_resolution_redispatches_through_the_runner_without_conflict_looping() {
         let log = Arc::new(StdMutex::new(Vec::new()));
         let io = FakeIo::new(log, fingerprint(4, Some("v1"))).with_inventory(
@@ -2490,6 +3035,82 @@ mod tests {
             "open local source /tmp/timeout/disconnect.bin failed: permission denied".into(),
         ));
         assert_eq!(already_contextualized.class, FailureClass::Permanent);
+    }
+
+    #[tokio::test]
+    async fn upload_local_read_failure_cannot_be_made_transient_by_path_text() {
+        let error = classify_copy_read_failure(
+            TransferDirection::Upload,
+            ErrorKind::Other,
+            "read /tmp/timeout/disconnect.bin failed",
+        )
+        .await;
+
+        assert_eq!(error.class, FailureClass::Permanent);
+    }
+
+    #[tokio::test]
+    async fn download_local_write_failure_cannot_be_made_transient_by_path_text() {
+        let error = classify_copy_write_failure(
+            TransferDirection::Download,
+            ErrorKind::PermissionDenied,
+            "write /tmp/timeout/disconnect.bin failed",
+        )
+        .await;
+
+        assert_eq!(error.class, FailureClass::Permanent);
+    }
+
+    #[tokio::test]
+    async fn structured_remote_read_and_write_disconnects_are_transient() {
+        let read = classify_copy_read_failure(
+            TransferDirection::Download,
+            ErrorKind::ConnectionReset,
+            "peer reset the channel",
+        )
+        .await;
+        let write = classify_copy_write_failure(
+            TransferDirection::Upload,
+            ErrorKind::BrokenPipe,
+            "remote pipe closed",
+        )
+        .await;
+
+        assert_eq!(read.class, FailureClass::Transient);
+        assert_eq!(write.class, FailureClass::Transient);
+    }
+
+    #[tokio::test]
+    async fn whole_raw_channel_closed_cause_remains_transient() {
+        let error = classify_copy_read_failure(
+            TransferDirection::Download,
+            ErrorKind::Other,
+            "channel closed: server reason",
+        )
+        .await;
+
+        assert_eq!(error.class, FailureClass::Transient);
+    }
+
+    #[tokio::test]
+    async fn structured_remote_permission_failure_is_permanent() {
+        let error = classify_copy_write_failure(
+            TransferDirection::Upload,
+            ErrorKind::PermissionDenied,
+            "permission denied",
+        )
+        .await;
+
+        assert_eq!(error.class, FailureClass::Permanent);
+    }
+
+    #[test]
+    fn untrusted_transfer_text_defaults_to_permanent_even_when_it_says_channel_closed() {
+        let error = TransferIoError::from_remote(RemoteError::Transfer(
+            "copy /tmp/channel closed failed".into(),
+        ));
+
+        assert_eq!(error.class, FailureClass::Permanent);
     }
 
     #[test]

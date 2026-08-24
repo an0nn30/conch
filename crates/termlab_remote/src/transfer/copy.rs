@@ -2,8 +2,6 @@ use std::io::SeekFrom;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::RemoteError;
-
 const MAX_COPY_CHUNK_SIZE: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +18,74 @@ pub enum CopyOutcome {
     Cancelled { bytes: u64 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyStage {
+    SeekSource,
+    SeekDestination,
+    ReadSource,
+    WriteDestination,
+}
+
+impl std::fmt::Display for CopyStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::SeekSource => "seek source",
+            Self::SeekDestination => "seek destination",
+            Self::ReadSource => "read source",
+            Self::WriteDestination => "write destination",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyError {
+    InvalidChunkSize,
+    OffsetBeyondSource {
+        offset: u64,
+        total: u64,
+    },
+    Io {
+        stage: CopyStage,
+        kind: std::io::ErrorKind,
+        cause: String,
+    },
+}
+
+impl CopyError {
+    fn io(stage: CopyStage, error: std::io::Error) -> Self {
+        Self::Io {
+            stage,
+            kind: error.kind(),
+            cause: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for CopyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidChunkSize => {
+                formatter.write_str("copy chunk size must be greater than zero")
+            }
+            Self::OffsetBeyondSource { offset, total } => {
+                write!(
+                    formatter,
+                    "copy offset {offset} exceeds source size {total}"
+                )
+            }
+            Self::Io { stage, cause, .. } => write!(formatter, "{stage} failed: {cause}"),
+        }
+    }
+}
+
+impl std::error::Error for CopyError {}
+
+impl From<CopyError> for crate::error::RemoteError {
+    fn from(error: CopyError) -> Self {
+        Self::Transfer(error.to_string())
+    }
+}
+
 /// Copy bounded chunks from an explicit absolute offset.
 ///
 /// `progress` is transient display progress. The returned byte position only
@@ -32,9 +98,41 @@ pub async fn copy_with_checkpoint<R, W, C, P>(
     offset: u64,
     total: u64,
     chunk_size: usize,
+    control: C,
+    progress: P,
+) -> Result<CopyOutcome, crate::error::RemoteError>
+where
+    R: AsyncRead + AsyncSeek + Unpin,
+    W: AsyncWrite + AsyncSeek + Unpin,
+    C: FnMut() -> ControlDecision,
+    P: FnMut(u64, u64),
+{
+    copy_with_checkpoint_typed(
+        source,
+        destination,
+        offset,
+        total,
+        chunk_size,
+        control,
+        progress,
+    )
+    .await
+    .map_err(Into::into)
+}
+
+/// The typed copy boundary used by durable transfer execution.
+///
+/// Unlike the compatibility wrapper, this preserves whether an I/O failure
+/// came from the source or destination before callers add path context.
+pub async fn copy_with_checkpoint_typed<R, W, C, P>(
+    source: &mut R,
+    destination: &mut W,
+    offset: u64,
+    total: u64,
+    chunk_size: usize,
     mut control: C,
     mut progress: P,
-) -> Result<CopyOutcome, RemoteError>
+) -> Result<CopyOutcome, CopyError>
 where
     R: AsyncRead + AsyncSeek + Unpin,
     W: AsyncWrite + AsyncSeek + Unpin,
@@ -42,24 +140,20 @@ where
     P: FnMut(u64, u64),
 {
     if chunk_size == 0 {
-        return Err(RemoteError::Transfer(
-            "copy chunk size must be greater than zero".into(),
-        ));
+        return Err(CopyError::InvalidChunkSize);
     }
     if offset > total {
-        return Err(RemoteError::Transfer(format!(
-            "copy offset {offset} exceeds source size {total}"
-        )));
+        return Err(CopyError::OffsetBeyondSource { offset, total });
     }
 
     source
         .seek(SeekFrom::Start(offset))
         .await
-        .map_err(|error| RemoteError::Transfer(format!("seek source failed: {error}")))?;
+        .map_err(|error| CopyError::io(CopyStage::SeekSource, error))?;
     destination
         .seek(SeekFrom::Start(offset))
         .await
-        .map_err(|error| RemoteError::Transfer(format!("seek destination failed: {error}")))?;
+        .map_err(|error| CopyError::io(CopyStage::SeekDestination, error))?;
 
     let mut bytes = offset;
     let mut buffer = vec![0; chunk_size.min(MAX_COPY_CHUNK_SIZE)];
@@ -72,7 +166,7 @@ where
         let read = source
             .read(&mut buffer[..read_limit])
             .await
-            .map_err(|error| RemoteError::Transfer(format!("read source failed: {error}")))?;
+            .map_err(|error| CopyError::io(CopyStage::ReadSource, error))?;
         if read == 0 {
             return Ok(CopyOutcome::Completed { bytes });
         }
@@ -80,7 +174,7 @@ where
         destination
             .write_all(&buffer[..read])
             .await
-            .map_err(|error| RemoteError::Transfer(format!("write destination failed: {error}")))?;
+            .map_err(|error| CopyError::io(CopyStage::WriteDestination, error))?;
         bytes += read as u64;
         progress(bytes, total);
 
@@ -102,7 +196,10 @@ mod tests {
 
     use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
-    use super::{ControlDecision, CopyOutcome, copy_with_checkpoint};
+    use super::{
+        ControlDecision, CopyError, CopyOutcome, CopyStage, copy_with_checkpoint,
+        copy_with_checkpoint_typed,
+    };
 
     struct CountingReader {
         inner: Cursor<Vec<u8>>,
@@ -312,11 +409,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_errors_are_transfer_errors() {
+    async fn read_errors_preserve_typed_source_provenance() {
         let mut source = FailingReader;
         let mut destination = Cursor::new(Vec::new());
 
-        let error = copy_with_checkpoint(
+        let error = copy_with_checkpoint_typed(
             &mut source,
             &mut destination,
             0,
@@ -328,17 +425,22 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(
-            matches!(error, crate::error::RemoteError::Transfer(message) if message.contains("read broke"))
-        );
+        assert!(matches!(
+            error,
+            CopyError::Io {
+                stage: CopyStage::ReadSource,
+                kind: ErrorKind::Other,
+                cause,
+            } if cause == "read broke"
+        ));
     }
 
     #[tokio::test]
-    async fn write_errors_are_transfer_errors() {
+    async fn write_errors_preserve_typed_destination_provenance() {
         let mut source = Cursor::new(b"0".to_vec());
         let mut destination = FailingWriter;
 
-        let error = copy_with_checkpoint(
+        let error = copy_with_checkpoint_typed(
             &mut source,
             &mut destination,
             0,
@@ -350,8 +452,13 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(
-            matches!(error, crate::error::RemoteError::Transfer(message) if message.contains("write broke"))
-        );
+        assert!(matches!(
+            error,
+            CopyError::Io {
+                stage: CopyStage::WriteDestination,
+                kind: ErrorKind::Other,
+                cause,
+            } if cause == "write broke"
+        ));
     }
 }
