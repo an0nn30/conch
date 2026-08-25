@@ -178,20 +178,28 @@ invoked in the Task 8 environment and skipped cleanly before connecting
 because no disposable OpenSSH server was configured; both rows remain
 pending-live-evidence until run against one.
 
-- [ ] `live_pipelined_upload_matches_content_and_beats_sequential`: upload a
+- [x] `live_pipelined_upload_matches_content_and_beats_sequential`: upload a
   64 MiB fixture once at `PipelineTuning { depth: 1, chunk_bytes: 262144 }` and
   once at `{ depth: 16, chunk_bytes: 262144 }` to distinct remote paths.
   Confirm both remote files match the source byte-for-byte and record the
   measured depth-1 vs. depth-16 throughput (elapsed time and MiB/s, printed by
-  the test). Evidence: pending-live-evidence (skipped: no
-  `TERMLAB_TEST_SFTP_*` server configured in this environment).
-- [ ] `live_pipelined_download_resumes_after_interruption`: start a pipelined
+  the test). Evidence: run 2026-08-25 by the repo owner against a live
+  OpenSSH host over Tailscale (release build, `--test-threads=1`). Both
+  depths content-verified. Depth-1 attempts: 38.29 s (1.67 MiB/s) and
+  30.37 s (2.11 MiB/s); depth-16 attempts: 9.33 s (6.86 MiB/s) and 11.52 s
+  (5.56 MiB/s). Minima comparison: 2.11 MiB/s sequential vs 6.86 MiB/s
+  pipelined — 3.25×. The design's aspirational ≥4× was not reached on this
+  link because depth-16 appears to saturate the link's real bandwidth
+  (~7 MiB/s); accepted as meeting the criterion's intent (link-bound, not
+  engine-bound).
+- [x] `live_pipelined_download_resumes_after_interruption`: start a pipelined
   download (`depth: 8`) with a control callback that pauses once the
   contiguous frontier passes 25% of the source; confirm the outcome is
   `Paused` with a frontier strictly between 0 and the total, resume with
   `offset = frontier`, and confirm completion plus a byte-for-byte match
-  against the remote source. Evidence: pending-live-evidence (skipped: no
-  `TERMLAB_TEST_SFTP_*` server configured in this environment).
+  against the remote source. Evidence: run 2026-08-25 on the same host —
+  paused at 6,266,880 of 16,777,216 bytes, resumed from the frontier, final
+  content matched the source byte-for-byte.
 
 ## Sign-off
 

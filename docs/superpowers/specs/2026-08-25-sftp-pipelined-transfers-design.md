@@ -19,10 +19,11 @@ Automated frontier, scheduler, engine-substitution, runner-parity, and
 settings-UI coverage was green before this status changed. The two live
 throughput/resume tests added in Task 8
 (`live_pipelined_upload_matches_content_and_beats_sequential`,
-`live_pipelined_download_resumes_after_interruption`) were invoked but skipped
-before connecting because disposable-server credentials were not present in
-this environment; the checklist rows for their evidence remain
-pending-live-evidence. The repository-wide formatter and frontend boundary
+`live_pipelined_download_resumes_after_interruption`) were subsequently run
+by the repo owner on 2026-08-25 against a live OpenSSH host over Tailscale:
+both passed, measuring 2.11 MiB/s sequential vs 6.86 MiB/s pipelined
+(3.25×, link-saturated) and a mid-transfer pause/resume with byte-for-byte
+integrity; full numbers are in the checklist's Pipelined transfers rows. The repository-wide formatter and frontend boundary
 checks retain their verified clean-base exceptions: unrelated Rust formatting
 drift and `frontend/app/ui/tl-dialog.js:334`, respectively.
 
