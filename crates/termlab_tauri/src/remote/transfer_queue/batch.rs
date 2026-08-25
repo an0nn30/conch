@@ -1,10 +1,37 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
 use super::model::{TransferDirection, TransferJob, TransferJobState};
+
+/// The expansion-state reason a batch carries once its owner cancels it. The
+/// engine writes it when the cancel lands and the expansion task writes the
+/// same string when its walk unwinds, so the two never disagree.
+pub const BATCH_CANCELLED_REASON: &str = "batch cancelled";
+
+/// The stop flag shared between `cancel_batch` and the expansion task that is
+/// walking that batch's tree. The task polls it through `walk_tree`'s
+/// `cancelled()`, which is why it must be cheap and lock-free.
+#[derive(Debug, Clone, Default)]
+pub struct BatchCancellation(Arc<AtomicBool>);
+
+impl BatchCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(
@@ -110,9 +137,14 @@ pub fn derive_batch_aggregates(
 }
 
 /// Drop batches with no remaining member jobs (active or history) so the
-/// batch map does not grow without bound as jobs age out of history.
+/// batch map does not grow without bound as jobs age out of history. A batch
+/// whose expansion is still `Running` is never memberless-by-attrition — it
+/// simply has not enqueued its first file yet — so it is kept.
 pub fn compact_batches(batches: &mut BTreeMap<Uuid, BatchInfo>, jobs: &[TransferJob]) {
-    batches.retain(|id, _| jobs.iter().any(|job| job.batch_id == Some(*id)));
+    batches.retain(|id, info| {
+        info.expansion == BatchExpansion::Running
+            || jobs.iter().any(|job| job.batch_id == Some(*id))
+    });
 }
 
 #[cfg(test)]
@@ -326,6 +358,41 @@ mod tests {
 
         assert!(batches.contains_key(&surviving_id));
         assert!(!batches.contains_key(&cleared_id));
+    }
+
+    #[test]
+    fn compact_keeps_a_batch_whose_expansion_is_still_running() {
+        let expanding_id = Uuid::from_u128(1);
+        let finished_id = Uuid::from_u128(2);
+        let mut batches = BTreeMap::new();
+        let mut expanding = batch_info(expanding_id, 0, 0, 10);
+        expanding.expansion = BatchExpansion::Running;
+        batches.insert(expanding_id, expanding);
+        batches.insert(finished_id, batch_info(finished_id, 1, 100, 10));
+
+        compact_batches(&mut batches, &[]);
+
+        assert!(
+            batches.contains_key(&expanding_id),
+            "a batch whose first member has not been enqueued yet is not an orphan"
+        );
+        assert!(!batches.contains_key(&finished_id));
+    }
+
+    #[test]
+    fn cancellation_flag_is_shared_by_clones() {
+        use super::BatchCancellation;
+
+        let cancellation = BatchCancellation::new();
+        let observer = cancellation.clone();
+
+        assert!(!observer.is_cancelled());
+        cancellation.cancel();
+
+        assert!(
+            observer.is_cancelled(),
+            "the expansion task polls the same flag the engine flips"
+        );
     }
 
     #[test]

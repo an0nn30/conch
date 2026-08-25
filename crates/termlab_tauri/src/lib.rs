@@ -883,6 +883,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::sftp_commands::local_remove,
             remote::transfer_commands::transfer_download,
             remote::transfer_commands::transfer_upload,
+            remote::transfer_commands::transfer_enqueue_recursive,
+            remote::transfer_commands::transfer_cancel_batch,
             remote::transfer_commands::transfer_queue_snapshot,
             remote::transfer_commands::transfer_pause,
             remote::transfer_commands::transfer_resume,

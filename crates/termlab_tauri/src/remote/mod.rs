@@ -12,6 +12,7 @@
 pub(crate) mod auth;
 pub(crate) mod detached_commands;
 pub(crate) mod local_fs;
+pub(crate) mod recursive_transfer;
 pub(crate) mod server_commands;
 pub(crate) mod sftp_commands;
 pub(crate) mod ssh_commands;

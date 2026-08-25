@@ -1,8 +1,12 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
+
+use super::batch::{BATCH_CANCELLED_REASON, BatchCancellation, BatchExpansion};
 
 /// Map a discovered source entry onto its destination path.
 /// POSIX remote paths use '/'; local paths use the platform separator.
@@ -125,12 +129,198 @@ where
     Ok(())
 }
 
+/// A file the walk found, already mapped onto its destination path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredFile {
+    pub source_path: String,
+    pub dest_path: String,
+    pub size: u64,
+}
+
+/// What expansion has found so far. Totals only ever grow, which is what lets
+/// the UI show them as a running count while the walk continues.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExpansionTotals {
+    pub discovered_files: u64,
+    pub discovered_bytes: u64,
+    pub skipped: Vec<String>,
+}
+
+/// Creates a directory at the destination side of a transfer. Implementations
+/// must treat an existing directory as success (product rule 5).
+#[async_trait]
+pub trait DirectoryCreator: Send + Sync {
+    async fn create_dir(&self, path: &str) -> Result<(), String>;
+}
+
+/// Where expansion delivers what it finds: member jobs into the queue, totals
+/// and expansion state onto the batch record.
+#[async_trait]
+pub trait ExpansionSink: Send + Sync {
+    async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String>;
+
+    async fn record_batch(
+        &self,
+        expansion: BatchExpansion,
+        totals: &ExpansionTotals,
+    ) -> Result<(), String>;
+}
+
+/// The source tree and where it lands.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpansionPlan {
+    pub source_root: String,
+    pub dest_root: String,
+    /// The destination is the remote side — an upload.
+    pub remote_dest: bool,
+}
+
+/// Entries walked between two batch-record writes. Expansion can discover
+/// thousands of files, and every write is a full durable document commit, so
+/// totals are coalesced instead of persisted per entry.
+const UPDATE_COALESCE_ENTRIES: u64 = 25;
+
+#[derive(Default)]
+struct ExpansionState {
+    totals: ExpansionTotals,
+    since_update: u64,
+}
+
+type EntryFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+/// Walk `plan.source_root`, recreating its directories at the destination and
+/// enqueuing every file as a member of the caller's batch. Returns the final
+/// expansion state, which has already been handed to `sink`.
+///
+/// This function performs no authentication and consumes no scheduler slot:
+/// the lister and the directory creator are handed an already-open session by
+/// the caller, and members run as ordinary queue jobs.
+pub async fn run_expansion(
+    lister: &dyn TreeLister,
+    creator: &dyn DirectoryCreator,
+    sink: &dyn ExpansionSink,
+    plan: &ExpansionPlan,
+    cancellation: &BatchCancellation,
+) -> BatchExpansion {
+    let state = Mutex::new(ExpansionState::default());
+    let root = normalize_entry_path(&plan.source_root);
+
+    // The walk only ever emits the root's descendants, so the counterpart of
+    // the source folder itself is created here. It is also what makes
+    // transferring an empty folder produce an empty folder.
+    let walked = match creator.create_dir(&plan.dest_root).await {
+        Ok(()) => {
+            walk_tree(
+                lister,
+                &root,
+                |entry| -> EntryFuture<'_> {
+                    Box::pin(expand_entry(entry, creator, sink, plan, &state))
+                },
+                || cancellation.is_cancelled(),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+
+    let totals = state.lock().totals.clone();
+    let expansion = match walked {
+        Ok(()) if cancellation.is_cancelled() => BatchExpansion::Interrupted {
+            reason: BATCH_CANCELLED_REASON.to_string(),
+        },
+        Ok(()) => BatchExpansion::Complete,
+        Err(reason) => BatchExpansion::Interrupted { reason },
+    };
+
+    if let Err(error) = sink.record_batch(expansion.clone(), &totals).await {
+        log::error!("could not record the final expansion state: {error}");
+    }
+    expansion
+}
+
+async fn expand_entry(
+    entry: WalkEntry,
+    creator: &dyn DirectoryCreator,
+    sink: &dyn ExpansionSink,
+    plan: &ExpansionPlan,
+    state: &Mutex<ExpansionState>,
+) -> Result<(), String> {
+    match entry {
+        WalkEntry::Dir { path } => {
+            let destination = map_entry(plan, &path)?;
+            creator.create_dir(&destination).await?;
+        }
+        WalkEntry::File { path, size } => {
+            let destination = map_entry(plan, &path)?;
+            sink.enqueue_file(DiscoveredFile {
+                source_path: normalize_entry_path(&path),
+                dest_path: destination,
+                size,
+            })
+            .await?;
+            let mut state = state.lock();
+            state.totals.discovered_files += 1;
+            state.totals.discovered_bytes = state.totals.discovered_bytes.saturating_add(size);
+        }
+        WalkEntry::SkippedSymlink { path } => {
+            state.lock().totals.skipped.push(path);
+        }
+    }
+
+    let due = {
+        let mut state = state.lock();
+        state.since_update += 1;
+        state.since_update >= UPDATE_COALESCE_ENTRIES
+    };
+    if due {
+        let totals = {
+            let mut state = state.lock();
+            state.since_update = 0;
+            state.totals.clone()
+        };
+        sink.record_batch(BatchExpansion::Running, &totals).await?;
+    }
+    Ok(())
+}
+
+fn map_entry(plan: &ExpansionPlan, entry_path: &str) -> Result<String, String> {
+    map_destination(
+        &plan.source_root,
+        &plan.dest_root,
+        &normalize_entry_path(entry_path),
+        plan.remote_dest,
+    )
+}
+
+/// `map_destination` matches entry paths against the source root literally, so
+/// a lister that reports `/src/a/` instead of `/src/a` would map onto a
+/// destination with a stray trailing separator. Trim it here, once.
+fn normalize_entry_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+
+    use uuid::Uuid;
+
+    use super::super::batch::{BATCH_CANCELLED_REASON, BatchExpansion, BatchInfo};
+    use super::super::engine::{QueueActor, TransferQueueHandle};
+    use super::super::events::{QueueEventPayload, QueueSummaryPayload, TransferEventSink};
+    use super::super::model::{
+        ConflictPolicy, NewTransferJob, TransferDirection, TransferEndpoint, TransferJobState,
+        TransferOrigin, TransferPriority, TransferProtocol, build_destination_key, build_host_key,
+    };
+    use super::super::store::TransferStore;
 
     struct FakeLister {
         tree: BTreeMap<String, Vec<WalkEntry>>,
@@ -502,6 +692,417 @@ mod tests {
                 },
             ],
             "entries discovered before the failure must already be emitted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_expansion against the real queue actor
+    // -----------------------------------------------------------------------
+
+    struct NoopEventSink;
+
+    #[async_trait]
+    impl TransferEventSink for NoopEventSink {
+        async fn job_updated(&self, _payload: QueueEventPayload) {}
+
+        async fn queue_summary(&self, _payload: QueueSummaryPayload) {}
+
+        async fn legacy_progress(&self, _payload: termlab_remote::transfer::TransferProgress) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingDirCreator {
+        created: Mutex<Vec<String>>,
+    }
+
+    impl RecordingDirCreator {
+        fn created(&self) -> Vec<String> {
+            self.created.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl DirectoryCreator for RecordingDirCreator {
+        async fn create_dir(&self, path: &str) -> Result<(), String> {
+            self.created.lock().unwrap().push(path.to_string());
+            Ok(())
+        }
+    }
+
+    /// Enqueues every discovered file as an upload member of `batch_id` and
+    /// mirrors expansion state onto the batch record, exactly as the Tauri
+    /// expansion task does.
+    struct QueueSink {
+        handle: TransferQueueHandle,
+        batch_id: Uuid,
+        /// Cancels the batch from inside the first enqueue, which is how the
+        /// cancellation test reaches a mid-walk cancel deterministically.
+        cancel_on_first_file: bool,
+        enqueued: Mutex<Vec<Uuid>>,
+    }
+
+    impl QueueSink {
+        fn new(handle: TransferQueueHandle, batch_id: Uuid) -> Self {
+            Self {
+                handle,
+                batch_id,
+                cancel_on_first_file: false,
+                enqueued: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn cancelling_on_first_file(mut self) -> Self {
+            self.cancel_on_first_file = true;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl ExpansionSink for QueueSink {
+        async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String> {
+            let id = Uuid::new_v4();
+            let host_key = build_host_key(&TransferEndpoint::Configured {
+                server_entry_id: "server-1".into(),
+                label: "Production".into(),
+            });
+            let destination_key = build_destination_key(
+                &host_key,
+                &TransferDirection::Upload,
+                &file.source_path,
+                &file.dest_path,
+            );
+            let file_name = file
+                .source_path
+                .rsplit('/')
+                .find(|component| !component.is_empty())
+                .unwrap_or(&file.source_path)
+                .to_string();
+            self.handle
+                .enqueue(NewTransferJob {
+                    id,
+                    protocol: TransferProtocol::Sftp,
+                    direction: TransferDirection::Upload,
+                    origin: TransferOrigin::FilesPanel,
+                    endpoint: TransferEndpoint::Configured {
+                        server_entry_id: "server-1".into(),
+                        label: "Production".into(),
+                    },
+                    local_path: file.source_path.clone(),
+                    remote_path: file.dest_path.clone(),
+                    file_name,
+                    batch_id: Some(self.batch_id),
+                    priority: TransferPriority::Normal,
+                    host_key,
+                    destination_key,
+                    conflict_policy: ConflictPolicy::Ask,
+                })
+                .await?;
+            self.enqueued.lock().unwrap().push(id);
+            if self.cancel_on_first_file && self.enqueued.lock().unwrap().len() == 1 {
+                self.handle.cancel_batch(self.batch_id).await?;
+            }
+            Ok(())
+        }
+
+        async fn record_batch(
+            &self,
+            expansion: BatchExpansion,
+            totals: &ExpansionTotals,
+        ) -> Result<(), String> {
+            self.handle
+                .update_batch(
+                    self.batch_id,
+                    expansion,
+                    totals.discovered_files,
+                    totals.discovered_bytes,
+                    totals.skipped.clone(),
+                )
+                .await
+        }
+    }
+
+    async fn queue_handle() -> (tempfile::TempDir, TransferQueueHandle) {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = QueueActor::spawn(
+            TransferStore::new(directory.path().join("transfers.json")),
+            Arc::new(NoopEventSink),
+        )
+        .unwrap();
+        (directory, handle)
+    }
+
+    fn batch_info(id: Uuid) -> BatchInfo {
+        BatchInfo {
+            id,
+            name: "src".into(),
+            direction: TransferDirection::Upload,
+            expansion: BatchExpansion::Running,
+            discovered_files: 0,
+            discovered_bytes: 0,
+            skipped: Vec::new(),
+            created_at_ms: 10,
+        }
+    }
+
+    fn upload_plan() -> ExpansionPlan {
+        ExpansionPlan {
+            source_root: "/src".into(),
+            dest_root: "/dst".into(),
+            remote_dest: true,
+        }
+    }
+
+    /// Two populated directories, one empty directory, three files (one of
+    /// them hidden), and one symlink that must be skipped.
+    fn expansion_tree() -> BTreeMap<String, Vec<WalkEntry>> {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "/src".to_string(),
+            vec![
+                WalkEntry::Dir {
+                    path: "/src/a".into(),
+                },
+                WalkEntry::Dir {
+                    path: "/src/empty".into(),
+                },
+                WalkEntry::File {
+                    path: "/src/.top".into(),
+                    size: 10,
+                },
+                WalkEntry::SkippedSymlink {
+                    path: "/src/link".into(),
+                },
+            ],
+        );
+        tree.insert(
+            "/src/a".to_string(),
+            vec![
+                WalkEntry::Dir {
+                    path: "/src/a/nested".into(),
+                },
+                WalkEntry::File {
+                    path: "/src/a/one.txt".into(),
+                    size: 20,
+                },
+            ],
+        );
+        tree.insert("/src/empty".to_string(), Vec::new());
+        tree.insert(
+            "/src/a/nested".to_string(),
+            vec![WalkEntry::File {
+                path: "/src/a/nested/two.txt".into(),
+                size: 30,
+            }],
+        );
+        tree
+    }
+
+    #[tokio::test]
+    async fn recursive_expansion_enqueues_batch_members_and_completes() {
+        let (_directory, handle) = queue_handle().await;
+        let batch_id = Uuid::from_u128(0xB1);
+        let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
+        let lister = FakeLister::new(expansion_tree());
+        let creator = RecordingDirCreator::default();
+        let sink = QueueSink::new(handle.clone(), batch_id);
+
+        let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
+
+        assert_eq!(outcome, BatchExpansion::Complete);
+        assert_eq!(
+            creator.created(),
+            vec![
+                "/dst".to_string(),
+                "/dst/a".to_string(),
+                "/dst/empty".to_string(),
+                "/dst/a/nested".to_string(),
+            ],
+            "the destination root comes first, then directories parents-first \
+             including the empty one"
+        );
+
+        let snapshot = handle.snapshot();
+        let mut destinations: Vec<_> = snapshot
+            .jobs
+            .iter()
+            .map(|job| job.remote_path.clone())
+            .collect();
+        destinations.sort();
+        assert_eq!(
+            destinations,
+            vec![
+                "/dst/.top".to_string(),
+                "/dst/a/nested/two.txt".to_string(),
+                "/dst/a/one.txt".to_string(),
+            ],
+            "every discovered file becomes a member job at its mapped destination"
+        );
+        assert!(
+            snapshot
+                .jobs
+                .iter()
+                .all(|job| job.batch_id == Some(batch_id)),
+            "every member carries the batch id"
+        );
+
+        assert_eq!(snapshot.batches.len(), 1);
+        let info = &snapshot.batches[0].info;
+        assert_eq!(info.expansion, BatchExpansion::Complete);
+        assert_eq!(info.discovered_files, 3);
+        assert_eq!(info.discovered_bytes, 60);
+        assert_eq!(info.skipped, vec!["/src/link".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn expansion_error_interrupts_batch_but_keeps_members() {
+        let (_directory, handle) = queue_handle().await;
+        let batch_id = Uuid::from_u128(0xB2);
+        let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
+        let lister = FakeLister::new(expansion_tree()).with_error("/src/a", "permission denied");
+        let creator = RecordingDirCreator::default();
+        let sink = QueueSink::new(handle.clone(), batch_id);
+
+        let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
+
+        let BatchExpansion::Interrupted { reason } = outcome else {
+            panic!("a failed listing must interrupt expansion, got {outcome:?}");
+        };
+        assert!(
+            reason.contains("/src/a"),
+            "reason names the failure: {reason}"
+        );
+
+        let snapshot = handle.snapshot();
+        assert_eq!(
+            snapshot.jobs.len(),
+            1,
+            "the file discovered before the failure stays enqueued"
+        );
+        assert_eq!(snapshot.jobs[0].remote_path, "/dst/.top");
+        assert_eq!(snapshot.jobs[0].batch_id, Some(batch_id));
+        assert_eq!(snapshot.batches[0].info.discovered_files, 1);
+        assert!(matches!(
+            snapshot.batches[0].info.expansion,
+            BatchExpansion::Interrupted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_cancels_members_and_stops_expansion() {
+        let (_directory, handle) = queue_handle().await;
+        let batch_id = Uuid::from_u128(0xB3);
+        let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
+        let lister = FakeLister::new(expansion_tree());
+        let creator = RecordingDirCreator::default();
+        let sink = QueueSink::new(handle.clone(), batch_id).cancelling_on_first_file();
+
+        let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
+
+        assert_eq!(
+            outcome,
+            BatchExpansion::Interrupted {
+                reason: BATCH_CANCELLED_REASON.to_string(),
+            }
+        );
+        assert_eq!(
+            lister.call_count(),
+            1,
+            "cancellation stops the walk before any subdirectory is listed"
+        );
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.jobs.len(), 1, "only the first file was enqueued");
+        assert!(
+            matches!(snapshot.jobs[0].state, TransferJobState::Cancelled { .. }),
+            "the member is cancelled through the existing per-job path, got {:?}",
+            snapshot.jobs[0].state
+        );
+        assert_eq!(
+            snapshot.batches[0].info.expansion,
+            BatchExpansion::Interrupted {
+                reason: BATCH_CANCELLED_REASON.to_string(),
+            },
+            "a late expansion update must not clobber the cancelled state"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_source_folder_still_creates_its_destination() {
+        let (_directory, handle) = queue_handle().await;
+        let batch_id = Uuid::from_u128(0xB5);
+        let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
+        let mut tree = BTreeMap::new();
+        tree.insert("/src".to_string(), Vec::new());
+        let lister = FakeLister::new(tree);
+        let creator = RecordingDirCreator::default();
+        let sink = QueueSink::new(handle.clone(), batch_id);
+
+        let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
+
+        assert_eq!(outcome, BatchExpansion::Complete);
+        assert_eq!(creator.created(), vec!["/dst".to_string()]);
+        assert!(handle.snapshot().jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_destination_that_cannot_be_created_interrupts_before_the_walk() {
+        struct FailingDirCreator;
+
+        #[async_trait]
+        impl DirectoryCreator for FailingDirCreator {
+            async fn create_dir(&self, path: &str) -> Result<(), String> {
+                Err(format!("{path}: permission denied"))
+            }
+        }
+
+        let (_directory, handle) = queue_handle().await;
+        let batch_id = Uuid::from_u128(0xB6);
+        let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
+        let lister = FakeLister::new(expansion_tree());
+        let sink = QueueSink::new(handle.clone(), batch_id);
+
+        let outcome = run_expansion(
+            &lister,
+            &FailingDirCreator,
+            &sink,
+            &upload_plan(),
+            &cancellation,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            BatchExpansion::Interrupted {
+                reason: "/dst: permission denied".into(),
+            }
+        );
+        assert_eq!(lister.call_count(), 0, "nothing is walked without a home");
+        assert!(handle.snapshot().jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expansion_tolerates_trailing_slashes_on_discovered_paths() {
+        let (_directory, handle) = queue_handle().await;
+        let batch_id = Uuid::from_u128(0xB4);
+        let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "/src".to_string(),
+            vec![WalkEntry::Dir {
+                path: "/src/a/".into(),
+            }],
+        );
+        tree.insert("/src/a/".to_string(), Vec::new());
+        let lister = FakeLister::new(tree);
+        let creator = RecordingDirCreator::default();
+        let sink = QueueSink::new(handle.clone(), batch_id);
+
+        let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
+
+        assert_eq!(outcome, BatchExpansion::Complete);
+        assert_eq!(
+            creator.created(),
+            vec!["/dst".to_string(), "/dst/a".to_string()]
         );
     }
 }

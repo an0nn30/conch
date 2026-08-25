@@ -9,7 +9,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use super::{
-    batch::{compact_batches, derive_batch_aggregates},
+    batch::{
+        BATCH_CANCELLED_REASON, BatchCancellation, BatchExpansion, BatchInfo, compact_batches,
+        derive_batch_aggregates,
+    },
     events::{
         QueueEventPayload, QueueSummaryPayload, RunnerEvent, TransferEventSink, legacy_progress_for,
     },
@@ -127,6 +130,38 @@ impl TransferQueueHandle {
             .await
     }
 
+    /// Persist a new batch record and hand back the stop flag its expansion
+    /// task must poll. The flag is the only channel `cancel_batch` has into a
+    /// walk that is already running.
+    pub async fn create_batch(&self, info: BatchInfo) -> Result<BatchCancellation, String> {
+        self.request(|reply| QueueCommand::CreateBatch { info, reply })
+            .await
+    }
+
+    pub async fn update_batch(
+        &self,
+        id: Uuid,
+        expansion: BatchExpansion,
+        discovered_files: u64,
+        discovered_bytes: u64,
+        skipped: Vec<String>,
+    ) -> Result<(), String> {
+        self.request(|reply| QueueCommand::UpdateBatch {
+            id,
+            expansion,
+            discovered_files,
+            discovered_bytes,
+            skipped,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn cancel_batch(&self, id: Uuid) -> Result<(), String> {
+        self.request(|reply| QueueCommand::CancelBatch { id, reply })
+            .await
+    }
+
     async fn request<T>(
         &self,
         command: impl FnOnce(oneshot::Sender<Result<T, String>>) -> QueueCommand,
@@ -190,6 +225,22 @@ pub enum QueueCommand {
         settings: QueueSettings,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    CreateBatch {
+        info: BatchInfo,
+        reply: oneshot::Sender<Result<BatchCancellation, String>>,
+    },
+    UpdateBatch {
+        id: Uuid,
+        expansion: BatchExpansion,
+        discovered_files: u64,
+        discovered_bytes: u64,
+        skipped: Vec<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    CancelBatch {
+        id: Uuid,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Durable queue state and command receiver prepared before the Tauri builder
@@ -239,6 +290,7 @@ impl QueueBootstrap {
             startup_authorized: HashSet::new(),
             pending_terminal_results: HashMap::new(),
             pending_progress: HashMap::new(),
+            batch_cancellations: HashMap::new(),
             persistence_fault: false,
             snapshot: self.snapshot,
         }
@@ -266,6 +318,9 @@ pub struct QueueActor {
     startup_authorized: HashSet<Uuid>,
     pending_terminal_results: HashMap<Uuid, PendingTerminalResult>,
     pending_progress: HashMap<Uuid, PendingProgress>,
+    /// Stop flags handed to in-flight expansion tasks, one per batch. Runtime
+    /// only: after a restart there is no walk left to stop.
+    batch_cancellations: HashMap<Uuid, BatchCancellation>,
     persistence_fault: bool,
     snapshot: Arc<RwLock<TransferQueueSnapshot>>,
 }
@@ -478,6 +533,27 @@ impl QueueActor {
             }
             QueueCommand::UpdateSettings { settings, reply } => {
                 let result = self.update_settings(settings).await;
+                let _ = reply.send(result);
+            }
+            QueueCommand::CreateBatch { info, reply } => {
+                let result = self.create_batch(info).await;
+                let _ = reply.send(result);
+            }
+            QueueCommand::UpdateBatch {
+                id,
+                expansion,
+                discovered_files,
+                discovered_bytes,
+                skipped,
+                reply,
+            } => {
+                let result = self
+                    .update_batch(id, expansion, discovered_files, discovered_bytes, skipped)
+                    .await;
+                let _ = reply.send(result);
+            }
+            QueueCommand::CancelBatch { id, reply } => {
+                let result = self.cancel_batch(id).await;
                 let _ = reply.send(result);
             }
         }
@@ -1636,6 +1712,118 @@ impl QueueActor {
         Ok(removed)
     }
 
+    // -----------------------------------------------------------------------
+    // Batch bookkeeping
+    //
+    // Batches hold no domain state of their own: members are ordinary jobs and
+    // every roll-up is derived at emission time. These three commands only
+    // maintain the small persisted `BatchInfo` record and the stop flag its
+    // expansion task polls, so no reducer transition is involved.
+    // -----------------------------------------------------------------------
+
+    async fn create_batch(&mut self, info: BatchInfo) -> Result<BatchCancellation, String> {
+        let id = info.id;
+        if self.document.batches.contains_key(&id) {
+            return Err(format!("transfer batch {id} already exists"));
+        }
+        let mut next = self.document.clone();
+        next.batches.insert(id, info);
+        self.commit(next).await?;
+        let cancellation = BatchCancellation::new();
+        self.batch_cancellations.insert(id, cancellation.clone());
+        Ok(cancellation)
+    }
+
+    async fn update_batch(
+        &mut self,
+        id: Uuid,
+        expansion: BatchExpansion,
+        discovered_files: u64,
+        discovered_bytes: u64,
+        skipped: Vec<String>,
+    ) -> Result<(), String> {
+        // A cancel that landed while the walk was unwinding owns the expansion
+        // state: the task's final write may still grow the discovered totals,
+        // but it must not report a walk that a user already stopped as either
+        // running or complete.
+        let cancelled = self
+            .batch_cancellations
+            .get(&id)
+            .is_some_and(BatchCancellation::is_cancelled);
+
+        let mut next = self.document.clone();
+        let batch = next
+            .batches
+            .get_mut(&id)
+            .ok_or_else(|| format!("transfer batch {id} was not found"))?;
+        let expansion = if cancelled {
+            batch.expansion.clone()
+        } else {
+            expansion
+        };
+        let updated = BatchInfo {
+            expansion,
+            discovered_files,
+            discovered_bytes,
+            skipped,
+            ..batch.clone()
+        };
+        if *batch == updated {
+            return Ok(());
+        }
+        let terminal = updated.expansion != BatchExpansion::Running;
+        *batch = updated;
+        self.commit(next).await?;
+        if terminal {
+            self.batch_cancellations.remove(&id);
+        }
+        Ok(())
+    }
+
+    async fn cancel_batch(&mut self, id: Uuid) -> Result<(), String> {
+        if !self.document.batches.contains_key(&id) {
+            return Err(format!("transfer batch {id} was not found"));
+        }
+        // Stop the walk first so it enqueues nothing more while the members
+        // below are being cancelled.
+        if let Some(cancellation) = self.batch_cancellations.get(&id) {
+            cancellation.cancel();
+        }
+
+        let members: Vec<Uuid> = self
+            .document
+            .jobs
+            .iter()
+            .filter(|job| job.batch_id == Some(id) && !job.state.is_terminal())
+            .map(|job| job.id)
+            .collect();
+        let mut failures = Vec::new();
+        for member in members {
+            if let Err(error) = self.cancel(member).await {
+                log::warn!("could not cancel batch member {member}: {error}");
+                failures.push(error);
+            }
+        }
+
+        if matches!(
+            self.document.batches.get(&id).map(|batch| &batch.expansion),
+            Some(BatchExpansion::Running)
+        ) {
+            let mut next = self.document.clone();
+            if let Some(batch) = next.batches.get_mut(&id) {
+                batch.expansion = BatchExpansion::Interrupted {
+                    reason: BATCH_CANCELLED_REASON.to_string(),
+                };
+            }
+            self.commit(next).await?;
+        }
+
+        match failures.into_iter().next() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     async fn update_settings(&mut self, settings: QueueSettings) -> Result<(), String> {
         validate_queue_settings(&settings)?;
         if self.document.settings == settings {
@@ -1660,6 +1848,10 @@ impl QueueActor {
         let delta = queue_delta(&self.document, &next);
         self.document = next;
         *self.snapshot.write() = snapshot.clone();
+        // Compaction can drop a batch record; its stop flag has nothing left
+        // to guard, so it goes with it rather than accumulating forever.
+        self.batch_cancellations
+            .retain(|id, _| self.document.batches.contains_key(id));
 
         self.event_sink.job_updated(delta.clone()).await;
         for job in &delta.upserts {
@@ -1826,7 +2018,7 @@ mod tests {
 
     use super::{QueueActor, QueueClock, QueueStore, TransferQueueHandle};
     use crate::remote::transfer_queue::{
-        batch::{BatchExpansion, BatchInfo, derive_batch_aggregates},
+        batch::{BATCH_CANCELLED_REASON, BatchExpansion, BatchInfo, derive_batch_aggregates},
         events::{QueueEventPayload, QueueSummaryPayload, TransferEventSink},
         model::{
             AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ConflictResolution,
@@ -3904,6 +4096,190 @@ mod tests {
         assert!(harness.handle.snapshot().batches.is_empty());
     }
 
+    fn new_batch(id: Uuid) -> BatchInfo {
+        BatchInfo {
+            id,
+            name: "vendor-assets".into(),
+            direction: TransferDirection::Upload,
+            expansion: BatchExpansion::Running,
+            discovered_files: 0,
+            discovered_bytes: 0,
+            skipped: Vec::new(),
+            created_at_ms: 10,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_batch_persists_the_record_and_rejects_a_duplicate_id() {
+        let batch_id = Uuid::from_u128(0x9_800);
+        let harness = ActorHarness::new();
+
+        harness
+            .handle
+            .create_batch(new_batch(batch_id))
+            .await
+            .unwrap();
+
+        // The store applies startup recovery on load, so the live expansion
+        // state is read from the snapshot; the store only proves it persisted.
+        let on_disk = harness.store.load().unwrap().into_document();
+        assert_eq!(on_disk.batches.len(), 1);
+        let snapshot = harness.handle.snapshot();
+        assert_eq!(snapshot.batches[0].info.expansion, BatchExpansion::Running);
+
+        let error = harness
+            .handle
+            .create_batch(new_batch(batch_id))
+            .await
+            .unwrap_err();
+        assert!(error.contains(&batch_id.to_string()), "{error}");
+    }
+
+    #[tokio::test]
+    async fn update_batch_grows_totals_and_never_reopens_a_cancelled_batch() {
+        let batch_id = Uuid::from_u128(0x9_801);
+        let harness = ActorHarness::new();
+        harness
+            .handle
+            .create_batch(new_batch(batch_id))
+            .await
+            .unwrap();
+
+        harness
+            .handle
+            .update_batch(
+                batch_id,
+                BatchExpansion::Running,
+                2,
+                300,
+                vec!["/src/link".into()],
+            )
+            .await
+            .unwrap();
+        let info = harness.handle.snapshot().batches[0].info.clone();
+        assert_eq!(info.discovered_files, 2);
+        assert_eq!(info.discovered_bytes, 300);
+        assert_eq!(info.skipped, vec!["/src/link".to_string()]);
+
+        harness.handle.cancel_batch(batch_id).await.unwrap();
+
+        // The expansion task's last write lands after the cancel; it may
+        // still grow the discovered totals but must not resurrect the walk.
+        harness
+            .handle
+            .update_batch(batch_id, BatchExpansion::Complete, 3, 400, Vec::new())
+            .await
+            .unwrap();
+
+        let info = harness.handle.snapshot().batches[0].info.clone();
+        assert_eq!(
+            info.expansion,
+            BatchExpansion::Interrupted {
+                reason: BATCH_CANCELLED_REASON.to_string(),
+            }
+        );
+        assert_eq!(info.discovered_files, 3);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_touches_only_its_own_non_terminal_members() {
+        let batch_id = Uuid::from_u128(0x9_802);
+        let other_batch_id = Uuid::from_u128(0x9_803);
+        let queued_id = Uuid::from_u128(0x9_804);
+        let done_id = Uuid::from_u128(0x9_805);
+        let stranger_id = Uuid::from_u128(0x9_806);
+
+        let mut queued = stored_job(queued_id, TransferJobState::Queued, 1);
+        queued.batch_id = Some(batch_id);
+        let mut done = stored_job(
+            done_id,
+            TransferJobState::Completed {
+                result: CompletionResult::Transferred,
+            },
+            0,
+        );
+        done.batch_id = Some(batch_id);
+        let mut stranger = stored_job(stranger_id, TransferJobState::Queued, 2);
+        stranger.batch_id = Some(other_batch_id);
+
+        let harness = ActorHarness::with_document(document_with(vec![queued, done, stranger]));
+        // Batches are created live rather than seeded: a `Running` batch in a
+        // loaded document is by definition a restart, and startup recovery
+        // would have already marked it interrupted.
+        harness
+            .handle
+            .create_batch(new_batch(batch_id))
+            .await
+            .unwrap();
+        harness
+            .handle
+            .create_batch(new_batch(other_batch_id))
+            .await
+            .unwrap();
+
+        harness.handle.cancel_batch(batch_id).await.unwrap();
+
+        let snapshot = harness.handle.snapshot();
+        let state_of = |id: Uuid| {
+            snapshot
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .unwrap()
+                .state
+                .clone()
+        };
+        assert!(matches!(
+            state_of(queued_id),
+            TransferJobState::Cancelled { .. }
+        ));
+        assert!(matches!(
+            state_of(done_id),
+            TransferJobState::Completed { .. }
+        ));
+        assert_eq!(state_of(stranger_id), TransferJobState::Queued);
+
+        let batches = snapshot.batches;
+        let expansion_of = |id: Uuid| {
+            batches
+                .iter()
+                .find(|aggregate| aggregate.info.id == id)
+                .unwrap()
+                .info
+                .expansion
+                .clone()
+        };
+        assert_eq!(
+            expansion_of(batch_id),
+            BatchExpansion::Interrupted {
+                reason: BATCH_CANCELLED_REASON.to_string(),
+            }
+        );
+        assert_eq!(expansion_of(other_batch_id), BatchExpansion::Running);
+    }
+
+    #[tokio::test]
+    async fn batch_commands_reject_unknown_ids() {
+        let harness = ActorHarness::new();
+        let unknown = Uuid::from_u128(0x9_807);
+
+        let cancel_error = harness.handle.cancel_batch(unknown).await.unwrap_err();
+        let update_error = harness
+            .handle
+            .update_batch(unknown, BatchExpansion::Complete, 0, 0, Vec::new())
+            .await
+            .unwrap_err();
+
+        assert!(
+            cancel_error.contains(&unknown.to_string()),
+            "{cancel_error}"
+        );
+        assert!(
+            update_error.contains(&unknown.to_string()),
+            "{update_error}"
+        );
+    }
+
     #[tokio::test]
     async fn automatic_compaction_is_included_in_the_same_atomic_delta() {
         let oldest_id = Uuid::from_u128(1_000);
@@ -4170,6 +4546,7 @@ mod tests {
                 startup_authorized: Default::default(),
                 pending_terminal_results: HashMap::new(),
                 pending_progress: HashMap::new(),
+                batch_cancellations: HashMap::new(),
                 persistence_fault: false,
                 snapshot,
             },

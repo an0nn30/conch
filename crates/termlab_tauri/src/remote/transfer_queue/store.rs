@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::remote::transfer_queue::batch::BatchExpansion;
 use crate::remote::transfer_queue::model::{
     TRANSFER_HISTORY_LIMIT, TRANSFER_STORE_VERSION, TransferJobState, TransferQueueDocument,
     validate_document_semantics,
@@ -223,6 +224,19 @@ pub fn recover_for_startup(document: &mut TransferQueueDocument) {
         }
         if job.eta_seconds.is_some() {
             job.eta_seconds = None;
+            changed = true;
+        }
+    }
+
+    // An expansion task does not survive the process that spawned it. Its
+    // already-enqueued members restore like any other job, but the
+    // un-enumerated remainder is gone, and the batch header must say so
+    // rather than claim the walk is still counting.
+    for batch in document.batches.values_mut() {
+        if batch.expansion == BatchExpansion::Running {
+            batch.expansion = BatchExpansion::Interrupted {
+                reason: "app closed during expansion".into(),
+            };
             changed = true;
         }
     }
@@ -600,6 +614,57 @@ mod tests {
         ));
         assert_eq!(document.jobs[2].speed_bytes_per_second, 0);
         assert_eq!(document.jobs[2].eta_seconds, None);
+    }
+
+    #[test]
+    fn startup_recovery_marks_running_expansions_interrupted_without_touching_members() {
+        use crate::remote::transfer_queue::batch::{BatchExpansion, BatchInfo};
+
+        let batch_id = Uuid::from_u128(0xB0);
+        let complete_id = Uuid::from_u128(0xB1);
+        let mut member = sample_job(TransferJobState::Queued);
+        member.batch_id = Some(batch_id);
+        let mut document = document_with(member);
+        for (id, expansion) in [
+            (batch_id, BatchExpansion::Running),
+            (complete_id, BatchExpansion::Complete),
+        ] {
+            document.batches.insert(
+                id,
+                BatchInfo {
+                    id,
+                    name: "vendor-assets".into(),
+                    direction: TransferDirection::Upload,
+                    expansion,
+                    discovered_files: 4,
+                    discovered_bytes: 400,
+                    skipped: Vec::new(),
+                    created_at_ms: 10,
+                },
+            );
+        }
+
+        recover_for_startup(&mut document);
+
+        assert_eq!(
+            document.batches[&batch_id].expansion,
+            BatchExpansion::Interrupted {
+                reason: "app closed during expansion".into(),
+            },
+            "an expansion that was still running at exit restores as interrupted"
+        );
+        assert_eq!(
+            document.batches[&complete_id].expansion,
+            BatchExpansion::Complete,
+            "a finished expansion is left alone"
+        );
+        assert_eq!(document.batches[&batch_id].discovered_files, 4);
+        assert_eq!(
+            document.jobs[0].state,
+            TransferJobState::Queued,
+            "members restore exactly as the queue design dictates"
+        );
+        assert_eq!(document.jobs[0].batch_id, Some(batch_id));
     }
 
     #[test]

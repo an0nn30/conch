@@ -24,7 +24,7 @@ use super::transfer_queue::model::{
 };
 
 #[derive(Clone)]
-struct TransferSessionSnapshot {
+pub(super) struct TransferSessionSnapshot {
     server_entry_id: Option<String>,
     server_label: Option<String>,
     host: String,
@@ -70,7 +70,7 @@ impl TransferOriginCommand {
     }
 }
 
-trait TransferSessionLookup {
+pub(super) trait TransferSessionLookup {
     fn transfer_session(
         &self,
         window_label: &str,
@@ -117,7 +117,7 @@ impl TransferSessionLookup for RemoteState {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_transfer_request(
+pub(super) fn build_transfer_request(
     sessions: &impl TransferSessionLookup,
     caller_label: &str,
     parent_label: Option<&str>,
@@ -128,6 +128,7 @@ fn build_transfer_request(
     remote_path: String,
     origin: Option<TransferOrigin>,
     conflict_policy: Option<ConflictPolicy>,
+    batch_id: Option<Uuid>,
 ) -> Result<NewTransferJob, String> {
     let window_label = parent_label.unwrap_or(caller_label);
     let session = sessions.transfer_session(window_label, pane_id)?;
@@ -173,7 +174,7 @@ fn build_transfer_request(
         local_path,
         remote_path,
         file_name,
-        batch_id: None,
+        batch_id,
         priority,
         host_key,
         destination_key,
@@ -236,6 +237,7 @@ pub(crate) async fn transfer_download(
             remote_path,
             origin.map(TransferOriginCommand::into_origin),
             conflict_policy,
+            None,
         )?
     };
     enqueue_transfer(&queue, request).await
@@ -269,9 +271,49 @@ pub(crate) async fn transfer_upload(
             remote_path,
             origin.map(TransferOriginCommand::into_origin),
             conflict_policy,
+            None,
         )?
     };
     enqueue_transfer(&queue, request).await
+}
+
+/// Transfer a whole folder. Validates the source, creates the batch, spawns
+/// the expansion task, and returns the batch id immediately — discovered
+/// files are enqueued (and may start transferring) while the walk continues.
+#[tauri::command]
+pub(crate) async fn transfer_enqueue_recursive(
+    window: tauri::WebviewWindow,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    queue: tauri::State<'_, TransferQueueHandle>,
+    pane_id: u32,
+    direction: TransferDirection,
+    source_path: String,
+    dest_path: String,
+) -> Result<String, String> {
+    let caller_label = window.label().to_string();
+    let session_label = session_caller_label(&window);
+    let parent_label = (session_label != caller_label).then_some(session_label);
+
+    super::recursive_transfer::start_recursive_transfer(
+        queue.inner().clone(),
+        Arc::clone(remote.inner()),
+        caller_label,
+        parent_label,
+        pane_id,
+        direction,
+        source_path,
+        dest_path,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn transfer_cancel_batch(
+    queue: tauri::State<'_, TransferQueueHandle>,
+    batch_id: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&batch_id).map_err(|_| format!("Invalid batch id '{batch_id}'"))?;
+    queue.cancel_batch(id).await
 }
 
 #[tauri::command]
@@ -506,6 +548,7 @@ mod tests {
             "/srv/releases/./daily/../report.csv".into(),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -545,6 +588,7 @@ mod tests {
                 name: "commandPalette".into(),
             }),
             Some(ConflictPolicy::Overwrite),
+            None,
         )
         .unwrap();
 
@@ -593,6 +637,7 @@ mod tests {
             "/srv/panel.txt".into(),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -607,6 +652,45 @@ mod tests {
     }
 
     #[test]
+    fn expansion_members_carry_their_batch_id_while_single_transfers_do_not() {
+        let lookup = FakeSessionLookup::default().with_session("main", 5, configured_session());
+        let batch_id = Uuid::from_u128(0x1_000);
+
+        let member = build_transfer_request(
+            &lookup,
+            "main",
+            None,
+            5,
+            Uuid::from_u128(0x108),
+            TransferDirection::Upload,
+            "/tmp/tree/a/one.txt".into(),
+            "/srv/tree/a/one.txt".into(),
+            None,
+            None,
+            Some(batch_id),
+        )
+        .unwrap();
+        let single = build_transfer_request(
+            &lookup,
+            "main",
+            None,
+            5,
+            Uuid::from_u128(0x109),
+            TransferDirection::Upload,
+            "/tmp/one.txt".into(),
+            "/srv/one.txt".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(member.batch_id, Some(batch_id));
+        assert_eq!(member.file_name, "one.txt");
+        assert_eq!(single.batch_id, None);
+    }
+
+    #[test]
     fn missing_session_is_reported_without_building_a_request() {
         let error = build_transfer_request(
             &FakeSessionLookup::default(),
@@ -617,6 +701,7 @@ mod tests {
             TransferDirection::Upload,
             "/tmp/missing.txt".into(),
             "/srv/missing.txt".into(),
+            None,
             None,
             None,
         )
@@ -639,6 +724,7 @@ mod tests {
             "/srv/editor.txt".into(),
             Some(TransferOrigin::Editor),
             None,
+            None,
         )
         .unwrap();
         let legacy = build_transfer_request(
@@ -650,6 +736,7 @@ mod tests {
             TransferDirection::Download,
             "/tmp/legacy.txt".into(),
             "/srv/legacy.txt".into(),
+            None,
             None,
             None,
         )
@@ -682,6 +769,7 @@ mod tests {
             "/srv/queued.txt".into(),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -710,6 +798,7 @@ mod tests {
             TransferDirection::Download,
             "/tmp/cancelled.txt".into(),
             "/srv/cancelled.txt".into(),
+            None,
             None,
             None,
         )
