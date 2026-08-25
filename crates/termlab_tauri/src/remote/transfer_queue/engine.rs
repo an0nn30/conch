@@ -1800,6 +1800,11 @@ fn compact_history(document: &mut TransferQueueDocument) {
         .enumerate()
         .filter_map(|(index, job)| (!remove.contains(&index)).then_some(job))
         .collect();
+    // A batch whose last member just aged out of history must not become a
+    // phantom zero-progress row that `derive_batch_aggregates` keeps
+    // emitting forever: compacting here, right after the trim, is what makes
+    // that orphan state unreachable.
+    compact_batches(&mut document.batches, &document.jobs);
 }
 
 #[cfg(test)]
@@ -3928,6 +3933,83 @@ mod tests {
             [queued_id]
         );
         client.assert_matches(&harness.handle.snapshot());
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_also_drops_batches_whose_last_member_left_history() {
+        let oldest_id = Uuid::from_u128(1_000);
+        let surviving_member_id = Uuid::from_u128(1_001);
+        let orphaned_batch_id = Uuid::from_u128(9_800);
+        let surviving_batch_id = Uuid::from_u128(9_801);
+        let mut jobs: Vec<_> = (0..500)
+            .map(|index| {
+                let id = Uuid::from_u128(1_000 + index);
+                let mut job = stored_job(
+                    id,
+                    TransferJobState::Completed {
+                        result: CompletionResult::Transferred,
+                    },
+                    index as u64 + 1,
+                );
+                if id == oldest_id {
+                    job.batch_id = Some(orphaned_batch_id);
+                } else if id == surviving_member_id {
+                    job.batch_id = Some(surviving_batch_id);
+                }
+                job
+            })
+            .collect();
+        let queued_id = Uuid::from_u128(2_000);
+        jobs.push(stored_job(queued_id, TransferJobState::Queued, 501));
+        let mut document = document_with(jobs);
+        for (id, name) in [
+            (orphaned_batch_id, "orphaned"),
+            (surviving_batch_id, "surviving"),
+        ] {
+            document.batches.insert(
+                id,
+                BatchInfo {
+                    id,
+                    name: name.into(),
+                    direction: TransferDirection::Upload,
+                    expansion: BatchExpansion::Complete,
+                    discovered_files: 1,
+                    discovered_bytes: 100,
+                    skipped: Vec::new(),
+                    created_at_ms: 10,
+                },
+            );
+        }
+        let harness = ActorHarness::with_document(document);
+        harness.events.clear();
+
+        // The queued job's own cancellation is what pushes the terminal
+        // count past the 500-row history cap, triggering the same-commit
+        // trim of the single oldest terminal job (`oldest_id`) that
+        // `automatic_compaction_is_included_in_the_same_atomic_delta`
+        // exercises for jobs; this test asserts the batch side of that trim.
+        assert!(harness.handle.cancel(queued_id).await.unwrap());
+
+        let delta = harness.events.take_delta_containing(queued_id);
+        assert_eq!(delta.removed_ids, [oldest_id]);
+        assert!(
+            !delta
+                .batches
+                .iter()
+                .any(|aggregate| aggregate.info.id == orphaned_batch_id),
+            "a batch whose last member just left history must not appear in the emitted projection"
+        );
+        assert!(
+            delta
+                .batches
+                .iter()
+                .any(|aggregate| aggregate.info.id == surviving_batch_id),
+            "a batch with a surviving member must remain in the emitted projection"
+        );
+
+        let on_disk = harness.store.load().unwrap().into_document();
+        assert!(!on_disk.batches.contains_key(&orphaned_batch_id));
+        assert!(on_disk.batches.contains_key(&surviving_batch_id));
     }
 
     #[tokio::test]
