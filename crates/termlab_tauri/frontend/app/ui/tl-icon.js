@@ -6,7 +6,7 @@
   let darkVariants = new Set([
     'add', 'edit', 'remove', 'refresh', 'web', 'settings', 'gear',
     'hideToolWindow', 'notifications', 'moreVertical', 'sftp',
-    'newFolder', 'copy',
+    'newFolder', 'copy', 'back', 'forward', 'home', 'toggleVisibility',
   ]);
 
   function resolve(name, isDark) {
@@ -17,6 +17,9 @@
   }
 
   function isDarkAppearance() {
+    // No document (string-building in a headless harness): the app's default
+    // appearance is dark, so resolve the dark variant.
+    if (typeof document === 'undefined' || !document.documentElement) return true;
     return document.documentElement.getAttribute('data-tl-appearance') !== 'light';
   }
 
@@ -25,6 +28,16 @@
   // `add_dark.svg` are two spellings of one name, and reversing the suffix
   // rule is guesswork the moment an icon is legitimately named `*_dark`.
   const NAME_ATTR = 'data-tl-icon';
+
+  // String twin of create() for innerHTML templates (the files-panel toolbar
+  // renders through one template string, not element-by-element). Carries the
+  // same NAME_ATTR stamp so refreshAll() re-resolves it on appearance flips.
+  // `name` is a known logical icon name, never user input.
+  function html(name, opts) {
+    const size = (opts && opts.size) || 16;
+    const alt = (opts && opts.alt) || '';
+    return `<img class="tl-icon" draggable="false" width="${size}" height="${size}" alt="${alt}" ${NAME_ATTR}="${name}" src="${resolve(name, isDarkAppearance())}">`;
+  }
 
   function create(name, opts) {
     const img = document.createElement('img');
@@ -83,6 +96,7 @@
 
   global.tlIcon = {
     create,
+    html,
     resolve,
     refreshAll,
     _setDarkVariants: (set) => { darkVariants = set; },

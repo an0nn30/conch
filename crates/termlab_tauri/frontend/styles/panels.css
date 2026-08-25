@@ -45,7 +45,10 @@
     }
     .fp-tb-btn:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
     .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
-    .fp-tb-btn.active { color: var(--green); }
+    /* Active state needs more than a text color now that the glyphs are
+       <img> icons: highlight the button surface itself. */
+    .fp-tb-btn.active { color: var(--green); background: var(--active-highlight); border-color: var(--tab-border); }
+    .fp-tb-btn .tl-icon { display: block; }
     /* Remote pane's host dropdown + disconnect — mounted into this slot by
        pane-view.js after every toolbar rebuild (app/ui/tl-combo.js wraps the
        hidden .fp-host-select; see files-panel.js's onComboMount). Sized down

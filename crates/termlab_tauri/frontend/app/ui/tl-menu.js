@@ -159,6 +159,11 @@
     menu.style.left = o.x + 'px';
     menu.style.top = o.y + 'px';
     menu.style.zIndex = String(menuZIndex());
+    // A popup opened from a control (tl-combo) must be at least as wide as
+    // that control; content may still widen it beyond the minimum.
+    if (typeof o.minWidth === 'number' && o.minWidth > 0) {
+      menu.style.minWidth = Math.round(o.minWidth) + 'px';
+    }
 
     for (const item of (Array.isArray(o.items) ? o.items : [])) {
       if (item.separator) {

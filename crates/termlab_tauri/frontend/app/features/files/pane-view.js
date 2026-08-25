@@ -94,7 +94,7 @@
           <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
           <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${d.iconHome || ''}</button>
           <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${d.iconRefresh || ''}</button>
-          <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
+          <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">${d.iconHidden || '.*'}</button>
         </span>
       </div>
       ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}

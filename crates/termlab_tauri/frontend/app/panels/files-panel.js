@@ -27,10 +27,15 @@
   });
 
   // Navigation icons — PNG assets from icons/ directory
-  const ICON_BACK = '<img src="icons/go-previous-dark.png" width="12" height="12" class="fp-icon">';
-  const ICON_FWD = '<img src="icons/go-next-dark.png" width="12" height="12" class="fp-icon">';
-  const ICON_HOME = '<img src="icons/go-home-dark.png" width="12" height="12" class="fp-icon">';
-  const ICON_REFRESH = '<img src="icons/view-refresh-dark.png" width="12" height="12" class="fp-icon">';
+  // Branded, appearance-aware toolbar glyphs (tl-icon resolves the light or
+  // dark variant per render; refreshAll() heals stamped imgs on theme flips).
+  // Resolved per call, not baked at module load, so a theme change after
+  // startup renders the correct variant on the next pane render.
+  function toolbarIcon(name) {
+    return window.tlIcon && typeof window.tlIcon.html === 'function'
+      ? window.tlIcon.html(name, { size: 12 })
+      : '';
+  }
 
   function createPaneState(prefix, isLocal) {
     if (!filesPaneStore || typeof filesPaneStore.createPaneState !== 'function') {
@@ -935,10 +940,11 @@
     const comboState = computeHostComboState();
     filesPaneView.renderPane(pane, el, {
       activeRemotePaneId,
-      iconBack: ICON_BACK,
-      iconForward: ICON_FWD,
-      iconHome: ICON_HOME,
-      iconRefresh: ICON_REFRESH,
+      iconBack: toolbarIcon('back'),
+      iconForward: toolbarIcon('forward'),
+      iconHome: toolbarIcon('home'),
+      iconRefresh: toolbarIcon('refresh'),
+      iconHidden: toolbarIcon('toggleVisibility'),
       fileIcons: window.fileIcons,
       sortArrow,
       extOf,
