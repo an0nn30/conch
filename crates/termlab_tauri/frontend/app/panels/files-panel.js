@@ -463,9 +463,27 @@
     panelEl.innerHTML = `
       <div class="fp-pane-container">
         <div class="fp-pane" id="fp-local"></div>
+        <div class="fp-pane-divider" id="fp-pane-divider"></div>
         <div class="fp-pane" id="fp-remote"></div>
       </div>
     `;
+
+    // Resizable splitter between the panes. Orientation is read per-drag from
+    // the computed style because the zone CSS flips the container to a column
+    // when this tool window docks in a sidebar.
+    if (window.termlabFilesSplit) {
+      const containerEl = panelEl.querySelector('.fp-pane-container');
+      window.termlabFilesSplit.attach({
+        container: containerEl,
+        firstEl: panelEl.querySelector('#fp-local'),
+        secondEl: panelEl.querySelector('#fp-remote'),
+        dividerEl: panelEl.querySelector('#fp-pane-divider'),
+        storage: window.localStorage,
+        getOrientation: () => (
+          window.getComputedStyle(containerEl).flexDirection === 'column' ? 'column' : 'row'
+        ),
+      });
+    }
 
     // Start local pane at home
     const homePromise = filesDataService && typeof filesDataService.getHomeDir === 'function'

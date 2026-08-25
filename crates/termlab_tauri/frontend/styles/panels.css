@@ -4,7 +4,21 @@
     }
     .fp-pane-container { flex: 1; display: flex; flex-direction: row; overflow: hidden; }
     .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; }
-    .fp-pane + .fp-pane { border-left: 1px solid var(--tl-border); }
+    /* The divider between the panes is both the visual border and the drag
+       handle for the resizable split (app/features/files/split.js). */
+    .fp-pane-divider {
+      flex: 0 0 5px; cursor: col-resize; touch-action: none;
+      background: transparent; border-left: 1px solid var(--tl-border);
+    }
+    .fp-pane-divider:hover, .fp-pane-divider:active { background: var(--tl-border); }
+    /* Sidebar zones are tall and narrow: stack the panes vertically there.
+       The bottom zone and popped-out hosts keep the side-by-side layout. */
+    .tool-zone[data-zone^="left"] .fp-pane-container,
+    .tool-zone[data-zone^="right"] .fp-pane-container { flex-direction: column; }
+    .tool-zone[data-zone^="left"] .fp-pane-divider,
+    .tool-zone[data-zone^="right"] .fp-pane-divider {
+      cursor: row-resize; border-left: none; border-top: 1px solid var(--tl-border);
+    }
     .fp-toolbar {
       display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0;
     }
