@@ -1,18 +1,38 @@
-use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::ops::ControlFlow;
+use std::sync::{Arc, Mutex};
 
 use async_lsp::lsp_types as lsp;
 use async_lsp::LanguageClient;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use super::types::{
-    CompletionItem, CompletionResponse, CompletionTextEdit, DefinitionResponse, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, EditorLocation, EditorPosition, EditorRange,
-    EditorTextEdit, HoverBlock, HoverResponse, SignatureHelpResponse, SignatureInformation,
-    SignatureParameter,
+    CompletionItem, CompletionResponse, CompletionTextEdit, CompletionUnsupportedEffect,
+    DefinitionResponse, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
+    EditorLocation, EditorPosition, EditorRange, EditorTextEdit, HoverBlock, HoverResponse,
+    SignatureHelpResponse, SignatureInformation, SignatureParameter,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProgressPayload {
+    Begin {
+        title: String,
+        cancellable: Option<bool>,
+        message: Option<String>,
+        percentage: Option<u32>,
+    },
+    Report {
+        cancellable: Option<bool>,
+        message: Option<String>,
+        percentage: Option<u32>,
+    },
+    End {
+        message: Option<String>,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ClientEvent {
@@ -27,9 +47,12 @@ pub(crate) enum ClientEvent {
     },
     Progress {
         token: String,
-        value: Value,
+        progress: ProgressPayload,
     },
-    RegistrationsChanged(Vec<String>),
+    RegistrationsChanged(Vec<DynamicRegistration>),
+    Overflow {
+        dropped: u64,
+    },
     ProtocolExited(Option<String>),
     ProcessExited {
         success: bool,
@@ -37,29 +60,210 @@ pub(crate) enum ClientEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DynamicRegistration {
+    pub id: String,
+    pub method: String,
+    pub options: DynamicRegistrationOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DynamicRegistrationOptions {
+    DidOpen(lsp::TextDocumentRegistrationOptions),
+    DidClose(lsp::TextDocumentRegistrationOptions),
+    DidChange(lsp::TextDocumentChangeRegistrationOptions),
+    DidSave(lsp::TextDocumentSaveRegistrationOptions),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SyncPolicy {
+    pub change: lsp::TextDocumentSyncKind,
+    pub open: bool,
+    pub close: bool,
+    pub save: bool,
+    pub save_include_text: bool,
+}
+
+impl Default for SyncPolicy {
+    fn default() -> Self {
+        Self {
+            change: lsp::TextDocumentSyncKind::NONE,
+            open: false,
+            close: false,
+            save: false,
+            save_include_text: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SessionCapabilityState {
+    static_sync: SyncPolicy,
+    registrations: Vec<DynamicRegistration>,
+}
+
+impl SessionCapabilityState {
+    pub(crate) fn set_static_sync(&mut self, sync: SyncPolicy) {
+        self.static_sync = sync;
+    }
+
+    pub(crate) fn sync_policy(&self) -> SyncPolicy {
+        let mut sync = self.static_sync;
+        for registration in &self.registrations {
+            match &registration.options {
+                DynamicRegistrationOptions::DidOpen(_) => sync.open = true,
+                DynamicRegistrationOptions::DidClose(_) => sync.close = true,
+                DynamicRegistrationOptions::DidChange(options) => {
+                    sync.change = if options.sync_kind == 1 {
+                        lsp::TextDocumentSyncKind::FULL
+                    } else {
+                        lsp::TextDocumentSyncKind::INCREMENTAL
+                    };
+                }
+                DynamicRegistrationOptions::DidSave(options) => {
+                    sync.save = true;
+                    sync.save_include_text = options.include_text.unwrap_or(false);
+                }
+            }
+        }
+        sync
+    }
+
+    fn registrations(&self) -> Vec<DynamicRegistration> {
+        self.registrations.clone()
+    }
+}
+
+const EVENT_MAILBOX_CAPACITY: usize = 32;
+
+#[derive(Clone)]
+pub(crate) struct EventSink {
+    mailbox: Arc<EventMailbox>,
+}
+
+struct EventMailbox {
+    pending: Mutex<PendingEvents>,
+    ready: Notify,
+}
+
+#[derive(Default)]
+struct PendingEvents {
+    queue: VecDeque<ClientEvent>,
+    dropped: u64,
+}
+
+impl EventSink {
+    pub(crate) fn new(target: mpsc::Sender<ClientEvent>) -> Self {
+        let mailbox = Arc::new(EventMailbox {
+            pending: Mutex::new(PendingEvents::default()),
+            ready: Notify::new(),
+        });
+        let forwarder = mailbox.clone();
+        tokio::spawn(async move {
+            loop {
+                forwarder.ready.notified().await;
+                loop {
+                    let event = forwarder.pop();
+                    let Some(event) = event else { break };
+                    if target.send(event).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Self { mailbox }
+    }
+
+    pub(crate) fn send(&self, event: ClientEvent) {
+        self.mailbox.push(event);
+    }
+}
+
+impl EventMailbox {
+    fn push(&self, event: ClientEvent) {
+        let mut pending = self.pending.lock().expect("LSP event mailbox poisoned");
+        if let Some(existing) = pending
+            .queue
+            .iter_mut()
+            .find(|existing| same_state_key(existing, &event))
+        {
+            *existing = event;
+            self.ready.notify_one();
+            return;
+        }
+        if pending.queue.len() == EVENT_MAILBOX_CAPACITY {
+            pending.dropped = pending.dropped.saturating_add(1);
+            if is_state_event(&event) {
+                let remove = pending
+                    .queue
+                    .iter()
+                    .position(|queued| !is_state_event(queued))
+                    .unwrap_or(0);
+                pending.queue.remove(remove);
+            } else {
+                self.ready.notify_one();
+                return;
+            }
+        }
+        pending.queue.push_back(event);
+        drop(pending);
+        self.ready.notify_one();
+    }
+
+    fn pop(&self) -> Option<ClientEvent> {
+        let mut pending = self.pending.lock().expect("LSP event mailbox poisoned");
+        if pending.dropped > 0 {
+            let dropped = std::mem::take(&mut pending.dropped);
+            return Some(ClientEvent::Overflow { dropped });
+        }
+        pending.queue.pop_front()
+    }
+}
+
+fn same_state_key(left: &ClientEvent, right: &ClientEvent) -> bool {
+    match (left, right) {
+        (
+            ClientEvent::Diagnostics { uri: left, .. },
+            ClientEvent::Diagnostics { uri: right, .. },
+        ) => left == right,
+        (ClientEvent::RegistrationsChanged(_), ClientEvent::RegistrationsChanged(_)) => true,
+        (ClientEvent::Progress { token: left, .. }, ClientEvent::Progress { token: right, .. }) => {
+            left == right
+        }
+        _ => false,
+    }
+}
+
+fn is_state_event(event: &ClientEvent) -> bool {
+    matches!(
+        event,
+        ClientEvent::Diagnostics { .. }
+            | ClientEvent::RegistrationsChanged(_)
+            | ClientEvent::Progress { .. }
+    )
+}
+
 pub(crate) struct ClientState {
-    events: mpsc::Sender<ClientEvent>,
+    events: EventSink,
     workspace_configuration: Value,
-    registrations: HashSet<String>,
+    capabilities: Arc<Mutex<SessionCapabilityState>>,
 }
 
 impl ClientState {
-    pub(crate) fn new(events: mpsc::Sender<ClientEvent>, workspace_configuration: Value) -> Self {
+    pub(crate) fn new(
+        events: EventSink,
+        workspace_configuration: Value,
+        capabilities: Arc<Mutex<SessionCapabilityState>>,
+    ) -> Self {
         Self {
             events,
             workspace_configuration,
-            registrations: HashSet::new(),
+            capabilities,
         }
     }
 
     fn send(&self, event: ClientEvent) {
-        let _ = self.events.try_send(event);
-    }
-
-    fn registration_snapshot(&self) -> Vec<String> {
-        let mut registrations = self.registrations.iter().cloned().collect::<Vec<_>>();
-        registrations.sort();
-        registrations
+        self.events.send(event);
     }
 }
 
@@ -72,13 +276,13 @@ impl LanguageClient for ClientState {
         params: lsp::ConfigurationParams,
     ) -> BoxFuture<'static, Result<Vec<Value>, Self::Error>> {
         let configuration = self.workspace_configuration.clone();
-        Box::pin(async move {
-            Ok(params
-                .items
-                .into_iter()
-                .map(|_| configuration.clone())
-                .collect())
-        })
+        let sections = params
+            .items
+            .iter()
+            .map(|item| item.section.as_deref())
+            .collect::<Vec<_>>();
+        let values = resolve_workspace_configuration(&configuration, sections);
+        Box::pin(async move { Ok(values) })
     }
 
     fn work_done_progress_create(
@@ -92,29 +296,74 @@ impl LanguageClient for ClientState {
         &mut self,
         params: lsp::RegistrationParams,
     ) -> BoxFuture<'static, Result<(), Self::Error>> {
-        for registration in params.registrations {
-            self.registrations.insert(registration.id);
-        }
-        self.send(ClientEvent::RegistrationsChanged(
-            self.registration_snapshot(),
-        ));
-        Box::pin(async { Ok(()) })
+        let parsed = params
+            .registrations
+            .into_iter()
+            .map(parse_registration)
+            .collect::<Result<Vec<_>, _>>();
+        let result = parsed.and_then(|registrations| {
+            let snapshot = {
+                let mut capabilities = self
+                    .capabilities
+                    .lock()
+                    .expect("LSP capability state poisoned");
+                if registrations.iter().any(|registration| {
+                    capabilities
+                        .registrations
+                        .iter()
+                        .any(|existing| existing.id == registration.id)
+                }) {
+                    return Err(invalid_registration("duplicate registration id"));
+                }
+                capabilities.registrations.extend(registrations);
+                capabilities.registrations()
+            };
+            self.send(ClientEvent::RegistrationsChanged(snapshot));
+            Ok(())
+        });
+        Box::pin(async move { result })
     }
 
     fn unregister_capability(
         &mut self,
         params: lsp::UnregistrationParams,
     ) -> BoxFuture<'static, Result<(), Self::Error>> {
-        for registration in params.unregisterations {
-            self.registrations.remove(&registration.id);
-        }
-        self.send(ClientEvent::RegistrationsChanged(
-            self.registration_snapshot(),
-        ));
-        Box::pin(async { Ok(()) })
+        let result = {
+            let mut capabilities = self
+                .capabilities
+                .lock()
+                .expect("LSP capability state poisoned");
+            let valid = params.unregisterations.iter().all(|unregistration| {
+                supported_registration_method(&unregistration.method)
+                    && capabilities.registrations.iter().any(|registration| {
+                        registration.id == unregistration.id
+                            && registration.method == unregistration.method
+                    })
+            });
+            if !valid {
+                Err(invalid_registration(
+                    "unknown or unsupported dynamic unregistration",
+                ))
+            } else {
+                for unregistration in params.unregisterations {
+                    capabilities.registrations.retain(|registration| {
+                        registration.id != unregistration.id
+                            || registration.method != unregistration.method
+                    });
+                }
+                let snapshot = capabilities.registrations();
+                drop(capabilities);
+                self.send(ClientEvent::RegistrationsChanged(snapshot));
+                Ok(())
+            }
+        };
+        Box::pin(async move { result })
     }
 
     fn publish_diagnostics(&mut self, params: lsp::PublishDiagnosticsParams) -> Self::NotifyResult {
+        if params.uri.scheme() != "file" {
+            return ControlFlow::Continue(());
+        }
         self.send(ClientEvent::Diagnostics {
             uri: params.uri.to_string(),
             version: params.version,
@@ -145,10 +394,77 @@ impl LanguageClient for ClientState {
                 lsp::NumberOrString::Number(value) => value.to_string(),
                 lsp::NumberOrString::String(value) => value,
             },
-            value: serde_json::to_value(params.value).unwrap_or(Value::Null),
+            progress: normalize_progress(params.value),
         });
         ControlFlow::Continue(())
     }
+}
+
+fn parse_registration(
+    registration: lsp::Registration,
+) -> Result<DynamicRegistration, async_lsp::ResponseError> {
+    let options = registration.register_options.unwrap_or_else(|| {
+        serde_json::json!({
+            "documentSelector": null
+        })
+    });
+    let options = match registration.method.as_str() {
+        "textDocument/didOpen" => DynamicRegistrationOptions::DidOpen(
+            serde_json::from_value(options).map_err(invalid_registration)?,
+        ),
+        "textDocument/didClose" => DynamicRegistrationOptions::DidClose(
+            serde_json::from_value(options).map_err(invalid_registration)?,
+        ),
+        "textDocument/didChange" => {
+            let options: lsp::TextDocumentChangeRegistrationOptions =
+                serde_json::from_value(options).map_err(invalid_registration)?;
+            if !matches!(options.sync_kind, 1 | 2) {
+                return Err(invalid_registration("unsupported didChange syncKind"));
+            }
+            DynamicRegistrationOptions::DidChange(options)
+        }
+        "textDocument/didSave" => DynamicRegistrationOptions::DidSave(
+            serde_json::from_value(options).map_err(invalid_registration)?,
+        ),
+        _ => {
+            return Err(invalid_registration(
+                "unsupported dynamic registration method",
+            ))
+        }
+    };
+    let selector_is_supported = match &options {
+        DynamicRegistrationOptions::DidOpen(options)
+        | DynamicRegistrationOptions::DidClose(options) => options.document_selector.is_none(),
+        DynamicRegistrationOptions::DidChange(options) => options.document_selector.is_none(),
+        DynamicRegistrationOptions::DidSave(options) => options
+            .text_document_registration_options
+            .document_selector
+            .is_none(),
+    };
+    if !selector_is_supported {
+        return Err(invalid_registration(
+            "dynamic document selectors are unsupported",
+        ));
+    }
+    Ok(DynamicRegistration {
+        id: registration.id,
+        method: registration.method,
+        options,
+    })
+}
+
+fn supported_registration_method(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/didOpen"
+            | "textDocument/didClose"
+            | "textDocument/didChange"
+            | "textDocument/didSave"
+    )
+}
+
+fn invalid_registration(message: impl std::fmt::Display) -> async_lsp::ResponseError {
+    async_lsp::ResponseError::new(async_lsp::ErrorCode::INVALID_PARAMS, message)
 }
 
 fn message_kind(kind: lsp::MessageType) -> String {
@@ -167,6 +483,7 @@ fn message_kind(kind: lsp::MessageType) -> String {
 pub(crate) fn normalize_completion(
     document_id: &str,
     source_version: i32,
+    generation: u64,
     response: Option<lsp::CompletionResponse>,
 ) -> (CompletionResponse, Vec<(String, lsp::CompletionItem)>) {
     let (is_incomplete, items) = match response {
@@ -179,7 +496,7 @@ pub(crate) fn normalize_completion(
         .into_iter()
         .enumerate()
         .map(|(index, item)| {
-            let id = format!("{document_id}:{source_version}:{index}");
+            let id = format!("{document_id}:{source_version}:{generation}:{index}");
             let normalized = normalize_completion_item(id.clone(), &item);
             originals.push((id, item));
             normalized
@@ -247,9 +564,55 @@ fn normalize_completion_item(id: String, item: &lsp::CompletionItem) -> Completi
                 .tags
                 .as_ref()
                 .is_some_and(|tags| tags.contains(&lsp::CompletionItemTag::DEPRECATED)),
-        workspace_edit_unsupported: item.data.as_ref().is_some_and(|data| {
-            data.get("workspaceEdit").is_some() || data.get("documentChanges").is_some()
-        }),
+        unsupported_effects: item
+            .command
+            .as_ref()
+            .map(|_| vec![CompletionUnsupportedEffect::Command])
+            .unwrap_or_default(),
+    }
+}
+
+pub(crate) fn resolve_workspace_configuration<'a>(
+    configuration: &Value,
+    sections: impl IntoIterator<Item = Option<&'a str>>,
+) -> Vec<Value> {
+    sections
+        .into_iter()
+        .map(|section| {
+            let Some(section) = section else {
+                return configuration.clone();
+            };
+            section
+                .split('.')
+                .try_fold(configuration, |value, key| value.get(key))
+                .cloned()
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+pub(crate) fn normalize_progress(value: lsp::ProgressParamsValue) -> ProgressPayload {
+    match value {
+        lsp::ProgressParamsValue::WorkDone(lsp::WorkDoneProgress::Begin(value)) => {
+            ProgressPayload::Begin {
+                title: value.title,
+                cancellable: value.cancellable,
+                message: value.message,
+                percentage: value.percentage,
+            }
+        }
+        lsp::ProgressParamsValue::WorkDone(lsp::WorkDoneProgress::Report(value)) => {
+            ProgressPayload::Report {
+                cancellable: value.cancellable,
+                message: value.message,
+                percentage: value.percentage,
+            }
+        }
+        lsp::ProgressParamsValue::WorkDone(lsp::WorkDoneProgress::End(value)) => {
+            ProgressPayload::End {
+                message: value.message,
+            }
+        }
     }
 }
 
@@ -499,12 +862,13 @@ mod tests {
 
     use super::{
         normalize_completion, normalize_definition, normalize_diagnostics, normalize_hover,
-        normalize_signature_help,
+        normalize_progress, normalize_resolved_completion, normalize_signature_help,
+        resolve_workspace_configuration, ProgressPayload,
     };
-    use crate::lsp::types::{CompletionTextEdit, DiagnosticSeverity};
+    use crate::lsp::types::{CompletionTextEdit, CompletionUnsupportedEffect, DiagnosticSeverity};
 
     #[test]
-    fn completion_normalizes_edits_snippets_and_unsupported_workspace_metadata() {
+    fn completion_normalizes_edits_snippets_and_unsupported_command_effects() {
         let raw: lsp::CompletionResponse = serde_json::from_value(json!({
             "isIncomplete": true,
             "items": [{
@@ -532,24 +896,110 @@ mod tests {
                     "newText": "import console;\n"
                 }],
                 "commitCharacters": [".", "("],
-                "data": { "workspaceEdit": { "changes": { "file:///other.ts": [] } } }
+                "command": { "title": "Run import", "command": "editor.runImport" }
             }]
         }))
         .unwrap();
 
-        let (response, originals) = normalize_completion("doc", 7, Some(raw));
+        let (response, originals) = normalize_completion("doc", 7, 12, Some(raw));
 
         assert!(response.is_incomplete);
         assert_eq!(response.items[0].kind.as_deref(), Some("function"));
         assert!(response.items[0].is_snippet);
         assert_eq!(response.items[0].commit_characters, [".", "("]);
         assert_eq!(response.items[0].additional_text_edits.len(), 1);
-        assert!(response.items[0].workspace_edit_unsupported);
+        assert_eq!(
+            response.items[0].unsupported_effects,
+            [CompletionUnsupportedEffect::Command]
+        );
         assert!(matches!(
             response.items[0].text_edit,
             Some(CompletionTextEdit::InsertReplaceEdit { .. })
         ));
-        assert_eq!(originals[0].0, "doc:7:0");
+        assert_eq!(originals[0].0, "doc:7:12:0");
+
+        let mut resolved = originals[0].1.clone();
+        resolved.command = Some(lsp::Command {
+            title: "Run resolved action".into(),
+            command: "editor.runResolved".into(),
+            arguments: None,
+        });
+        assert_eq!(
+            normalize_resolved_completion(originals[0].0.clone(), &resolved).unsupported_effects,
+            [CompletionUnsupportedEffect::Command]
+        );
+    }
+
+    #[test]
+    fn workspace_configuration_resolves_ordered_dot_sections_and_missing_values() {
+        let configuration = json!({
+            "typescript": {
+                "preferences": { "quoteStyle": "single" }
+            },
+            "javascript": { "format": true }
+        });
+
+        assert_eq!(
+            resolve_workspace_configuration(
+                &configuration,
+                [
+                    None,
+                    Some("typescript.preferences"),
+                    Some("missing.section"),
+                    Some("javascript"),
+                ]
+            ),
+            vec![
+                configuration,
+                json!({ "quoteStyle": "single" }),
+                json!(null),
+                json!({ "format": true }),
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_is_normalized_to_typed_begin_report_and_end_payloads() {
+        let begin: lsp::ProgressParamsValue = serde_json::from_value(json!({
+            "kind": "begin",
+            "title": "Indexing",
+            "cancellable": true,
+            "message": "starting",
+            "percentage": 1
+        }))
+        .unwrap();
+        let report: lsp::ProgressParamsValue = serde_json::from_value(json!({
+            "kind": "report",
+            "message": "halfway",
+            "percentage": 50
+        }))
+        .unwrap();
+        let end: lsp::ProgressParamsValue =
+            serde_json::from_value(json!({ "kind": "end", "message": "done" })).unwrap();
+
+        assert_eq!(
+            normalize_progress(begin),
+            ProgressPayload::Begin {
+                title: "Indexing".into(),
+                cancellable: Some(true),
+                message: Some("starting".into()),
+                percentage: Some(1),
+            }
+        );
+        assert_eq!(
+            normalize_progress(report),
+            ProgressPayload::Report {
+                cancellable: None,
+                message: Some("halfway".into()),
+                percentage: Some(50),
+            }
+        );
+        assert_eq!(
+            normalize_progress(end),
+            ProgressPayload::End {
+                message: Some("done".into()),
+            }
+        );
     }
 
     #[test]

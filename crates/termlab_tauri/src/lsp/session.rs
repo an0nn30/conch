@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::future::Future;
@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,7 +27,8 @@ use tower::ServiceBuilder;
 use super::catalog::{AdapterDescriptor, ResolvedServerCommand};
 use super::client::{
     normalize_completion, normalize_definition, normalize_diagnostics, normalize_hover,
-    normalize_resolved_completion, normalize_signature_help, ClientEvent, ClientState,
+    normalize_resolved_completion, normalize_signature_help, ClientEvent, ClientState, EventSink,
+    SessionCapabilityState, SyncPolicy,
 };
 use super::document::{DocumentError, VersionedDocument};
 use super::types::{
@@ -40,6 +41,8 @@ const DEFINITION_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const MIN_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REVALIDATED_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_COMPLETION_GENERATIONS: usize = 32;
+const MAX_COMPLETION_ITEMS: usize = 2048;
 
 type BoxReader = Box<dyn AsyncRead + Unpin + Send>;
 type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
@@ -307,6 +310,7 @@ pub(crate) enum SessionError {
     Timeout(&'static str),
     UnknownDocument(String),
     UnknownCompletion(String),
+    NonLocalUri(String),
     Document(DocumentError),
 }
 
@@ -326,6 +330,7 @@ impl fmt::Display for SessionError {
             Self::Timeout(operation) => write!(formatter, "language server {operation} timed out"),
             Self::UnknownDocument(document) => write!(formatter, "unknown LSP document {document}"),
             Self::UnknownCompletion(item) => write!(formatter, "unknown completion item {item}"),
+            Self::NonLocalUri(uri) => write!(formatter, "non-file LSP URI is unsupported: {uri}"),
             Self::Document(error) => write!(formatter, "invalid document change: {error:?}"),
         }
     }
@@ -353,20 +358,68 @@ struct OpenDocument {
     text: VersionedDocument,
 }
 
-#[derive(Clone, Copy)]
-struct SyncPolicy {
-    change: lsp::TextDocumentSyncKind,
-    open_close: bool,
-    save: bool,
-    save_include_text: bool,
+struct CachedCompletion {
+    document_id: String,
+    source_version: i32,
+    generation: u64,
+    item: lsp::CompletionItem,
+}
+
+#[derive(Default)]
+struct CompletionCache {
+    items: HashMap<String, CachedCompletion>,
+    generations: VecDeque<(String, u64, Vec<String>)>,
+}
+
+impl CompletionCache {
+    fn insert_generation(
+        &mut self,
+        document_id: &str,
+        source_version: i32,
+        generation: u64,
+        items: Vec<(String, lsp::CompletionItem)>,
+    ) {
+        let mut ids = Vec::with_capacity(items.len());
+        for (id, item) in items {
+            ids.push(id.clone());
+            self.items.insert(
+                id,
+                CachedCompletion {
+                    document_id: document_id.to_owned(),
+                    source_version,
+                    generation,
+                    item,
+                },
+            );
+        }
+        self.generations
+            .push_back((document_id.to_owned(), generation, ids));
+        while self.generations.len() > MAX_COMPLETION_GENERATIONS
+            || self.items.len() > MAX_COMPLETION_ITEMS
+        {
+            let Some((_, _, expired)) = self.generations.pop_front() else {
+                break;
+            };
+            for id in expired {
+                self.items.remove(&id);
+            }
+        }
+    }
+
+    fn purge_document(&mut self, document_id: &str) {
+        self.items.retain(|_, item| item.document_id != document_id);
+        self.generations
+            .retain(|(cached_document, _, _)| cached_document != document_id);
+    }
 }
 
 struct SessionInner {
     server: ServerSocket,
     process: ProcessHandle,
     documents: Mutex<HashMap<String, OpenDocument>>,
-    completion_items: Mutex<HashMap<String, lsp::CompletionItem>>,
-    sync: SyncPolicy,
+    completion_items: Mutex<CompletionCache>,
+    capabilities: Arc<std::sync::Mutex<SessionCapabilityState>>,
+    next_completion_generation: AtomicU64,
     request_gate: Mutex<()>,
     next_request_id: AtomicI32,
     shutdown_timeout: Duration,
@@ -396,35 +449,36 @@ impl LspSession {
             .await?;
         let workspace_configuration = serde_json::from_str(descriptor.workspace_configuration_json)
             .map_err(|error| SessionError::Protocol(error.to_string()))?;
-        let router =
-            Router::from_language_client(ClientState::new(events.clone(), workspace_configuration));
+        let event_sink = EventSink::new(events);
+        let capabilities = Arc::new(std::sync::Mutex::new(SessionCapabilityState::default()));
+        let router = Router::from_language_client(ClientState::new(
+            event_sink.clone(),
+            workspace_configuration,
+            capabilities.clone(),
+        ));
         let (mainloop, mut server) = MainLoop::new_client(|_| {
             ServiceBuilder::new()
                 .layer(CatchUnwindLayer::default())
                 .layer(ConcurrencyLayer::default())
                 .service(router)
         });
-        let protocol_events = events.clone();
-        let process_events = events.clone();
+        let protocol_events = event_sink.clone();
+        let process_events = event_sink.clone();
         let process_for_report = launched.process.clone();
         tokio::spawn(async move {
             let status = process_for_report.wait().await;
-            let _ = process_events
-                .send(ClientEvent::ProcessExited {
-                    success: status.success,
-                    code: status.code,
-                })
-                .await;
+            process_events.send(ClientEvent::ProcessExited {
+                success: status.success,
+                code: status.code,
+            });
         });
         let mainloop_task = tokio::spawn(async move {
             let result = mainloop
                 .run_buffered(launched.stdout.compat(), launched.stdin.compat_write())
                 .await;
-            let _ = protocol_events
-                .send(ClientEvent::ProtocolExited(
-                    result.err().map(|error| error.to_string()),
-                ))
-                .await;
+            protocol_events.send(ClientEvent::ProtocolExited(
+                result.err().map(|error| error.to_string()),
+            ));
         });
 
         let init_timeout = descriptor
@@ -449,17 +503,22 @@ impl LspSession {
                 return Err(SessionError::Timeout("initialize"));
             }
         };
+        let sync = sync_policy(result.capabilities.text_document_sync);
+        capabilities
+            .lock()
+            .expect("LSP capability state poisoned")
+            .set_static_sync(sync);
         server
             .notify::<lsp::notification::Initialized>(lsp::InitializedParams {})
             .map_err(|error| SessionError::Protocol(error.to_string()))?;
-        let sync = sync_policy(result.capabilities.text_document_sync);
         Ok(Self {
             inner: Arc::new(SessionInner {
                 server,
                 process: launched.process,
                 documents: Mutex::new(HashMap::new()),
-                completion_items: Mutex::new(HashMap::new()),
-                sync,
+                completion_items: Mutex::new(CompletionCache::default()),
+                capabilities,
+                next_completion_generation: AtomicU64::new(1),
                 request_gate: Mutex::new(()),
                 next_request_id: AtomicI32::new(1),
                 shutdown_timeout: descriptor.timeouts.shutdown.min(Duration::from_secs(3)),
@@ -468,6 +527,15 @@ impl LspSession {
     }
 
     pub(crate) async fn did_open(&self, document: SessionDocument) -> Result<(), SessionError> {
+        if document.uri.scheme() != "file" {
+            return Err(SessionError::NonLocalUri(document.uri.to_string()));
+        }
+        let sync = self
+            .inner
+            .capabilities
+            .lock()
+            .expect("LSP capability state poisoned")
+            .sync_policy();
         let item = lsp::TextDocumentItem {
             uri: document.uri.clone(),
             language_id: document.language_id.clone(),
@@ -489,21 +557,36 @@ impl LspSession {
             );
         }
         self.inner
-            .server
-            .notify::<lsp::notification::DidOpenTextDocument>(lsp::DidOpenTextDocumentParams {
-                text_document: item,
-            })
-            .map_err(|error| SessionError::Protocol(error.to_string()))
+            .completion_items
+            .lock()
+            .await
+            .purge_document(&document.document_id);
+        if sync.open {
+            self.inner
+                .server
+                .notify::<lsp::notification::DidOpenTextDocument>(lsp::DidOpenTextDocumentParams {
+                    text_document: item,
+                })
+                .map_err(|error| SessionError::Protocol(error.to_string()))?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn did_change(&self, batch: LspChangeBatch) -> Result<i32, SessionError> {
+        let sync = self
+            .inner
+            .capabilities
+            .lock()
+            .expect("LSP capability state poisoned")
+            .sync_policy();
+        let document_id = batch.document_id.clone();
         let (uri, version, changes) = {
             let mut documents = self.inner.documents.lock().await;
             let document = documents
                 .get_mut(&batch.document_id)
                 .ok_or_else(|| SessionError::UnknownDocument(batch.document_id.clone()))?;
             let applied = document.text.apply_batch(batch)?;
-            let changes = if self.inner.sync.change == lsp::TextDocumentSyncKind::FULL {
+            let changes = if sync.change == lsp::TextDocumentSyncKind::FULL {
                 vec![lsp::TextDocumentContentChangeEvent {
                     range: None,
                     range_length: None,
@@ -514,7 +597,12 @@ impl LspSession {
             };
             (document.uri.clone(), applied.version, changes)
         };
-        if self.inner.sync.change != lsp::TextDocumentSyncKind::NONE {
+        self.inner
+            .completion_items
+            .lock()
+            .await
+            .purge_document(&document_id);
+        if sync.change != lsp::TextDocumentSyncKind::NONE {
             self.inner
                 .server
                 .notify::<lsp::notification::DidChangeTextDocument>(
@@ -529,6 +617,12 @@ impl LspSession {
     }
 
     pub(crate) async fn did_save(&self, document_id: &str) -> Result<(), SessionError> {
+        let sync = self
+            .inner
+            .capabilities
+            .lock()
+            .expect("LSP capability state poisoned")
+            .sync_policy();
         let (uri, text) = {
             let documents = self.inner.documents.lock().await;
             let document = documents
@@ -536,12 +630,12 @@ impl LspSession {
                 .ok_or_else(|| SessionError::UnknownDocument(document_id.to_owned()))?;
             (document.uri.clone(), document.text.text())
         };
-        if self.inner.sync.save {
+        if sync.save {
             self.inner
                 .server
                 .notify::<lsp::notification::DidSaveTextDocument>(lsp::DidSaveTextDocumentParams {
                     text_document: lsp::TextDocumentIdentifier { uri },
-                    text: self.inner.sync.save_include_text.then_some(text),
+                    text: sync.save_include_text.then_some(text),
                 })
                 .map_err(|error| SessionError::Protocol(error.to_string()))?;
         }
@@ -549,6 +643,12 @@ impl LspSession {
     }
 
     pub(crate) async fn did_close(&self, document_id: &str) -> Result<(), SessionError> {
+        let sync = self
+            .inner
+            .capabilities
+            .lock()
+            .expect("LSP capability state poisoned")
+            .sync_policy();
         let document = self
             .inner
             .documents
@@ -556,7 +656,12 @@ impl LspSession {
             .await
             .remove(document_id)
             .ok_or_else(|| SessionError::UnknownDocument(document_id.to_owned()))?;
-        if self.inner.sync.open_close {
+        self.inner
+            .completion_items
+            .lock()
+            .await
+            .purge_document(document_id);
+        if sync.close {
             self.inner
                 .server
                 .notify::<lsp::notification::DidCloseTextDocument>(
@@ -586,8 +691,18 @@ impl LspSession {
                 server.completion(params)
             })
             .await?;
-        let (response, originals) = normalize_completion(document_id, version, response);
-        self.inner.completion_items.lock().await.extend(originals);
+        let generation = self
+            .inner
+            .next_completion_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let (response, originals) =
+            normalize_completion(document_id, version, generation, response);
+        self.inner.completion_items.lock().await.insert_generation(
+            document_id,
+            version,
+            generation,
+            originals,
+        );
         Ok(response)
     }
 
@@ -595,24 +710,41 @@ impl LspSession {
         &self,
         item_id: &str,
     ) -> Result<CompletionItem, SessionError> {
-        let item = self
-            .inner
-            .completion_items
-            .lock()
-            .await
-            .get(item_id)
-            .cloned()
-            .ok_or_else(|| SessionError::UnknownCompletion(item_id.to_owned()))?;
+        let (document_id, source_version, generation, item) = {
+            let cache = self.inner.completion_items.lock().await;
+            let cached = cache
+                .items
+                .get(item_id)
+                .ok_or_else(|| SessionError::UnknownCompletion(item_id.to_owned()))?;
+            (
+                cached.document_id.clone(),
+                cached.source_version,
+                cached.generation,
+                cached.item.clone(),
+            )
+        };
+        let current_version = self.document_snapshot(&document_id).await?.1;
+        if current_version != source_version {
+            return Err(SessionError::UnknownCompletion(item_id.to_owned()));
+        }
         let resolved = self
             .request(SHORT_REQUEST_TIMEOUT, "completion resolve", move |server| {
                 server.completion_item_resolve(item)
             })
             .await?;
-        self.inner
+        if let Some(cached) = self
+            .inner
             .completion_items
             .lock()
             .await
-            .insert(item_id.to_owned(), resolved.clone());
+            .items
+            .get_mut(item_id)
+            .filter(|cached| {
+                cached.generation == generation && cached.source_version == source_version
+            })
+        {
+            cached.item = resolved.clone();
+        }
         Ok(normalize_resolved_completion(item_id.to_owned(), &resolved))
     }
 
@@ -788,7 +920,6 @@ fn initialize_params(descriptor: &AdapterDescriptor, root: &Path) -> lsp::Initia
                 "didSave": true
             },
             "completion": {
-                "dynamicRegistration": true,
                 "contextSupport": true,
                 "completionItem": {
                     "snippetSupport": true,
@@ -802,11 +933,9 @@ fn initialize_params(descriptor: &AdapterDescriptor, root: &Path) -> lsp::Initia
                 }
             },
             "hover": {
-                "dynamicRegistration": true,
                 "contentFormat": ["markdown", "plaintext"]
             },
             "signatureHelp": {
-                "dynamicRegistration": true,
                 "signatureInformation": {
                     "documentationFormat": ["markdown", "plaintext"],
                     "parameterInformation": { "labelOffsetSupport": true },
@@ -815,7 +944,6 @@ fn initialize_params(descriptor: &AdapterDescriptor, root: &Path) -> lsp::Initia
                 "contextSupport": true
             },
             "definition": {
-                "dynamicRegistration": true,
                 "linkSupport": true
             },
             "publishDiagnostics": {
@@ -823,7 +951,6 @@ fn initialize_params(descriptor: &AdapterDescriptor, root: &Path) -> lsp::Initia
                 "versionSupport": true
             },
             "diagnostic": {
-                "dynamicRegistration": true,
                 "relatedDocumentSupport": false
             }
         },
@@ -868,13 +995,15 @@ fn sync_policy(capability: Option<lsp::TextDocumentSyncCapability>) -> SyncPolic
     match capability {
         None => SyncPolicy {
             change: lsp::TextDocumentSyncKind::NONE,
-            open_close: true,
+            open: false,
+            close: false,
             save: false,
             save_include_text: false,
         },
         Some(lsp::TextDocumentSyncCapability::Kind(change)) => SyncPolicy {
             change,
-            open_close: true,
+            open: true,
+            close: true,
             save: true,
             save_include_text: false,
         },
@@ -888,7 +1017,8 @@ fn sync_policy(capability: Option<lsp::TextDocumentSyncCapability>) -> SyncPolic
             };
             SyncPolicy {
                 change: options.change.unwrap_or(lsp::TextDocumentSyncKind::NONE),
-                open_close: options.open_close.unwrap_or(false),
+                open: options.open_close.unwrap_or(false),
+                close: options.open_close.unwrap_or(false),
                 save,
                 save_include_text,
             }
@@ -913,14 +1043,31 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{LspSession, ProcessServerLauncher, ServerLauncher, SessionDocument, SessionError};
-    use crate::lsp::catalog::ResolvedServerCommand;
+    use crate::lsp::catalog::{AdapterDescriptor, ResolvedServerCommand};
     #[cfg(unix)]
     use crate::lsp::catalog::{ResolvedFileIdentity, ResolvedResourceFile};
-    use crate::lsp::client::ClientEvent;
+    use crate::lsp::client::{ClientEvent, ProgressPayload};
     use crate::lsp::test_support::{
         full_feature_script, root, test_command, test_descriptor, MockServerLauncher, ServerScript,
     };
     use crate::lsp::types::{LspChangeBatch, LspTextChange};
+
+    fn descriptor_with_configuration(configuration: &'static str) -> &'static AdapterDescriptor {
+        Box::leak(Box::new(AdapterDescriptor {
+            workspace_configuration_json: configuration,
+            ..*test_descriptor()
+        }))
+    }
+
+    fn session_document(document_id: &str, uri: async_lsp::lsp_types::Url) -> SessionDocument {
+        SessionDocument {
+            document_id: document_id.into(),
+            uri,
+            language_id: "typescript".into(),
+            version: 1,
+            text: "con".into(),
+        }
+    }
 
     #[tokio::test]
     async fn session_round_trips_editor_features() {
@@ -1038,6 +1185,374 @@ mod tests {
         observed.assert_incremental_changes_descend();
         observed.assert_saved_text("CoN");
         observed.assert_configuration_and_unsupported_request_responses();
+    }
+
+    #[tokio::test]
+    async fn workspace_configuration_sections_round_trip_in_requested_order() {
+        let (launcher, observed) =
+            MockServerLauncher::scripted(ServerScript::ConfigurationSections);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let session = LspSession::start(
+            descriptor_with_configuration(
+                r#"{"typescript":{"preferences":{"quoteStyle":"single"}},"javascript":{"format":true}}"#,
+            ),
+            test_command(),
+            root(),
+            launcher,
+            sink,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed.has_client_response(130) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        session.shutdown().await.unwrap();
+        observed.assert_configuration_sections();
+    }
+
+    #[tokio::test]
+    async fn supported_dynamic_sync_registration_and_unregistration_change_behavior() {
+        let (launcher, observed) = MockServerLauncher::scripted(ServerScript::DynamicSync);
+        let (sink, mut events) = tokio::sync::mpsc::channel(16);
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let Some(ClientEvent::RegistrationsChanged(registrations)) = events.recv().await
+                else {
+                    continue;
+                };
+                if registrations.len() == 3
+                    && registrations.iter().any(|registration| {
+                        registration.id == "change-dynamic"
+                            && registration.method == "textDocument/didChange"
+                    })
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        session
+            .did_open(session_document(
+                "doc-dynamic",
+                async_lsp::lsp_types::Url::from_file_path(root().join("dynamic.ts")).unwrap(),
+            ))
+            .await
+            .unwrap();
+        session
+            .did_change(LspChangeBatch {
+                document_id: "doc-dynamic".into(),
+                base_version: 1,
+                next_version: 2,
+                changes: vec![LspTextChange {
+                    from_utf16: 0,
+                    to_utf16: 1,
+                    inserted_text: "C".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(events.recv().await, Some(ClientEvent::RegistrationsChanged(registrations)) if registrations.is_empty()) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        session
+            .did_change(LspChangeBatch {
+                document_id: "doc-dynamic".into(),
+                base_version: 2,
+                next_version: 3,
+                changes: vec![LspTextChange {
+                    from_utf16: 1,
+                    to_utf16: 2,
+                    inserted_text: "O".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        session.did_close("doc-dynamic").await.unwrap();
+        session.shutdown().await.unwrap();
+        assert_eq!(observed.method_count("textDocument/didOpen"), 1);
+        assert_eq!(observed.method_count("textDocument/didChange"), 1);
+        assert_eq!(observed.method_count("textDocument/didClose"), 0);
+    }
+
+    #[tokio::test]
+    async fn false_and_absent_open_close_sync_keep_local_documents_without_lifecycle_notifications()
+    {
+        for (script, expected_change_count) in
+            [(ServerScript::OpenCloseFalse, 1), (ServerScript::NoSync, 0)]
+        {
+            let (launcher, observed) = MockServerLauncher::scripted(script);
+            let (sink, _events) = tokio::sync::mpsc::channel(16);
+            let session =
+                LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+                    .await
+                    .unwrap();
+            session
+                .did_open(session_document(
+                    "doc-local-only",
+                    async_lsp::lsp_types::Url::from_file_path(root().join("local-only.ts"))
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                session
+                    .did_change(LspChangeBatch {
+                        document_id: "doc-local-only".into(),
+                        base_version: 1,
+                        next_version: 2,
+                        changes: vec![LspTextChange {
+                            from_utf16: 0,
+                            to_utf16: 1,
+                            inserted_text: "C".into(),
+                        }],
+                    })
+                    .await
+                    .unwrap(),
+                2
+            );
+            session.did_close("doc-local-only").await.unwrap();
+            session.shutdown().await.unwrap();
+            assert_eq!(observed.method_count("textDocument/didOpen"), 0);
+            assert_eq!(
+                observed.method_count("textDocument/didChange"),
+                expected_change_count
+            );
+            assert_eq!(observed.method_count("textDocument/didClose"), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn non_file_documents_are_rejected_before_session_mutation_or_notification() {
+        let (launcher, observed) = MockServerLauncher::scripted(ServerScript::FullSync);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        for (index, uri) in [
+            "untitled:buffer",
+            "https://example.invalid/main.ts",
+            "vscode-remote://ssh-remote+host/main.ts",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let document_id = format!("remote-{index}");
+            assert!(matches!(
+                session
+                    .did_open(session_document(
+                        &document_id,
+                        async_lsp::lsp_types::Url::parse(uri).unwrap(),
+                    ))
+                    .await,
+                Err(SessionError::NonLocalUri(rejected)) if rejected == uri
+            ));
+            assert!(matches!(
+                session.completion(&document_id, Position::new(0, 0)).await,
+                Err(SessionError::UnknownDocument(_))
+            ));
+        }
+        session.shutdown().await.unwrap();
+        assert_eq!(observed.method_count("textDocument/didOpen"), 0);
+    }
+
+    #[tokio::test]
+    async fn non_file_publish_diagnostics_are_dropped_without_stopping_the_protocol() {
+        let (launcher, _observed) = MockServerLauncher::scripted(ServerScript::NonFileDiagnostics);
+        let (sink, mut events) = tokio::sync::mpsc::channel(16);
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        session
+            .did_open(session_document(
+                "doc-diagnostics",
+                async_lsp::lsp_types::Url::from_file_path(root().join("diagnostics.ts")).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let local = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(ClientEvent::Diagnostics {
+                    uri,
+                    version: Some(4),
+                    diagnostics,
+                }) = events.recv().await
+                {
+                    break (uri, diagnostics);
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(local.0.starts_with("file:"));
+        assert_eq!(local.1[0].message, "local latest");
+        tokio::task::yield_now().await;
+        while let Ok(event) = events.try_recv() {
+            if let ClientEvent::Diagnostics { uri, .. } = event {
+                assert!(
+                    uri.starts_with("file:"),
+                    "leaked non-file diagnostics: {uri}"
+                );
+            }
+        }
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_version_completion_generations_resolve_originals_and_purge_on_change_and_close() {
+        let (launcher, _observed) =
+            MockServerLauncher::scripted(ServerScript::CompletionGenerations);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        session
+            .did_open(session_document(
+                "doc-generations",
+                async_lsp::lsp_types::Url::from_file_path(root().join("generations.ts")).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let first = session
+            .completion("doc-generations", Position::new(0, 3))
+            .await
+            .unwrap();
+        let second = session
+            .completion("doc-generations", Position::new(0, 3))
+            .await
+            .unwrap();
+        assert_ne!(first.items[0].id, second.items[0].id);
+        assert_eq!(
+            session
+                .resolve_completion_item(&first.items[0].id)
+                .await
+                .unwrap()
+                .documentation[0]
+                .value,
+            "resolved generation 1"
+        );
+        assert_eq!(
+            session
+                .resolve_completion_item(&second.items[0].id)
+                .await
+                .unwrap()
+                .documentation[0]
+                .value,
+            "resolved generation 2"
+        );
+        let stale_after_change = session
+            .completion("doc-generations", Position::new(0, 3))
+            .await
+            .unwrap()
+            .items[0]
+            .id
+            .clone();
+        session
+            .did_change(LspChangeBatch {
+                document_id: "doc-generations".into(),
+                base_version: 1,
+                next_version: 2,
+                changes: vec![LspTextChange {
+                    from_utf16: 0,
+                    to_utf16: 1,
+                    inserted_text: "C".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.resolve_completion_item(&stale_after_change).await,
+            Err(SessionError::UnknownCompletion(_))
+        ));
+        let stale_after_close = session
+            .completion("doc-generations", Position::new(0, 3))
+            .await
+            .unwrap()
+            .items[0]
+            .id
+            .clone();
+        session.did_close("doc-generations").await.unwrap();
+        assert!(matches!(
+            session.resolve_completion_item(&stale_after_close).await,
+            Err(SessionError::UnknownCompletion(_))
+        ));
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capacity_one_event_backpressure_retains_latest_state_and_reports_overflow() {
+        let (launcher, observed) = MockServerLauncher::scripted(ServerScript::EventFlood);
+        let (sink, mut events) = tokio::sync::mpsc::channel(1);
+        sink.send(ClientEvent::Message {
+            kind: "test-blocker".into(),
+            message: "block forwarding".into(),
+        })
+        .await
+        .unwrap();
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        session
+            .did_open(session_document(
+                "doc-flood",
+                async_lsp::lsp_types::Url::from_file_path(root().join("flood.ts")).unwrap(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed.has_client_response(142) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(events.recv().await, Some(ClientEvent::Message { kind, .. }) if kind == "test-blocker")
+        );
+        let mut latest_diagnostics = false;
+        let mut latest_registration = false;
+        let mut latest_progress = false;
+        let mut overflow = false;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !(latest_diagnostics && latest_registration && latest_progress && overflow) {
+                match events.recv().await {
+                    Some(ClientEvent::Diagnostics {
+                        version: Some(3),
+                        diagnostics,
+                        ..
+                    }) => {
+                        latest_diagnostics = diagnostics[0].message == "diagnostic-3";
+                    }
+                    Some(ClientEvent::RegistrationsChanged(registrations)) => {
+                        latest_registration =
+                            registrations.len() == 1 && registrations[0].id == "save-b";
+                    }
+                    Some(ClientEvent::Progress {
+                        progress: ProgressPayload::End { message },
+                        ..
+                    }) => latest_progress = message.as_deref() == Some("complete"),
+                    Some(ClientEvent::Overflow { dropped }) => overflow = dropped > 0,
+                    Some(_) => {}
+                    None => panic!("event forwarder stopped"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        session.shutdown().await.unwrap();
     }
 
     #[tokio::test]

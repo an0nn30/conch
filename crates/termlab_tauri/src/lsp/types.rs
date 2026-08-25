@@ -121,6 +121,14 @@ pub(crate) enum CompletionTextEdit {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CompletionUnsupportedEffect {
+    Command,
+    WorkspaceEdit,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -150,7 +158,7 @@ pub(crate) struct CompletionItem {
     pub additional_text_edits: Vec<EditorTextEdit>,
     pub commit_characters: Vec<String>,
     pub deprecated: bool,
-    pub workspace_edit_unsupported: bool,
+    pub unsupported_effects: Vec<CompletionUnsupportedEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -370,9 +378,10 @@ pub(crate) struct ResyncDocumentResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyChangesResponse, CompletionItem, CompletionTextEdit, Diagnostic, EditorLocation,
-        EditorPosition, EditorRange, HoverBlock, LspCapabilities, LspChangeBatch, LspSessionState,
-        LspStatus, LspTextChange, LspUnavailableReason, ProjectCandidate, SignatureHelpResponse,
+        ApplyChangesResponse, CompletionItem, CompletionTextEdit, CompletionUnsupportedEffect,
+        Diagnostic, EditorLocation, EditorPosition, EditorRange, HoverBlock, LspCapabilities,
+        LspChangeBatch, LspSessionState, LspStatus, LspTextChange, LspUnavailableReason,
+        ProjectCandidate, SignatureHelpResponse,
     };
     use ts_rs::TS;
 
@@ -404,6 +413,7 @@ mod tests {
             EditorPosition::decl(&config),
             EditorRange::decl(&config),
             completion_declaration,
+            CompletionUnsupportedEffect::decl(&config),
             HoverBlock::decl(&config),
             SignatureHelpResponse::decl(&config),
             EditorLocation::decl(&config),

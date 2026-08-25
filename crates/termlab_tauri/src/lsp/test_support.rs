@@ -10,11 +10,17 @@ use super::catalog::{AdapterDescriptor, BundledServerCatalog, ResolvedServerComm
 use super::root::LanguageId;
 use super::session::{LaunchedServer, ProcessExit, ProcessHandle, ServerLauncher, SessionError};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServerScript {
     FullFeature,
     FullSync,
     NoSync,
+    OpenCloseFalse,
+    DynamicSync,
+    NonFileDiagnostics,
+    CompletionGenerations,
+    EventFlood,
+    ConfigurationSections,
     HangingCompletion,
     IgnoresExit,
     MalformedCompletion,
@@ -120,14 +126,12 @@ impl ObservedProtocol {
                 .find(|response| response["id"] == id)
                 .unwrap_or_else(|| panic!("missing response {id}; observed {responses:?}"))
         };
-        assert_eq!(
-            by_id(100)["result"],
-            json!([{ "javascript": {}, "typescript": {} }])
-        );
+        assert_eq!(by_id(100)["result"], json!([{}]));
         assert_eq!(by_id(101)["result"], Value::Null);
         assert_eq!(by_id(102)["result"], Value::Null);
         assert_eq!(by_id(103)["result"], Value::Null);
         assert_eq!(by_id(104)["error"]["code"], -32601);
+        assert_eq!(by_id(105)["error"]["code"], -32602);
     }
 
     pub(crate) fn assert_cancelled_request_id(&self, request_id: i32) {
@@ -137,6 +141,45 @@ impl ObservedProtocol {
                 message["method"] == "$/cancelRequest" && message["params"]["id"] == request_id
             }),
             "missing cancellation for {request_id}; observed {messages:?}"
+        );
+    }
+
+    pub(crate) fn method_count(&self, method: &str) -> usize {
+        self.methods
+            .lock()
+            .expect("observed protocol lock")
+            .iter()
+            .filter(|observed| observed.as_str() == method)
+            .count()
+    }
+
+    pub(crate) fn has_client_response(&self, id: i64) -> bool {
+        self.client_responses
+            .lock()
+            .expect("client responses lock")
+            .iter()
+            .any(|response| response["id"] == id)
+    }
+
+    pub(crate) fn assert_configuration_sections(&self) {
+        let responses = self.client_responses.lock().expect("client responses lock");
+        let response = responses
+            .iter()
+            .find(|response| response["id"] == 130)
+            .unwrap_or_else(|| panic!("missing configuration response; observed {responses:?}"));
+        assert_eq!(
+            response["result"],
+            json!([
+                {
+                    "typescript": {
+                        "preferences": { "quoteStyle": "single" }
+                    },
+                    "javascript": { "format": true }
+                },
+                { "quoteStyle": "single" },
+                null,
+                { "format": true }
+            ])
         );
     }
 }
@@ -203,6 +246,8 @@ async fn run_script(
     observed: ObservedProtocol,
 ) -> Result<(), String> {
     let mut reader = BufReader::new(reader);
+    let mut completion_generation = 0_u32;
+    let mut dynamic_unregistered = false;
     while let Some(message) = read_message(&mut reader).await? {
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             observed
@@ -266,12 +311,27 @@ async fn run_script(
                     capabilities["textDocument"]["definition"]["linkSupport"],
                     true
                 );
+                for feature in [
+                    "completion",
+                    "hover",
+                    "signatureHelp",
+                    "definition",
+                    "diagnostic",
+                ] {
+                    assert!(capabilities["textDocument"][feature]
+                        .get("dynamicRegistration")
+                        .is_none());
+                }
                 let text_document_sync = match script {
                     ServerScript::FullSync => Some(json!({
                         "openClose": true,
                         "change": 1
                     })),
-                    ServerScript::NoSync => None,
+                    ServerScript::NoSync | ServerScript::DynamicSync => None,
+                    ServerScript::OpenCloseFalse => Some(json!({
+                        "openClose": false,
+                        "change": 2
+                    })),
                     _ => Some(json!({
                         "openClose": true,
                         "change": 2,
@@ -328,9 +388,12 @@ async fn run_script(
                         "id": 102,
                         "method": "client/registerCapability",
                         "params": { "registrations": [{
-                            "id": "watch-1",
-                            "method": "workspace/didChangeWatchedFiles",
-                            "registerOptions": {}
+                            "id": "save-1",
+                            "method": "textDocument/didSave",
+                            "registerOptions": {
+                                "documentSelector": null,
+                                "includeText": true
+                            }
                         }] }
                     }),
                 )
@@ -342,8 +405,22 @@ async fn run_script(
                         "id": 103,
                         "method": "client/unregisterCapability",
                         "params": { "unregisterations": [{
-                            "id": "watch-1",
-                            "method": "workspace/didChangeWatchedFiles"
+                            "id": "save-1",
+                            "method": "textDocument/didSave"
+                        }] }
+                    }),
+                )
+                .await?;
+                write_message(
+                    &mut writer,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": 105,
+                        "method": "client/registerCapability",
+                        "params": { "registrations": [{
+                            "id": "watch-unsupported",
+                            "method": "workspace/didChangeWatchedFiles",
+                            "registerOptions": {}
                         }] }
                     }),
                 )
@@ -377,7 +454,166 @@ async fn run_script(
                 )
                 .await?;
             }
+            (ServerScript::DynamicSync, "initialized") => {
+                write_message(
+                    &mut writer,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": 120,
+                        "method": "client/registerCapability",
+                        "params": { "registrations": [
+                            {
+                                "id": "open-dynamic",
+                                "method": "textDocument/didOpen",
+                                "registerOptions": { "documentSelector": null }
+                            },
+                            {
+                                "id": "change-dynamic",
+                                "method": "textDocument/didChange",
+                                "registerOptions": {
+                                    "documentSelector": null,
+                                    "syncKind": 2
+                                }
+                            },
+                            {
+                                "id": "close-dynamic",
+                                "method": "textDocument/didClose",
+                                "registerOptions": { "documentSelector": null }
+                            }
+                        ] }
+                    }),
+                )
+                .await?;
+            }
+            (ServerScript::ConfigurationSections, "initialized") => {
+                write_message(
+                    &mut writer,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": 130,
+                        "method": "workspace/configuration",
+                        "params": { "items": [
+                            {},
+                            { "section": "typescript.preferences" },
+                            { "section": "missing.section" },
+                            { "section": "javascript" }
+                        ] }
+                    }),
+                )
+                .await?;
+            }
+            (ServerScript::EventFlood, "initialized") => {
+                for request in [
+                    json!({
+                        "jsonrpc": "2.0", "id": 140,
+                        "method": "client/registerCapability",
+                        "params": { "registrations": [{
+                            "id": "save-a", "method": "textDocument/didSave",
+                            "registerOptions": { "documentSelector": null }
+                        }] }
+                    }),
+                    json!({
+                        "jsonrpc": "2.0", "id": 141,
+                        "method": "client/unregisterCapability",
+                        "params": { "unregisterations": [{
+                            "id": "save-a", "method": "textDocument/didSave"
+                        }] }
+                    }),
+                    json!({
+                        "jsonrpc": "2.0", "id": 142,
+                        "method": "client/registerCapability",
+                        "params": { "registrations": [{
+                            "id": "save-b", "method": "textDocument/didSave",
+                            "registerOptions": { "documentSelector": null }
+                        }] }
+                    }),
+                ] {
+                    write_message(&mut writer, &request).await?;
+                }
+            }
             (ServerScript::ExitAfterInitialize, "initialized") => return Ok(()),
+            (ServerScript::NonFileDiagnostics, "textDocument/didOpen") => {
+                for (uri, version, message_text) in [
+                    ("untitled:buffer", 1, "untitled"),
+                    ("https://example.invalid/main.ts", 2, "https"),
+                    ("vscode-remote://ssh-remote+host/main.ts", 3, "remote"),
+                    (
+                        message["params"]["textDocument"]["uri"].as_str().unwrap(),
+                        4,
+                        "local latest",
+                    ),
+                ] {
+                    write_message(
+                        &mut writer,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/publishDiagnostics",
+                            "params": {
+                                "uri": uri,
+                                "version": version,
+                                "diagnostics": [{
+                                    "range": {
+                                        "start": { "line": 0, "character": 0 },
+                                        "end": { "line": 0, "character": 1 }
+                                    },
+                                    "message": message_text
+                                }]
+                            }
+                        }),
+                    )
+                    .await?;
+                }
+            }
+            (ServerScript::EventFlood, "textDocument/didOpen") => {
+                let uri = &message["params"]["textDocument"]["uri"];
+                for version in 1..=3 {
+                    write_message(
+                        &mut writer,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/publishDiagnostics",
+                            "params": {
+                                "uri": uri,
+                                "version": version,
+                                "diagnostics": [{
+                                    "range": {
+                                        "start": { "line": 0, "character": 0 },
+                                        "end": { "line": 0, "character": 1 }
+                                    },
+                                    "message": format!("diagnostic-{version}")
+                                }]
+                            }
+                        }),
+                    )
+                    .await?;
+                }
+                for index in 0..48 {
+                    write_message(
+                        &mut writer,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "window/logMessage",
+                            "params": { "type": 3, "message": format!("flood-{index}") }
+                        }),
+                    )
+                    .await?;
+                }
+                for value in [
+                    json!({ "kind": "begin", "title": "Index" }),
+                    json!({ "kind": "report", "message": "latest report", "percentage": 99 }),
+                    json!({ "kind": "end", "message": "complete" }),
+                ] {
+                    write_message(
+                        &mut writer,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "$/progress",
+                            "params": { "token": "flood", "value": value }
+                        }),
+                    )
+                    .await?;
+                }
+            }
             (_, "textDocument/didOpen") => {
                 write_message(
                     &mut writer,
@@ -418,6 +654,21 @@ async fn run_script(
             (ServerScript::MalformedCompletion, "textDocument/completion") => {
                 write_response(&mut writer, id.unwrap(), json!({ "items": "invalid" })).await?;
             }
+            (ServerScript::CompletionGenerations, "textDocument/completion") => {
+                completion_generation += 1;
+                write_response(
+                    &mut writer,
+                    id.unwrap(),
+                    json!({
+                        "isIncomplete": false,
+                        "items": [{
+                            "label": format!("generation-{completion_generation}"),
+                            "data": { "generation": completion_generation }
+                        }]
+                    }),
+                )
+                .await?;
+            }
             (_, "textDocument/completion") => {
                 write_response(
                     &mut writer,
@@ -439,10 +690,17 @@ async fn run_script(
             }
             (_, "completionItem/resolve") => {
                 let mut item = message["params"].clone();
-                item["documentation"] = json!({
-                    "kind": "markdown",
-                    "value": "Resolved **console**"
-                });
+                item["documentation"] = if script == ServerScript::CompletionGenerations {
+                    json!({
+                        "kind": "markdown",
+                        "value": format!("resolved generation {}", item["data"]["generation"])
+                    })
+                } else {
+                    json!({
+                        "kind": "markdown",
+                        "value": "Resolved **console**"
+                    })
+                };
                 write_response(&mut writer, id.unwrap(), item).await?;
             }
             (_, "textDocument/hover") => {
@@ -509,6 +767,23 @@ async fn run_script(
                 .await?;
             }
             (ServerScript::HangingShutdown, "shutdown") => {}
+            (ServerScript::DynamicSync, "textDocument/didChange") if !dynamic_unregistered => {
+                dynamic_unregistered = true;
+                write_message(
+                    &mut writer,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": 121,
+                        "method": "client/unregisterCapability",
+                        "params": { "unregisterations": [
+                            { "id": "open-dynamic", "method": "textDocument/didOpen" },
+                            { "id": "change-dynamic", "method": "textDocument/didChange" },
+                            { "id": "close-dynamic", "method": "textDocument/didClose" }
+                        ] }
+                    }),
+                )
+                .await?;
+            }
             (_, "shutdown") => write_response(&mut writer, id.unwrap(), Value::Null).await?,
             (ServerScript::IgnoresExit, "exit") => {}
             (_, "exit") => return Ok(()),
