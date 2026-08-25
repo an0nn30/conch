@@ -283,6 +283,14 @@
             && typeof global.termlabEditorService.cancelPendingChooser === 'function') {
           global.termlabEditorService.cancelPendingChooser(pane);
         }
+        if (global.termlabEditorService
+            && typeof global.termlabEditorService.closeDocument === 'function') {
+          await global.termlabEditorService.closeDocument(pane);
+        }
+        if (global.termlabProjectContext
+            && typeof global.termlabProjectContext.unmount === 'function') {
+          global.termlabProjectContext.unmount(pane);
+        }
         if (pane.view && global.termlabEditorPane) {
           global.termlabEditorPane.destroyEditorView(pane.view);
         }

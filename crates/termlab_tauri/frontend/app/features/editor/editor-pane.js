@@ -44,6 +44,9 @@
     if (!CM || !hostEl) return null;
     const opts = options || {};
     const onDirtyChange = typeof opts.onDirtyChange === 'function' ? opts.onDirtyChange : () => {};
+    const onDocumentTransaction = typeof opts.onDocumentTransaction === 'function'
+      ? opts.onDocumentTransaction
+      : () => {};
 
     const fontComp = new CM.Compartment();
     const themeComp = new CM.Compartment();
@@ -58,6 +61,9 @@
       if (!update.docChanged || dirty) return;
       dirty = true;
       onDirtyChange(true);
+    });
+    const transactionWatcher = CM.EditorView.updateListener.of((update) => {
+      if (update.docChanged) onDocumentTransaction(update);
     });
 
     const view = new CM.EditorView({
@@ -94,6 +100,7 @@
           themeComp.of(themeExtensions),
           fontComp.of([]),
           dirtyWatcher,
+          transactionWatcher,
         ],
       }),
     });

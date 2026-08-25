@@ -446,6 +446,14 @@
               && typeof global.termlabEditorService.cancelPendingChooser === 'function') {
             global.termlabEditorService.cancelPendingChooser(pane);
           }
+          if (global.termlabEditorService
+              && typeof global.termlabEditorService.closeDocument === 'function') {
+            await global.termlabEditorService.closeDocument(pane);
+          }
+          if (global.termlabProjectContext
+              && typeof global.termlabProjectContext.unmount === 'function') {
+            global.termlabProjectContext.unmount(pane);
+          }
           // Unconditional, unlike the two branches above: destroying the
           // CodeMirror view is local cleanup, not a backend notification, so it
           // must happen even when notifyBackend is false.
@@ -726,7 +734,19 @@
           pane.dirty = dirty;
           dirtyMarker.hidden = !dirty;
         },
+        onDocumentTransaction: (update) => {
+          const service = global.termlabEditorService;
+          if (service && typeof service.documentTransaction === 'function') {
+            service.documentTransaction(pane, update);
+          }
+        },
       });
+
+      if (global.termlabProjectContext && typeof global.termlabProjectContext.mount === 'function') {
+        pane.projectStatusControl = global.termlabProjectContext.mount(paneEl, pane);
+      }
+
+      if (typeof opts.onPaneCreated === 'function') opts.onPaneCreated(pane);
 
       // createEditorView starts with an empty font compartment, so the view
       // would inherit the page font size and only snap to the configured one

@@ -104,6 +104,13 @@
       );
     }
 
+    const projects = global.termlabProjectContext;
+    if (projects && typeof projects.renderTrustedProjects === 'function') {
+      projects.renderTrustedProjects(container, { addSectionLabel, addRow }).catch((error) => {
+        console.warn('Could not load trusted projects', error);
+      });
+    }
+
     return true;
   }
 

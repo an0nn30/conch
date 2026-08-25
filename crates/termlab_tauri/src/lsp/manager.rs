@@ -3467,11 +3467,14 @@ impl LspManager {
         result: Result<Arc<dyn SessionClient>, ManagerError>,
     ) {
         let current = !self.shutting_down
-            && self
-                .state
-                .sessions
-                .get(&key)
-                .is_some_and(|session| session.generation == generation);
+            && self.state.sessions.get(&key).is_some_and(|session| {
+                session.generation == generation
+                    && !session.restart_after_stop
+                    && !session
+                        .startup_cancel
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+            });
         if !current {
             if let Ok(client) = result {
                 let input = self.input_tx.clone();
@@ -7434,6 +7437,128 @@ mod tests {
         harness.factory.release_starts();
         spin().await;
         harness.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_restart_rejects_a_successful_start_queued_before_the_command_wins() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        factory.hold_shutdowns();
+        let (manager, mut actor, _events) =
+            LspManager::new(factory.clone(), config_root, cache_root, Enablement::all());
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        let path = project_root.join("main.ts");
+        std::fs::write(&path, "let value = 1;").unwrap();
+        let path = path.canonicalize().unwrap();
+        let document_id = DocumentId::new();
+        let mut status = actor.blank_status(document_id, Some("typescript"));
+        status.state = LspSessionState::Starting;
+        status.session_id = Some("queued-success-generation".into());
+        actor.state.documents.insert(
+            document_id,
+            super::ManagedDocument {
+                owner_window: "main".into(),
+                owner_pane: "pane".into(),
+                uri: lsp::Url::from_file_path(&path).unwrap().to_string(),
+                path,
+                language: Some(LanguageId::TypeScript),
+                lsp_language_id: Some("typescript".into()),
+                adapter_id: Some("typescript".into()),
+                text: crate::lsp::document::VersionedDocument::new(
+                    &super::document_id_text(document_id),
+                    "let value = 1;",
+                    1,
+                )
+                .unwrap(),
+                candidates: Vec::new(),
+                binding_scope: project_root.clone(),
+                session_key: Some(session_key.clone()),
+                selected_root: Some(project_root.clone()),
+                deferred_for_session: false,
+                pending_batches: Vec::new(),
+                batch_generation: 0,
+                pull_result_id: None,
+                pull_generation: 0,
+                synchronization_dirty: false,
+                status,
+            },
+        );
+        actor.state.sessions.insert(
+            session_key.clone(),
+            super::ManagedSession {
+                session_id: "queued-success-generation".into(),
+                language: LanguageId::TypeScript,
+                generation: 1,
+                worker: None,
+                startup_cancel: Some(tokio_util::sync::CancellationToken::new()),
+                outbox: std::collections::VecDeque::new(),
+                restart_after_stop: false,
+                documents: [document_id].into_iter().collect(),
+                idle_generation: 0,
+                crash_timestamps: std::collections::VecDeque::new(),
+                automatic_restart_blocked: false,
+                exit_observed: false,
+                logs: std::collections::VecDeque::new(),
+                next_log_sequence: 1,
+                capabilities: super::capabilities(false),
+                protocol_started: false,
+            },
+        );
+        actor.active_generations.insert((session_key.clone(), 1));
+
+        // Both lanes are ready before the first actor turn. The biased command
+        // lane must cancel generation 1 before its already-successful startup
+        // result reaches the input lane.
+        let (restart_reply, restart_result) = tokio::sync::oneshot::channel();
+        manager
+            .commands
+            .try_send(super::ManagerCommand::RestartSession {
+                adapter_id: "typescript".into(),
+                root: project_root.clone(),
+                reply: restart_reply,
+            })
+            .unwrap();
+        actor
+            .input_tx
+            .try_send(super::ActorInput::SessionStarted {
+                key: session_key.clone(),
+                generation: 1,
+                result: Ok(Arc::new(FakeSession {
+                    factory: factory.clone(),
+                    key: session_key.clone(),
+                })),
+            })
+            .unwrap();
+        let actor_task = tokio::spawn(actor.run());
+
+        restart_result.await.unwrap().unwrap();
+        spin().await;
+        let observations = factory.observations(&session_key);
+        assert_eq!(observations, vec![Observation::Shutdown]);
+        assert_eq!(
+            factory.launch_count("typescript", &project_root),
+            0,
+            "replacement launch overlapped the cancelled successful client reap"
+        );
+
+        factory.release_shutdowns();
+        for _ in 0..100 {
+            if factory.launch_count("typescript", &project_root) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(factory.launch_count("typescript", &project_root), 1);
+        manager.shutdown().await.unwrap();
+        actor_task.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

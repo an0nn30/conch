@@ -347,6 +347,12 @@
           return true;
         },
       };
+      if (global.termlabLspBridge && typeof global.termlabLspBridge.configure === 'function') {
+        global.termlabLspBridge.configure({
+          windowLabel: currentWindowLabel,
+          paneAccess: global.__termlabPaneAccess,
+        });
+      }
     }
 
     // vim's `:w` and `:q` have to mean what Cmd+S and closing the tab mean, and
