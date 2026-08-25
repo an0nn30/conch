@@ -1279,6 +1279,7 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
         end: vmaddr.checked_add(vmsize)?,
     };
     let mut text_section = None;
+    let segment_name = c_string(&bytes[8..24]);
     for index in 0..nsects {
         let section = &bytes[SEGMENT_64_SIZE + index * SECTION_64_SIZE
             ..SEGMENT_64_SIZE + (index + 1) * SECTION_64_SIZE];
@@ -1290,7 +1291,8 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
             section_type,
             S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
         );
-        if !read_u32(section, 52).is_some_and(|align| align <= 31)
+        if c_string(&section[16..32]) != segment_name
+            || !read_u32(section, 52).is_some_and(|align| align <= 31)
             || !address
                 .checked_add(size)
                 .is_some_and(|end| vm_range.start <= address && end <= vm_range.end)
@@ -1302,7 +1304,8 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
         {
             return None;
         }
-        if c_string(&bytes[8..24]) == b"__TEXT"
+        if !zero_fill
+            && segment_name == b"__TEXT"
             && (c_string(&section[..16]) == b"__text" && c_string(&section[16..32]) == b"__TEXT")
         {
             if text_section
@@ -1316,7 +1319,7 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
             }
         }
     }
-    if c_string(&bytes[8..24]) != b"__TEXT" {
+    if segment_name != b"__TEXT" {
         return Some(None);
     }
     (read_u32(bytes, 60).unwrap_or(0) & VM_PROT_EXECUTE != 0)
@@ -2197,6 +2200,39 @@ mod tests {
         bytes[zero_fill_section + 32..zero_fill_section + 40]
             .copy_from_slice(&0x1_0000_22f0u64.to_le_bytes());
         resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_mismatched_section_owner_and_zero_fill_text() {
+        let resources = ResourceTree::new();
+        let text_section = 32 + 72;
+        let mut mismatched_owner = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+        mismatched_owner[text_section + 16..text_section + 32].fill(0);
+        mismatched_owner[text_section + 16..text_section + 22].copy_from_slice(b"__DATA");
+        resources.install_rust_analyzer_bytes(&mismatched_owner, true);
+        resources.write_receipt();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+
+        let mut zero_fill_text = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+        zero_fill_text[text_section + 48..text_section + 52].copy_from_slice(&0u32.to_le_bytes());
+        zero_fill_text[text_section + 64..text_section + 68].copy_from_slice(&1u32.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&zero_fill_text, true);
         resources.write_receipt();
         assert!(matches!(
             BundledServerCatalog::new().resolve_for_host(
