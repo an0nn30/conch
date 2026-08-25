@@ -87,17 +87,132 @@ vm.runInContext(source, sandbox, { filename: 'transfers.js' });
   ]);
 }
 
-// Attention is a stable text badge, not a percentage or a spinner. Keeping
-// this pure makes the state-to-label contract testable without a fake DOM.
+// An attention state with a transfer id is an actionable control. Regressing
+// this to passive text strands the job in another tool window with no
+// discoverable recovery path from the Files workflow that created it.
 {
   const paneSandbox = {};
   paneSandbox.window = paneSandbox;
   vm.createContext(paneSandbox);
   vm.runInContext(paneViewSource, paneSandbox, { filename: 'pane-view.js' });
   assert.equal(
-    paneSandbox.termlabFilesPaneView.transferBadgeHtml({ status: 'attention' }),
-    '<span class="fp-transfer-attention" role="status">Needs attention</span>',
+    paneSandbox.termlabFilesPaneView.transferBadgeHtml({
+      status: 'attention',
+      transferId: 'upload-2',
+    }),
+    '<button type="button" class="fp-transfer-attention" data-transfer-id="upload-2" aria-label="Resolve transfer issue">Needs attention</button>',
   );
+
+  const invoker = { id: 'attention-control' };
+  const activations = [];
+  paneSandbox.termlabFilesPaneView.activateTransferBadge(
+    { status: 'attention', transferId: 'upload-2' },
+    invoker,
+    {
+      onTransferAttention(transferId, source) {
+        activations.push({ transferId, source });
+      },
+    },
+  );
+  assert.deepEqual(activations, [{ transferId: 'upload-2', source: invoker }]);
+
+  function eventElement(tagName) {
+    const listeners = new Map();
+    let html = '';
+    const element = {
+      tagName: tagName.toUpperCase(),
+      parentNode: null,
+      children: [],
+      dataset: {},
+      style: {},
+      className: '',
+      tabIndex: -1,
+      classList: { add() {}, remove() {} },
+      setAttribute() {},
+      addEventListener(name, listener) {
+        if (!listeners.has(name)) listeners.set(name, []);
+        listeners.get(name).push(listener);
+      },
+      appendChild(child) {
+        child.parentNode = this;
+        this.children.push(child);
+        return child;
+      },
+      querySelector(selector) {
+        if (selector === '.fp-transfer-attention[data-transfer-id]') return this.attentionControl || null;
+        return null;
+      },
+      querySelectorAll() { return []; },
+      dispatchBubbling(name, values = {}) {
+        const event = {
+          target: this,
+          key: values.key,
+          defaultPrevented: false,
+          propagationStopped: false,
+          preventDefault() { this.defaultPrevented = true; },
+          stopPropagation() { this.propagationStopped = true; },
+        };
+        let current = this;
+        while (current && !event.propagationStopped) {
+          for (const listener of listenersFor(current, name)) listener(event);
+          current = current.parentNode;
+        }
+        if (name === 'keydown'
+            && this.tagName === 'BUTTON'
+            && (event.key === 'Enter' || event.key === ' ')
+            && !event.defaultPrevented) {
+          this.dispatchBubbling('click');
+        }
+        return event;
+      },
+    };
+    function listenersFor(target, name) {
+      return target === element ? (listeners.get(name) || []) : target._listeners(name);
+    }
+    element._listeners = (name) => listeners.get(name) || [];
+    Object.defineProperty(element, 'innerHTML', {
+      get() { return html; },
+      set(value) {
+        html = String(value);
+        if (html.includes('data-transfer-id="upload-keyboard"')) {
+          const button = eventElement('button');
+          button.parentNode = element;
+          element.attentionControl = button;
+        }
+      },
+    });
+    return element;
+  }
+
+  const tbody = eventElement('tbody');
+  const paneRoot = eventElement('div');
+  paneRoot.querySelector = (selector) => (selector === 'tbody' ? tbody : null);
+  const keyboardActivations = [];
+  const rowActivations = [];
+  paneSandbox.document = { createElement: (tag) => eventElement(tag) };
+  paneSandbox.termlabFilesPaneView.renderPane({
+    isLocal: true,
+    entries: [{ name: 'keyboard.txt', is_dir: false, size: 1, modified: 0 }],
+    transferStatus: {
+      'keyboard.txt': { status: 'attention', transferId: 'upload-keyboard' },
+    },
+    backStack: [],
+    forwardStack: [],
+    currentPath: '/tmp',
+    pathInput: '/tmp',
+    showHidden: true,
+    colExt: false,
+    colSize: false,
+    colModified: false,
+    error: null,
+  }, paneRoot, {
+    onActivateEntry(entry) { rowActivations.push(entry.name); },
+    onTransferAttention(transferId) { keyboardActivations.push(transferId); },
+  });
+  const attentionButton = tbody.children[0].attentionControl;
+  attentionButton.dispatchBubbling('keydown', { key: 'Enter' });
+  assert.deepEqual(rowActivations, [], 'Enter on the attention button must not activate the file row');
+  assert.deepEqual(keyboardActivations, ['upload-keyboard'], 'Enter activates the attention button');
 }
 
 const localPane = { transferStatus: {} };
@@ -107,11 +222,52 @@ const remotePane = {
   },
 };
 const refreshed = [];
+const conflictDialogs = [];
+const conflictResolutions = [];
+
+// Restoring a persisted queue must paint the attention badge without opening a
+// dialog during app startup. Only a live transition should interrupt the user.
+{
+  const restoredDialogs = [];
+  const restoredController = sandbox.window.termlabFilesTransfers.createController({
+    localPane: { transferStatus: {} },
+    remotePane: { transferStatus: {} },
+    toast: sandbox.window.toast,
+    loadEntries() {},
+    transferRuntime: { resolve() { return Promise.resolve(); } },
+    transferDialogs: {
+      showConflict(job) { restoredDialogs.push(job); },
+    },
+  });
+  restoredController.handleTransferSnapshot({
+    revision: 1,
+    jobs: [{
+      id: 'restored-attention',
+      direction: 'upload',
+      origin: { kind: 'filesPanel' },
+      fileName: 'restored.txt',
+      state: { kind: 'needsAttention', reason: { kind: 'destinationConflict' } },
+    }],
+  });
+  assert.equal(restoredDialogs.length, 0, 'initial persisted attention stays quiet at startup');
+}
+
 const controller = sandbox.window.termlabFilesTransfers.createController({
   localPane,
   remotePane,
   toast: sandbox.window.toast,
   loadEntries(pane) { refreshed.push(pane); },
+  transferRuntime: {
+    resolve(transferId, resolution) {
+      conflictResolutions.push({ transferId, resolution });
+      return Promise.resolve();
+    },
+  },
+  transferDialogs: {
+    showConflict(job, invoker, onResolve) {
+      conflictDialogs.push({ job, invoker, onResolve });
+    },
+  },
 });
 
 controller.handleTransferProgress({
@@ -151,12 +307,25 @@ controller.handleTransferSnapshot({
     direction: 'upload',
     origin: { kind: 'filesPanel' },
     fileName: 'blocked.txt',
-    state: { kind: 'needsAttention', reason: { kind: 'sourceChanged' } },
+    state: { kind: 'needsAttention', reason: { kind: 'destinationConflict', resumeAvailable: false } },
   }],
 });
 assert.deepEqual(JSON.parse(JSON.stringify(remotePane.transferStatus['blocked.txt'])), {
   status: 'attention', percent: 0, transferId: 'upload-2',
 });
+assert.equal(conflictDialogs.length, 1, 'a live conflict opens its resolution dialog immediately');
+assert.equal(conflictDialogs[0].job.id, 'upload-2');
+assert.equal(conflictDialogs[0].invoker, null);
+const conflictInvoker = { id: 'blocked-file-badge' };
+assert.equal(controller.handleTransferAttention('upload-2', conflictInvoker), true);
+assert.equal(conflictDialogs.length, 2);
+assert.equal(conflictDialogs[1].job.id, 'upload-2');
+assert.equal(conflictDialogs[1].invoker, conflictInvoker);
+await conflictDialogs[1].onResolve({ kind: 'overwrite' });
+assert.deepEqual(conflictResolutions, [{
+  transferId: 'upload-2',
+  resolution: { kind: 'overwrite' },
+}]);
 controller.handleTransferProgress({
   payload: {
     transfer_id: 'upload-2',

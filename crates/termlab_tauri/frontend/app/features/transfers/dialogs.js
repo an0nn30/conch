@@ -14,12 +14,19 @@
   }
 
   function createFocusReturn(invoker) {
-    const row = invoker && typeof invoker.closest === 'function'
+    const transferRow = invoker && typeof invoker.closest === 'function'
       ? invoker.closest('tr[data-job-id]')
       : null;
-    const panel = row && typeof row.closest === 'function' ? row.closest('.tl-transfer-center') : null;
-    const jobId = row ? row.getAttribute('data-job-id') : null;
-    const rowsAtOpen = panel ? Array.from(panel.querySelectorAll('tr[data-job-id]')) : [];
+    const fileRow = !transferRow && invoker && typeof invoker.closest === 'function'
+      ? invoker.closest('tr[data-name]')
+      : null;
+    const row = transferRow || fileRow;
+    const rowSelector = transferRow ? 'tr[data-job-id]' : 'tr[data-name]';
+    const keyAttribute = transferRow ? 'data-job-id' : 'data-name';
+    const panelSelector = transferRow ? '.tl-transfer-center' : '.fp-pane';
+    const panel = row && typeof row.closest === 'function' ? row.closest(panelSelector) : null;
+    const rowKey = row ? row.getAttribute(keyAttribute) : null;
+    const rowsAtOpen = panel ? Array.from(panel.querySelectorAll(rowSelector)) : [];
     const rowIndex = Math.max(0, rowsAtOpen.indexOf(row));
 
     return () => {
@@ -28,9 +35,12 @@
         return;
       }
       if (!connected(panel)) return;
-      const currentRows = Array.from(panel.querySelectorAll('tr[data-job-id]'));
-      const keyedRow = currentRows.find((candidate) => candidate.getAttribute('data-job-id') === jobId);
-      const fallback = keyedRow || currentRows[Math.min(rowIndex, Math.max(0, currentRows.length - 1))] || panel;
+      const currentRows = Array.from(panel.querySelectorAll(rowSelector));
+      const keyedRow = currentRows.find((candidate) => candidate.getAttribute(keyAttribute) === rowKey);
+      let fallback = keyedRow || currentRows[Math.min(rowIndex, Math.max(0, currentRows.length - 1))] || panel;
+      if (fileRow && keyedRow) {
+        fallback = keyedRow.querySelector('.fp-transfer-attention[data-transfer-id]') || keyedRow;
+      }
       if (fallback && typeof fallback.focus === 'function') fallback.focus();
     };
   }

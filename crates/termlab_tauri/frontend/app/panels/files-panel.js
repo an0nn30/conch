@@ -428,10 +428,15 @@
       || null;
     fitActiveTabFn = opts.fitActiveTab;
     getActiveTabFn = opts.getActiveTab;
+    const transferRuntime = window.termlabTransferRuntime;
+    const transferDialogs = window.termlabTransferDialogs;
     transferController = filesTransfers && typeof filesTransfers.createController === 'function'
       ? filesTransfers.createController({
         localPane,
         remotePane,
+        toast: window.toast,
+        transferRuntime,
+        transferDialogs,
         loadEntries,
         renderTransferStatus: (pane) => {
           const selector = pane && pane.isLocal ? '#fp-local' : '#fp-remote';
@@ -442,7 +447,6 @@
 
     if (typeof unsubscribeTransferRuntime === 'function') unsubscribeTransferRuntime();
     unsubscribeTransferRuntime = null;
-    const transferRuntime = window.termlabTransferRuntime;
     if (transferRuntime && typeof transferRuntime.subscribe === 'function'
         && transferController
         && typeof transferController.handleTransferSnapshot === 'function') {
@@ -940,6 +944,16 @@
       },
       onOpenColumnMenu: (event) => showColumnMenu(event, pane, el),
       onOpenRowMenu: (event, entry) => showRowContextMenu(event, pane, entry),
+      onTransferAttention: (transferId, invoker) => {
+        const handled = transferController
+          && typeof transferController.handleTransferAttention === 'function'
+          && transferController.handleTransferAttention(transferId, invoker);
+        if (!handled
+            && window.toolWindowManager
+            && typeof window.toolWindowManager.activate === 'function') {
+          window.toolWindowManager.activate('transfer-center');
+        }
+      },
       hostOptions: comboState.hostOptions,
       hostComboValue: comboState.hostComboValue,
       hostComboBusy: comboState.hostComboBusy,

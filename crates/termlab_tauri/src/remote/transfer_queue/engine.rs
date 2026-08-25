@@ -902,7 +902,11 @@ impl QueueActor {
 
     async fn checking(&mut self, job_id: Uuid, lease_id: Uuid) -> Result<(), String> {
         self.active_task(job_id, lease_id)?;
-        self.apply_job_event(job_id, JobEvent::BeginCheck).await
+        // Connecting and Checking have identical startup-recovery semantics.
+        // Fingerprinted transitions Connecting -> Checking -> Running in one
+        // durable commit, so persisting this intermediate state only adds an
+        // fsync to the critical path before the first byte is copied.
+        Ok(())
     }
 
     async fn durable_checkpoint(
@@ -2834,11 +2838,17 @@ mod tests {
         harness.handle.resume_all().await.unwrap();
         wait_for_starts(&runner, 1).await;
         let reporter = runner.reporter(id);
+        let revision_before_checking = harness.store.load().unwrap().into_document().revision;
         reporter.checking().await.unwrap();
         assert!(matches!(
             harness.handle.snapshot().jobs[0].state,
-            TransferJobState::Checking
+            TransferJobState::Connecting
         ));
+        assert_eq!(
+            harness.store.load().unwrap().into_document().revision,
+            revision_before_checking,
+            "checking acknowledgement must not add a redundant durable write before fingerprinting",
+        );
         reporter
             .fingerprinted(
                 SourceFingerprint {

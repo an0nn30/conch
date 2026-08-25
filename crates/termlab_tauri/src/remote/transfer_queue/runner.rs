@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    future::Future,
     path::Path,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -19,7 +20,7 @@ use termlab_remote::{
     },
 };
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{OnceCell, mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use super::{
@@ -39,6 +40,25 @@ const DEFAULT_COPY_CHUNK_SIZE: usize = 256 * 1024;
 pub(crate) struct ResolvedSftpConnection {
     pub(crate) ssh_handle:
         Arc<termlab_remote::russh::client::Handle<termlab_remote::handler::TermLabSshHandler>>,
+    sftp_session: Arc<OnceCell<Arc<SftpSessionHandle>>>,
+}
+
+async fn cached_resource<T, E, F, Fut>(cell: &OnceCell<Arc<T>>, initialize: F) -> Result<Arc<T>, E>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    cell.get_or_try_init(|| async { initialize().await.map(Arc::new) })
+        .await
+        .cloned()
+}
+
+impl ResolvedSftpConnection {
+    async fn sftp_session(&self) -> Result<Arc<SftpSessionHandle>, TransferIoError> {
+        cached_resource(&self.sftp_session, || open_sftp_session(&self.ssh_handle))
+            .await
+            .map_err(TransferIoError::from_remote)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +109,7 @@ pub(crate) fn resolve_live_sftp_connection(
         .get(key)
         .map(|connection| ResolvedSftpConnection {
             ssh_handle: Arc::clone(&connection.ssh_handle),
+            sftp_session: Arc::new(OnceCell::new()),
         })
 }
 
@@ -1199,9 +1220,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
                 .map(|(file, fingerprint)| (RealSource::Local(file), fingerprint))
                 .map_err(TransferIoError::from_local_source),
             TransferDirection::Download => {
-                let session = open_sftp_session(&connection.ssh_handle)
-                    .await
-                    .map_err(TransferIoError::from_remote)?;
+                let session = connection.sftp_session().await?;
                 fingerprint_open_remote(&session, &job.remote_path)
                     .await
                     .map(|(file, fingerprint)| (RealSource::Remote(file), fingerprint))
@@ -1218,13 +1237,16 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
     ) -> Result<ArtifactInventory, TransferIoError> {
         match job.direction {
             TransferDirection::Upload => {
-                let session = open_sftp_session(&connection.ssh_handle)
-                    .await
-                    .map_err(TransferIoError::from_remote)?;
+                let session = connection.sftp_session().await?;
+                let (final_exists, partial_exists, backup_exists) = tokio::try_join!(
+                    remote_exists(&session, &job.remote_path),
+                    remote_exists(&session, &artifacts.partial_path),
+                    remote_exists(&session, &artifacts.backup_path),
+                )?;
                 Ok(ArtifactInventory {
-                    final_exists: remote_exists(&session, &job.remote_path).await?,
-                    partial_exists: remote_exists(&session, &artifacts.partial_path).await?,
-                    backup_exists: remote_exists(&session, &artifacts.backup_path).await?,
+                    final_exists,
+                    partial_exists,
+                    backup_exists,
                 })
             }
             TransferDirection::Download => Ok(ArtifactInventory {
@@ -1243,9 +1265,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
     ) -> Result<Option<u64>, TransferIoError> {
         match job.direction {
             TransferDirection::Upload => {
-                let session = open_sftp_session(&connection.ssh_handle)
-                    .await
-                    .map_err(TransferIoError::from_remote)?;
+                let session = connection.sftp_session().await?;
                 match session.metadata(artifacts.partial_path.clone()).await {
                     Ok(metadata) => Ok(metadata.size),
                     Err(error) => match remote_exists(&session, &artifacts.partial_path).await {
@@ -1278,9 +1298,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
     ) -> Result<(), TransferIoError> {
         match job.direction {
             TransferDirection::Upload => {
-                let session = open_sftp_session(&connection.ssh_handle)
-                    .await
-                    .map_err(TransferIoError::from_remote)?;
+                let session = connection.sftp_session().await?;
                 truncate_remote_partial(&session, &artifacts.partial_path, bytes)
                     .await
                     .map_err(TransferIoError::from_remote)
@@ -1300,9 +1318,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
     ) -> Result<Self::Partial, TransferIoError> {
         match job.direction {
             TransferDirection::Upload => {
-                let session = open_sftp_session(&connection.ssh_handle)
-                    .await
-                    .map_err(TransferIoError::from_remote)?;
+                let session = connection.sftp_session().await?;
                 open_remote_partial(&session, &artifacts.partial_path, resume)
                     .await
                     .map(|file| self.remote_partial(file))
@@ -1425,9 +1441,7 @@ async fn rename_artifact(
 ) -> Result<(), TransferIoError> {
     match job.direction {
         TransferDirection::Upload => {
-            let session = open_sftp_session(&connection.ssh_handle)
-                .await
-                .map_err(TransferIoError::from_remote)?;
+            let session = connection.sftp_session().await?;
             session
                 .rename(from.to_owned(), to.to_owned())
                 .await
@@ -1449,9 +1463,9 @@ async fn rename_artifact_no_replace(
 ) -> Result<(), PromotionError> {
     match job.direction {
         TransferDirection::Upload => {
-            let session = open_sftp_session(&connection.ssh_handle)
+            let session = connection
+                .sftp_session()
                 .await
-                .map_err(TransferIoError::from_remote)
                 .map_err(PromotionError::Failed)?;
             // russh-sftp sends the base SSH_FXP_RENAME request here. SFTP v3
             // requires that request to fail when `to` already exists; it does
@@ -1510,9 +1524,7 @@ async fn remove_artifact(
 ) -> Result<(), TransferIoError> {
     match job.direction {
         TransferDirection::Upload => {
-            let session = open_sftp_session(&connection.ssh_handle)
-                .await
-                .map_err(TransferIoError::from_remote)?;
+            let session = connection.sftp_session().await?;
             if missing_ok && !remote_exists(&session, path).await? {
                 return Ok(());
             }
@@ -1822,8 +1834,8 @@ mod tests {
     use super::{
         ConnectionResolver, LiveConnectionIdentity, PromotionError, RealPartial, RunnerControl,
         RunnerControlState, RunnerReporter, RunnerResult, SftpTransferJobRunner, TransferIo,
-        TransferIoError, TransferJobRunner, failed, recover_commit, remove_local_artifact,
-        select_live_connection_key,
+        TransferIoError, TransferJobRunner, cached_resource, failed, recover_commit,
+        remove_local_artifact, select_live_connection_key,
     };
     use crate::remote::transfer_queue::{
         artifacts::ArtifactInventory,
@@ -1841,6 +1853,41 @@ mod tests {
 
     #[derive(Clone, Copy)]
     struct TestConnection;
+
+    #[tokio::test]
+    async fn attempt_resource_is_initialized_once_and_new_attempt_gets_fresh_resource() {
+        let cell = tokio::sync::OnceCell::new();
+        let opens = AtomicUsize::new(0);
+
+        let first = cached_resource(&cell, || async {
+            opens.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, ()>(String::from("session"))
+        })
+        .await
+        .unwrap();
+        let second = cached_resource(&cell, || async {
+            opens.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, ()>(String::from("unexpected replacement"))
+        })
+        .await
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.as_str(), "session");
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+        let next_attempt_cell = tokio::sync::OnceCell::new();
+        let next_attempt = cached_resource(&next_attempt_cell, || async {
+            opens.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, ()>(String::from("fresh session"))
+        })
+        .await
+        .unwrap();
+
+        assert!(!Arc::ptr_eq(&first, &next_attempt));
+        assert_eq!(next_attempt.as_str(), "fresh session");
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+    }
 
     struct FailingRead {
         kind: ErrorKind,

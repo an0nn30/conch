@@ -23,6 +23,53 @@
       if (typeof d.renderTransferStatus === 'function') d.renderTransferStatus(pane);
     }
 
+    function reportCommandError(error) {
+      if (d.toast && typeof d.toast.error === 'function') {
+        d.toast.error(
+          'Transfer action failed',
+          error && error.message ? error.message : String(error),
+        );
+      }
+    }
+
+    function acknowledge(result) {
+      return Promise.resolve(result).catch(reportCommandError);
+    }
+
+    function handleTransferAttention(transferId, invoker) {
+      const job = previousJobs.get(transferId);
+      const kind = job && job.state && job.state.kind;
+      const runtime = d.transferRuntime;
+      const dialogs = d.transferDialogs;
+      if (!job || !runtime) return false;
+
+      if (kind === 'needsAttention'
+          && dialogs
+          && typeof dialogs.showConflict === 'function'
+          && typeof runtime.resolve === 'function') {
+        dialogs.showConflict(job, invoker, (resolution) => (
+          acknowledge(runtime.resolve(job.id, resolution))
+        ));
+        return true;
+      }
+
+      if (kind === 'needsConnection') {
+        if (job.endpoint
+            && job.endpoint.kind === 'configured'
+            && typeof runtime.reconnect === 'function') {
+          acknowledge(runtime.reconnect(job));
+          return true;
+        }
+        if (dialogs
+            && typeof dialogs.showAdHocReconnect === 'function'
+            && typeof runtime.retry === 'function') {
+          dialogs.showAdHocReconnect(job, invoker, () => acknowledge(runtime.retry(job.id)));
+          return true;
+        }
+      }
+      return false;
+    }
+
     // Legacy byte progress remains the compatibility source for percentages.
     // Lifecycle notifications and committed completion come from the durable
     // runtime snapshot below, so this path never creates a toast or refreshes
@@ -57,6 +104,7 @@
       const jobs = Array.isArray(snapshot && snapshot.jobs) ? snapshot.jobs : [];
       const currentJobs = new Map();
       const panesToRender = new Set();
+      const attentionToOpen = [];
       let refreshAfterCommit = false;
 
       for (const job of jobs) {
@@ -89,6 +137,9 @@
 
         const previous = previousJobs.get(job.id);
         const previousKind = previous && previous.state && previous.state.kind;
+        if (kind === 'needsAttention' && previousKind && previousKind !== 'needsAttention') {
+          attentionToOpen.push(job.id);
+        }
         if (kind === 'completed' && previousKind && previousKind !== 'completed') {
           refreshAfterCommit = true;
         }
@@ -101,6 +152,7 @@
         if (pane && clearBadge(pane, job.fileName, id)) panesToRender.add(pane);
       }
       previousJobs = currentJobs;
+      attentionToOpen.forEach((transferId) => handleTransferAttention(transferId, null));
 
       if (refreshAfterCommit && typeof d.loadEntries === 'function') {
         if (d.localPane) d.loadEntries(d.localPane);
@@ -113,6 +165,7 @@
     return {
       handleTransferProgress,
       handleTransferSnapshot,
+      handleTransferAttention,
     };
   }
 

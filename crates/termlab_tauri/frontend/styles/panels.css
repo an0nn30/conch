@@ -62,7 +62,11 @@
       display: inline-block; padding: 0 var(--tl-space-1);
       color: var(--tl-warning-fg); background: var(--tl-warning-bg);
       border: 1px solid var(--tl-warning-border); border-radius: var(--tl-radius);
+      font: inherit; font-weight: 600; line-height: inherit; cursor: pointer;
+      appearance: none;
     }
+    .fp-transfer-attention:hover { filter: brightness(1.12); }
+    .fp-transfer-attention:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
     /* Row context menu (right-click on a file/dir row) and the column-chooser
        menu (right-click a column header) both render through the shared
        .tl-menu component (styles/design-system/components/menu.css,

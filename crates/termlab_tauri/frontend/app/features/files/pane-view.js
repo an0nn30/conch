@@ -4,12 +4,27 @@
   function transferBadgeHtml(status) {
     if (!status) return '';
     if (status.status === 'attention') {
+      if (status.transferId) {
+        const transferId = String(status.transferId)
+          .replace(/&/g, '&amp;')
+          .replace(/"/g, '&quot;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        return `<button type="button" class="fp-transfer-attention" data-transfer-id="${transferId}" aria-label="Resolve transfer issue">Needs attention</button>`;
+      }
       return '<span class="fp-transfer-attention" role="status">Needs attention</span>';
     }
     if (status.status === 'in_progress') {
       return `<span class="fp-transfer-pct">${status.percent || 0}%</span>`;
     }
     return '';
+  }
+
+  function activateTransferBadge(status, invoker, deps) {
+    if (!status || status.status !== 'attention' || !status.transferId) return;
+    if (deps && typeof deps.onTransferAttention === 'function') {
+      deps.onTransferAttention(status.transferId, invoker);
+    }
   }
 
   function renderPane(pane, el, deps) {
@@ -83,6 +98,19 @@
       if (pane.colModified) cells += `<td class="fp-cell-mod">${entry.modified ? formatDate(entry.modified) : ''}</td>`;
       tr.innerHTML = cells;
 
+      const attentionControl = tr.querySelector('.fp-transfer-attention[data-transfer-id]');
+      if (attentionControl) {
+        attentionControl.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          activateTransferBadge(ts, attentionControl, d);
+        });
+        attentionControl.addEventListener('dblclick', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+      }
+
       tr.addEventListener('dblclick', () => {
         if (typeof d.onActivateEntry === 'function') d.onActivateEntry(entry);
       });
@@ -99,6 +127,7 @@
         if (typeof d.onOpenRowMenu === 'function') d.onOpenRowMenu(event, entry);
       });
       tr.addEventListener('keydown', (event) => {
+        if (event.target !== tr) return;
         if (event.key === 'Enter') {
           event.preventDefault();
           if (typeof d.onActivateEntry === 'function') d.onActivateEntry(entry);
@@ -274,6 +303,7 @@
   global.termlabFilesPaneView = {
     renderPane,
     transferBadgeHtml,
+    activateTransferBadge,
     showColumnMenu,
     showRowContextMenu,
   };

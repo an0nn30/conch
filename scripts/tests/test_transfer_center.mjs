@@ -626,6 +626,42 @@ function dialogButton(dialog, label) {
     'replaced action button falls back to its still-connected keyed row');
 }
 
+// Files-pane conflict dialogs use the same shared dialog helper. When a queue
+// update rerenders the file row while the dialog is open, focus returns to the
+// replacement attention control rather than being stranded on the document.
+{
+  const harness = loadHarness();
+  const pane = makeElement('div');
+  pane.className = 'fp-pane';
+  harness.sandbox.document.body.appendChild(pane);
+
+  const oldRow = makeElement('tr');
+  oldRow.setAttribute('data-name', 'blocked.txt');
+  const oldButton = makeElement('button');
+  oldButton.className = 'fp-transfer-attention';
+  oldButton.setAttribute('data-transfer-id', 'upload-2');
+  oldRow.appendChild(oldButton);
+  pane.appendChild(oldRow);
+  oldButton.focus();
+
+  harness.sandbox.termlabTransferDialogs.showConflict(job('upload-2', 'needsAttention', {
+    fileName: 'blocked.txt',
+    state: { kind: 'needsAttention', reason: { kind: 'destinationConflict', resumeAvailable: false } },
+  }), oldButton, () => {});
+
+  const replacementRow = makeElement('tr');
+  replacementRow.setAttribute('data-name', 'blocked.txt');
+  const replacementButton = makeElement('button');
+  replacementButton.className = 'fp-transfer-attention';
+  replacementButton.setAttribute('data-transfer-id', 'upload-2');
+  replacementRow.appendChild(replacementButton);
+  pane.replaceChildren(replacementRow);
+
+  await dialogButton(harness.dialogs.at(-1), 'Cancel').onSelect();
+  assert.strictEqual(harness.sandbox.document.activeElement, replacementButton,
+    'Files conflict close restores focus to the replacement badge after rerender');
+}
+
 {
   const harness = loadHarness();
   const sibling = job('b', 'running', { queueOrder: 2 });

@@ -195,7 +195,9 @@ async function setupLogicHarness(invokeExtra, opts = {}) {
     showColumnMenu: () => {},
     showRowContextMenu: () => {},
   };
-  sandbox.termlabFilesTransfers = {};
+  sandbox.termlabFilesTransfers = opts.filesTransfers || {};
+  if (opts.transferRuntime) sandbox.termlabTransferRuntime = opts.transferRuntime;
+  if (opts.transferDialogs) sandbox.termlabTransferDialogs = opts.transferDialogs;
 
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
@@ -749,6 +751,38 @@ function lastRemoteCall(renderCalls) {
     'a superseded response must not overwrite the latest listing',
   );
   console.log('12b. out-of-order directory loads keep the newest listing: ok');
+}
+
+// --- 12c. Files-pane attention controls reach the transfer controller. ---
+// The visible badge is the recovery entry point; dropping this callback from
+// render deps recreates the inert "Needs attention" regression.
+{
+  const activations = [];
+  const runtime = { resolve() {} };
+  const dialogs = { showConflict() {} };
+  const h = await setupLogicHarness(undefined, {
+    transferRuntime: runtime,
+    transferDialogs: dialogs,
+    filesTransfers: {
+      createController(deps) {
+        assert.equal(deps.transferRuntime, runtime);
+        assert.equal(deps.transferDialogs, dialogs);
+        return {
+          handleTransferAttention(transferId, invoker) {
+            activations.push({ transferId, invoker });
+          },
+        };
+      },
+    },
+  });
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  const rendered = lastRemoteCall(h.renderCalls);
+  const invoker = { id: 'attention-control' };
+  rendered.deps.onTransferAttention('upload-2', invoker);
+  assert.deepEqual(activations, [{ transferId: 'upload-2', invoker }]);
+  console.log('12c. file-pane attention control reaches transfer resolution: ok');
 }
 
 console.log('sftp connect part 1 (host dropdown + pinning): all assertions passed');
