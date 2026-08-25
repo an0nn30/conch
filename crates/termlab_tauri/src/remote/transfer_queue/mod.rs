@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod batch;
 pub mod engine;
 pub mod events;
+pub mod expansion;
 pub mod model;
 pub mod reducer;
 pub mod runner;
