@@ -172,6 +172,27 @@ impl<P: PathIdentityPolicy> OwnershipRegistry<P> {
         }
     }
 
+    /// Returns the exact live reservation identity for an identifier. Manager
+    /// delivery obligations use this instead of comparing path spellings, so
+    /// aliases and reservation reuse cannot attach a waiter to the wrong ABA
+    /// generation.
+    pub(crate) fn reservation_id(
+        &self,
+        identifier: DocumentIdentifier,
+    ) -> Result<Option<ReservationId>, OwnershipError> {
+        let canonical = match identifier {
+            DocumentIdentifier::Local(path) => canonical_local_path(&path)?,
+            DocumentIdentifier::Untitled | DocumentIdentifier::Remote(_) => {
+                return Err(OwnershipError::NonLocalIdentifier);
+            }
+        };
+        let key = self.path_identity.key_for(&canonical)?;
+        Ok(match self.leases.get(&key) {
+            Some(UriLease::Reserved { token, .. }) => Some(*token),
+            Some(UriLease::Owned { .. }) | None => None,
+        })
+    }
+
     pub(crate) fn commit(
         &mut self,
         token: ReservationId,

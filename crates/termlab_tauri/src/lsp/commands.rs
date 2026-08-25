@@ -19,6 +19,41 @@ pub(crate) const SESSION_STATUS_EVENT: &str = "lsp-session-status";
 pub(crate) const DIAGNOSTICS_UPDATED_EVENT: &str = "lsp-diagnostics-updated";
 pub(crate) const DOCUMENT_OWNER_FOCUSED_EVENT: &str = "editor-document-owner-focused";
 
+pub(crate) fn invoke_handler<R: Runtime>()
+-> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        editor_reserve_document,
+        editor_release_document,
+        editor_transfer_document,
+        lsp_open_document,
+        lsp_apply_changes,
+        lsp_resync_document,
+        lsp_did_save,
+        lsp_close_document,
+        lsp_project_candidates,
+        lsp_set_project_context,
+        lsp_set_project_trust,
+        lsp_completion,
+        lsp_hover,
+        lsp_signature_help,
+        lsp_definition,
+        lsp_problems_snapshot,
+        lsp_status_snapshot,
+        lsp_restart_session,
+        lsp_session_logs,
+        lsp_trusted_projects,
+        lsp_revoke_project_trust,
+    ]
+}
+
+pub(crate) fn is_lsp_command(name: &str) -> bool {
+    name.starts_with("lsp_")
+        || matches!(
+            name,
+            "editor_reserve_document" | "editor_release_document" | "editor_transfer_document"
+        )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommandContract {
     pub name: &'static str,
@@ -480,10 +515,27 @@ pub(crate) async fn lsp_revoke_project_trust(
 #[cfg(test)]
 mod tests {
     use super::{DocumentOwnerFocusedPayload, LSP_COMMAND_CONTRACTS, LspState};
-    use crate::lsp::manager::ProjectContextChoice;
+    use crate::lsp::manager::{
+        Enablement, LspManager, ManagerError, ProjectContextChoice, SessionFactory, SessionStart,
+    };
     use crate::lsp::trust::TrustDecision;
-    use crate::lsp::types::DocumentId;
+    use crate::lsp::types::{DocumentId, ReservationId};
+    use async_trait::async_trait;
+    use std::sync::Arc;
     use ts_rs::TS;
+
+    struct BoundaryFactory;
+
+    #[async_trait]
+    impl SessionFactory for BoundaryFactory {
+        async fn start(
+            self: Arc<Self>,
+            _start: SessionStart,
+            _events: tokio::sync::mpsc::Sender<crate::lsp::client::ClientEvent>,
+        ) -> Result<Arc<dyn crate::lsp::manager::SessionClient>, ManagerError> {
+            unreachable!("boundary decoding never starts a session")
+        }
+    }
 
     #[test]
     fn project_and_trust_choices_have_stable_camel_case_boundary_shapes() {
@@ -624,6 +676,138 @@ mod tests {
                     .map(String::as_str)
                     .collect::<std::collections::HashSet<_>>(),
                 args.iter().copied().collect()
+            );
+        }
+    }
+
+    #[test]
+    fn all_twenty_one_commands_decode_and_dispatch_through_the_production_invoke_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let (manager, actor, _events) = LspManager::new(
+            Arc::new(BoundaryFactory),
+            temp.path().join("config"),
+            temp.path().join("cache"),
+            Enablement::all(),
+        );
+        drop(actor);
+        let app = tauri::test::mock_builder()
+            .manage(LspState::new(manager))
+            .invoke_handler(super::invoke_handler())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let document = serde_json::to_value(DocumentId::new()).unwrap();
+        let reservation = serde_json::to_value(ReservationId::new()).unwrap();
+        let root = root.display().to_string();
+        let batch = serde_json::json!({
+            "documentId": document,
+            "baseVersion": 1,
+            "nextVersion": 2,
+            "changes": [],
+        });
+        let position = serde_json::json!({ "line": 0, "character": 0 });
+        let cases = [
+            (
+                "editor_reserve_document",
+                serde_json::json!({ "path": root, "windowLabel": "main" }),
+            ),
+            (
+                "editor_release_document",
+                serde_json::json!({ "reservationId": reservation }),
+            ),
+            (
+                "editor_transfer_document",
+                serde_json::json!({ "documentId": document, "targetReservationId": reservation, "windowLabel": "main", "paneId": "pane" }),
+            ),
+            (
+                "lsp_open_document",
+                serde_json::json!({ "reservationId": reservation, "paneId": "pane", "contents": "x", "languageId": "typescript" }),
+            ),
+            (
+                "lsp_apply_changes",
+                serde_json::json!({ "documentId": document, "batch": batch }),
+            ),
+            (
+                "lsp_resync_document",
+                serde_json::json!({ "documentId": document, "version": 2, "contents": "x" }),
+            ),
+            (
+                "lsp_did_save",
+                serde_json::json!({ "documentId": document }),
+            ),
+            (
+                "lsp_close_document",
+                serde_json::json!({ "documentId": document }),
+            ),
+            (
+                "lsp_project_candidates",
+                serde_json::json!({ "path": root, "languageId": "typescript" }),
+            ),
+            (
+                "lsp_set_project_context",
+                serde_json::json!({ "documentId": document, "context": { "kind": "disabled" } }),
+            ),
+            (
+                "lsp_set_project_trust",
+                serde_json::json!({ "root": root, "adapterId": "typescript", "decision": "revoked" }),
+            ),
+            (
+                "lsp_completion",
+                serde_json::json!({ "documentId": document, "position": position, "trigger": null }),
+            ),
+            (
+                "lsp_hover",
+                serde_json::json!({ "documentId": document, "position": position }),
+            ),
+            (
+                "lsp_signature_help",
+                serde_json::json!({ "documentId": document, "position": position, "trigger": null }),
+            ),
+            (
+                "lsp_definition",
+                serde_json::json!({ "documentId": document, "position": position }),
+            ),
+            ("lsp_problems_snapshot", serde_json::json!({ "root": null })),
+            (
+                "lsp_status_snapshot",
+                serde_json::json!({ "documentId": document }),
+            ),
+            (
+                "lsp_restart_session",
+                serde_json::json!({ "adapterId": "typescript", "root": root }),
+            ),
+            (
+                "lsp_session_logs",
+                serde_json::json!({ "adapterId": "typescript", "root": root }),
+            ),
+            ("lsp_trusted_projects", serde_json::json!({})),
+            (
+                "lsp_revoke_project_trust",
+                serde_json::json!({ "root": root, "adapterId": "typescript" }),
+            ),
+        ];
+        assert_eq!(cases.len(), 21);
+        for (command, body) in cases {
+            let response = tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: command.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: "http://tauri.localhost".parse().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            );
+            assert_eq!(
+                response.unwrap_err(),
+                serde_json::Value::String("the LSP manager is not running".into()),
+                "{command} must decode camelCase arguments and dispatch"
             );
         }
     }

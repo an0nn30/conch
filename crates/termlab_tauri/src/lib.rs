@@ -814,7 +814,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let application_handler: Box<
+                dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync,
+            > = Box::new(tauri::generate_handler![
             commands::app_ready,
             commands::open_devtools,
             commands::set_zoom_level,
@@ -956,27 +959,6 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             editor_fs::editor_write_file,
             editor_fs::editor_temp_path,
             editor_fs::editor_temp_cleanup,
-            lsp::commands::editor_reserve_document,
-            lsp::commands::editor_release_document,
-            lsp::commands::editor_transfer_document,
-            lsp::commands::lsp_open_document,
-            lsp::commands::lsp_apply_changes,
-            lsp::commands::lsp_resync_document,
-            lsp::commands::lsp_did_save,
-            lsp::commands::lsp_close_document,
-            lsp::commands::lsp_project_candidates,
-            lsp::commands::lsp_set_project_context,
-            lsp::commands::lsp_set_project_trust,
-            lsp::commands::lsp_completion,
-            lsp::commands::lsp_hover,
-            lsp::commands::lsp_signature_help,
-            lsp::commands::lsp_definition,
-            lsp::commands::lsp_problems_snapshot,
-            lsp::commands::lsp_status_snapshot,
-            lsp::commands::lsp_restart_session,
-            lsp::commands::lsp_session_logs,
-            lsp::commands::lsp_trusted_projects,
-            lsp::commands::lsp_revoke_project_trust,
             // editor_temp_sweep is deliberately absent, and is no longer a
             // #[tauri::command] at all: it deletes the entire remote-edit temp
             // root, which would destroy the backing file of every open remote
@@ -985,7 +967,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             close_guard::window_close_guard_arm,
             close_guard::confirm_window_close,
             close_guard::quit_vote,
-        ])
+            ]);
+            let lsp_handler = lsp::commands::invoke_handler::<tauri::Wry>();
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                if lsp::commands::is_lsp_command(invoke.message.command()) {
+                    lsp_handler(invoke)
+                } else {
+                    application_handler(invoke)
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
 

@@ -2,6 +2,7 @@
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::future::Future;
 use std::sync::Arc;
 use tauri::Emitter;
 use termlab_core::config::{self, UserConfig};
@@ -37,6 +38,38 @@ pub(crate) struct SaveSettingsResult {
     restart_required: bool,
 }
 
+async fn transition_settings<S, A, F>(
+    authority: &parking_lot::RwLock<UserConfig>,
+    new_config: UserConfig,
+    save: &S,
+    apply_runtime: A,
+) -> Result<(), String>
+where
+    S: Fn(&UserConfig) -> Result<(), String>,
+    A: FnOnce(Enablement) -> F,
+    F: Future<Output = Result<(), String>>,
+{
+    let old_config = authority.read().clone();
+    save(&new_config).map_err(|error| format!("Failed to save config: {error}"))?;
+    if let Err(manager_error) = apply_runtime(Enablement::from_config(&new_config.editor.lsp)).await
+    {
+        return match save(&old_config) {
+            Ok(()) => Err(format!("Failed to apply LSP settings: {manager_error}")),
+            Err(rollback_error) => {
+                // The new file is the only durable authority left. The actor
+                // rejected the transition because it is unavailable, so keep
+                // in-memory settings aligned with disk and report both facts.
+                *authority.write() = new_config;
+                Err(format!(
+                    "Failed to apply LSP settings: {manager_error}; rollback failed: {rollback_error}; persisted settings retained and LSP runtime unavailable"
+                ))
+            }
+        };
+    }
+    *authority.write() = new_config;
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) fn get_all_settings(state: tauri::State<'_, TauriState>) -> serde_json::Value {
     let mut cfg = state.config.read().clone();
@@ -62,21 +95,19 @@ pub(crate) async fn save_settings(
         needs_restart(&old_config, &new_config)
     };
 
-    config::save_user_config(&new_config).map_err(|e| format!("Failed to save config: {e}"))?;
-    if let Err(error) = lsp_state
-        .manager()
-        .set_enablement(Enablement::from_config(&new_config.editor.lsp))
-        .await
-    {
-        // Keep persistent settings and live manager authority coherent when
-        // the actor cannot accept the runtime policy transition.
-        let _ = config::save_user_config(&state.config.read().clone());
-        return Err(format!("Failed to apply LSP settings: {error}"));
-    }
-    {
-        let mut cfg = state.config.write();
-        *cfg = new_config.clone();
-    }
+    let manager = lsp_state.manager().clone();
+    transition_settings(
+        &state.config,
+        new_config.clone(),
+        &|config| config::save_user_config(config).map_err(|error| error.to_string()),
+        move |enablement| async move {
+            manager
+                .set_enablement(enablement)
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await?;
 
     let _ = app.emit("config-changed", ());
 
@@ -149,6 +180,7 @@ pub(crate) fn needs_restart(old: &UserConfig, new: &UserConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn identical_configs_no_restart() {
@@ -247,6 +279,115 @@ mod tests {
             !needs_restart(&a, &b),
             "UI chrome font sizes are hot-reloadable"
         );
+    }
+
+    #[tokio::test]
+    async fn settings_transaction_persists_and_applies_live_policy_without_holding_config_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.toml");
+        let state = parking_lot::RwLock::new(UserConfig::default());
+        let mut new = UserConfig::default();
+        new.editor.lsp.enabled = false;
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let applied_for_runtime = applied.clone();
+        let authority_for_runtime = &state;
+
+        transition_settings(
+            &state,
+            new,
+            &|config| {
+                std::fs::write(&path, toml::to_string(config).unwrap())
+                    .map_err(|error| error.to_string())
+            },
+            move |policy| {
+                assert!(
+                    authority_for_runtime.try_write().is_some(),
+                    "config guard must be released before awaiting the manager"
+                );
+                let applied = applied_for_runtime.clone();
+                async move {
+                    applied.lock().push(policy);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let persisted: UserConfig =
+            toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(!persisted.editor.lsp.enabled);
+        assert!(!state.read().editor.lsp.enabled);
+        assert!(!applied.lock()[0].enables("typescript"));
+    }
+
+    #[tokio::test]
+    async fn settings_transaction_preserves_old_authority_on_save_or_manager_failure() {
+        let state = parking_lot::RwLock::new(UserConfig::default());
+        let mut new = UserConfig::default();
+        new.editor.lsp.enabled = false;
+        let runtime_calls = Arc::new(AtomicUsize::new(0));
+        let calls = runtime_calls.clone();
+        let error = transition_settings(
+            &state,
+            new.clone(),
+            &|_| Err("disk unavailable".into()),
+            move |_| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("disk unavailable"));
+        assert_eq!(runtime_calls.load(Ordering::SeqCst), 0);
+        assert!(state.read().editor.lsp.enabled);
+
+        let saves = Arc::new(AtomicUsize::new(0));
+        let saves_for_disk = saves.clone();
+        let error = transition_settings(
+            &state,
+            new,
+            &move |_| {
+                saves_for_disk.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| async { Err("manager stopped".into()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("manager stopped"));
+        assert_eq!(saves.load(Ordering::SeqCst), 2, "new save plus rollback");
+        assert!(state.read().editor.lsp.enabled);
+    }
+
+    #[tokio::test]
+    async fn settings_transaction_surfaces_rollback_failure_and_keeps_memory_with_durable_disk() {
+        let state = parking_lot::RwLock::new(UserConfig::default());
+        let mut new = UserConfig::default();
+        new.editor.lsp.enabled = false;
+        let saves = AtomicUsize::new(0);
+        let error = transition_settings(
+            &state,
+            new,
+            &|_| {
+                if saves.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err("rollback disk full".into())
+                }
+            },
+            |_| async { Err("manager stopped".into()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("manager stopped"));
+        assert!(error.contains("rollback disk full"));
+        assert!(error.contains("persisted settings retained"));
+        assert!(!state.read().editor.lsp.enabled);
     }
 
     #[test]

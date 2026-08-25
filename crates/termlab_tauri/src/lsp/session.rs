@@ -880,6 +880,10 @@ impl LspSession {
             .await;
         if result.is_err() {
             self.inner.process.kill();
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if !remaining.is_zero() {
+                let _ = timeout(remaining, self.inner.process.wait()).await;
+            }
             return result;
         }
         let _ = self.inner.server.notify::<lsp::notification::Exit>(());
