@@ -74,11 +74,12 @@
   white-space: nowrap;
 }
 
+/* Toolbar actions are tl-icon-btn icon buttons (22x22, see button.css); this
+   class only pins them in the flex row and dims the disabled state. */
 .tl-transfer-center__toolbar-button {
-  height: var(--tl-row-h);
-  padding: 0 var(--tl-space-2);
-  white-space: nowrap;
+  flex: 0 0 auto;
 }
+.tl-transfer-center__toolbar-button:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
 
 .tl-transfer-center__recovery {
   flex: 0 0 auto;

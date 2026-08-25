@@ -1275,4 +1275,35 @@ async function loadMountLifecycleHarness() {
     'one aggregate count change produces one polite announcement');
 }
 
+// --- Toolbar actions are compact icon buttons with tooltips ----------------
+// The queue/clear/concurrency controls render as tl-icon-btn icon buttons
+// (matching the tool-window header chrome) with `title` tooltips that mirror
+// their aria-labels — not wide text buttons. The queue toggle's icon, tooltip,
+// and action all flip together with the paused state.
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([job('done', 'completed')], { summary: summary({ history: 1 }) }));
+
+  const buttons = harness.panelEl.querySelectorAll('[data-transfer-action]')
+    .filter((el) => ['pause-all', 'resume-all', 'clear-completed', 'concurrency'].includes(el.dataset.transferAction));
+  assert.strictEqual(buttons.length, 3, 'three toolbar action buttons');
+  for (const button of buttons) {
+    assert.ok(button.className.includes('tl-icon-btn'),
+      `${button.dataset.transferAction} must be a compact icon button`);
+    assert.ok(!button.className.split(' ').includes('tl-btn'),
+      `${button.dataset.transferAction} must not keep the wide text-button class`);
+    assert.ok(button.getAttribute('title'), `${button.dataset.transferAction} must carry a tooltip`);
+    assert.strictEqual(button.getAttribute('title'), button.getAttribute('aria-label'),
+      `${button.dataset.transferAction} tooltip must mirror its aria-label`);
+  }
+
+  const queueButton = harness.panelEl.querySelector('[data-transfer-action="pause-all"]');
+  assert.strictEqual(queueButton.getAttribute('title'), 'Pause all active transfers');
+
+  harness.emit(snapshot([job('done', 'completed')], { queuePaused: true, summary: summary({ history: 1, queuePaused: true }) }));
+  const resumeButton = harness.panelEl.querySelector('[data-transfer-action="resume-all"]');
+  assert.ok(resumeButton, 'paused queue flips the action to resume-all');
+  assert.strictEqual(resumeButton.getAttribute('title'), 'Resume all eligible transfers');
+}
+
 console.log('transfer center: all assertions passed');

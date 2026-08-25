@@ -7,6 +7,7 @@
     'add', 'edit', 'remove', 'refresh', 'web', 'settings', 'gear',
     'hideToolWindow', 'notifications', 'moreVertical', 'sftp',
     'newFolder', 'copy', 'back', 'forward', 'home', 'toggleVisibility',
+    'resume', 'suspend', 'gc',
   ]);
 
   function resolve(name, isDark) {

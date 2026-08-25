@@ -35,6 +35,9 @@ classic set has no dark counterpart (verified by search — Task 5's icon helper
 - `forward` ← `actions/forward.svg` (Apache-2.0) `[+ _dark]`
 - `home` ← `nodes/homeFolder.svg` (Apache-2.0) `[+ _dark]`
 - `toggleVisibility` ← `actions/toggleVisibility.svg` (Apache-2.0) `[+ _dark]`
+- `resume` ← `actions/resume.svg` (Apache-2.0) `[+ _dark]`
+- `suspend` ← `actions/suspend.svg` (Apache-2.0) `[+ _dark]`
+- `gc` ← `actions/gc.svg` (Apache-2.0) `[+ _dark]`
 
 ## Notes on non-exact-name choices
 

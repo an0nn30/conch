@@ -147,15 +147,27 @@
     summaryEl.setAttribute('aria-atomic', 'true');
 
     const toolbarActionsEl = append(toolbarEl, 'div', 'tl-transfer-center__toolbar-actions');
-    const queueButtonEl = append(toolbarActionsEl, 'button', 'tl-btn tl-transfer-center__toolbar-button');
+    // Toolbar actions are compact icon buttons (the tool-window header's
+    // tl-icon-btn chrome) with `title` tooltips mirroring their aria-labels.
+    // The harness has no tlIcon, so fall back to the action's text label.
+    const actionIcon = (name, fallback) => (
+      global.tlIcon && typeof global.tlIcon.html === 'function'
+        ? global.tlIcon.html(name, { size: 16, alt: '' })
+        : fallback
+    );
+    const queueButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
     queueButtonEl.setAttribute('type', 'button');
-    const clearButtonEl = append(toolbarActionsEl, 'button', 'tl-btn tl-transfer-center__toolbar-button', 'Clear completed');
+    const clearButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
     clearButtonEl.setAttribute('type', 'button');
+    clearButtonEl.innerHTML = actionIcon('gc', 'Clear completed');
     clearButtonEl.setAttribute('aria-label', 'Clear completed transfer history');
+    clearButtonEl.setAttribute('title', 'Clear completed transfer history');
     setData(clearButtonEl, 'transfer-action', 'clear-completed');
-    const concurrencyButtonEl = append(toolbarActionsEl, 'button', 'tl-btn tl-transfer-center__toolbar-button', 'Concurrency');
+    const concurrencyButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
     concurrencyButtonEl.setAttribute('type', 'button');
+    concurrencyButtonEl.innerHTML = actionIcon('settings', 'Concurrency');
     concurrencyButtonEl.setAttribute('aria-label', 'Configure transfer concurrency');
+    concurrencyButtonEl.setAttribute('title', 'Configure transfer concurrency');
     setData(concurrencyButtonEl, 'transfer-action', 'concurrency');
 
     const recoveryEl = append(panelEl, 'div', 'tl-transfer-center__recovery');
@@ -316,8 +328,12 @@
       }
 
       const paused = !!snapshot.queuePaused;
-      queueButtonEl.textContent = paused ? 'Resume all' : 'Pause all';
-      queueButtonEl.setAttribute('aria-label', paused ? 'Resume all eligible transfers' : 'Pause all active transfers');
+      queueButtonEl.innerHTML = paused
+        ? actionIcon('resume', 'Resume all')
+        : actionIcon('suspend', 'Pause all');
+      const queueLabel = paused ? 'Resume all eligible transfers' : 'Pause all active transfers';
+      queueButtonEl.setAttribute('aria-label', queueLabel);
+      queueButtonEl.setAttribute('title', queueLabel);
       setData(queueButtonEl, 'transfer-action', paused ? 'resume-all' : 'pause-all');
       clearButtonEl.disabled = history === 0;
     }
