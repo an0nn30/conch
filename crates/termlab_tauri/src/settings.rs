@@ -4,13 +4,14 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 use termlab_core::config::{self, UserConfig};
 use ts_rs::TS;
 
 use crate::TauriState;
 use crate::lsp::commands::LspState;
-use crate::lsp::manager::Enablement;
+use crate::lsp::manager::{Enablement, LspManagerHandle, ManagerError};
 use crate::plugins::PluginState;
 
 fn normalize_plugin_search_paths(cfg: &mut UserConfig) {
@@ -38,7 +39,55 @@ pub(crate) struct SaveSettingsResult {
     restart_required: bool,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct SettingsTransactionGate {
+    busy: Arc<AtomicBool>,
+}
+
+struct SettingsTransactionPermit(Arc<AtomicBool>);
+
+impl SettingsTransactionGate {
+    fn try_enter(&self) -> Result<SettingsTransactionPermit, String> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| SettingsTransactionPermit(self.busy.clone()))
+            .map_err(|_| "A settings save is already in progress".into())
+    }
+}
+
+impl Drop for SettingsTransactionPermit {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+async fn apply_live_enablement(
+    manager: LspManagerHandle,
+    enablement: Enablement,
+) -> Result<(), ManagerError> {
+    loop {
+        match manager.set_enablement(enablement.clone()).await {
+            Err(ManagerError::Overloaded) => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(ManagerError::ActorStopped) => return Err(ManagerError::ActorStopped),
+            Err(error) => {
+                // A live runtime that rejected the new durable authority must
+                // not remain active under an older policy.
+                return match manager.shutdown().await {
+                    Ok(()) | Err(ManagerError::ActorStopped) => Err(ManagerError::ActorStopped),
+                    Err(shutdown) => Err(ManagerError::Infrastructure(format!(
+                        "live policy failed ({error}); runtime quarantine failed ({shutdown})"
+                    ))),
+                };
+            }
+            Ok(()) => return Ok(()),
+        }
+    }
+}
+
 async fn transition_settings<S, A, F>(
+    gate: &SettingsTransactionGate,
     authority: &parking_lot::RwLock<UserConfig>,
     new_config: UserConfig,
     save: &S,
@@ -46,28 +95,31 @@ async fn transition_settings<S, A, F>(
 ) -> Result<(), String>
 where
     S: Fn(&UserConfig) -> Result<(), String>,
-    A: FnOnce(Enablement) -> F,
-    F: Future<Output = Result<(), String>>,
+    A: FnOnce(Enablement) -> F + Send + 'static,
+    F: Future<Output = Result<(), ManagerError>> + Send + 'static,
 {
-    let old_config = authority.read().clone();
+    let _permit = gate.try_enter()?;
     save(&new_config).map_err(|error| format!("Failed to save config: {error}"))?;
-    if let Err(manager_error) = apply_runtime(Enablement::from_config(&new_config.editor.lsp)).await
-    {
-        return match save(&old_config) {
-            Ok(()) => Err(format!("Failed to apply LSP settings: {manager_error}")),
-            Err(rollback_error) => {
-                // The new file is the only durable authority left. The actor
-                // rejected the transition because it is unavailable, so keep
-                // in-memory settings aligned with disk and report both facts.
-                *authority.write() = new_config;
-                Err(format!(
-                    "Failed to apply LSP settings: {manager_error}; rollback failed: {rollback_error}; persisted settings retained and LSP runtime unavailable"
-                ))
-            }
-        };
-    }
     *authority.write() = new_config;
-    Ok(())
+    let enablement = {
+        let config = authority.read();
+        Enablement::from_config(&config.editor.lsp)
+    };
+    // The owned permit moves with the application task. If the invoking
+    // window disappears, Tokio detaches this task and later saves remain busy
+    // until the accepted durable transition reaches a terminal runtime state.
+    let apply = tokio::spawn(async move {
+        let _permit = _permit;
+        apply_runtime(enablement).await
+    })
+    .await
+    .map_err(|error| format!("Settings were saved, but the live policy task failed: {error}"))?;
+    match apply {
+        Ok(()) | Err(ManagerError::ActorStopped) => Ok(()),
+        Err(error) => Err(format!(
+            "Settings were saved, but the live LSP policy could not be applied: {error}"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -82,6 +134,7 @@ pub(crate) async fn save_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, TauriState>,
     lsp_state: tauri::State<'_, LspState>,
+    transaction_gate: tauri::State<'_, SettingsTransactionGate>,
     plugin_state: tauri::State<'_, Arc<Mutex<PluginState>>>,
     settings: serde_json::Value,
 ) -> Result<SaveSettingsResult, String> {
@@ -97,15 +150,11 @@ pub(crate) async fn save_settings(
 
     let manager = lsp_state.manager().clone();
     transition_settings(
+        &transaction_gate,
         &state.config,
         new_config.clone(),
         &|config| config::save_user_config(config).map_err(|error| error.to_string()),
-        move |enablement| async move {
-            manager
-                .set_enablement(enablement)
-                .await
-                .map_err(|error| error.to_string())
-        },
+        move |enablement| apply_live_enablement(manager, enablement),
     )
     .await?;
 
@@ -285,14 +334,16 @@ mod tests {
     async fn settings_transaction_persists_and_applies_live_policy_without_holding_config_lock() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("settings.toml");
-        let state = parking_lot::RwLock::new(UserConfig::default());
+        let state = Arc::new(parking_lot::RwLock::new(UserConfig::default()));
         let mut new = UserConfig::default();
         new.editor.lsp.enabled = false;
         let applied = Arc::new(Mutex::new(Vec::new()));
+        let gate = SettingsTransactionGate::default();
         let applied_for_runtime = applied.clone();
-        let authority_for_runtime = &state;
+        let authority_for_runtime = state.clone();
 
         transition_settings(
+            &gate,
             &state,
             new,
             &|config| {
@@ -307,7 +358,7 @@ mod tests {
                 let applied = applied_for_runtime.clone();
                 async move {
                     applied.lock().push(policy);
-                    Ok(())
+                    Ok::<(), ManagerError>(())
                 }
             },
         )
@@ -322,13 +373,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_transaction_preserves_old_authority_on_save_or_manager_failure() {
+    async fn settings_transaction_preserves_old_authority_only_when_persistence_fails() {
         let state = parking_lot::RwLock::new(UserConfig::default());
+        let gate = SettingsTransactionGate::default();
         let mut new = UserConfig::default();
         new.editor.lsp.enabled = false;
         let runtime_calls = Arc::new(AtomicUsize::new(0));
         let calls = runtime_calls.clone();
         let error = transition_settings(
+            &gate,
             &state,
             new.clone(),
             &|_| Err("disk unavailable".into()),
@@ -336,7 +389,7 @@ mod tests {
                 let calls = calls.clone();
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Ok::<(), ManagerError>(())
                 }
             },
         )
@@ -348,46 +401,115 @@ mod tests {
 
         let saves = Arc::new(AtomicUsize::new(0));
         let saves_for_disk = saves.clone();
-        let error = transition_settings(
+        transition_settings(
+            &gate,
             &state,
             new,
             &move |_| {
                 saves_for_disk.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_| async { Err("manager stopped".into()) },
+            |_| async { Err(ManagerError::ActorStopped) },
         )
         .await
-        .unwrap_err();
-        assert!(error.contains("manager stopped"));
-        assert_eq!(saves.load(Ordering::SeqCst), 2, "new save plus rollback");
-        assert!(state.read().editor.lsp.enabled);
+        .unwrap();
+        assert_eq!(
+            saves.load(Ordering::SeqCst),
+            1,
+            "durable authority is one-way"
+        );
+        assert!(!state.read().editor.lsp.enabled);
     }
 
     #[tokio::test]
-    async fn settings_transaction_surfaces_rollback_failure_and_keeps_memory_with_durable_disk() {
+    async fn runtime_rejection_reports_failure_without_rolling_back_durable_authority() {
         let state = parking_lot::RwLock::new(UserConfig::default());
+        let gate = SettingsTransactionGate::default();
         let mut new = UserConfig::default();
         new.editor.lsp.enabled = false;
         let saves = AtomicUsize::new(0);
         let error = transition_settings(
+            &gate,
             &state,
             new,
             &|_| {
-                if saves.fetch_add(1, Ordering::SeqCst) == 0 {
-                    Ok(())
-                } else {
-                    Err("rollback disk full".into())
-                }
+                saves.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             },
-            |_| async { Err("manager stopped".into()) },
+            |_| async { Err(ManagerError::Infrastructure("runtime unavailable".into())) },
         )
         .await
         .unwrap_err();
-        assert!(error.contains("manager stopped"));
-        assert!(error.contains("rollback disk full"));
-        assert!(error.contains("persisted settings retained"));
+        assert!(error.contains("Settings were saved"));
+        assert!(error.contains("runtime unavailable"));
+        assert_eq!(saves.load(Ordering::SeqCst), 1);
         assert!(!state.read().editor.lsp.enabled);
+    }
+
+    #[tokio::test]
+    async fn concurrent_settings_save_is_explicitly_rejected_without_overtaking() {
+        let gate = Arc::new(SettingsTransactionGate::default());
+        let state = Arc::new(parking_lot::RwLock::new(UserConfig::default()));
+        let entered_runtime = Arc::new(tokio::sync::Notify::new());
+        let release_runtime = Arc::new(tokio::sync::Notify::new());
+        let saves = Arc::new(AtomicUsize::new(0));
+        let mut disabled = UserConfig::default();
+        disabled.editor.lsp.enabled = false;
+        let first = tokio::spawn({
+            let gate = gate.clone();
+            let state = state.clone();
+            let entered_runtime = entered_runtime.clone();
+            let release_runtime = release_runtime.clone();
+            let saves = saves.clone();
+            async move {
+                transition_settings(
+                    &gate,
+                    &state,
+                    disabled,
+                    &move |_| {
+                        saves.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    move |_| async move {
+                        entered_runtime.notify_one();
+                        release_runtime.notified().await;
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+        entered_runtime.notified().await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        let error = transition_settings(
+            &gate,
+            &state,
+            UserConfig::default(),
+            &|_| panic!("busy transaction must not persist"),
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("already in progress"));
+        assert_eq!(saves.load(Ordering::SeqCst), 1);
+        assert!(!state.read().editor.lsp.enabled);
+
+        release_runtime.notify_one();
+        while gate.busy.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        transition_settings(
+            &gate,
+            &state,
+            UserConfig::default(),
+            &|_| Ok(()),
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        assert!(state.read().editor.lsp.enabled);
     }
 
     #[test]

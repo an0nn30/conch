@@ -318,6 +318,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             config: RwLock::new(config),
             workspace_dir,
         })
+        .manage(settings::SettingsTransactionGate::default())
         .manage(Arc::clone(&remote_state))
         .manage(Arc::clone(&plugin_state))
         .manage(Arc::clone(&vault_state))

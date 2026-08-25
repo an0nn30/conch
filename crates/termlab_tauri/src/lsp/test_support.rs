@@ -23,6 +23,8 @@ pub(crate) enum ServerScript {
     ConfigurationSections,
     HangingCompletion,
     IgnoresExit,
+    DelayedKillAfterExit,
+    DelayedKillAfterShutdownTimeout,
     MalformedCompletion,
     HangingInitialize,
     ExitAfterInitialize,
@@ -235,7 +237,12 @@ impl ServerLauncher for MockServerLauncher {
         tokio::spawn(async move {
             let success = tokio::select! {
                 result = run_script(script, server_read, server_write, observed) => result.is_ok(),
-                _ = kill_rx => false,
+                _ = kill_rx => {
+                    if matches!(script, ServerScript::DelayedKillAfterExit | ServerScript::DelayedKillAfterShutdownTimeout) {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    false
+                },
             };
             let _ = exit_tx.send(Some(ProcessExit {
                 success,
@@ -780,7 +787,10 @@ async fn run_script(
                 )
                 .await?;
             }
-            (ServerScript::HangingShutdown, "shutdown") => {}
+            (
+                ServerScript::HangingShutdown | ServerScript::DelayedKillAfterShutdownTimeout,
+                "shutdown",
+            ) => {}
             (ServerScript::DynamicSync, "textDocument/didChange") if !dynamic_unregistered => {
                 dynamic_unregistered = true;
                 write_message(
@@ -799,7 +809,7 @@ async fn run_script(
                 .await?;
             }
             (_, "shutdown") => write_response(&mut writer, id.unwrap(), Value::Null).await?,
-            (ServerScript::IgnoresExit, "exit") => {}
+            (ServerScript::IgnoresExit | ServerScript::DelayedKillAfterExit, "exit") => {}
             (_, "exit") => return Ok(()),
             _ => {}
         }

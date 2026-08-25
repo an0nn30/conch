@@ -880,16 +880,16 @@ impl LspSession {
             .await;
         if result.is_err() {
             self.inner.process.kill();
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if !remaining.is_zero() {
-                let _ = timeout(remaining, self.inner.process.wait()).await;
-            }
+            // A kill acknowledgement is not a reap. Keep the generation live
+            // until the process watcher has observed the OS child exit.
+            let _ = self.inner.process.wait().await;
             return result;
         }
         let _ = self.inner.server.notify::<lsp::notification::Exit>(());
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() || timeout(remaining, self.inner.process.wait()).await.is_err() {
             self.inner.process.kill();
+            let _ = self.inner.process.wait().await;
         }
         result
     }
@@ -1806,6 +1806,49 @@ mod tests {
             Err(SessionError::Timeout("shutdown"))
         ));
         assert_eq!(started.elapsed(), Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn graceful_shutdown_timeout_kills_and_reaps_before_completion() {
+        let (launcher, _observed) =
+            MockServerLauncher::scripted(ServerScript::DelayedKillAfterExit);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        let shutdown = tokio::spawn(async move { session.shutdown().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "kill acknowledgement is not process reap"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        shutdown.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_shutdown_request_kills_and_reaps_before_returning_error() {
+        let (launcher, _observed) =
+            MockServerLauncher::scripted(ServerScript::DelayedKillAfterShutdownTimeout);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        let shutdown = tokio::spawn(async move { session.shutdown().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown timeout must still reap after kill"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(matches!(
+            shutdown.await.unwrap(),
+            Err(SessionError::Timeout("shutdown"))
+        ));
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_lsp::lsp_types as lsp;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
@@ -869,6 +870,39 @@ enum ManagerCommand {
     },
 }
 
+impl ManagerCommand {
+    fn is_policy(&self) -> bool {
+        matches!(
+            self,
+            Self::SetProjectContext { .. }
+                | Self::SetProjectTrust { .. }
+                | Self::SetEnablement { .. }
+        )
+    }
+
+    fn policy_reply_closed(&self) -> bool {
+        match self {
+            Self::SetProjectContext { reply, .. } => reply.is_closed(),
+            Self::SetProjectTrust { reply, .. } | Self::SetEnablement { reply, .. } => {
+                reply.is_closed()
+            }
+            _ => false,
+        }
+    }
+
+    fn fail_policy(self, error: ManagerError) {
+        match self {
+            Self::SetProjectContext { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::SetProjectTrust { reply, .. } | Self::SetEnablement { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            _ => unreachable!("only policy commands are deferred"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RequestKind {
     Completion,
@@ -1070,6 +1104,7 @@ struct ManagedSession {
     logs: VecDeque<SessionLogEntry>,
     next_log_sequence: u64,
     capabilities: LspCapabilities,
+    protocol_started: bool,
 }
 
 struct ProjectStore {
@@ -1077,15 +1112,97 @@ struct ProjectStore {
     enablement: Enablement,
 }
 
+#[derive(Clone)]
+struct CacheRootAnchor {
+    canonical_path: Option<PathBuf>,
+    #[cfg(unix)]
+    directory: Option<Arc<fs::File>>,
+    capture_error: Option<Arc<str>>,
+}
+
+impl CacheRootAnchor {
+    fn capture(path: &Path) -> Self {
+        let canonical_path = match fs::canonicalize(path) {
+            Ok(path) if path.is_dir() => path,
+            Ok(_) => {
+                return Self {
+                    canonical_path: None,
+                    #[cfg(unix)]
+                    directory: None,
+                    capture_error: Some("cache root is not a directory".into()),
+                };
+            }
+            Err(error) => {
+                return Self {
+                    canonical_path: None,
+                    #[cfg(unix)]
+                    directory: None,
+                    capture_error: Some(error.to_string().into()),
+                };
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&canonical_path)
+            {
+                Ok(directory) => Self {
+                    canonical_path: Some(canonical_path),
+                    directory: Some(Arc::new(directory)),
+                    capture_error: None,
+                },
+                Err(error) => Self {
+                    canonical_path: Some(canonical_path),
+                    directory: None,
+                    capture_error: Some(error.to_string().into()),
+                },
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                canonical_path: Some(canonical_path),
+                capture_error: None,
+            }
+        }
+    }
+
+    fn unavailable(&self) -> ManagerError {
+        ManagerError::Infrastructure(format!(
+            "cache root could not be anchored: {}",
+            self.capture_error.as_deref().unwrap_or("unknown error")
+        ))
+    }
+}
+
 struct CacheDeletionPlan {
-    cache_root: PathBuf,
-    targets: Vec<(String, PathBuf)>,
+    cache_root: CacheRootAnchor,
+    project_root: PathBuf,
+    targets: Vec<(String, String, &'static str)>,
 }
 
 impl CacheDeletionPlan {
     fn remove(self) -> Result<(), ManagerError> {
-        for (adapter, target) in self.targets {
-            remove_owned_cache_directory(&self.cache_root, &adapter, &target)?;
+        let canonical_cache_root = self
+            .cache_root
+            .canonical_path
+            .as_deref()
+            .ok_or_else(|| self.cache_root.unavailable())?;
+        if canonical_cache_root.starts_with(&self.project_root) {
+            return Err(ManagerError::Infrastructure(
+                "refused to remove a cache root inside the project".into(),
+            ));
+        }
+        for (adapter, project_hash, disposable) in self.targets {
+            remove_owned_cache_directory_anchored(
+                &self.cache_root,
+                &adapter,
+                &project_hash,
+                disposable,
+            )?;
         }
         Ok(())
     }
@@ -1107,7 +1224,7 @@ type ShutdownReply = (
 pub(crate) struct LspManager {
     state: ManagerState,
     factory: Arc<dyn SessionFactory>,
-    cache_root: PathBuf,
+    cache_root: CacheRootAnchor,
     command_rx: mpsc::Receiver<ManagerCommand>,
     shutdown_rx: mpsc::Receiver<oneshot::Sender<Result<(), ManagerError>>>,
     input_tx: mpsc::Sender<ActorInput>,
@@ -1123,6 +1240,9 @@ pub(crate) struct LspManager {
     latest_requests: HashMap<(DocumentId, RequestKind), u64>,
     next_request_id: u64,
     pending_policy_commands: VecDeque<ManagerCommand>,
+    retrying_policy: bool,
+    policy_async_in_flight: bool,
+    retry_policy_requested: bool,
     status_revision: u32,
     shutdown_reply: Option<ShutdownReply>,
     shutting_down: bool,
@@ -1161,7 +1281,7 @@ impl LspManager {
                 },
             },
             factory,
-            cache_root,
+            cache_root: CacheRootAnchor::capture(&cache_root),
             command_rx,
             shutdown_rx,
             input_tx,
@@ -1177,6 +1297,9 @@ impl LspManager {
             latest_requests: HashMap::new(),
             next_request_id: 1,
             pending_policy_commands: VecDeque::new(),
+            retrying_policy: false,
+            policy_async_in_flight: false,
+            retry_policy_requested: false,
             status_revision: 0,
             shutdown_reply: None,
             shutting_down: false,
@@ -1193,6 +1316,10 @@ impl LspManager {
                     if let Some(reply) = shutdown {
                         self.begin_shutdown(reply);
                     }
+                }
+                _ = std::future::ready(()), if self.retry_policy_requested && !self.shutting_down => {
+                    self.retry_policy_requested = false;
+                    self.retry_pending_policy_command();
                 }
                 command = self.command_rx.recv(), if !self.shutting_down => {
                     let Some(command) = command else { break };
@@ -1215,6 +1342,17 @@ impl LspManager {
 
 impl LspManager {
     fn handle_command(&mut self, command: ManagerCommand) {
+        if command.is_policy() && !self.retrying_policy {
+            self.discard_cancelled_policy_front();
+            if self.policy_async_in_flight || !self.pending_policy_commands.is_empty() {
+                self.defer_policy_command(command, false);
+                return;
+            }
+        }
+        self.handle_command_now(command);
+    }
+
+    fn handle_command_now(&mut self, command: ManagerCommand) {
         match command {
             ManagerCommand::ReserveDocument {
                 path,
@@ -1289,9 +1427,19 @@ impl LspManager {
                 document_id,
                 context,
                 reply,
-            } => {
-                let _ = reply.send(self.set_project_context(document_id, context));
-            }
+            } => match self.set_project_context(document_id, context.clone()) {
+                Err(ManagerError::Overloaded) => self.defer_policy_command(
+                    ManagerCommand::SetProjectContext {
+                        document_id,
+                        context,
+                        reply,
+                    },
+                    self.retrying_policy,
+                ),
+                result => {
+                    let _ = reply.send(result);
+                }
+            },
             ManagerCommand::SetProjectTrust {
                 root,
                 adapter_id,
@@ -1299,17 +1447,15 @@ impl LspManager {
                 reply,
             } => match self.set_project_trust(root.clone(), adapter_id.clone(), decision) {
                 Err(ManagerError::Overloaded) => {
-                    if self.pending_policy_commands.len() >= COMMAND_CAPACITY {
-                        let _ = reply.send(Err(ManagerError::Overloaded));
-                    } else {
-                        self.pending_policy_commands
-                            .push_back(ManagerCommand::SetProjectTrust {
-                                root,
-                                adapter_id,
-                                decision,
-                                reply,
-                            });
-                    }
+                    self.defer_policy_command(
+                        ManagerCommand::SetProjectTrust {
+                            root,
+                            adapter_id,
+                            decision,
+                            reply,
+                        },
+                        self.retrying_policy,
+                    );
                 }
                 Err(error) => {
                     let _ = reply.send(Err(error));
@@ -1318,6 +1464,7 @@ impl LspManager {
                     let _ = reply.send(Ok(()));
                 }
                 Ok(Some(plan)) => {
+                    self.policy_async_in_flight = true;
                     let input = self.input_tx.clone();
                     tokio::spawn(async move {
                         let result = tokio::task::spawn_blocking(move || plan.remove())
@@ -1333,12 +1480,10 @@ impl LspManager {
             ManagerCommand::SetEnablement { enablement, reply } => {
                 match self.set_enablement_policy(enablement.clone()) {
                     Err(ManagerError::Overloaded) => {
-                        if self.pending_policy_commands.len() >= COMMAND_CAPACITY {
-                            let _ = reply.send(Err(ManagerError::Overloaded));
-                        } else {
-                            self.pending_policy_commands
-                                .push_back(ManagerCommand::SetEnablement { enablement, reply });
-                        }
+                        self.defer_policy_command(
+                            ManagerCommand::SetEnablement { enablement, reply },
+                            self.retrying_policy,
+                        );
                     }
                     result => {
                         let _ = reply.send(result);
@@ -2052,14 +2197,50 @@ impl LspManager {
     }
 
     fn retry_pending_policy_command(&mut self) {
-        if self.shutting_down {
+        if self.shutting_down || self.policy_async_in_flight {
             return;
         }
-        let pending = self.pending_policy_commands.len();
-        for _ in 0..pending {
-            if let Some(command) = self.pending_policy_commands.pop_front() {
-                self.handle_command(command);
-            }
+        self.discard_cancelled_policy_front();
+        let queued_before = self.pending_policy_commands.len();
+        let Some(command) = self.pending_policy_commands.pop_front() else {
+            return;
+        };
+        self.retrying_policy = true;
+        self.handle_command_now(command);
+        self.retrying_policy = false;
+        // An overloaded retry puts the same command back at the front. Do not
+        // turn that into a permanently-ready actor branch: the lifecycle or
+        // worker event that frees more capacity will retry it. When the front
+        // did complete, schedule exactly one following FIFO command.
+        let front_progressed = self.pending_policy_commands.len() < queued_before;
+        if front_progressed
+            && !self.policy_async_in_flight
+            && !self.pending_policy_commands.is_empty()
+        {
+            self.retry_policy_requested = true;
+        }
+    }
+
+    fn defer_policy_command(&mut self, command: ManagerCommand, retry_at_front: bool) {
+        if command.policy_reply_closed() {
+            return;
+        }
+        if self.pending_policy_commands.len() >= COMMAND_CAPACITY {
+            command.fail_policy(ManagerError::Overloaded);
+        } else if retry_at_front {
+            self.pending_policy_commands.push_front(command);
+        } else {
+            self.pending_policy_commands.push_back(command);
+        }
+    }
+
+    fn discard_cancelled_policy_front(&mut self) {
+        while self
+            .pending_policy_commands
+            .front()
+            .is_some_and(ManagerCommand::policy_reply_closed)
+        {
+            self.pending_policy_commands.pop_front();
         }
     }
 
@@ -2074,6 +2255,11 @@ impl LspManager {
                 .documents
                 .get(&document_id)
                 .and_then(|document| document.session_key.clone())
+                && self
+                    .state
+                    .sessions
+                    .get(&key)
+                    .is_some_and(|session| session.protocol_started)
             {
                 *required.entry(key).or_default() += 1;
             }
@@ -2134,7 +2320,14 @@ impl LspManager {
                 continue;
             }
             if let Some(current) = current {
-                *operations.entry(current).or_default() += 1;
+                if self
+                    .state
+                    .sessions
+                    .get(&current)
+                    .is_some_and(|session| session.protocol_started)
+                {
+                    *operations.entry(current).or_default() += 1;
+                }
             }
             if let Some(desired) = desired
                 && let Some(session) = self.state.sessions.get(&desired)
@@ -2322,12 +2515,18 @@ impl LspManager {
         self.detach_document(document_id, false, true)?;
         if needs_start {
             let session_id = format!("{}-{}", key.adapter_id, uuid::Uuid::new_v4());
+            let generation = self
+                .active_generations
+                .iter()
+                .filter_map(|(active_key, generation)| (active_key == &key).then_some(*generation))
+                .max()
+                .unwrap_or(0);
             self.state.sessions.insert(
                 key.clone(),
                 ManagedSession {
                     session_id,
                     language,
-                    generation: 0,
+                    generation,
                     worker: None,
                     startup_cancel: None,
                     outbox: VecDeque::new(),
@@ -2340,6 +2539,7 @@ impl LspManager {
                     logs: VecDeque::new(),
                     next_log_sequence: 1,
                     capabilities: capabilities(false),
+                    protocol_started: false,
                 },
             );
         }
@@ -2387,7 +2587,13 @@ impl LspManager {
         let Some((key, uri)) = attachment else {
             return Ok(());
         };
-        if queue_close {
+        if queue_close
+            && self
+                .state
+                .sessions
+                .get(&key)
+                .is_some_and(|session| session.protocol_started)
+        {
             self.enqueue_session_operations(
                 &key,
                 [SessionOperation::DidClose(document_id_text(document_id))],
@@ -2443,10 +2649,17 @@ impl LspManager {
             .session_key
             .clone();
         if let Some(key) = key {
-            self.enqueue_session_operations(
-                &key,
-                [SessionOperation::DidClose(document_id_text(document_id))],
-            )?;
+            if self
+                .state
+                .sessions
+                .get(&key)
+                .is_some_and(|session| session.protocol_started)
+            {
+                self.enqueue_session_operations(
+                    &key,
+                    [SessionOperation::DidClose(document_id_text(document_id))],
+                )?;
+            }
         }
         Ok(())
     }
@@ -2471,6 +2684,7 @@ impl LspManager {
         session.generation = session.generation.saturating_add(1);
         session.exit_observed = false;
         session.worker = None;
+        session.protocol_started = false;
         session.outbox.clear();
         let generation = session.generation;
         self.active_generations.insert((key.clone(), generation));
@@ -2917,6 +3131,7 @@ impl LspManager {
                         }
                     }
                 }
+                self.retry_pending_policy_command();
             }
             ActorInput::RequestCompleted { request_id, result } => {
                 self.request_completed(request_id, result)
@@ -3021,6 +3236,8 @@ impl LspManager {
                     log::warn!("LSP cache removal failed: {error}");
                 }
                 let _ = reply.send(result);
+                self.policy_async_in_flight = false;
+                self.retry_policy_requested = !self.pending_policy_commands.is_empty();
             }
             ActorInput::FocusDelivered { key } => {
                 self.focus_in_flight = None;
@@ -3081,6 +3298,7 @@ impl LspManager {
                     session.worker = Some(worker);
                     session.exit_observed = false;
                     session.capabilities = negotiated_capabilities;
+                    session.protocol_started = true;
                     session.documents.iter().copied().collect::<Vec<_>>()
                 };
                 for document in documents {
@@ -3129,8 +3347,14 @@ impl LspManager {
                 self.push_log(&key, "startup", "session startup failed".into());
                 if let Some(session) = self.state.sessions.get_mut(&key) {
                     session.startup_cancel = None;
+                    session.worker = None;
+                    session.protocol_started = false;
+                    session.outbox.clear();
                 }
                 for document in documents {
+                    if let Some(document) = self.state.documents.get_mut(&document) {
+                        document.synchronization_dirty = true;
+                    }
                     self.set_document_status(
                         document,
                         state,
@@ -3144,6 +3368,7 @@ impl LspManager {
                         unavailable.clone(),
                     );
                 }
+                self.retry_pending_policy_command();
             }
         }
     }
@@ -3421,6 +3646,8 @@ impl LspManager {
             }
             session.exit_observed = true;
             session.worker = None;
+            session.protocol_started = false;
+            session.outbox.clear();
             session
                 .crash_timestamps
                 .retain(|timestamp| now.duration_since(*timestamp) <= CRASH_WINDOW);
@@ -3469,6 +3696,7 @@ impl LspManager {
                     .await;
             });
         }
+        self.retry_pending_policy_command();
     }
 
     fn restart_session(&mut self, adapter_id: String, root: PathBuf) -> Result<(), ManagerError> {
@@ -3639,20 +3867,16 @@ impl LspManager {
             });
         let mut targets = Vec::new();
         for adapter in adapters {
-            let Some(language) = language_for_adapter(&adapter) else {
+            if language_for_adapter(&adapter).is_none() {
                 continue;
-            };
-            let Ok(paths) =
-                BundledServerCatalog::new().cache_paths(language, root, &self.cache_root)
-            else {
-                continue;
-            };
-            for path in [paths.cache_dir, paths.data_dir] {
-                targets.push((adapter.clone(), path));
             }
+            let project_hash = cache_project_key(&adapter, root);
+            targets.push((adapter.clone(), project_hash.clone(), "cache"));
+            targets.push((adapter, project_hash, "data"));
         }
         CacheDeletionPlan {
             cache_root: self.cache_root.clone(),
+            project_root: root.to_path_buf(),
             targets,
         }
     }
@@ -3698,6 +3922,10 @@ impl LspManager {
             return;
         }
         self.shutting_down = true;
+        for command in self.pending_policy_commands.drain(..) {
+            command.fail_policy(ManagerError::ActorStopped);
+        }
+        self.retry_policy_requested = false;
         self.event_dispatch_cancel.cancel();
         self.command_rx.close();
         let documents = self.state.documents.keys().copied().collect::<Vec<_>>();
@@ -3801,6 +4029,14 @@ fn language_for_adapter(adapter_id: &str) -> Option<LanguageId> {
     }
 }
 
+fn cache_project_key(adapter_id: &str, canonical_project_root: &Path) -> String {
+    let mut hash = Sha256::new();
+    hash.update(adapter_id.as_bytes());
+    hash.update([0]);
+    hash.update(canonical_project_root.as_os_str().as_encoded_bytes());
+    format!("{:x}", hash.finalize())
+}
+
 fn canonical_directory(path: &Path) -> Result<PathBuf, ManagerError> {
     let canonical = fs::canonicalize(path).map_err(|_| ManagerError::InvalidProjectRoot)?;
     canonical
@@ -3839,53 +4075,20 @@ fn truncate_log(mut message: String) -> String {
     message
 }
 
-fn remove_owned_cache_directory(
-    cache_root: &Path,
-    adapter_id: &str,
-    target: &Path,
-) -> Result<(), ManagerError> {
-    if language_for_adapter(adapter_id).is_none() {
-        return Err(ManagerError::Infrastructure(
-            "refused to remove cache for an unknown adapter".into(),
-        ));
+#[cfg(unix)]
+fn ensure_cache_device(expected: libc::dev_t, actual: libc::dev_t) -> Result<(), ManagerError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ManagerError::Infrastructure(
+            "refused to cross a cache filesystem mount boundary".into(),
+        ))
     }
-    let canonical_cache_root = fs::canonicalize(cache_root)
-        .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
-    let disposable_name = target.file_name().and_then(|name| name.to_str());
-    let project_key = target
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str());
-    let valid_project_key = project_key.is_some_and(|name| {
-        name.len() == 64
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    });
-    let expected_parent =
-        project_key.map(|hash| canonical_cache_root.join("lsp").join(adapter_id).join(hash));
-    if target.parent() != expected_parent.as_deref()
-        || !matches!(disposable_name, Some("cache" | "data"))
-        || !valid_project_key
-    {
-        return Err(ManagerError::Infrastructure(
-            "refused to remove an unresolved or non-TermLab cache path".into(),
-        ));
-    }
-    let Some(hash) = project_key else {
-        unreachable!("validated")
-    };
-    remove_owned_cache_directory_anchored(
-        cache_root,
-        adapter_id,
-        hash,
-        disposable_name.expect("validated"),
-    )
 }
 
 #[cfg(unix)]
 fn remove_owned_cache_directory_anchored(
-    cache_root: &Path,
+    cache_root: &CacheRootAnchor,
     adapter_id: &str,
     project_hash: &str,
     disposable_name: &str,
@@ -3901,7 +4104,7 @@ fn remove_owned_cache_directory_anchored(
 
 #[cfg(unix)]
 fn remove_owned_cache_directory_anchored_with_hook(
-    cache_root: &Path,
+    cache_root: &CacheRootAnchor,
     adapter_id: &str,
     project_hash: &str,
     disposable_name: &str,
@@ -3917,20 +4120,14 @@ fn remove_owned_cache_directory_anchored_with_hook(
             .map_err(|_| ManagerError::Infrastructure("refused cache path containing NUL".into()))
     }
 
-    fn open_directory_at(parent: Option<i32>, name: &OsStr) -> Result<Option<File>, ManagerError> {
+    fn open_directory_at(parent: i32, name: &OsStr) -> Result<Option<File>, ManagerError> {
         let name = c_name(name)?;
         let fd = unsafe {
-            match parent {
-                Some(parent) => libc::openat(
-                    parent,
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                ),
-                None => libc::open(
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                ),
-            }
+            libc::openat(
+                parent,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
         };
         if fd >= 0 {
             // SAFETY: `open`/`openat` returned a new owned descriptor.
@@ -3980,7 +4177,11 @@ fn remove_owned_cache_directory_anchored_with_hook(
         left.st_dev == right.st_dev && left.st_ino == right.st_ino
     }
 
-    fn remove_contents(directory: &File) -> Result<(), ManagerError> {
+    fn require_device(actual: &libc::stat, expected: libc::dev_t) -> Result<(), ManagerError> {
+        ensure_cache_device(expected, actual.st_dev)
+    }
+
+    fn remove_contents(directory: &File, expected_device: libc::dev_t) -> Result<(), ManagerError> {
         let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
         if duplicate < 0 {
             return Err(ManagerError::Infrastructure(
@@ -4009,21 +4210,23 @@ fn remove_owned_cache_directory_anchored_with_hook(
 
         for name in names {
             let before = stat_at(directory.as_raw_fd(), &name)?;
+            require_device(&before, expected_device)?;
             if before.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                let child = open_directory_at(
-                    Some(directory.as_raw_fd()),
-                    OsStr::from_bytes(name.to_bytes()),
-                )?
-                .ok_or_else(|| {
-                    ManagerError::Infrastructure("cache entry changed during removal".into())
-                })?;
-                if !same_identity(&before, &stat_fd(child.as_raw_fd())?) {
+                let child =
+                    open_directory_at(directory.as_raw_fd(), OsStr::from_bytes(name.to_bytes()))?
+                        .ok_or_else(|| {
+                        ManagerError::Infrastructure("cache entry changed during removal".into())
+                    })?;
+                let child_stat = stat_fd(child.as_raw_fd())?;
+                require_device(&child_stat, expected_device)?;
+                if !same_identity(&before, &child_stat) {
                     return Err(ManagerError::Infrastructure(
                         "cache entry changed during removal".into(),
                     ));
                 }
-                remove_contents(&child)?;
+                remove_contents(&child, expected_device)?;
                 let current = stat_at(directory.as_raw_fd(), &name)?;
+                require_device(&current, expected_device)?;
                 if !same_identity(&current, &stat_fd(child.as_raw_fd())?) {
                     return Err(ManagerError::Infrastructure(
                         "cache directory changed during removal".into(),
@@ -4046,23 +4249,39 @@ fn remove_owned_cache_directory_anchored_with_hook(
         Ok(())
     }
 
-    let Some(root) = open_directory_at(None, cache_root.as_os_str())? else {
+    if language_for_adapter(adapter_id).is_none()
+        || project_hash.len() != 64
+        || !project_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !matches!(disposable_name, "cache" | "data")
+    {
+        return Err(ManagerError::Infrastructure(
+            "refused to remove an unresolved or non-TermLab cache path".into(),
+        ));
+    }
+    let root = cache_root
+        .directory
+        .as_deref()
+        .ok_or_else(|| cache_root.unavailable())?;
+    let root_stat = stat_fd(root.as_raw_fd())?;
+    let expected_device = root_stat.st_dev;
+    let Some(lsp) = open_directory_at(root.as_raw_fd(), OsStr::new("lsp"))? else {
         return Ok(());
     };
-    let Some(lsp) = open_directory_at(Some(root.as_raw_fd()), OsStr::new("lsp"))? else {
+    require_device(&stat_fd(lsp.as_raw_fd())?, expected_device)?;
+    let Some(adapter) = open_directory_at(lsp.as_raw_fd(), OsStr::new(adapter_id))? else {
         return Ok(());
     };
-    let Some(adapter) = open_directory_at(Some(lsp.as_raw_fd()), OsStr::new(adapter_id))? else {
+    require_device(&stat_fd(adapter.as_raw_fd())?, expected_device)?;
+    let Some(project) = open_directory_at(adapter.as_raw_fd(), OsStr::new(project_hash))? else {
         return Ok(());
     };
-    let Some(project) = open_directory_at(Some(adapter.as_raw_fd()), OsStr::new(project_hash))?
-    else {
+    require_device(&stat_fd(project.as_raw_fd())?, expected_device)?;
+    let Some(target) = open_directory_at(project.as_raw_fd(), OsStr::new(disposable_name))? else {
         return Ok(());
     };
-    let Some(target) = open_directory_at(Some(project.as_raw_fd()), OsStr::new(disposable_name))?
-    else {
-        return Ok(());
-    };
+    require_device(&stat_fd(target.as_raw_fd())?, expected_device)?;
     before_identity_validation();
     let target_name = CString::new(disposable_name).expect("fixed cache component");
     if !same_identity(
@@ -4073,7 +4292,7 @@ fn remove_owned_cache_directory_anchored_with_hook(
             "cache target changed before removal".into(),
         ));
     }
-    remove_contents(&target)?;
+    remove_contents(&target, expected_device)?;
     if !same_identity(
         &stat_at(project.as_raw_fd(), &target_name)?,
         &stat_fd(target.as_raw_fd())?,
@@ -4099,7 +4318,7 @@ fn remove_owned_cache_directory_anchored_with_hook(
 
 #[cfg(not(unix))]
 fn remove_owned_cache_directory_anchored(
-    _cache_root: &Path,
+    _cache_root: &CacheRootAnchor,
     _adapter_id: &str,
     _project_hash: &str,
     _disposable_name: &str,
@@ -6383,8 +6602,9 @@ mod tests {
             .unwrap()
             .to_owned();
         let moved = paths_a.cache_dir.with_file_name("cache-moved");
+        let cache_anchor = super::CacheRootAnchor::capture(&cache_root);
         let result = super::remove_owned_cache_directory_anchored_with_hook(
-            &cache_root,
+            &cache_anchor,
             "typescript",
             &project_hash,
             "cache",
@@ -6396,6 +6616,61 @@ mod tests {
         assert!(matches!(result, Err(ManagerError::Infrastructure(_))));
         assert!(moved.join("owned-by-a").exists());
         assert!(paths_b.cache_dir.join("owned-by-b").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_deletion_mount_policy_accepts_only_the_anchored_device() {
+        assert!(super::ensure_cache_device(7, 7).is_ok());
+        assert!(matches!(
+            super::ensure_cache_device(7, 8),
+            Err(ManagerError::Infrastructure(message)) if message.contains("mount boundary")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn cache_deletion_remains_bound_to_the_root_opened_at_manager_creation() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("anchored-root.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+
+        let original_paths = BundledServerCatalog::new()
+            .cache_paths(LanguageId::TypeScript, &root, &harness.cache_root)
+            .unwrap();
+        let project_hash = original_paths
+            .cache_dir
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_owned();
+        std::fs::create_dir_all(&original_paths.cache_dir).unwrap();
+        std::fs::write(original_paths.cache_dir.join("original"), "remove").unwrap();
+        let anchored_root = harness.cache_root.with_file_name("cache-root-opened");
+        std::fs::rename(&harness.cache_root, &anchored_root).unwrap();
+        std::fs::create_dir_all(&harness.cache_root).unwrap();
+        let relative_target = PathBuf::from("lsp")
+            .join("typescript")
+            .join(project_hash)
+            .join("cache");
+        let replacement_target = harness.cache_root.join(&relative_target);
+        std::fs::create_dir_all(&replacement_target).unwrap();
+        std::fs::write(replacement_target.join("outside"), "preserve").unwrap();
+
+        harness
+            .manager
+            .set_project_trust(root, Some("typescript".into()), TrustDecision::Revoked)
+            .await
+            .unwrap();
+
+        let anchored_target = anchored_root.join(relative_target);
+        assert!(!anchored_target.exists());
+        assert!(replacement_target.join("outside").exists());
     }
 
     #[tokio::test(start_paused = true)]
@@ -6490,13 +6765,16 @@ mod tests {
             .await;
         saturate_session_outbox(&harness, document).await;
 
-        assert_eq!(
-            harness
-                .manager
-                .set_project_context(document, ProjectContextChoice::Disabled)
-                .await,
-            Err(ManagerError::Overloaded)
-        );
+        let transition = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move {
+                manager
+                    .set_project_context(document, ProjectContextChoice::Disabled)
+                    .await
+            }
+        });
+        spin().await;
+        assert!(!transition.is_finished());
         assert_eq!(
             harness
                 .manager
@@ -6507,6 +6785,7 @@ mod tests {
             LspSessionState::Ready
         );
         harness.factory.release_changes();
+        transition.await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -6594,6 +6873,153 @@ mod tests {
         );
         harness.factory.release_changes();
         revoke.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_policy_commands_commit_in_invocation_fifo_order() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("policy-fifo.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        saturate_session_outbox(&harness, document).await;
+
+        let disable = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        let enable = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::all()).await }
+        });
+        spin().await;
+        assert!(!disable.is_finished());
+        assert!(
+            !enable.is_finished(),
+            "a later inverse policy must not overtake deferred authority"
+        );
+        assert!(
+            harness.manager.status_snapshot(None).await.is_ok(),
+            "a deferred policy queue must not starve unrelated commands"
+        );
+
+        harness.factory.release_changes();
+        disable.await.unwrap().unwrap();
+        enable.await.unwrap().unwrap();
+        for _ in 0..100 {
+            spin().await;
+            if harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state
+                == LspSessionState::Ready
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Ready
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_policy_queue_is_bounded_and_cancelled_callers_do_not_block_the_front() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("policy-capacity.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        saturate_session_outbox(&harness, document).await;
+
+        let mut pending = Vec::new();
+        for _ in 0..=super::COMMAND_CAPACITY {
+            pending.push(tokio::spawn({
+                let manager = harness.manager.clone();
+                async move { manager.set_enablement(Enablement::none()).await }
+            }));
+        }
+        for _ in 0..100 {
+            spin().await;
+            if pending.iter().any(tokio::task::JoinHandle::is_finished) {
+                break;
+            }
+        }
+        let overload = pending
+            .iter()
+            .position(tokio::task::JoinHandle::is_finished)
+            .expect("bounded pending-policy admission must reject overload");
+        assert_eq!(
+            pending.swap_remove(overload).await.unwrap(),
+            Err(ManagerError::Overloaded)
+        );
+        for command in pending {
+            command.abort();
+        }
+        let successor = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::all()).await }
+        });
+        assert!(harness.manager.status_snapshot(None).await.is_ok());
+        harness.factory.release_changes();
+        successor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_terminal_failure_reconciles_outbox_and_completes_deferred_policy() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("policy-startup-failure.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        saturate_session_outbox(&harness, document).await;
+        let disable = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        harness.factory.fail_start.store(true, Ordering::SeqCst);
+        harness
+            .factory
+            .emit(
+                &key("typescript", &root),
+                ClientEvent::ProcessExited {
+                    success: false,
+                    code: Some(1),
+                },
+            )
+            .await;
+        tokio::time::advance(Duration::from_millis(250)).await;
+        spin().await;
+
+        assert!(
+            disable.is_finished(),
+            "terminal startup failure must not strand a deferred policy reply"
+        );
+        disable.await.unwrap().unwrap();
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Disabled
+        );
     }
 
     #[tokio::test(start_paused = true)]
