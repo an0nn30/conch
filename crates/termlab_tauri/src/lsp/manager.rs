@@ -25,7 +25,7 @@ use super::diagnostics::{DiagnosticKey, DiagnosticStore};
 use super::document::{DocumentError, VersionedDocument};
 use super::ownership::{DocumentIdentifier, OwnershipError, OwnershipRegistry};
 use super::root::{LanguageId, discover_project_roots};
-use super::session::{LspSession, ProcessServerLauncher, SessionDocument};
+use super::session::{LspSession, ProcessServerLauncher, SessionDocument, SessionError};
 use super::trust::{ProjectTrustStore, RootBinding, TrustDecision};
 use super::types::{
     ApplyChangesResponse, CompletionResponse, DefinitionResponse, Diagnostic, DiagnosticSeverity,
@@ -290,6 +290,7 @@ pub(crate) trait SessionFactory: Send + Sync + 'static {
         self: Arc<Self>,
         start: SessionStart,
         events: mpsc::Sender<ClientEvent>,
+        cancellation: CancellationToken,
     ) -> Result<Arc<dyn SessionClient>, ManagerError>;
 }
 
@@ -411,6 +412,7 @@ impl SessionFactory for RealSessionFactory {
         self: Arc<Self>,
         start: SessionStart,
         events: mpsc::Sender<ClientEvent>,
+        cancellation: CancellationToken,
     ) -> Result<Arc<dyn SessionClient>, ManagerError> {
         let resource_root = self.resource_root.clone()?;
         let catalog = BundledServerCatalog::new();
@@ -418,15 +420,19 @@ impl SessionFactory for RealSessionFactory {
         let command = catalog
             .resolve(start.language, &resource_root)
             .map_err(|error| ManagerError::Unavailable(error.lsp_reason()))?;
-        let session = LspSession::start(
+        let session = LspSession::start_with_cancellation(
             descriptor,
             command,
             start.key.root,
             ProcessServerLauncher,
             events,
+            cancellation,
         )
         .await
-        .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+        .map_err(|error| match error {
+            SessionError::Cancelled => ManagerError::Cancelled,
+            error => ManagerError::Infrastructure(error.to_string()),
+        })?;
         Ok(Arc::new(RealSessionClient(session)))
     }
 }
@@ -880,17 +886,18 @@ impl ManagerCommand {
         )
     }
 
-    fn policy_reply_closed(&self) -> bool {
+    fn deferred_reply_closed(&self) -> bool {
         match self {
             Self::SetProjectContext { reply, .. } => reply.is_closed(),
             Self::SetProjectTrust { reply, .. } | Self::SetEnablement { reply, .. } => {
                 reply.is_closed()
             }
+            Self::CloseDocument { reply, .. } => reply.is_closed(),
             _ => false,
         }
     }
 
-    fn fail_policy(self, error: ManagerError) {
+    fn fail_deferred(self, error: ManagerError) {
         match self {
             Self::SetProjectContext { reply, .. } => {
                 let _ = reply.send(Err(error));
@@ -898,7 +905,10 @@ impl ManagerCommand {
             Self::SetProjectTrust { reply, .. } | Self::SetEnablement { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
-            _ => unreachable!("only policy commands are deferred"),
+            Self::CloseDocument { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            _ => unreachable!("only authority commands are deferred"),
         }
     }
 }
@@ -1221,10 +1231,11 @@ struct ShutdownReply {
     replies: Vec<oneshot::Sender<Result<(), ManagerError>>>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct PolicyCapacityReservation {
     operations: usize,
     attachments: usize,
+    close_documents: HashSet<DocumentId>,
 }
 
 pub(crate) struct LspManager {
@@ -1319,7 +1330,41 @@ impl LspManager {
     }
 
     pub(crate) async fn run(mut self) {
+        let mut policy_input_quota_available = true;
         while !self.terminated {
+            let policy_needs_input = !self.pending_policy_commands.is_empty()
+                || !self.policy_capacity_reservations.is_empty();
+            if policy_needs_input && policy_input_quota_available {
+                let can_receive_shutdown = self.shutdown_channel_open
+                    && self
+                        .shutdown_reply
+                        .as_ref()
+                        .is_none_or(|shutdown| shutdown.replies.len() < COMMAND_CAPACITY);
+                if can_receive_shutdown {
+                    match self.shutdown_rx.try_recv() {
+                        Ok(reply) => {
+                            self.begin_shutdown(reply);
+                            continue;
+                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            self.shutdown_channel_open = false;
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                    }
+                }
+                match self.input_rx.try_recv() {
+                    Ok(input) => {
+                        self.handle_input(input);
+                        // Give a ready normal command one turn before taking
+                        // another policy-liveness input. This bounds service in
+                        // both directions while a policy is pending.
+                        policy_input_quota_available = false;
+                        continue;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
             tokio::select! {
                 biased;
                 shutdown = self.shutdown_rx.recv(), if self.shutdown_channel_open
@@ -1334,16 +1379,19 @@ impl LspManager {
                 _ = std::future::ready(()), if self.retry_policy_requested && !self.shutting_down => {
                     self.retry_policy_requested = false;
                     self.retry_pending_policy_command();
+                    policy_input_quota_available = true;
                 }
                 command = self.command_rx.recv(), if !self.shutting_down => {
                     let Some(command) = command else { break };
                     if !self.shutting_down {
                         self.handle_command(command);
                     }
+                    policy_input_quota_available = true;
                 }
                 input = self.input_rx.recv() => {
                     let Some(input) = input else { break };
                     self.handle_input(input);
+                    policy_input_quota_available = false;
                 }
             }
         }
@@ -1424,7 +1472,28 @@ impl LspManager {
                 let _ = reply.send(self.did_save(document_id));
             }
             ManagerCommand::CloseDocument { document_id, reply } => {
-                let _ = reply.send(self.close_document(document_id));
+                let reserved_close = self.policy_reserves_close(document_id);
+                match self.close_document(document_id) {
+                    Err(ManagerError::Overloaded) if reserved_close => {
+                        self.defer_policy_command(
+                            ManagerCommand::CloseDocument { document_id, reply },
+                            true,
+                        );
+                        // The first retry may already fit once this close is
+                        // coalesced with the reservation. A physically full
+                        // outbox puts it back at the front without spinning.
+                        if !self.retrying_policy {
+                            self.retry_policy_requested = true;
+                        }
+                    }
+                    result => {
+                        if result.is_ok() && reserved_close {
+                            self.policy_capacity_reservations.clear();
+                            self.retry_policy_requested = !self.pending_policy_commands.is_empty();
+                        }
+                        let _ = reply.send(result);
+                    }
+                }
             }
             ManagerCommand::ProjectCandidates {
                 path,
@@ -2248,7 +2317,7 @@ impl LspManager {
     }
 
     fn defer_policy_command(&mut self, command: ManagerCommand, retry_at_front: bool) {
-        if command.policy_reply_closed() {
+        if command.deferred_reply_closed() {
             if retry_at_front {
                 self.policy_capacity_reservations.clear();
                 self.retry_policy_requested = !self.pending_policy_commands.is_empty();
@@ -2256,7 +2325,7 @@ impl LspManager {
             return;
         }
         if self.pending_policy_commands.len() >= COMMAND_CAPACITY {
-            command.fail_policy(ManagerError::Overloaded);
+            command.fail_deferred(ManagerError::Overloaded);
         } else if retry_at_front {
             self.pending_policy_commands.push_front(command);
         } else {
@@ -2269,7 +2338,7 @@ impl LspManager {
         while self
             .pending_policy_commands
             .front()
-            .is_some_and(ManagerCommand::policy_reply_closed)
+            .is_some_and(ManagerCommand::deferred_reply_closed)
         {
             self.pending_policy_commands.pop_front();
             discarded = true;
@@ -2288,9 +2357,23 @@ impl LspManager {
         } else {
             self.policy_capacity_reservations
                 .get(key)
-                .copied()
+                .cloned()
                 .unwrap_or_default()
         }
+    }
+
+    fn policy_reserves_close(&self, document_id: DocumentId) -> bool {
+        let Some(key) = self
+            .state
+            .documents
+            .get(&document_id)
+            .and_then(|document| document.session_key.as_ref())
+        else {
+            return false;
+        };
+        self.policy_capacity_reservations
+            .get(key)
+            .is_some_and(|reservation| reservation.close_documents.contains(&document_id))
     }
 
     fn ensure_close_capacity(
@@ -2363,6 +2446,7 @@ impl LspManager {
     ) -> Result<(), ManagerError> {
         let mut operations = HashMap::<SessionKey, usize>::new();
         let mut attachments = HashMap::<SessionKey, usize>::new();
+        let mut close_documents = HashMap::<SessionKey, HashSet<DocumentId>>::new();
         for (document_id, desired) in transitions {
             let current = self
                 .state
@@ -2381,7 +2465,11 @@ impl LspManager {
                     .get(&current)
                     .is_some_and(|session| session.protocol_started)
                 {
-                    *operations.entry(current).or_default() += 1;
+                    *operations.entry(current.clone()).or_default() += 1;
+                    close_documents
+                        .entry(current)
+                        .or_default()
+                        .insert(document_id);
                 }
             }
             if let Some(desired) = desired
@@ -2415,6 +2503,9 @@ impl LspManager {
             }
             for (key, count) in attachments {
                 reservations.entry(key).or_default().attachments = count;
+            }
+            for (key, documents) in close_documents {
+                reservations.entry(key).or_default().close_documents = documents;
             }
             self.policy_capacity_reservations = reservations;
             return Err(ManagerError::Overloaded);
@@ -2772,25 +2863,46 @@ impl LspManager {
         session.startup_cancel = Some(cancellation.clone());
         tokio::spawn(async move {
             let (client_events, mut client_event_rx) = mpsc::channel(ACTOR_INPUT_CAPACITY);
-            tokio::select! {
-                _ = cancellation.cancelled() => {
-                    let _ = input.send(ActorInput::ShutdownFinished { key, generation }).await;
+            let result = factory
+                .start(start, client_events, cancellation.clone())
+                .await;
+            if cancellation.is_cancelled() {
+                // Startup owns every post-launch cleanup. Never drop its
+                // future: only publish terminal generation completion after
+                // it returns. If success won the cancellation race, this task
+                // owns the handed-off client and must shut it down first.
+                if let Ok(client) = result {
+                    let _ = client.shutdown().await;
                 }
-                result = factory.start(start, client_events) => {
-                    // FIFO on actor input is the lifecycle barrier: no client
-                    // event for this generation can overtake SessionStarted.
-                    if input.send(ActorInput::SessionStarted {
-                        key: key.clone(), generation, result,
-                    }).await.is_err() {
-                        return;
-                    }
-                    while let Some(event) = client_event_rx.recv().await {
-                        if input.send(ActorInput::ClientEvent {
-                            key: key.clone(), generation, event,
-                        }).await.is_err() {
-                            break;
-                        }
-                    }
+                let _ = input
+                    .send(ActorInput::ShutdownFinished { key, generation })
+                    .await;
+                return;
+            }
+            // FIFO on actor input is the lifecycle barrier: no client event
+            // for this generation can overtake SessionStarted.
+            if input
+                .send(ActorInput::SessionStarted {
+                    key: key.clone(),
+                    generation,
+                    result,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            while let Some(event) = client_event_rx.recv().await {
+                if input
+                    .send(ActorInput::ClientEvent {
+                        key: key.clone(),
+                        generation,
+                        event,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
         });
@@ -4020,7 +4132,7 @@ impl LspManager {
         }
         self.shutting_down = true;
         for command in self.pending_policy_commands.drain(..) {
-            command.fail_policy(ManagerError::ActorStopped);
+            command.fail_deferred(ManagerError::ActorStopped);
         }
         self.retry_policy_requested = false;
         self.policy_capacity_reservations.clear();
@@ -4841,6 +4953,29 @@ mod tests {
         fail_next_change: AtomicBool,
         immediate_exit: AtomicBool,
         fail_start: AtomicBool,
+        hold_startup_cleanup: AtomicBool,
+        startup_cleanups_started: AtomicUsize,
+        startup_cleanups_completed: AtomicUsize,
+        startup_owners_aborted: AtomicUsize,
+        startup_cleanups_released: Notify,
+    }
+
+    struct FakeStartupOwner {
+        factory: Arc<FakeFactory>,
+        armed: bool,
+    }
+
+    impl Drop for FakeStartupOwner {
+        fn drop(&mut self) {
+            if self.armed {
+                self.factory
+                    .startup_owners_aborted
+                    .fetch_add(1, Ordering::SeqCst);
+                self.factory
+                    .startup_cleanups_started
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
     }
 
     impl FakeFactory {
@@ -4907,6 +5042,26 @@ mod tests {
 
         fn hold_starts(&self) {
             self.block_starts.store(true, Ordering::SeqCst);
+        }
+
+        fn hold_starts_with_delayed_cleanup(&self) {
+            self.hold_starts();
+            self.hold_startup_cleanup.store(true, Ordering::SeqCst);
+        }
+
+        async fn wait_for_startup_cleanup(&self) {
+            for _ in 0..100 {
+                if self.startup_cleanups_started.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("cancelled startup never entered owned cleanup");
+        }
+
+        fn release_startup_cleanup(&self) {
+            self.hold_startup_cleanup.store(false, Ordering::SeqCst);
+            self.startup_cleanups_released.notify_waiters();
         }
 
         fn release_starts(&self) {
@@ -5124,10 +5279,28 @@ mod tests {
             self: Arc<Self>,
             start: SessionStart,
             events: mpsc::Sender<ClientEvent>,
+            cancellation: tokio_util::sync::CancellationToken,
         ) -> Result<Arc<dyn SessionClient>, ManagerError> {
+            let mut startup_owner = FakeStartupOwner {
+                factory: self.clone(),
+                armed: true,
+            };
             self.launches.lock().unwrap().push(start.clone());
-            self.wait_if_held(&self.block_starts, &self.starts_released)
-                .await;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    self.startup_cleanups_started.fetch_add(1, Ordering::SeqCst);
+                    self.wait_if_held(
+                        &self.hold_startup_cleanup,
+                        &self.startup_cleanups_released,
+                    ).await;
+                    self.startup_cleanups_completed.fetch_add(1, Ordering::SeqCst);
+                    startup_owner.armed = false;
+                    return Err(ManagerError::Cancelled);
+                }
+                _ = self.wait_if_held(&self.block_starts, &self.starts_released) => {}
+            }
+            startup_owner.armed = false;
             if self.fail_start.load(Ordering::SeqCst) {
                 return Err(ManagerError::Infrastructure(
                     "server echoed source: const SECRET = true".into(),
@@ -5311,6 +5484,25 @@ mod tests {
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
+    }
+
+    fn fill_normal_command_queue(
+        manager: &LspManagerHandle,
+    ) -> Vec<tokio::sync::oneshot::Receiver<Result<Vec<crate::lsp::types::LspStatus>, ManagerError>>>
+    {
+        (0..super::COMMAND_CAPACITY)
+            .map(|_| {
+                let (reply, result) = tokio::sync::oneshot::channel();
+                manager
+                    .commands
+                    .try_send(super::ManagerCommand::StatusSnapshot {
+                        document_id: None,
+                        reply,
+                    })
+                    .expect("the actor command queue must begin empty");
+                result
+            })
+            .collect()
     }
 
     async fn saturate_session_outbox(harness: &ManagerHarness, document: DocumentId) -> i32 {
@@ -7131,6 +7323,119 @@ mod tests {
         harness.factory.release_starts();
     }
 
+    #[tokio::test]
+    async fn shutdown_waits_for_cancelled_startup_owner_to_reap() {
+        let harness = ManagerHarness::new();
+        harness.factory.hold_starts_with_delayed_cleanup();
+        let path = harness.file("shutdown-startup-cleanup.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .manager
+            .set_project_context(document, ProjectContextChoice::root(root.clone()))
+            .await
+            .unwrap();
+        harness
+            .manager
+            .set_project_trust(root, Some("typescript".into()), TrustDecision::Trusted)
+            .await
+            .unwrap();
+        spin().await;
+        assert_eq!(harness.factory.launch_count("typescript", &harness.root), 1);
+
+        let shutdown = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.shutdown().await }
+        });
+        harness.factory.wait_for_startup_cleanup().await;
+        assert!(
+            !shutdown.is_finished(),
+            "generation shutdown finished while startup cleanup still owned a live process"
+        );
+        assert_eq!(
+            harness
+                .factory
+                .startup_cleanups_completed
+                .load(Ordering::SeqCst),
+            0
+        );
+
+        harness.factory.release_startup_cleanup();
+        shutdown.await.unwrap().unwrap();
+        assert_eq!(
+            harness
+                .factory
+                .startup_cleanups_completed
+                .load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            harness
+                .factory
+                .startup_owners_aborted
+                .load(Ordering::SeqCst),
+            0,
+            "the manager must not drop the startup cleanup future"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_restart_waits_for_cancelled_startup_reap_before_replacement_launch() {
+        let harness = ManagerHarness::new();
+        harness.factory.hold_starts_with_delayed_cleanup();
+        let path = harness.file("restart-startup-cleanup.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .manager
+            .set_project_context(document, ProjectContextChoice::root(root.clone()))
+            .await
+            .unwrap();
+        harness
+            .manager
+            .set_project_trust(
+                root.clone(),
+                Some("typescript".into()),
+                TrustDecision::Trusted,
+            )
+            .await
+            .unwrap();
+        spin().await;
+        assert_eq!(harness.factory.launch_count("typescript", &root), 1);
+
+        harness
+            .manager
+            .restart_session("typescript".into(), root.clone())
+            .await
+            .unwrap();
+        harness.factory.wait_for_startup_cleanup().await;
+        assert_eq!(
+            harness.factory.launch_count("typescript", &root),
+            1,
+            "replacement launch overlapped the old startup cleanup"
+        );
+
+        harness.factory.release_startup_cleanup();
+        for _ in 0..100 {
+            if harness.factory.launch_count("typescript", &root) == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            harness
+                .factory
+                .startup_cleanups_completed
+                .load(Ordering::SeqCst),
+            1,
+            "old process reap must precede generation finish"
+        );
+        assert_eq!(harness.factory.launch_count("typescript", &root), 2);
+        harness.factory.release_starts();
+        spin().await;
+        harness.manager.shutdown().await.unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn immediate_startup_exit_never_resurrects_a_ready_generation() {
         let harness = ManagerHarness::new();
@@ -7698,6 +8003,266 @@ mod tests {
                 )
             }),
             "the latest accepted edit version was not restored after policy convergence: {observations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn permanently_ready_normal_commands_cannot_starve_worker_ready_for_front_policy() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        let path = project_root.join("main.ts");
+        std::fs::write(&path, "let value = 1;").unwrap();
+        let path = path.canonicalize().unwrap();
+        let document_id = DocumentId::new();
+        let mut status = actor.blank_status(document_id, Some("typescript"));
+        status.state = LspSessionState::Ready;
+        status.session_id = Some("fairness-generation".into());
+        actor.state.documents.insert(
+            document_id,
+            super::ManagedDocument {
+                owner_window: "main".into(),
+                owner_pane: "pane".into(),
+                uri: lsp::Url::from_file_path(&path).unwrap().to_string(),
+                path: path.clone(),
+                language: Some(LanguageId::TypeScript),
+                lsp_language_id: Some("typescript".into()),
+                adapter_id: Some("typescript".into()),
+                text: crate::lsp::document::VersionedDocument::new(
+                    &super::document_id_text(document_id),
+                    "let value = 1;",
+                    1,
+                )
+                .unwrap(),
+                candidates: Vec::new(),
+                binding_scope: project_root.clone(),
+                session_key: Some(session_key.clone()),
+                selected_root: Some(project_root.clone()),
+                deferred_for_session: false,
+                pending_batches: Vec::new(),
+                batch_generation: 0,
+                pull_result_id: None,
+                pull_generation: 0,
+                synchronization_dirty: false,
+                status,
+            },
+        );
+        actor.state.sessions.insert(
+            session_key.clone(),
+            super::ManagedSession {
+                session_id: "fairness-generation".into(),
+                language: LanguageId::TypeScript,
+                generation: 1,
+                worker: None,
+                startup_cancel: None,
+                outbox: std::collections::VecDeque::new(),
+                restart_after_stop: false,
+                documents: [document_id].into_iter().collect(),
+                idle_generation: 0,
+                crash_timestamps: std::collections::VecDeque::new(),
+                automatic_restart_blocked: false,
+                exit_observed: false,
+                logs: std::collections::VecDeque::new(),
+                next_log_sequence: 1,
+                capabilities: super::capabilities(false),
+                protocol_started: true,
+            },
+        );
+        let (policy_reply, policy_result) = tokio::sync::oneshot::channel();
+        actor
+            .pending_policy_commands
+            .push_back(super::ManagerCommand::SetEnablement {
+                enablement: Enablement::none(),
+                reply: policy_reply,
+            });
+        actor.policy_capacity_reservations.insert(
+            session_key.clone(),
+            super::PolicyCapacityReservation {
+                operations: 1,
+                attachments: 0,
+                close_documents: [document_id].into_iter().collect(),
+            },
+        );
+
+        // Both lanes are ready before the actor takes its first turn. The
+        // normal lane then stays ready for a full queue quota.
+        let normal_replies = fill_normal_command_queue(&manager);
+        actor
+            .input_tx
+            .try_send(super::ActorInput::WorkerReady {
+                key: session_key,
+                generation: 1,
+            })
+            .unwrap();
+        tokio::spawn(actor.run());
+
+        policy_result
+            .await
+            .expect("actor must retain the front policy reply")
+            .expect("WorkerReady must advance the front policy");
+        let mut normal_turns_before_policy = 0;
+        for reply in normal_replies {
+            let statuses = reply.await.unwrap().unwrap();
+            if statuses
+                .iter()
+                .any(|status| status.state == LspSessionState::Ready)
+            {
+                normal_turns_before_policy += 1;
+            }
+        }
+        assert!(
+            normal_turns_before_policy <= 1,
+            "front policy waited behind {normal_turns_before_policy} normal actor turns even though WorkerReady was already queued"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_close_consumes_reserved_multi_close_credit_and_advances_policy() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("reserved-close-a.ts", "a");
+        let second_path = harness.file("reserved-close-b.ts", "b");
+        let first = harness.open(&first_path, "main", "a").await;
+        let second = harness.open(&second_path, "main", "b").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+        assert_eq!(
+            harness.manager.status_snapshot(Some(second)).await.unwrap()[0].state,
+            LspSessionState::Ready
+        );
+
+        harness.factory.hold_changes_one_at_a_time();
+        let last_admitted = saturate_session_outbox(&harness, first).await;
+        let disable = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        assert!(
+            !disable.is_finished(),
+            "multi-close policy must hold a reservation"
+        );
+
+        let close = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_document(second).await }
+        });
+        spin().await;
+        assert!(
+            !close.is_finished(),
+            "an explicit close that satisfies reserved policy work must defer instead of returning Overloaded"
+        );
+
+        harness.factory.release_one_change();
+        for _ in 0..100 {
+            if close.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        close.await.unwrap().unwrap();
+        assert!(
+            !disable.is_finished(),
+            "the remaining reserved close still needs its own worker credit"
+        );
+
+        harness.factory.release_one_change();
+        disable.await.unwrap().unwrap();
+        harness
+            .manager
+            .set_enablement(Enablement::all())
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            spin().await;
+            let observations = harness.factory.observations(&key("typescript", &root));
+            if observations.iter().any(|observation| {
+                matches!(
+                    observation,
+                    Observation::Open {
+                        document_id,
+                        version,
+                    } if document_id == &super::document_id_text(first) && *version == last_admitted
+                )
+            }) {
+                break;
+            }
+        }
+
+        let observations = harness.factory.observations(&key("typescript", &root));
+        assert!(
+            observations.iter().any(|observation| {
+                matches!(
+                    observation,
+                    Observation::Open {
+                        document_id,
+                        version,
+                    } if document_id == &super::document_id_text(first) && *version == last_admitted
+                )
+            }),
+            "the remaining document lost its latest accepted edit while close advanced policy: {observations:?}"
+        );
+        assert!(
+            harness
+                .manager
+                .status_snapshot(Some(second))
+                .await
+                .unwrap()
+                .is_empty(),
+            "the explicit close must remove the document exactly once"
+        );
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(second_path, "reopened".into())
+                .await
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn normal_commands_progress_without_a_pending_policy() {
+        let harness = ManagerHarness::new();
+        let replies = fill_normal_command_queue(&harness.manager);
+        for reply in replies {
+            reply
+                .await
+                .expect("actor remains live")
+                .expect("normal command succeeds");
+        }
+    }
+
+    #[tokio::test]
+    async fn priority_shutdown_preempts_a_full_normal_command_queue() {
+        let harness = ManagerHarness::new();
+        let replies = fill_normal_command_queue(&harness.manager);
+        let (shutdown_reply, shutdown_result) = tokio::sync::oneshot::channel();
+        harness
+            .manager
+            .shutdown
+            .try_send(shutdown_reply)
+            .expect("priority lane begins empty");
+
+        shutdown_result.await.unwrap().unwrap();
+        assert!(
+            replies.into_iter().any(|mut reply| {
+                matches!(
+                    reply.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                )
+            }),
+            "priority shutdown must close normal admission before draining a full command queue"
         );
     }
 }

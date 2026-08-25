@@ -316,7 +316,73 @@ pub(crate) fn needs_restart(old: &UserConfig, new: &UserConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lsp::client::ClientEvent;
+    use crate::lsp::manager::{
+        LspManager, ProjectContextChoice, SessionClient, SessionFactory, SessionStart,
+    };
+    use crate::lsp::trust::TrustDecision;
+    use crate::lsp::types::{DocumentId, ReserveResult};
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct ReapDelayedStartingFactory {
+        launches: AtomicUsize,
+        cleanups_started: AtomicUsize,
+        cleanups_completed: AtomicUsize,
+        hold_cleanup: AtomicBool,
+        cleanup_released: tokio::sync::Notify,
+    }
+
+    impl ReapDelayedStartingFactory {
+        fn hold_cleanup(&self) {
+            self.hold_cleanup.store(true, Ordering::SeqCst);
+        }
+
+        async fn wait_for_launch(&self) {
+            for _ in 0..100 {
+                if self.launches.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("settings fixture never launched its starting generation");
+        }
+
+        async fn wait_for_cleanup(&self) {
+            for _ in 0..100 {
+                if self.cleanups_started.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("settings fixture never entered startup cleanup");
+        }
+
+        fn release_cleanup(&self) {
+            self.hold_cleanup.store(false, Ordering::SeqCst);
+            self.cleanup_released.notify_waiters();
+        }
+    }
+
+    #[async_trait]
+    impl SessionFactory for ReapDelayedStartingFactory {
+        async fn start(
+            self: Arc<Self>,
+            _start: SessionStart,
+            _events: tokio::sync::mpsc::Sender<ClientEvent>,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Result<Arc<dyn SessionClient>, ManagerError> {
+            self.launches.fetch_add(1, Ordering::SeqCst);
+            cancellation.cancelled().await;
+            self.cleanups_started.fetch_add(1, Ordering::SeqCst);
+            while self.hold_cleanup.load(Ordering::SeqCst) {
+                self.cleanup_released.notified().await;
+            }
+            self.cleanups_completed.fetch_add(1, Ordering::SeqCst);
+            Err(ManagerError::Cancelled)
+        }
+    }
 
     #[test]
     fn identical_configs_no_restart() {
@@ -730,6 +796,110 @@ mod tests {
         assert_eq!(runtime_applied.load(Ordering::SeqCst), 1);
         assert_eq!(config_events.load(Ordering::SeqCst), 1);
         assert_eq!(menu_refreshes.load(Ordering::SeqCst), 1);
+        assert!(!gate.busy.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cancelled_settings_invoke_holds_gate_and_hot_effects_until_startup_reap() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&cache_root).unwrap();
+        let path = root.join("settings-live-start.ts");
+        std::fs::write(&path, "let value = 1;").unwrap();
+        let factory = Arc::new(ReapDelayedStartingFactory::default());
+        factory.hold_cleanup();
+        let (manager, actor, _events) =
+            LspManager::new(factory.clone(), config_root, cache_root, Enablement::all());
+        tokio::spawn(actor.run());
+
+        let reservation = manager
+            .reserve_document(path.clone(), "main".into())
+            .await
+            .unwrap();
+        let ReserveResult::Reserved { reservation_id, .. } = reservation else {
+            panic!("fresh settings fixture path must reserve")
+        };
+        let opened = manager
+            .open_document(
+                reservation_id,
+                "pane".into(),
+                "let value = 1;".into(),
+                "typescript".into(),
+            )
+            .await
+            .unwrap();
+        let document: DocumentId =
+            serde_json::from_value(serde_json::Value::String(opened.document_id)).unwrap();
+        manager
+            .set_project_context(document, ProjectContextChoice::root(root.clone()))
+            .await
+            .unwrap();
+        manager
+            .set_project_trust(root, Some("typescript".into()), TrustDecision::Trusted)
+            .await
+            .unwrap();
+        factory.wait_for_launch().await;
+
+        let primary_shutdown = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.shutdown().await }
+        });
+        factory.wait_for_cleanup().await;
+
+        let gate = Arc::new(SettingsTransactionGate::default());
+        let authority = Arc::new(parking_lot::RwLock::new(UserConfig::default()));
+        let hot_effects = Arc::new(AtomicUsize::new(0));
+        let mut disabled = UserConfig::default();
+        disabled.editor.lsp.enabled = false;
+        let invoke = tokio::spawn({
+            let gate = gate.clone();
+            let authority = authority.clone();
+            let manager = manager.clone();
+            let hot_effects = hot_effects.clone();
+            async move {
+                transition_settings_owned(
+                    &gate,
+                    authority,
+                    disabled,
+                    &|_| Ok(()),
+                    move |enablement| apply_live_enablement(manager, enablement),
+                    move |_| async move {
+                        hot_effects.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+        for _ in 0..100 {
+            if !authority.read().editor.lsp.enabled {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!authority.read().editor.lsp.enabled);
+        invoke.abort();
+        assert!(invoke.await.unwrap_err().is_cancelled());
+        assert!(gate.busy.load(Ordering::Acquire));
+        assert_eq!(hot_effects.load(Ordering::SeqCst), 0);
+        assert!(
+            !primary_shutdown.is_finished(),
+            "priority shutdown reported convergence before the starting generation reaped"
+        );
+
+        factory.release_cleanup();
+        primary_shutdown.await.unwrap().unwrap();
+        for _ in 0..100 {
+            if !gate.busy.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(factory.cleanups_completed.load(Ordering::SeqCst), 1);
+        assert_eq!(hot_effects.load(Ordering::SeqCst), 1);
         assert!(!gate.busy.load(Ordering::Acquire));
     }
 

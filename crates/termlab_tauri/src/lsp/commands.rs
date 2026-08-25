@@ -532,6 +532,7 @@ mod tests {
             self: Arc<Self>,
             _start: SessionStart,
             _events: tokio::sync::mpsc::Sender<crate::lsp::client::ClientEvent>,
+            _cancellation: tokio_util::sync::CancellationToken,
         ) -> Result<Arc<dyn crate::lsp::manager::SessionClient>, ManagerError> {
             unreachable!("boundary decoding never starts a session")
         }

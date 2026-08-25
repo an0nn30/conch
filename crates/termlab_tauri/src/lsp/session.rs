@@ -22,6 +22,7 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 
 use super::catalog::{AdapterDescriptor, ResolvedServerCommand};
@@ -314,6 +315,7 @@ pub(crate) enum SessionError {
     Integrity(String),
     Protocol(String),
     Timeout(&'static str),
+    Cancelled,
     UnknownDocument(String),
     UnknownCompletion(String),
     NonLocalUri(String),
@@ -334,6 +336,7 @@ impl fmt::Display for SessionError {
                 write!(formatter, "language server protocol failed: {message}")
             }
             Self::Timeout(operation) => write!(formatter, "language server {operation} timed out"),
+            Self::Cancelled => formatter.write_str("language server startup was cancelled"),
             Self::UnknownDocument(document) => write!(formatter, "unknown LSP document {document}"),
             Self::UnknownCompletion(item) => write!(formatter, "unknown completion item {item}"),
             Self::NonLocalUri(uri) => write!(formatter, "non-file LSP URI is unsupported: {uri}"),
@@ -481,13 +484,33 @@ impl LspSession {
         launcher: L,
         events: mpsc::Sender<ClientEvent>,
     ) -> Result<Self, SessionError> {
-        Self::start_with_initialized_notifier(
+        Self::start_with_cancellation(
+            descriptor,
+            command,
+            canonical_project_root,
+            launcher,
+            events,
+            CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_cancellation<L: ServerLauncher>(
+        descriptor: &'static AdapterDescriptor,
+        command: ResolvedServerCommand,
+        canonical_project_root: PathBuf,
+        launcher: L,
+        events: mpsc::Sender<ClientEvent>,
+        cancellation: CancellationToken,
+    ) -> Result<Self, SessionError> {
+        Self::start_with_initialized_notifier_and_cancellation(
             descriptor,
             command,
             canonical_project_root,
             launcher,
             events,
             ProtocolInitializedNotifier,
+            cancellation,
         )
         .await
     }
@@ -500,13 +523,39 @@ impl LspSession {
         events: mpsc::Sender<ClientEvent>,
         initialized_notifier: N,
     ) -> Result<Self, SessionError> {
+        Self::start_with_initialized_notifier_and_cancellation(
+            descriptor,
+            command,
+            canonical_project_root,
+            launcher,
+            events,
+            initialized_notifier,
+            CancellationToken::new(),
+        )
+        .await
+    }
+
+    async fn start_with_initialized_notifier_and_cancellation<
+        L: ServerLauncher,
+        N: InitializedNotifier,
+    >(
+        descriptor: &'static AdapterDescriptor,
+        command: ResolvedServerCommand,
+        canonical_project_root: PathBuf,
+        launcher: L,
+        events: mpsc::Sender<ClientEvent>,
+        initialized_notifier: N,
+        cancellation: CancellationToken,
+    ) -> Result<Self, SessionError> {
         // Validate static adapter data before a child exists. From this point
         // onward every fallible startup edge shares the kill-and-reap path.
         let workspace_configuration = serde_json::from_str(descriptor.workspace_configuration_json)
             .map_err(|error| SessionError::Protocol(error.to_string()))?;
-        let launched = launcher
-            .launch(command, canonical_project_root.clone())
-            .await?;
+        let launched = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(SessionError::Cancelled),
+            launched = launcher.launch(command, canonical_project_root.clone()) => launched?,
+        };
         let event_sink = EventSink::new(events);
         let stderr_events = event_sink.clone();
         let mut stderr = launched.stderr;
@@ -548,30 +597,42 @@ impl LspSession {
             .initialize
             .max(MIN_INITIALIZE_TIMEOUT)
             .min(MAX_INITIALIZE_TIMEOUT);
-        let initialize = server.initialize(initialize_params(descriptor, &canonical_project_root));
-        let result = match timeout(init_timeout, initialize).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                clean_up_failed_startup(&launched.process, mainloop_task, stderr_task).await;
-                return Err(SessionError::Protocol(error.to_string()));
+        let startup = async {
+            let initialize =
+                server.initialize(initialize_params(descriptor, &canonical_project_root));
+            let result = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(SessionError::Cancelled),
+                result = timeout(init_timeout, initialize) => match result {
+                    Ok(Ok(result)) => Ok(result),
+                    Ok(Err(error)) => Err(SessionError::Protocol(error.to_string())),
+                    Err(_) => {
+                        let _ = server.notify::<lsp::notification::Cancel>(lsp::CancelParams {
+                            id: lsp::NumberOrString::Number(0),
+                        });
+                        Err(SessionError::Timeout("initialize"))
+                    }
+                },
+            }?;
+            let features = normalized_capabilities(&result.capabilities);
+            let sync = sync_policy(result.capabilities.text_document_sync);
+            {
+                let mut capabilities = capabilities.lock().expect("LSP capability state poisoned");
+                capabilities.set_static_sync(sync);
+                capabilities.set_features(features);
             }
-            Err(_) => {
-                let _ = server.notify::<lsp::notification::Cancel>(lsp::CancelParams {
-                    id: lsp::NumberOrString::Number(0),
-                });
-                clean_up_failed_startup(&launched.process, mainloop_task, stderr_task).await;
-                return Err(SessionError::Timeout("initialize"));
+            event_sink.send(ClientEvent::CapabilitiesChanged(features));
+            if cancellation.is_cancelled() {
+                return Err(SessionError::Cancelled);
             }
-        };
-        let features = normalized_capabilities(&result.capabilities);
-        let sync = sync_policy(result.capabilities.text_document_sync);
-        {
-            let mut capabilities = capabilities.lock().expect("LSP capability state poisoned");
-            capabilities.set_static_sync(sync);
-            capabilities.set_features(features);
+            initialized_notifier.notify(&server)?;
+            if cancellation.is_cancelled() {
+                return Err(SessionError::Cancelled);
+            }
+            Ok(())
         }
-        event_sink.send(ClientEvent::CapabilitiesChanged(features));
-        if let Err(error) = initialized_notifier.notify(&server) {
+        .await;
+        if let Err(error) = startup {
             clean_up_failed_startup(&launched.process, mainloop_task, stderr_task).await;
             return Err(error);
         }
@@ -2028,15 +2089,67 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn startup_cancellation_kills_and_reaps_before_returning_cancelled() {
+        let (launcher, observed) =
+            MockServerLauncher::scripted(ServerScript::HangingInitializeDelayedReap);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let start = tokio::spawn({
+            let cancellation = cancellation.clone();
+            async move {
+                LspSession::start_with_cancellation(
+                    test_descriptor(),
+                    test_command(),
+                    root(),
+                    launcher,
+                    sink,
+                    cancellation,
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
+        wait_for_startup_kill(&observed).await;
+        assert!(
+            !start.is_finished(),
+            "cancellation acknowledgement is not process reap"
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !start.is_finished(),
+            "cancelled startup returned before the exit fact"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(start.await.unwrap(), Err(SessionError::Cancelled)));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn initialize_request_failure_kills_and_waits_for_reap_before_start_returns() {
         let (launcher, observed) =
             MockServerLauncher::scripted(ServerScript::InitializeFailureDelayedReap);
         let (sink, _events) = tokio::sync::mpsc::channel(16);
-        let start = tokio::spawn(async move {
-            LspSession::start(test_descriptor(), test_command(), root(), launcher, sink).await
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let start = tokio::spawn({
+            let cancellation = cancellation.clone();
+            async move {
+                LspSession::start_with_cancellation(
+                    test_descriptor(),
+                    test_command(),
+                    root(),
+                    launcher,
+                    sink,
+                    cancellation,
+                )
+                .await
+            }
         });
 
         wait_for_startup_kill(&observed).await;
+        cancellation.cancel();
         assert!(
             !start.is_finished(),
             "kill acknowledgement is not process reap"
@@ -2060,13 +2173,26 @@ mod tests {
         let (launcher, observed) =
             MockServerLauncher::scripted(ServerScript::HangingInitializeDelayedReap);
         let (sink, _events) = tokio::sync::mpsc::channel(16);
-        let start = tokio::spawn(async move {
-            LspSession::start(test_descriptor(), test_command(), root(), launcher, sink).await
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let start = tokio::spawn({
+            let cancellation = cancellation.clone();
+            async move {
+                LspSession::start_with_cancellation(
+                    test_descriptor(),
+                    test_command(),
+                    root(),
+                    launcher,
+                    sink,
+                    cancellation,
+                )
+                .await
+            }
         });
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(60)).await;
 
         wait_for_startup_kill(&observed).await;
+        cancellation.cancel();
         assert!(
             !start.is_finished(),
             "kill acknowledgement is not process reap"
@@ -2100,19 +2226,25 @@ mod tests {
         let (launcher, observed) =
             MockServerLauncher::scripted(ServerScript::InitializedNotificationFailureDelayedReap);
         let (sink, _events) = tokio::sync::mpsc::channel(16);
-        let start = tokio::spawn(async move {
-            LspSession::start_with_initialized_notifier(
-                test_descriptor(),
-                test_command(),
-                root(),
-                launcher,
-                sink,
-                RejectInitialized,
-            )
-            .await
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let start = tokio::spawn({
+            let cancellation = cancellation.clone();
+            async move {
+                LspSession::start_with_initialized_notifier_and_cancellation(
+                    test_descriptor(),
+                    test_command(),
+                    root(),
+                    launcher,
+                    sink,
+                    RejectInitialized,
+                    cancellation,
+                )
+                .await
+            }
         });
 
         wait_for_startup_kill(&observed).await;
+        cancellation.cancel();
         assert!(
             !start.is_finished(),
             "kill acknowledgement is not process reap"
