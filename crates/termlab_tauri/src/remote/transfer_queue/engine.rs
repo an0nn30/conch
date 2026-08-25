@@ -4,7 +4,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use termlab_remote::transfer::SourceFingerprint;
+use termlab_remote::transfer::{SourceFingerprint, pipelined::PipelineTuning};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
@@ -801,9 +801,15 @@ impl QueueActor {
 
         let reporter = RunnerReporter::new(id, lease_id, self.runner_event_tx.clone());
         let internal_tx = self.internal_tx.clone();
+        // Tuning is a dispatch-time snapshot: a settings change mid-transfer
+        // never re-tunes an attempt that is already running.
+        let tuning = PipelineTuning {
+            depth: self.document.settings.pipeline_depth,
+            chunk_bytes: self.document.settings.pipeline_chunk_bytes,
+        };
         let runner_task = tokio::spawn(async move {
             runner
-                .run(job, RunnerControl::new(control_rx), reporter)
+                .run(job, RunnerControl::new(control_rx), reporter, tuning)
                 .await
         });
         tokio::spawn(async move {
@@ -1806,7 +1812,7 @@ mod tests {
 
     use async_trait::async_trait;
     use parking_lot::RwLock;
-    use termlab_remote::transfer::SourceFingerprint;
+    use termlab_remote::transfer::{SourceFingerprint, pipelined::PipelineTuning};
     use tokio::sync::{Notify, mpsc, oneshot, watch};
     use uuid::Uuid;
 
@@ -1830,6 +1836,7 @@ mod tests {
     struct GatedRunner {
         starts: Mutex<Vec<Uuid>>,
         jobs: Mutex<Vec<TransferJob>>,
+        tunings: Mutex<Vec<PipelineTuning>>,
         gates: Mutex<HashMap<Uuid, VecDeque<oneshot::Receiver<RunnerResult>>>>,
         controls: Mutex<HashMap<Uuid, RunnerControl>>,
         reporters: Mutex<HashMap<Uuid, RunnerReporter>>,
@@ -1855,6 +1862,10 @@ mod tests {
             self.jobs.lock().unwrap().clone()
         }
 
+        fn tunings(&self) -> Vec<PipelineTuning> {
+            self.tunings.lock().unwrap().clone()
+        }
+
         fn control_state(&self, id: Uuid) -> RunnerControlState {
             self.controls.lock().unwrap()[&id].state()
         }
@@ -1871,11 +1882,13 @@ mod tests {
             job: TransferJob,
             control: RunnerControl,
             reporter: RunnerReporter,
+            tuning: PipelineTuning,
         ) -> RunnerResult {
             self.controls.lock().unwrap().insert(job.id, control);
             self.reporters.lock().unwrap().insert(job.id, reporter);
             self.starts.lock().unwrap().push(job.id);
             self.jobs.lock().unwrap().push(job.clone());
+            self.tunings.lock().unwrap().push(tuning);
             let gate = {
                 let mut gates = self.gates.lock().unwrap();
                 gates
@@ -1901,6 +1914,7 @@ mod tests {
             job: TransferJob,
             _control: RunnerControl,
             _reporter: RunnerReporter,
+            _tuning: PipelineTuning,
         ) -> RunnerResult {
             self.starts.lock().unwrap().push(job.id);
             if job.id == self.panic_id {
@@ -2271,6 +2285,34 @@ mod tests {
             tokio::task::yield_now().await;
         }
         panic!("transfer job {id} did not reach expected state")
+    }
+
+    #[tokio::test]
+    async fn dispatch_hands_the_runner_the_configured_pipeline_tuning() {
+        let id = Uuid::from_u128(8_101);
+        let mut document = document_with(vec![stored_job(id, TransferJobState::Queued, 1)]);
+        document.settings = QueueSettings {
+            pipeline_depth: 8,
+            pipeline_chunk_bytes: 65_536,
+            ..QueueSettings::default()
+        };
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(id);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        assert_eq!(
+            runner.tunings(),
+            vec![PipelineTuning {
+                depth: 8,
+                chunk_bytes: 65_536,
+            }]
+        );
+        release
+            .send(RunnerResult::Completed(CompletionResult::Transferred))
+            .unwrap();
     }
 
     #[tokio::test]

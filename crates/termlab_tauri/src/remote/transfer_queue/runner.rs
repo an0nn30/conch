@@ -15,8 +15,10 @@ use termlab_remote::{
     transfer::{
         ControlDecision, CopyOutcome, SftpFileHandle, SftpSessionHandle, SourceFingerprint,
         copy::{CopyError, CopyStage, copy_with_checkpoint_typed},
-        fingerprint_open_local, fingerprint_open_remote, open_local_partial, open_remote_partial,
-        open_sftp_session, truncate_local_partial, truncate_remote_partial,
+        download_to_partial_pipelined, fingerprint_open_local, fingerprint_open_remote,
+        open_local_partial, open_remote_partial, open_sftp_session,
+        pipelined::PipelineTuning,
+        truncate_local_partial, truncate_remote_partial, upload_to_partial_pipelined,
     },
 };
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -33,8 +35,6 @@ use super::{
     scheduler::FailureClass,
 };
 use crate::remote::RemoteState;
-
-const DEFAULT_COPY_CHUNK_SIZE: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct ResolvedSftpConnection {
@@ -341,10 +341,162 @@ impl PromotionError {
     }
 }
 
+/// Everything a `copy_ranges` attempt needs besides the opened handles and
+/// the control/progress callbacks.
+#[derive(Clone, Copy)]
+struct CopyRangesRequest<'a> {
+    job: &'a TransferJob,
+    artifacts: &'a ManagedArtifacts,
+    /// The fingerprint this attempt established for the opened source. The
+    /// pipelined engines reopen the source behind the runner's back, so they
+    /// re-report a fingerprint that must match this one exactly.
+    established: &'a SourceFingerprint,
+    offset: u64,
+    total: u64,
+    tuning: PipelineTuning,
+}
+
+/// How a `copy_ranges` attempt failed, and whether the runner is allowed to
+/// re-run it once sequentially.
+#[derive(Debug)]
+enum CopyRangesError {
+    /// A real failure, already classified for the job's direction.
+    Failed(TransferIoError),
+    /// A pipelined attempt failed inside its first window — before any byte
+    /// past `offset + depth * chunk_bytes` was ever reported durable — so no
+    /// concurrency-dependent progress can be lost by retrying at depth 1.
+    DegradeToSequential(TransferIoError),
+    /// The source changed underneath the attempt after the runner had already
+    /// established its fingerprint.
+    SourceChanged {
+        expected: SourceFingerprint,
+        actual: SourceFingerprint,
+    },
+}
+
+impl CopyRangesError {
+    fn from_copy(direction: &TransferDirection, error: CopyError) -> Self {
+        Self::Failed(TransferIoError::from_copy(direction, error))
+    }
+
+    /// Production degrades from a `RemoteError` the pipelined engine
+    /// returned; tests build the marker straight from a typed copy failure.
+    #[cfg(test)]
+    fn degrade_to_sequential(direction: &TransferDirection, error: CopyError) -> Self {
+        Self::DegradeToSequential(TransferIoError::from_copy(direction, error))
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::Failed(error) | Self::DegradeToSequential(error) => error.message.clone(),
+            Self::SourceChanged { expected, actual } => format!(
+                "source changed during the attempt (size {} -> {})",
+                expected.size, actual.size
+            ),
+        }
+    }
+}
+
+/// Strip the `"<stage> failed: "` prefix [`CopyError::Io`] renders, so only
+/// transport's own words are ever classified.
+fn copy_stage_cause(message: &str) -> Option<&str> {
+    for stage in [
+        CopyStage::SeekSource,
+        CopyStage::SeekDestination,
+        CopyStage::ReadSource,
+        CopyStage::WriteDestination,
+    ] {
+        let prefix = format!("{stage} failed: ");
+        if let Some(cause) = message.strip_prefix(prefix.as_str()) {
+            return Some(cause);
+        }
+    }
+    None
+}
+
+/// Classify a failure one of the pipelined engines reported.
+///
+/// They flatten the typed [`CopyError`] into `RemoteError::Transfer`, which
+/// [`TransferIoError::from_remote`] deliberately treats as permanent so a
+/// user-controlled path can never fake a transient cause. A copy-stage prefix
+/// proves the text really is transport's own, so a pipelined copy failure
+/// keeps the same transient/permanent split the sequential engine gives it;
+/// everything else falls back to the conservative mapping.
+fn classify_pipelined_failure(error: RemoteError) -> TransferIoError {
+    let RemoteError::Transfer(message) = &error else {
+        return TransferIoError::from_remote(error);
+    };
+    match copy_stage_cause(message) {
+        Some(cause) => TransferIoError {
+            class: classify_transport_failure(cause),
+            message: message.clone(),
+            source_missing: false,
+        },
+        None => TransferIoError::from_remote(error),
+    }
+}
+
+/// The last offset the pipelined engine's first window can reach.
+///
+/// A failure at or below this position cannot have depended on any chunk
+/// completing out of order, so re-running the same range sequentially is
+/// safe. `total` clamps it: when the whole remaining range fits inside one
+/// window, every failure is a first-window failure.
+fn pipeline_first_window_end(offset: u64, total: u64, tuning: PipelineTuning) -> u64 {
+    let window = (tuning.depth as u64).saturating_mul(tuning.chunk_bytes as u64);
+    offset.saturating_add(window).min(total)
+}
+
+/// The sequential copy engine behind [`TransferIo::copy_ranges`]'s default.
+///
+/// Kept as a free function so the trait default and the real IO's depth-1
+/// path run byte-for-byte the same code.
+async fn sequential_copy_ranges<S, P>(
+    request: CopyRangesRequest<'_>,
+    source: &mut S,
+    partial: &mut P,
+    control: &mut (dyn FnMut() -> ControlDecision + Send),
+    progress: &mut (dyn FnMut(u64, u64) + Send),
+) -> Result<CopyOutcome, CopyRangesError>
+where
+    S: AsyncRead + AsyncSeek + Unpin + Send,
+    P: AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    copy_with_checkpoint_typed(
+        source,
+        partial,
+        request.offset,
+        request.total,
+        request.tuning.chunk_bytes.max(1),
+        control,
+        progress,
+    )
+    .await
+    .map_err(|error| CopyRangesError::from_copy(&request.job.direction, error))
+}
+
 #[async_trait]
 trait TransferIo<C>: Send + Sync {
     type Source: AsyncRead + AsyncSeek + Unpin + Send;
     type Partial: AsyncWrite + AsyncSeek + Unpin + Send;
+
+    /// Copy `offset..total` from the opened source into the opened partial.
+    ///
+    /// The default is the sequential engine, so every implementation keeps
+    /// today's behavior for free; [`RealTransferIo`] overrides it to drive
+    /// the pipelined engine over its own positional handles when the tuning
+    /// asks for depth greater than one.
+    async fn copy_ranges(
+        &self,
+        _connection: &C,
+        request: CopyRangesRequest<'_>,
+        source: &mut Self::Source,
+        partial: &mut Self::Partial,
+        control: &mut (dyn FnMut() -> ControlDecision + Send),
+        progress: &mut (dyn FnMut(u64, u64) + Send),
+    ) -> Result<CopyOutcome, CopyRangesError> {
+        sequential_copy_ranges(request, source, partial, control, progress).await
+    }
 
     async fn open_source(
         &self,
@@ -418,13 +570,13 @@ trait SftpAttempt: Send + Sync {
         job: TransferJob,
         control: RunnerControl,
         reporter: RunnerReporter,
+        tuning: PipelineTuning,
     ) -> RunnerResult;
 }
 
 struct RunnerServices<R, I> {
     resolver: R,
     io: I,
-    chunk_size: usize,
 }
 
 pub(crate) struct SftpTransferJobRunner {
@@ -433,11 +585,7 @@ pub(crate) struct SftpTransferJobRunner {
 
 impl SftpTransferJobRunner {
     pub(crate) fn new(remote: Arc<ParkingMutex<RemoteState>>) -> Self {
-        Self::with_services(
-            LiveConnectionResolver { remote },
-            RealTransferIo::new(),
-            DEFAULT_COPY_CHUNK_SIZE,
-        )
+        Self::with_services(LiveConnectionResolver { remote }, RealTransferIo::new())
     }
 
     #[cfg(test)]
@@ -448,21 +596,16 @@ impl SftpTransferJobRunner {
         Self::with_services(
             LiveConnectionResolver { remote },
             RealTransferIo::with_partial_seek_observer(observer),
-            DEFAULT_COPY_CHUNK_SIZE,
         )
     }
 
-    fn with_services<R, I>(resolver: R, io: I, chunk_size: usize) -> Self
+    fn with_services<R, I>(resolver: R, io: I) -> Self
     where
         R: ConnectionResolver + 'static,
         I: TransferIo<R::Connection> + 'static,
     {
         Self {
-            attempt: Arc::new(RunnerServices {
-                resolver,
-                io,
-                chunk_size,
-            }),
+            attempt: Arc::new(RunnerServices { resolver, io }),
         }
     }
 }
@@ -474,8 +617,9 @@ impl TransferJobRunner for SftpTransferJobRunner {
         job: TransferJob,
         control: RunnerControl,
         reporter: RunnerReporter,
+        tuning: PipelineTuning,
     ) -> RunnerResult {
-        self.attempt.run(job, control, reporter).await
+        self.attempt.run(job, control, reporter, tuning).await
     }
 }
 
@@ -490,6 +634,7 @@ where
         job: TransferJob,
         control: RunnerControl,
         reporter: RunnerReporter,
+        tuning: PipelineTuning,
     ) -> RunnerResult {
         if control.state() == RunnerControlState::Cancel
             && matches!(
@@ -665,27 +810,72 @@ where
                 return failed(error);
             }
         };
-        let copy_result = copy_with_checkpoint_typed(
-            &mut source,
-            &mut partial,
+        let mut control_fn = || match control.state() {
+            RunnerControlState::Run => ControlDecision::Continue,
+            RunnerControlState::Pause => ControlDecision::Pause,
+            RunnerControlState::Cancel => ControlDecision::Cancel,
+        };
+        let mut progress_fn = |bytes: u64, _total: u64| reporter.progress(bytes, None, None);
+        let request = CopyRangesRequest {
+            job: &job,
+            artifacts: &artifacts,
+            established: &actual,
             offset,
-            actual.size,
-            self.chunk_size,
-            || match control.state() {
-                RunnerControlState::Run => ControlDecision::Continue,
-                RunnerControlState::Pause => ControlDecision::Pause,
-                RunnerControlState::Cancel => ControlDecision::Cancel,
-            },
-            |bytes, _total| reporter.progress(bytes, None, None),
-        )
-        .await
-        .map_err(|error| TransferIoError::from_copy(&job.direction, error));
+            total: actual.size,
+            tuning,
+        };
+        let mut copy_result = self
+            .io
+            .copy_ranges(
+                &connection,
+                request,
+                &mut source,
+                &mut partial,
+                &mut control_fn,
+                &mut progress_fn,
+            )
+            .await;
+        if let Err(CopyRangesError::DegradeToSequential(_)) = &copy_result {
+            // Nothing past the first window was ever reported, so the same
+            // range can simply be re-copied sequentially over the handles this
+            // attempt already opened: both engines address absolute offsets,
+            // so the retry overwrites rather than appends.
+            if let Err(error) = &copy_result {
+                log::warn!(
+                    "pipelined transfer for job {} degraded to sequential: {}",
+                    job.id,
+                    error.message()
+                );
+            }
+            copy_result = self
+                .io
+                .copy_ranges(
+                    &connection,
+                    CopyRangesRequest {
+                        tuning: PipelineTuning { depth: 1, ..tuning },
+                        ..request
+                    },
+                    &mut source,
+                    &mut partial,
+                    &mut control_fn,
+                    &mut progress_fn,
+                )
+                .await;
+        }
 
         let source_finish = self.io.finish_source(&mut source).await;
         let partial_finish = self.io.finish_partial(&mut partial).await;
         let outcome = match copy_result {
             Ok(outcome) => outcome,
-            Err(error) => return failed(error),
+            Err(CopyRangesError::SourceChanged { expected, actual }) => {
+                return RunnerResult::NeedsAttention(AttentionReason::SourceChanged {
+                    expected,
+                    actual,
+                });
+            }
+            Err(CopyRangesError::Failed(error) | CopyRangesError::DegradeToSequential(error)) => {
+                return failed(error);
+            }
         };
         if let Err(error) = source_finish.and(partial_finish) {
             return failed(error);
@@ -1331,6 +1521,101 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
         }
     }
 
+    async fn copy_ranges(
+        &self,
+        connection: &ResolvedSftpConnection,
+        request: CopyRangesRequest<'_>,
+        source: &mut Self::Source,
+        partial: &mut Self::Partial,
+        control: &mut (dyn FnMut() -> ControlDecision + Send),
+        progress: &mut (dyn FnMut(u64, u64) + Send),
+    ) -> Result<CopyOutcome, CopyRangesError> {
+        if request.tuning.depth <= 1 {
+            return sequential_copy_ranges(request, source, partial, control, progress).await;
+        }
+
+        let job = request.job;
+        // The pipelined engines reopen the source themselves, so they report a
+        // fresh fingerprint. This attempt already established one and told the
+        // queue about it; anything else means the source moved underneath us.
+        let expected = request.established.clone();
+        let observed_change: Arc<Mutex<Option<SourceFingerprint>>> = Arc::new(Mutex::new(None));
+        let change_sink = Arc::clone(&observed_change);
+        let verify_fingerprint = move |current: SourceFingerprint| {
+            let change_sink = Arc::clone(&change_sink);
+            let expected = expected.clone();
+            async move {
+                if current == expected {
+                    return Ok(());
+                }
+                let message = format!(
+                    "source changed during the pipelined transfer (size {} -> {})",
+                    expected.size, current.size
+                );
+                *change_sink
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(current);
+                Err(RemoteError::Transfer(message))
+            }
+        };
+
+        let mut furthest = request.offset;
+        let result = {
+            let mut tracked_progress = |bytes: u64, total: u64| {
+                furthest = furthest.max(bytes);
+                progress(bytes, total);
+            };
+            match job.direction {
+                TransferDirection::Upload => {
+                    upload_to_partial_pipelined(
+                        &connection.ssh_handle,
+                        &job.local_path,
+                        &request.artifacts.partial_path,
+                        request.offset,
+                        request.tuning,
+                        verify_fingerprint,
+                        control,
+                        &mut tracked_progress,
+                    )
+                    .await
+                }
+                TransferDirection::Download => {
+                    download_to_partial_pipelined(
+                        &connection.ssh_handle,
+                        &job.remote_path,
+                        &request.artifacts.partial_path,
+                        request.offset,
+                        request.tuning,
+                        verify_fingerprint,
+                        control,
+                        &mut tracked_progress,
+                    )
+                    .await
+                }
+            }
+        };
+
+        let error = match result {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => error,
+        };
+        if let Some(actual) = observed_change
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            return Err(CopyRangesError::SourceChanged {
+                expected: request.established.clone(),
+                actual,
+            });
+        }
+        let classified = classify_pipelined_failure(error);
+        if furthest <= pipeline_first_window_end(request.offset, request.total, request.tuning) {
+            return Err(CopyRangesError::DegradeToSequential(classified));
+        }
+        Err(CopyRangesError::Failed(classified))
+    }
+
     async fn finish_source(&self, source: &mut Self::Source) -> Result<(), TransferIoError> {
         if let RealSource::Remote(file) = source {
             file.shutdown().await.map_err(|error| {
@@ -1555,6 +1840,7 @@ pub trait TransferJobRunner: Send + Sync {
         job: TransferJob,
         control: RunnerControl,
         reporter: RunnerReporter,
+        tuning: PipelineTuning,
     ) -> RunnerResult;
 }
 
@@ -1821,8 +2107,10 @@ mod tests {
         config::ServerEntry,
         ssh::{SshCredentials, connect_and_auth},
         transfer::{
-            ControlDecision, SourceFingerprint, copy::copy_with_checkpoint_typed,
+            ControlDecision, CopyOutcome, SourceFingerprint,
+            copy::{CopyError, CopyStage, copy_with_checkpoint_typed},
             fingerprint_open_local, open_sftp_session,
+            pipelined::PipelineTuning,
         },
     };
     use tokio::{
@@ -1832,10 +2120,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConnectionResolver, LiveConnectionIdentity, PromotionError, RealPartial, RunnerControl,
-        RunnerControlState, RunnerReporter, RunnerResult, SftpTransferJobRunner, TransferIo,
-        TransferIoError, TransferJobRunner, cached_resource, failed, recover_commit,
-        remove_local_artifact, select_live_connection_key,
+        ConnectionResolver, CopyRangesError, CopyRangesRequest, LiveConnectionIdentity,
+        PromotionError, RealPartial, RunnerControl, RunnerControlState, RunnerReporter,
+        RunnerResult, SftpTransferJobRunner, TransferIo, TransferIoError, TransferJobRunner,
+        cached_resource, classify_pipelined_failure, failed, pipeline_first_window_end,
+        recover_commit, remove_local_artifact, select_live_connection_key, sequential_copy_ranges,
     };
     use crate::remote::transfer_queue::{
         artifacts::ArtifactInventory,
@@ -2658,6 +2947,24 @@ mod tests {
         assert_eq!(*observed.lock().unwrap(), vec![3]);
     }
 
+    /// The tuning every legacy `run_fake` test ran under before the pipelined
+    /// seam existed: depth 1 (sequential) with the historical 2-byte chunk.
+    fn sequential_test_tuning() -> PipelineTuning {
+        PipelineTuning {
+            depth: 1,
+            chunk_bytes: 2,
+        }
+    }
+
+    /// The live-SSH harness pins the sequential engine at the historical
+    /// default chunk size so its seek/progress observations stay comparable.
+    fn live_sequential_tuning() -> PipelineTuning {
+        PipelineTuning {
+            depth: 1,
+            chunk_bytes: 256 * 1024,
+        }
+    }
+
     async fn run_fake(
         connection: bool,
         io: FakeIo,
@@ -2665,13 +2972,34 @@ mod tests {
         control_state: super::RunnerControlState,
     ) -> (RunnerResult, Vec<String>) {
         let log = io.state.lock().unwrap().log.clone();
+        run_attempt(
+            connection,
+            io,
+            log,
+            job,
+            control_state,
+            sequential_test_tuning(),
+        )
+        .await
+    }
+
+    async fn run_attempt<I>(
+        connection: bool,
+        io: I,
+        log: Arc<StdMutex<Vec<String>>>,
+        job: TransferJob,
+        control_state: super::RunnerControlState,
+        tuning: PipelineTuning,
+    ) -> (RunnerResult, Vec<String>)
+    where
+        I: TransferIo<TestConnection> + 'static,
+    {
         let runner = SftpTransferJobRunner::with_services(
             FakeResolver {
                 connection: connection.then_some(TestConnection),
                 log: log.clone(),
             },
             io,
-            2,
         );
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let reporter = RunnerReporter::new(job.id, Uuid::from_u128(0xbbbb), event_tx.clone());
@@ -2708,11 +3036,467 @@ mod tests {
         let (_control_tx, control_rx) = tokio::sync::watch::channel(control_state);
 
         let result = runner
-            .run(job, RunnerControl::new(control_rx), reporter)
+            .run(job, RunnerControl::new(control_rx), reporter, tuning)
             .await;
         acknowledger.await.unwrap();
         let operations = log.lock().unwrap().clone();
         (result, operations)
+    }
+
+    /// A `TransferIo` that delegates every artifact operation to an inner
+    /// [`FakeIo`] but overrides `copy_ranges`, so the runner's pipelined seam
+    /// (and its one-shot sequential fallback) can be exercised without a live
+    /// SFTP connection.
+    struct FallbackIo {
+        inner: FakeIo,
+        depths: Arc<StdMutex<Vec<usize>>>,
+        first_failure: StdMutex<Option<CopyRangesError>>,
+    }
+
+    impl FallbackIo {
+        fn new(inner: FakeIo, first_failure: CopyRangesError) -> Self {
+            Self {
+                inner,
+                depths: Arc::new(StdMutex::new(Vec::new())),
+                first_failure: StdMutex::new(Some(first_failure)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TransferIo<TestConnection> for FallbackIo {
+        type Source = <FakeIo as TransferIo<TestConnection>>::Source;
+        type Partial = <FakeIo as TransferIo<TestConnection>>::Partial;
+
+        async fn open_source(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+        ) -> Result<(Self::Source, SourceFingerprint), TransferIoError> {
+            self.inner.open_source(connection, job).await
+        }
+
+        async fn inventory(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<ArtifactInventory, TransferIoError> {
+            self.inner.inventory(connection, job, artifacts).await
+        }
+
+        async fn partial_size(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<Option<u64>, TransferIoError> {
+            self.inner.partial_size(connection, job, artifacts).await
+        }
+
+        async fn truncate_partial(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+            bytes: u64,
+        ) -> Result<(), TransferIoError> {
+            self.inner
+                .truncate_partial(connection, job, artifacts, bytes)
+                .await
+        }
+
+        async fn open_partial(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+            resume: bool,
+        ) -> Result<Self::Partial, TransferIoError> {
+            self.inner
+                .open_partial(connection, job, artifacts, resume)
+                .await
+        }
+
+        async fn copy_ranges(
+            &self,
+            _connection: &TestConnection,
+            request: CopyRangesRequest<'_>,
+            source: &mut Self::Source,
+            partial: &mut Self::Partial,
+            control: &mut (dyn FnMut() -> ControlDecision + Send),
+            progress: &mut (dyn FnMut(u64, u64) + Send),
+        ) -> Result<CopyOutcome, CopyRangesError> {
+            self.depths.lock().unwrap().push(request.tuning.depth);
+            if let Some(failure) = self.first_failure.lock().unwrap().take() {
+                return Err(failure);
+            }
+            sequential_copy_ranges(request, source, partial, control, progress).await
+        }
+
+        async fn finish_source(&self, source: &mut Self::Source) -> Result<(), TransferIoError> {
+            self.inner.finish_source(source).await
+        }
+
+        async fn finish_partial(&self, partial: &mut Self::Partial) -> Result<(), TransferIoError> {
+            self.inner.finish_partial(partial).await
+        }
+
+        async fn move_final_to_backup(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            self.inner
+                .move_final_to_backup(connection, job, artifacts)
+                .await
+        }
+
+        async fn promote_partial_no_replace(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), PromotionError> {
+            self.inner
+                .promote_partial_no_replace(connection, job, artifacts)
+                .await
+        }
+
+        async fn restore_backup(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            self.inner.restore_backup(connection, job, artifacts).await
+        }
+
+        async fn delete_backup(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            self.inner.delete_backup(connection, job, artifacts).await
+        }
+
+        async fn cleanup_owned_artifacts(
+            &self,
+            connection: &TestConnection,
+            job: &TransferJob,
+            artifacts: &ManagedArtifacts,
+        ) -> Result<(), TransferIoError> {
+            self.inner
+                .cleanup_owned_artifacts(connection, job, artifacts)
+                .await
+        }
+    }
+
+    /// Captures `log::warn!` records so the fallback's operator-facing warning
+    /// is asserted rather than assumed.
+    struct CapturedWarnings;
+
+    static CAPTURED_WARNINGS: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
+    static CAPTURE_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+    impl log::Log for CapturedWarnings {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                CAPTURED_WARNINGS.lock().unwrap().push(format!(
+                    "{}: {}",
+                    record.level(),
+                    record.args()
+                ));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn install_warning_capture() {
+        CAPTURE_INSTALLED.call_once(|| {
+            if log::set_boxed_logger(Box::new(CapturedWarnings)).is_ok() {
+                log::set_max_level(log::LevelFilter::Warn);
+            }
+        });
+    }
+
+    fn captured_warnings_for(job_id: Uuid) -> Vec<String> {
+        let needle = job_id.to_string();
+        CAPTURED_WARNINGS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.contains(&needle))
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_pipelined_copy_disconnect_keeps_the_sequential_transient_classification() {
+        // What `pipelined_copy` produces once `From<CopyError>` flattens it.
+        let error = classify_pipelined_failure(RemoteError::Transfer(
+            "write destination failed: the SFTP channel closed while writing".into(),
+        ));
+        let sequential = classify_copy_write_failure(
+            TransferDirection::Upload,
+            ErrorKind::Other,
+            "the SFTP channel closed while writing",
+        )
+        .await;
+
+        assert_eq!(error.class, FailureClass::Transient);
+        assert_eq!(
+            error.class, sequential.class,
+            "the pipelined engine must not turn a transient disconnect terminal"
+        );
+    }
+
+    #[test]
+    fn a_pipelined_setup_failure_stays_permanent_even_with_a_disconnecting_path() {
+        // No copy-stage prefix, so the user-controlled path text is never
+        // allowed to fake a transient cause.
+        let error = classify_pipelined_failure(RemoteError::Transfer(
+            "open local source /tmp/timeout/connection reset.bin for pipelined upload failed: permission denied"
+                .into(),
+        ));
+
+        assert_eq!(error.class, FailureClass::Permanent);
+    }
+
+    #[test]
+    fn a_pipelined_copy_permission_failure_stays_permanent() {
+        let error = classify_pipelined_failure(RemoteError::Transfer(
+            "read source failed: permission denied".into(),
+        ));
+
+        assert_eq!(error.class, FailureClass::Permanent);
+    }
+
+    #[test]
+    fn the_first_window_ends_one_full_window_past_the_resume_offset() {
+        let tuning = PipelineTuning {
+            depth: 4,
+            chunk_bytes: 1024,
+        };
+
+        assert_eq!(pipeline_first_window_end(0, 1_000_000, tuning), 4096);
+        assert_eq!(pipeline_first_window_end(500, 1_000_000, tuning), 4596);
+    }
+
+    #[test]
+    fn a_transfer_smaller_than_one_window_is_entirely_first_window() {
+        let tuning = PipelineTuning {
+            depth: 16,
+            chunk_bytes: 262_144,
+        };
+
+        assert_eq!(
+            pipeline_first_window_end(0, 10, tuning),
+            10,
+            "progress can never advance past the end of the source"
+        );
+        assert_eq!(
+            pipeline_first_window_end(10, 10, tuning),
+            10,
+            "a zero-length copy reports no progress at all, so it degrades"
+        );
+    }
+
+    #[test]
+    fn an_absurd_window_saturates_instead_of_overflowing() {
+        let tuning = PipelineTuning {
+            depth: usize::MAX,
+            chunk_bytes: usize::MAX,
+        };
+
+        assert_eq!(
+            pipeline_first_window_end(u64::MAX - 1, u64::MAX, tuning),
+            u64::MAX
+        );
+    }
+
+    #[tokio::test]
+    async fn default_copy_ranges_preserves_sequential_behavior() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let io = FakeIo::new(log.clone(), fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: false,
+                backup_exists: false,
+            },
+            None,
+        );
+        let mut job = test_job();
+        job.conflict_policy = ConflictPolicy::Overwrite;
+
+        // `FakeIo` does not override `copy_ranges`, so a pipelined tuning must
+        // still run the sequential default and reproduce the happy path that
+        // `overwrite_copies_then_commits_only_after_durable_barriers` asserts.
+        let (result, operations) = run_attempt(
+            true,
+            io,
+            log,
+            job,
+            super::RunnerControlState::Run,
+            PipelineTuning {
+                depth: 16,
+                chunk_bytes: 64,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            RunnerResult::Completed(super::CompletionResult::Transferred)
+        ));
+        assert_eq!(
+            operations,
+            vec![
+                "resolve",
+                "checking",
+                "open_source",
+                "fingerprinted",
+                "inventory",
+                "open_partial",
+                "finish_source",
+                "finish_partial",
+                "checkpoint:4",
+                "inventory",
+                "phase:Prepared",
+                "move_final_to_backup",
+                "phase:BackupMoved",
+                "promote_partial",
+                "phase:PartialPromoted",
+                "delete_backup",
+                "phase:Complete",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pipelined_failure_in_first_window_falls_back_to_sequential() {
+        install_warning_capture();
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let inner = FakeIo::new(log.clone(), fingerprint(4, Some("v1"))).with_inventory(
+            ArtifactInventory {
+                final_exists: true,
+                partial_exists: false,
+                backup_exists: false,
+            },
+            None,
+        );
+        let io = FallbackIo::new(
+            inner,
+            CopyRangesError::degrade_to_sequential(
+                &TransferDirection::Upload,
+                CopyError::Io {
+                    stage: CopyStage::WriteDestination,
+                    kind: ErrorKind::Other,
+                    cause: "concurrency rejected".into(),
+                },
+            ),
+        );
+        let depths = Arc::clone(&io.depths);
+        let mut job = test_job();
+        job.conflict_policy = ConflictPolicy::Overwrite;
+        let job_id = job.id;
+
+        let (result, operations) = run_attempt(
+            true,
+            io,
+            log,
+            job,
+            super::RunnerControlState::Run,
+            PipelineTuning {
+                depth: 16,
+                chunk_bytes: 64,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            *depths.lock().unwrap(),
+            vec![16, 1],
+            "a first-window pipelined failure retries exactly once at depth 1"
+        );
+        assert!(
+            matches!(
+                result,
+                RunnerResult::Completed(super::CompletionResult::Transferred)
+            ),
+            "the sequential retry completes the attempt, got {result:?}"
+        );
+        assert!(
+            operations.contains(&"phase:Complete".to_string()),
+            "the fallback still commits: {operations:?}"
+        );
+        let warnings = captured_warnings_for(job_id);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one warn-level fallback record: {warnings:?}"
+        );
+        assert!(
+            warnings[0].starts_with("WARN") && warnings[0].contains("concurrency rejected"),
+            "the warning names the failure that caused the degrade: {warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipelined_failure_after_first_window_is_a_real_error() {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let inner = FakeIo::new(log.clone(), fingerprint(4, Some("v1")));
+        let io = FallbackIo::new(
+            inner,
+            CopyRangesError::from_copy(
+                &TransferDirection::Download,
+                CopyError::Io {
+                    stage: CopyStage::WriteDestination,
+                    kind: ErrorKind::PermissionDenied,
+                    cause: "write /tmp/timeout/disconnect.bin failed".into(),
+                },
+            ),
+        );
+        let depths = Arc::clone(&io.depths);
+        let mut job = test_job();
+        job.direction = TransferDirection::Download;
+
+        let (result, _operations) = run_attempt(
+            true,
+            io,
+            log,
+            job,
+            super::RunnerControlState::Run,
+            PipelineTuning {
+                depth: 16,
+                chunk_bytes: 64,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            *depths.lock().unwrap(),
+            vec![16],
+            "a failure past the first window is never retried sequentially"
+        );
+        let expected = classify_copy_write_failure(
+            TransferDirection::Download,
+            ErrorKind::PermissionDenied,
+            "write /tmp/timeout/disconnect.bin failed",
+        )
+        .await;
+        let RunnerResult::Failed { class, message } = result else {
+            panic!("a real pipelined failure must surface as a runner failure, got {result:?}")
+        };
+        assert_eq!(class, expected.class);
+        assert_eq!(message, expected.message);
     }
 
     struct NoPromptLiveCallbacks;
@@ -2881,7 +3665,12 @@ mod tests {
             });
         let (_control_tx, control_rx) = watch::channel(control_state);
         let result = runner
-            .run(job, RunnerControl::new(control_rx), reporter)
+            .run(
+                job,
+                RunnerControl::new(control_rx),
+                reporter,
+                live_sequential_tuning(),
+            )
             .await;
         acknowledger
             .await
