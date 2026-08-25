@@ -424,6 +424,25 @@
       }
 
       const paneIds = allPanesInTab(tabId);
+      const editorPanes = paneIds
+        .map((paneId) => panes.get(paneId))
+        .filter((pane) => pane && pane.kind === 'editor');
+      let editorOwnershipClosedAsGroup = false;
+      if (
+        editorPanes.length > 0
+        && global.termlabEditorService
+        && typeof global.termlabEditorService.closeDocuments === 'function'
+      ) {
+        for (const pane of editorPanes) {
+          if (typeof global.termlabEditorService.cancelPendingChooser === 'function') {
+            global.termlabEditorService.cancelPendingChooser(pane);
+          }
+        }
+        const ownershipClosed = await global.termlabEditorService.closeDocuments(editorPanes);
+        if (ownershipClosed === false) return false;
+        editorOwnershipClosedAsGroup = true;
+        if (!tabs.has(tabId)) return;
+      }
       for (const pid of paneIds) {
         const pane = panes.get(pid);
         if (!pane) continue;
@@ -446,7 +465,7 @@
               && typeof global.termlabEditorService.cancelPendingChooser === 'function') {
             global.termlabEditorService.cancelPendingChooser(pane);
           }
-          if (global.termlabEditorService
+          if (!editorOwnershipClosedAsGroup && global.termlabEditorService
               && typeof global.termlabEditorService.closeDocument === 'function') {
             const ownershipClosed = await global.termlabEditorService.closeDocument(pane);
             if (ownershipClosed === false) return false;

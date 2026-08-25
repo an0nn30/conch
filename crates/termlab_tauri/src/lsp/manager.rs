@@ -564,6 +564,19 @@ impl LspManagerHandle {
         result.await.map_err(|_| ManagerError::ActorStopped)?
     }
 
+    pub(crate) async fn close_documents(
+        &self,
+        document_ids: Vec<DocumentId>,
+    ) -> Result<(), ManagerError> {
+        let (reply, result) = oneshot::channel();
+        self.send(ManagerCommand::CloseDocuments {
+            document_ids,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| ManagerError::ActorStopped)?
+    }
+
     pub(crate) async fn project_candidates(
         &self,
         path: PathBuf,
@@ -806,6 +819,10 @@ enum ManagerCommand {
     },
     CloseDocument {
         document_id: DocumentId,
+        reply: oneshot::Sender<Result<(), ManagerError>>,
+    },
+    CloseDocuments {
+        document_ids: Vec<DocumentId>,
         reply: oneshot::Sender<Result<(), ManagerError>>,
     },
     ProjectCandidates {
@@ -1059,7 +1076,7 @@ enum ActorInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum FocusKey {
-    Reservation(ReservationId),
+    ReservationWaiter(ReservationId, u64),
     Owner(DocumentId),
 }
 
@@ -1074,7 +1091,13 @@ struct ReservationRecord {
     canonical_path: PathBuf,
     window_label: String,
     expires_at: tokio::time::Instant,
-    waiter_window_label: Option<String>,
+    waiters: Vec<ReservationWaiter>,
+}
+
+#[derive(Clone)]
+struct ReservationWaiter {
+    delivery_key: FocusKey,
+    window_label: String,
 }
 
 struct ManagedDocument {
@@ -1253,6 +1276,7 @@ pub(crate) struct LspManager {
     focus_deliveries: HashMap<FocusKey, FocusDelivery>,
     focus_order: VecDeque<FocusKey>,
     focus_in_flight: Option<FocusKey>,
+    next_focus_waiter_id: u64,
     active_generations: HashSet<(SessionKey, u64)>,
     reservations: HashMap<ReservationId, ReservationRecord>,
     pending_requests: HashMap<u64, PendingRequest>,
@@ -1312,6 +1336,7 @@ impl LspManager {
             focus_deliveries: HashMap::new(),
             focus_order: VecDeque::new(),
             focus_in_flight: None,
+            next_focus_waiter_id: 1,
             active_generations: HashSet::new(),
             reservations: HashMap::new(),
             pending_requests: HashMap::new(),
@@ -1495,6 +1520,12 @@ impl LspManager {
                         let _ = reply.send(result);
                     }
                 }
+            }
+            ManagerCommand::CloseDocuments {
+                document_ids,
+                reply,
+            } => {
+                let _ = reply.send(self.close_documents(document_ids));
             }
             ManagerCommand::ProjectCandidates {
                 path,
@@ -1721,7 +1752,7 @@ impl LspManager {
                         canonical_path: PathBuf::from(canonical_path),
                         window_label,
                         expires_at,
-                        waiter_window_label: None,
+                        waiters: Vec::new(),
                     },
                 );
                 let input = self.input_tx.clone();
@@ -1741,9 +1772,15 @@ impl LspManager {
                     .ownership
                     .reservation_id(DocumentIdentifier::Local(path.clone()))?
                     .ok_or(ManagerError::InvalidReservation)?;
-                self.reserve_focus_obligation(FocusKey::Reservation(reservation_id))?;
+                let waiter_id = self.next_focus_waiter_id;
+                self.next_focus_waiter_id = self.next_focus_waiter_id.wrapping_add(1).max(1);
+                let delivery_key = FocusKey::ReservationWaiter(reservation_id, waiter_id);
+                self.reserve_focus_obligation(delivery_key)?;
                 if let Some(reservation) = self.reservations.get_mut(&reservation_id) {
-                    reservation.waiter_window_label = Some(window_label);
+                    reservation.waiters.push(ReservationWaiter {
+                        delivery_key,
+                        window_label,
+                    });
                 }
                 let _ = owner_window_label;
             }
@@ -2135,6 +2172,47 @@ impl LspManager {
         self.detach_document(document_id, true, false)?;
         self.state.documents.remove(&document_id);
         self.state.ownership.close(document_id);
+        Ok(())
+    }
+
+    fn close_documents(&mut self, document_ids: Vec<DocumentId>) -> Result<(), ManagerError> {
+        let document_ids = document_ids.into_iter().collect::<HashSet<_>>();
+        let mut required = HashMap::<SessionKey, usize>::new();
+        for document_id in &document_ids {
+            let Some(document) = self.state.documents.get(document_id) else {
+                continue;
+            };
+            let Some(key) = document.session_key.clone() else {
+                continue;
+            };
+            let close_count = usize::from(
+                self.state
+                    .sessions
+                    .get(&key)
+                    .is_some_and(|session| session.protocol_started),
+            );
+            *required.entry(key).or_default() +=
+                document.pending_batches.len().saturating_add(close_count);
+        }
+        for (key, count) in required {
+            let session = self
+                .state
+                .sessions
+                .get(&key)
+                .ok_or(ManagerError::SessionUnavailable)?;
+            if session
+                .outbox
+                .len()
+                .saturating_add(count)
+                .saturating_add(self.reserved_policy_capacity(&key).operations)
+                > SESSION_OUTBOX_CAPACITY
+            {
+                return Err(ManagerError::Overloaded);
+            }
+        }
+        for document_id in document_ids {
+            self.close_document(document_id)?;
+        }
         Ok(())
     }
 
@@ -4156,18 +4234,18 @@ impl LspManager {
         let Some(record) = self.reservations.remove(&reservation_id) else {
             return;
         };
-        if let Some(waiter_window_label) = record.waiter_window_label {
+        for waiter in record.waiters {
             let event_window_label = if document_id.is_some() {
-                record.window_label
+                record.window_label.clone()
             } else {
-                waiter_window_label
+                waiter.window_label
             };
             self.fulfill_focus_obligation(
-                FocusKey::Reservation(reservation_id),
+                waiter.delivery_key,
                 ManagerEvent::DocumentOwnerFocused {
                     window_label: event_window_label,
                     document_id,
-                    pane_id,
+                    pane_id: pane_id.clone(),
                     canonical_path: Some(record.canonical_path.to_string_lossy().into_owned()),
                     reservation_failed: document_id.is_none(),
                 },
@@ -5849,6 +5927,117 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn every_pending_requester_receives_one_failure_for_the_shared_reservation() {
+        let harness = ManagerHarness::new();
+        let path = harness.root.join("shared-open-failure.ts");
+        let ReserveResult::Reserved {
+            reservation_id,
+            canonical_path,
+        } = harness
+            .manager
+            .reserve_document(path.clone(), "owner".into())
+            .await
+            .unwrap()
+        else {
+            panic!("first request must reserve")
+        };
+        for requester in ["requester-a", "requester-b", "requester-c"] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path.clone(), requester.into())
+                    .await
+                    .unwrap(),
+                ReserveResult::FocusPending { .. }
+            ));
+        }
+        harness
+            .manager
+            .release_document(reservation_id)
+            .await
+            .unwrap();
+
+        for _ in 0..10 {
+            spin().await;
+        }
+        let mut recipients = Vec::new();
+        let mut events = harness.events.lock().await;
+        while let Ok(event) = events.try_recv() {
+            if let ManagerEvent::DocumentOwnerFocused {
+                window_label,
+                canonical_path: Some(event_path),
+                reservation_failed: true,
+                ..
+            } = event
+            {
+                assert_eq!(event_path, canonical_path);
+                recipients.push(window_label);
+            }
+        }
+        recipients.sort();
+        assert_eq!(recipients, ["requester-a", "requester-b", "requester-c"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn every_alias_waiter_receives_one_success_for_the_shared_owner() {
+        use std::os::unix::fs::symlink;
+
+        let harness = ManagerHarness::new();
+        let path = harness.file("shared-open-success.ts", "let shared = true;");
+        let ReserveResult::Reserved { reservation_id, .. } = harness
+            .manager
+            .reserve_document(path.clone(), "owner".into())
+            .await
+            .unwrap()
+        else {
+            panic!("first request must reserve")
+        };
+        for (index, requester) in ["requester-a", "requester-b", "requester-c"]
+            .into_iter()
+            .enumerate()
+        {
+            let alias = harness
+                .root
+                .join(format!("shared-success-alias-{index}.ts"));
+            symlink(&path, &alias).unwrap();
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(alias, requester.into())
+                    .await
+                    .unwrap(),
+                ReserveResult::FocusPending { .. }
+            ));
+        }
+        let opened = harness
+            .manager
+            .open_document(
+                reservation_id,
+                "owner-pane".into(),
+                "let shared = true;".into(),
+                "typescript".into(),
+            )
+            .await
+            .unwrap();
+        let document_id: DocumentId =
+            serde_json::from_value(serde_json::Value::String(opened.document_id)).unwrap();
+
+        for _ in 0..3 {
+            assert!(matches!(
+                harness.next_owner_event().await,
+                ManagerEvent::DocumentOwnerFocused {
+                    ref window_label,
+                    document_id: Some(owner),
+                    ref pane_id,
+                    reservation_failed: false,
+                    ..
+                } if window_label == "owner" && owner == document_id && pane_id.as_deref() == Some("owner-pane")
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn owner_focus_is_not_dropped_when_the_public_event_channel_is_full() {
         let harness = ManagerHarness::new();
         for index in 0..=PUBLIC_EVENT_CAPACITY {
@@ -6583,6 +6772,54 @@ mod tests {
                 .unwrap(),
             ReserveResult::Reserved { .. }
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn multi_document_close_is_atomic_when_later_close_capacity_is_unavailable() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("atomic-tab-close-a.ts", "let a = 1;");
+        let second_path = harness.file("atomic-tab-close-b.ts", "let b = 2;");
+        let first = harness.open(&first_path, "main", "pane-a").await;
+        let second = harness.open(&second_path, "main", "pane-b").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+        let _ = saturate_session_outbox(&harness, second).await;
+
+        assert_eq!(
+            harness.manager.close_documents(vec![first, second]).await,
+            Err(ManagerError::Overloaded)
+        );
+        for (path, expected) in [(&first_path, first), (&second_path, second)] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path.clone(), "popup".into())
+                    .await
+                    .unwrap(),
+                ReserveResult::FocusOwner { document_id, .. } if document_id == expected
+            ));
+        }
+
+        harness.factory.release_changes();
+        for _ in 0..400 {
+            spin().await;
+        }
+        harness
+            .manager
+            .close_documents(vec![first, second])
+            .await
+            .unwrap();
+        for path in [first_path, second_path] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path, "popup".into())
+                    .await
+                    .unwrap(),
+                ReserveResult::Reserved { .. }
+            ));
+        }
     }
 
     #[tokio::test(start_paused = true)]

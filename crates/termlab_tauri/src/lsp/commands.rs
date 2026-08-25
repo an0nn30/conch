@@ -30,6 +30,7 @@ pub(crate) fn invoke_handler<R: Runtime>()
         lsp_resync_document,
         lsp_did_save,
         lsp_close_document,
+        lsp_close_documents,
         lsp_project_candidates,
         lsp_set_project_context,
         lsp_set_project_trust,
@@ -102,6 +103,11 @@ pub(crate) const LSP_COMMAND_CONTRACTS: &[CommandContract] = &[
     CommandContract {
         name: "lsp_close_document",
         args: &["documentId"],
+        result: "void",
+    },
+    CommandContract {
+        name: "lsp_close_documents",
+        args: &["documentIds"],
         result: "void",
     },
     CommandContract {
@@ -348,6 +354,18 @@ pub(crate) async fn lsp_close_document(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn lsp_close_documents(
+    document_ids: Vec<DocumentId>,
+    state: tauri::State<'_, LspState>,
+) -> Result<(), String> {
+    state
+        .manager
+        .close_documents(document_ids)
+        .await
+        .map_err(command_error)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lsp_project_candidates(
     path: String,
     language_id: String,
@@ -585,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn all_twenty_one_invoke_contracts_have_exact_names_args_and_results() {
+    fn all_twenty_two_invoke_contracts_have_exact_names_args_and_results() {
         let expected = [
             (
                 "editor_reserve_document",
@@ -615,6 +633,7 @@ mod tests {
             ),
             ("lsp_did_save", &["documentId"][..], "void"),
             ("lsp_close_document", &["documentId"][..], "void"),
+            ("lsp_close_documents", &["documentIds"][..], "void"),
             (
                 "lsp_project_candidates",
                 &["path", "languageId"][..],
@@ -665,7 +684,7 @@ mod tests {
                 "void",
             ),
         ];
-        assert_eq!(LSP_COMMAND_CONTRACTS.len(), 21);
+        assert_eq!(LSP_COMMAND_CONTRACTS.len(), 22);
         for (contract, (name, args, result)) in LSP_COMMAND_CONTRACTS.iter().zip(expected) {
             assert_eq!(
                 (contract.name, contract.args, contract.result),
@@ -687,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn all_twenty_one_commands_decode_and_dispatch_through_the_production_invoke_handler() {
+    fn all_twenty_two_commands_decode_and_dispatch_through_the_production_invoke_handler() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
@@ -750,6 +769,10 @@ mod tests {
                 serde_json::json!({ "documentId": document }),
             ),
             (
+                "lsp_close_documents",
+                serde_json::json!({ "documentIds": [document] }),
+            ),
+            (
                 "lsp_project_candidates",
                 serde_json::json!({ "path": root, "languageId": "typescript" }),
             ),
@@ -796,7 +819,7 @@ mod tests {
                 serde_json::json!({ "root": root, "adapterId": "typescript" }),
             ),
         ];
-        assert_eq!(cases.len(), 21);
+        assert_eq!(cases.len(), 22);
         for (command, body) in cases {
             let response = tauri::test::get_ipc_response(
                 &webview,

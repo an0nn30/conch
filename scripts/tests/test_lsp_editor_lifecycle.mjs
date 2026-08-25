@@ -25,6 +25,13 @@ function load(sandbox, relative) {
   vm.runInContext(fs.readFileSync(filename, 'utf8'), sandbox, { filename });
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
+  return { promise, resolve, reject };
+}
+
 function response(pathname, documentId = 'doc-1') {
   return {
     documentId,
@@ -124,6 +131,7 @@ function harness(options = {}) {
       view: {
         state: { doc },
         termlabResetDirty() { created.dirty = false; },
+        termlabSetReadOnly(value) { created.readOnly = value === true; },
         focus() { focused.push(`view:${id}`); },
       },
     };
@@ -221,6 +229,59 @@ await check('typing while open ownership commits is reconciled with a full curre
   assert.equal(resync.args.contents, 'let value = "💡";\nnext();');
   assert.equal(resync.args.version, 2);
   assert.equal(h.state.get(h.pane).version, 2);
+});
+
+await check('close joins a delayed committed open and releases it before permitting destruction', async () => {
+  const managerOpen = deferred();
+  const h = harness({
+    invoke(command) {
+      if (command === 'lsp_open_document') return managerOpen.promise;
+    },
+  });
+  const opening = h.service.openLocalFile('/repo/close-during-open.ts');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let closeSettled = false;
+  const closing = h.service.closeDocument(h.pane).then((value) => {
+    closeSettled = true;
+    return value;
+  });
+  await Promise.resolve();
+  assert.equal(closeSettled, false, 'destruction permission waits for the ownership terminal outcome');
+  assert.equal(h.pane.readOnly, true);
+  managerOpen.resolve(response('/repo/close-during-open.ts', 'doc-open-close'));
+  assert.equal(await closing, true);
+  await opening;
+  assert.deepEqual(
+    ownershipCalls(h.calls).map((entry) => entry.command),
+    ['editor_reserve_document', 'lsp_open_document', 'lsp_close_document'],
+  );
+  assert.equal(h.state.get(h.pane), null, 'a late committed response cannot remain attached');
+});
+
+await check('close joins a delayed failed open until its reservation release is terminal', async () => {
+  const managerOpen = deferred();
+  const h = harness({
+    invoke(command) {
+      if (command === 'lsp_open_document') return managerOpen.promise;
+    },
+  });
+  const opening = h.service.openLocalFile('/repo/fail-during-close.ts');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let closeSettled = false;
+  const closing = h.service.closeDocument(h.pane).then((value) => {
+    closeSettled = true;
+    return value;
+  });
+  await Promise.resolve();
+  assert.equal(closeSettled, false);
+  managerOpen.reject(new Error('manager open failed'));
+  assert.equal(await closing, true);
+  await opening;
+  assert.deepEqual(
+    ownershipCalls(h.calls).map((entry) => entry.command),
+    ['editor_reserve_document', 'lsp_open_document', 'editor_release_document'],
+  );
+  assert.equal(h.state.get(h.pane), null);
 });
 
 await check('read failure releases exactly the uncommitted reservation', async () => {
@@ -491,7 +552,7 @@ await check('save waits for a timer-dispatched change flush already in flight', 
   assert.equal(h.calls.some((entry) => entry.command === 'editor_write_file'), true);
 });
 
-await check('save and feature barriers serialize a transaction admitted during an in-flight flush', async () => {
+await check('save uses a fixed admission snapshot and does not claim later continuous edits', async () => {
   const pane = {
     paneId: 13, tabId: 14, kind: 'editor', filePath: '/repo/barrier.ts', remote: null, dirty: true,
     view: {
@@ -499,21 +560,17 @@ await check('save and feature barriers serialize a transaction admitted during a
       termlabResetDirty() { pane.dirty = false; },
     },
   };
-  let releaseFirst;
+  const firstApply = deferred();
+  const laterApply = deferred();
   let applies = 0;
   const h = harness({
     pane,
     invoke(command, args) {
       if (command === 'lsp_apply_changes') {
         applies += 1;
-        if (applies === 1) {
-          return new Promise((resolve) => {
-            releaseFirst = () => resolve({ kind: 'applied', version: args.batch.nextVersion });
-          });
-        }
-        return { kind: 'applied', version: args.batch.nextVersion };
+        if (applies === 1) return firstApply.promise;
+        return laterApply.promise;
       }
-      if (command === 'lsp_completion') return { documentId: 'doc-barrier', sourceVersion: 3, items: [] };
     },
   });
   h.state.attach(pane, response('/repo/barrier.ts', 'doc-barrier'));
@@ -528,22 +585,47 @@ await check('save and feature barriers serialize a transaction admitted during a
     docChanged: true,
     changes: { iterChanges(fn) { fn(3, 3, 3, 6, { toString: () => '\n💡' }); } },
   });
-  releaseFirst();
+  firstApply.resolve({ kind: 'applied', version: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const wroteBeforeLaterApply = h.calls.some((entry) => entry.command === 'editor_write_file');
+  laterApply.resolve({ kind: 'applied', version: 3 });
   await saving;
-  const ordered = h.calls.filter((entry) => ['lsp_apply_changes', 'editor_write_file'].includes(entry.command));
-  assert.deepEqual(ordered.map((entry) => entry.command), [
-    'lsp_apply_changes', 'lsp_apply_changes', 'editor_write_file',
-  ]);
+  assert.equal(wroteBeforeLaterApply, true, 'later admissions cannot expand or starve the save barrier');
+  assert.equal(h.calls.find((entry) => entry.command === 'editor_write_file').args.contents, 'abc');
+  assert.equal(pane.dirty, true, 'text after the save snapshot remains visibly unsaved');
+  assert.deepEqual(
+    h.calls
+      .filter((entry) => ['editor_write_file', 'lsp_did_save', 'lsp_apply_changes'].includes(entry.command))
+      .map((entry) => entry.command),
+    ['lsp_apply_changes', 'editor_write_file', 'lsp_did_save', 'lsp_apply_changes'],
+  );
+});
 
-  pane.view.state.doc.value += '!';
+await check('feature uses a fixed version and rejects a result made stale by later typing', async () => {
+  const pane = {
+    paneId: 131, tabId: 132, kind: 'editor', filePath: '/repo/feature-barrier.ts', remote: null, dirty: false,
+    view: { state: { doc: { value: 'abc', toString() { return this.value; } } } },
+  };
+  const featureResult = deferred();
+  const laterApply = deferred();
+  const h = harness({
+    pane,
+    invoke(command, args) {
+      if (command === 'lsp_hover') return featureResult.promise;
+      if (command === 'lsp_apply_changes') return laterApply.promise;
+    },
+  });
+  h.state.attach(pane, response('/repo/feature-barrier.ts', 'doc-feature-barrier'));
+  const feature = h.service.requestFeature(pane, 'hover', { line: 0, character: 1 });
+  await Promise.resolve();
+  pane.view.state.doc.value = 'abcd';
   h.service.documentTransaction(pane, {
     docChanged: true,
-    changes: { iterChanges(fn) { fn(6, 6, 6, 7, { toString: () => '!' }); } },
+    changes: { iterChanges(fn) { fn(3, 3, 3, 4, { toString: () => 'd' }); } },
   });
-  await h.service.requestFeature(pane, 'completion', { line: 1, character: 3 });
-  const featureOrder = h.calls.filter((entry) => ['lsp_apply_changes', 'lsp_completion'].includes(entry.command));
-  assert.equal(featureOrder.at(-2).command, 'lsp_apply_changes');
-  assert.equal(featureOrder.at(-1).command, 'lsp_completion');
+  featureResult.resolve({ documentId: 'doc-feature-barrier', sourceVersion: 1, blocks: [] });
+  assert.equal(await feature, null, 'a feature result cannot apply to a newer CodeMirror snapshot');
+  laterApply.resolve({ kind: 'applied', version: 2 });
 });
 
 await check('close gates editing and aborts destruction when a transaction arrives during its drain', async () => {
@@ -588,6 +670,59 @@ await check('close gates editing and aborts destruction when a transaction arriv
   assert.equal(h.state.get(pane).documentId, 'doc-closing');
 });
 
+await check('concurrent closes join one delayed rejection and restore read-only exactly once', async () => {
+  const managerClose = deferred();
+  const readOnly = [];
+  const pane = {
+    paneId: 141, tabId: 142, kind: 'editor', filePath: '/repo/concurrent-close.ts', remote: null, dirty: false,
+    view: {
+      state: { doc: { toString: () => 'x' } },
+      termlabSetReadOnly(value) { readOnly.push(value); },
+    },
+  };
+  const h = harness({
+    pane,
+    invoke(command) {
+      if (command === 'lsp_close_document') return managerClose.promise;
+    },
+  });
+  h.state.attach(pane, response('/repo/concurrent-close.ts', 'doc-concurrent-close'));
+  const first = h.service.closeDocument(pane);
+  const second = h.service.closeDocument(pane);
+  assert.equal(first, second, 'later callers join the one close owner promise');
+  managerClose.reject(new Error('close rejected'));
+  assert.deepEqual(await Promise.all([first, second]), [false, false]);
+  assert.equal(h.calls.filter((entry) => entry.command === 'lsp_close_document').length, 1);
+  assert.deepEqual(readOnly, [true, false]);
+  assert.equal(h.state.get(pane).documentId, 'doc-concurrent-close');
+});
+
+await check('concurrent closes join one delayed success without reopening the pane', async () => {
+  const managerClose = deferred();
+  const readOnly = [];
+  const pane = {
+    paneId: 143, tabId: 144, kind: 'editor', filePath: '/repo/concurrent-success.ts', remote: null, dirty: false,
+    view: {
+      state: { doc: { toString: () => 'x' } },
+      termlabSetReadOnly(value) { readOnly.push(value); },
+    },
+  };
+  const h = harness({
+    pane,
+    invoke(command) {
+      if (command === 'lsp_close_document') return managerClose.promise;
+    },
+  });
+  h.state.attach(pane, response('/repo/concurrent-success.ts', 'doc-concurrent-success'));
+  const first = h.service.closeDocument(pane);
+  const second = h.service.closeDocument(pane);
+  managerClose.resolve();
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  assert.equal(h.calls.filter((entry) => entry.command === 'lsp_close_document').length, 1);
+  assert.deepEqual(readOnly, [true]);
+  assert.equal(h.state.get(pane), null);
+});
+
 await check('a rejected incremental change forces full-text resync before the next feature', async () => {
   const pane = {
     paneId: 15, tabId: 16, kind: 'editor', filePath: '/repo/desync.ts', remote: null, dirty: true,
@@ -624,6 +759,70 @@ await check('a rejected incremental change forces full-text resync before the ne
   assert.equal(afterRejection[0].args.version, 2);
 });
 
+await check('failed resync still writes plain bytes but withholds didSave and remains retryable', async () => {
+  const pane = {
+    paneId: 151, tabId: 152, kind: 'editor', filePath: '/repo/stale-save.ts', remote: null, dirty: true,
+    view: {
+      state: { doc: { value: 'é\n💡', toString() { return this.value; } } },
+      termlabResetDirty() { pane.dirty = false; },
+    },
+  };
+  let resyncAttempts = 0;
+  const h = harness({
+    pane,
+    invoke(command) {
+      if (command === 'lsp_apply_changes') throw new Error('apply uncertain');
+      if (command === 'lsp_resync_document') {
+        resyncAttempts += 1;
+        throw new Error('resync offline');
+      }
+    },
+  });
+  h.state.attach(pane, response('/repo/stale-save.ts', 'doc-stale-save'));
+  h.service.documentTransaction(pane, {
+    docChanged: true,
+    changes: { iterChanges(fn) { fn(0, 1, 0, 2, { toString: () => 'é' }); } },
+  });
+  await h.service.savePane(pane);
+  const write = h.calls.find((entry) => entry.command === 'editor_write_file');
+  assert.equal(write.args.contents, 'é\n💡', 'plain file save uses the captured CodeMirror snapshot');
+  assert.equal(h.calls.some((entry) => entry.command === 'lsp_did_save'), false);
+  await h.service.requestFeature(pane, 'hover', { line: 1, character: 2 });
+  assert.ok(resyncAttempts >= 2, 'desync remains set so the next operation retries full resync');
+  assert.equal(h.calls.some((entry) => entry.command === 'lsp_hover'), false);
+});
+
+await check('failed resync blocks local Save As ownership transfer and preserves the source tab', async () => {
+  const pane = {
+    paneId: 153, tabId: 154, kind: 'editor', filePath: '/repo/source-stale.ts', remote: null, dirty: true,
+    view: {
+      state: { doc: { value: 'current 💡', toString() { return this.value; } } },
+      termlabResetDirty() { pane.dirty = false; },
+    },
+  };
+  const h = harness({
+    pane,
+    invoke(command) {
+      if (command === 'lsp_apply_changes') throw new Error('apply uncertain');
+      if (command === 'lsp_resync_document') throw new Error('resync offline');
+    },
+  });
+  h.state.attach(pane, response('/repo/source-stale.ts', 'doc-source-stale'));
+  h.service.documentTransaction(pane, {
+    docChanged: true,
+    changes: { iterChanges(fn) { fn(7, 7, 7, 10, { toString: () => ' 💡' }); } },
+  });
+  await assert.rejects(
+    h.service.saveAs(pane, { scope: 'local', path: '/other/target.ts' }),
+    /resync offline/,
+  );
+  assert.equal(pane.filePath, '/repo/source-stale.ts');
+  assert.equal(pane.dirty, true);
+  assert.equal(h.state.get(pane).documentId, 'doc-source-stale');
+  assert.equal(h.calls.some((entry) => entry.command === 'editor_transfer_document'), false);
+  assert.equal(h.calls.some((entry) => entry.command === 'editor_write_file'), false);
+});
+
 await check('cross-project local Save As replaces project metadata without changing document identity', async () => {
   const pane = {
     paneId: 17, tabId: 18, kind: 'editor', filePath: '/project-a/a.ts', remote: null, dirty: true,
@@ -657,6 +856,45 @@ await check('cross-project local Save As replaces project metadata without chang
   assert.equal(state.status.state, 'failed');
 });
 
+await check('Save As drains an old attachment apply before installing transfer metadata', async () => {
+  const pane = {
+    paneId: 171, tabId: 172, kind: 'editor', filePath: '/project-a/old.ts', remote: null, dirty: true,
+    view: {
+      state: { doc: { value: 'old', toString() { return this.value; } } },
+      termlabResetDirty() { pane.dirty = false; },
+    },
+  };
+  const oldApply = deferred();
+  let transferStarted = false;
+  const h = harness({
+    pane,
+    async invoke(command) {
+      if (command === 'lsp_apply_changes') return oldApply.promise;
+      if (command === 'editor_transfer_document') {
+        transferStarted = true;
+        const transferred = response('/project-b/new.ts', 'doc-same-generation');
+        transferred.version = 10;
+        return transferred;
+      }
+    },
+  });
+  h.state.attach(pane, response('/project-a/old.ts', 'doc-same-generation'));
+  pane.view.state.doc.value = 'old!';
+  h.service.documentTransaction(pane, {
+    docChanged: true,
+    changes: { iterChanges(fn) { fn(3, 3, 3, 4, { toString: () => '!' }); } },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const saving = h.service.saveAs(pane, { scope: 'local', path: '/project-b/new.ts' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const crossedAttachment = transferStarted;
+  oldApply.resolve({ kind: 'applied', version: 2 });
+  await saving;
+  await Promise.resolve();
+  assert.equal(crossedAttachment, false, 'transfer metadata waits for the old admission drain');
+  assert.equal(h.state.get(pane).version, 10, 'the transferred attachment retains its returned version');
+});
+
 await check('pending duplicate-open failure retries the exact canonical path instead of disappearing', async () => {
   let reservations = 0;
   const h = harness({
@@ -677,6 +915,34 @@ await check('pending duplicate-open failure retries the exact canonical path ins
   assert.equal(reservations, 2);
   assert.equal(h.calls.filter((entry) => entry.command === 'editor_read_file').length, 1);
   assert.equal(h.calls.filter((entry) => entry.command === 'lsp_open_document').length, 1);
+});
+
+await check('duplicate pending-failure delivery coalesces one retry without a reservation storm', async () => {
+  let retries = 0;
+  const retry = deferred();
+  const h = harness();
+  h.sandbox.termlabLspBridge.configure({
+    windowLabel: 'main',
+    paneAccess: h.sandbox.__termlabPaneAccess,
+    onReservationFailed: async () => {
+      retries += 1;
+      await retry.promise;
+    },
+  });
+  const event = {
+    payload: {
+      documentId: null,
+      paneId: null,
+      canonicalPath: '/repo/shared-pending.ts',
+      reservationFailed: true,
+    },
+  };
+  h.listeners.get('editor-document-owner-focused')(event);
+  h.listeners.get('editor-document-owner-focused')(event);
+  await Promise.resolve();
+  assert.equal(retries, 1);
+  retry.resolve();
+  await Promise.resolve();
 });
 
 await check('lsp-bridge is the only production frontend invoker of ownership/LSP commands', async () => {

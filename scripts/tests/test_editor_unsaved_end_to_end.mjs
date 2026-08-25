@@ -220,6 +220,7 @@ function makeApp() {
   const invocations = [];
   let denyWrites = false;
   let denyDocumentClose = false;
+  let rejectDocumentCloseId = null;
   let delayDocumentOpen = false;
   let resolveDocumentOpen = null;
   const invoke = (command, args) => {
@@ -229,7 +230,16 @@ function makeApp() {
       disk.set(args.path, args.contents);
       return Promise.resolve(null);
     }
-    if (command === 'lsp_close_document' && denyDocumentClose) {
+    if (
+      command === 'lsp_close_document'
+      && (denyDocumentClose || args.documentId === rejectDocumentCloseId)
+    ) {
+      return Promise.reject(new Error('manager outbox overloaded'));
+    }
+    if (
+      command === 'lsp_close_documents'
+      && (denyDocumentClose || (args.documentIds || []).includes(rejectDocumentCloseId))
+    ) {
       return Promise.reject(new Error('manager outbox overloaded'));
     }
     if (command === 'editor_reserve_document') {
@@ -246,7 +256,9 @@ function makeApp() {
         },
       };
       if (delayDocumentOpen) {
-        return new Promise((resolve) => { resolveDocumentOpen = () => resolve(opened); });
+        return new Promise((resolve, reject) => {
+          resolveDocumentOpen = (error) => (error ? reject(error) : resolve(opened));
+        });
       }
       return Promise.resolve(opened);
     }
@@ -429,8 +441,9 @@ function makeApp() {
     dialogCount: () => sandbox.tlDialog.count(),
     denyWrites: (on) => { denyWrites = on; },
     denyDocumentClose: (on) => { denyDocumentClose = on; },
+    rejectDocumentClose: (documentId) => { rejectDocumentCloseId = documentId; },
     delayDocumentOpen: (on) => { delayDocumentOpen = on; },
-    resolveDocumentOpen: () => resolveDocumentOpen && resolveDocumentOpen(),
+    resolveDocumentOpen: (error) => resolveDocumentOpen && resolveDocumentOpen(error),
     destroyedWindowCount: () => destroyedWindow,
     appClosed: () => invocations.some((i) => i.command === 'quit_vote' && i.args.allow === true),
   };
@@ -664,6 +677,53 @@ check('5d. a rejected manager close preserves the real tab, view, and ownership 
   assert.strictEqual(app.sandbox.termlabLspState.get(pane), null);
 });
 
+check('5d2. a later pane close rejection preserves the entire real tab and every owner', async () => {
+  const app = makeApp();
+  const { tabId, pane: first } = app.openTitledFileAndType('atomic-a.ts', '');
+  const secondId = 9001;
+  const tab = app.tabs.get(tabId);
+  tab.treeRoot = app.sandbox.splitTree.splitLeaf(tab.treeRoot, first.paneId, secondId, 'vertical');
+  const second = {
+    paneId: secondId,
+    tabId,
+    kind: 'editor',
+    filePath: '/home/u/docs/atomic-b.ts',
+    dirty: false,
+    remote: null,
+    root: makeElement('div', app.sandbox.document),
+  };
+  second.view = app.sandbox.termlabEditorPane.createEditorView(second.root, {
+    doc: '',
+    onDirtyChange(value) { second.dirty = value; },
+  });
+  app.panes.set(secondId, second);
+  for (const [pane, documentId] of [[first, 'doc-atomic-a'], [second, 'doc-atomic-b']]) {
+    app.sandbox.termlabLspState.attach(pane, {
+      documentId,
+      version: 1,
+      projectCandidates: [],
+      status: {
+        revision: 1, documentId, sessionId: 'session', adapterId: 'typescript',
+        projectRootUri: 'file:///repo', state: 'ready', message: null, capabilities: {},
+        errorCount: 0, warningCount: 0,
+      },
+    });
+  }
+  app.rejectDocumentClose('doc-atomic-b');
+  await app.tabManager.closeTab(tabId);
+  assert.strictEqual(app.tabs.has(tabId), true);
+  assert.strictEqual(app.panes.has(first.paneId), true);
+  assert.strictEqual(app.panes.has(second.paneId), true);
+  assert.strictEqual(app.destroyedViews.length, 0, 'no view is destroyed before the group outcome');
+  assert.strictEqual(app.sandbox.termlabLspState.get(first).documentId, 'doc-atomic-a');
+  assert.strictEqual(app.sandbox.termlabLspState.get(second).documentId, 'doc-atomic-b');
+
+  app.rejectDocumentClose(null);
+  await app.tabManager.closeTab(tabId);
+  assert.strictEqual(app.tabs.has(tabId), false);
+  assert.strictEqual(app.destroyedViews.length, 2);
+});
+
 check('5e. the real tab-manager open path preserves typing while manager attachment is in flight', async () => {
   const app = makeApp();
   const filePath = '/home/u/docs/in-flight.ts';
@@ -679,6 +739,45 @@ check('5e. the real tab-manager open path preserves typing while manager attachm
   const resync = app.invocations.find((entry) => entry.command === 'lsp_resync_document');
   assert.equal(resync.args.contents, 'const value = 1;\nconst light = "💡";');
   assert.equal(app.sandbox.termlabLspState.get(pane).version, 2);
+});
+
+check('5f. real tab close waits for a pending committed open, releases it, then destroys', async () => {
+  const app = makeApp();
+  const filePath = '/home/u/docs/close-pending-open.ts';
+  app.disk.set(filePath, 'const pending = true;');
+  app.delayDocumentOpen(true);
+  const opening = app.sandbox.termlabEditorService.openLocalFile(filePath);
+  await tick();
+  const pane = Array.from(app.panes.values()).find((entry) => entry.kind === 'editor');
+  const closing = app.tabManager.closeTab(pane.tabId);
+  await tick();
+  assert.equal(app.tabs.has(pane.tabId), true, 'the view remains until manager open is terminal');
+  assert.equal(app.destroyedViews.length, 0);
+  app.resolveDocumentOpen();
+  await Promise.all([opening, closing]);
+  assert.equal(app.tabs.has(pane.tabId), false);
+  assert.equal(app.destroyedViews.length, 1);
+  assert.equal(app.sandbox.termlabLspState.get(pane), null);
+});
+
+check('5g. real tab close waits for failed open reservation cleanup before destruction', async () => {
+  const app = makeApp();
+  const filePath = '/home/u/docs/close-failed-open.ts';
+  app.disk.set(filePath, 'const pending = false;');
+  app.delayDocumentOpen(true);
+  const opening = app.sandbox.termlabEditorService.openLocalFile(filePath);
+  await tick();
+  const pane = Array.from(app.panes.values()).find((entry) => entry.kind === 'editor');
+  const closing = app.tabManager.closeTab(pane.tabId);
+  await tick();
+  assert.equal(app.destroyedViews.length, 0);
+  app.resolveDocumentOpen(new Error('manager open rejected'));
+  await Promise.all([opening, closing]);
+  assert.equal(app.tabs.has(pane.tabId), false);
+  assert.equal(app.destroyedViews.length, 1);
+  const commands = app.invocations.map((entry) => entry.command);
+  assert.ok(commands.includes('editor_release_document'));
+  assert.equal(commands.includes('lsp_close_document'), false);
 });
 
 // === closePane: the split-pane route to the same destruction ==============

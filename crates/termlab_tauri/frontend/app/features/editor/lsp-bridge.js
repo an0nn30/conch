@@ -8,6 +8,7 @@
   let listening = false;
   let listenerEpoch = 0;
   const unlisteners = [];
+  const reservationFailureRetries = new Map();
 
   function client() {
     return global.termlabServices && global.termlabServices.tauriClient;
@@ -58,7 +59,18 @@
   function handleOwnershipEvent(payload) {
     if (payload && payload.reservationFailed) {
       if (reservationFailureHandler && payload.canonicalPath) {
-        Promise.resolve(reservationFailureHandler(payload.canonicalPath)).catch(() => {});
+        const canonicalPath = String(payload.canonicalPath);
+        if (!reservationFailureRetries.has(canonicalPath)) {
+          let retry = null;
+          retry = Promise.resolve(reservationFailureHandler(canonicalPath))
+            .catch(() => {})
+            .finally(() => {
+              if (reservationFailureRetries.get(canonicalPath) === retry) {
+                reservationFailureRetries.delete(canonicalPath);
+              }
+            });
+          reservationFailureRetries.set(canonicalPath, retry);
+        }
       } else {
         console.warn('Document reservation failed before its waiting open could continue.');
       }
@@ -115,6 +127,7 @@
   function dispose() {
     listenerEpoch += 1;
     listening = false;
+    reservationFailureRetries.clear();
     while (unlisteners.length) {
       try { unlisteners.pop()(); } catch (_) {}
     }
@@ -139,6 +152,7 @@
     }),
     didSave: (documentId) => invoke('lsp_did_save', { documentId }),
     closeDocument: (documentId) => invoke('lsp_close_document', { documentId }),
+    closeDocuments: (documentIds) => invoke('lsp_close_documents', { documentIds }),
     projectCandidates: (path, languageId) => invoke('lsp_project_candidates', { path, languageId }),
     setProjectContext: (documentId, context) => invoke('lsp_set_project_context', { documentId, context }),
     setProjectTrust: (root, adapterId, decision) => invoke('lsp_set_project_trust', { root, adapterId, decision }),

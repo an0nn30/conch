@@ -123,6 +123,11 @@
     return true;
   }
 
+  // A local pane exists before its reservation is committed. Keep that
+  // terminal ownership operation attached to the pane so a close cannot
+  // destroy the view and let a late manager response attach state to it.
+  const ownershipOpens = new WeakMap();
+
   async function openLocalFile(filePath) {
     if (bundleMissing()) return;
     if (focusExistingEditor(filePath)) return;
@@ -149,22 +154,32 @@
       });
       if (reservation && bridge) {
         if (!createdPane) throw new Error('editor pane construction did not complete');
-        try {
-          const opened = await bridge.openDocument(
-            reservation.reservationId,
-            createdPane.paneId,
-            contents,
-            languageIdFor(canonicalPath),
-          );
-          reservation = null;
-          await attachOpenedDocument(createdPane, opened, contents).catch((error) => {
-            admissionFor(createdPane).desynchronized = true;
-            logLspError('reconcile opened document', error);
-          });
-        } catch (error) {
-          await bridge.releaseDocument(reservation.reservationId).catch(() => {});
-          reservation = null;
-          logLspError('open document', error);
+        const ownershipOpen = { closing: false, promise: null };
+        ownershipOpen.promise = (async () => {
+          try {
+            const opened = await bridge.openDocument(
+              reservation.reservationId,
+              createdPane.paneId,
+              contents,
+              languageIdFor(canonicalPath),
+            );
+            reservation = null;
+            await attachOpenedDocument(createdPane, opened, contents).catch((error) => {
+              admissionFor(createdPane).desynchronized = true;
+              logLspError('reconcile opened document', error);
+            });
+            return { committed: true, documentId: opened.documentId };
+          } catch (error) {
+            await bridge.releaseDocument(reservation.reservationId).catch(() => {});
+            reservation = null;
+            logLspError('open document', error);
+            return { committed: false };
+          }
+        })();
+        ownershipOpens.set(createdPane, ownershipOpen);
+        await ownershipOpen.promise;
+        if (!ownershipOpen.closing && ownershipOpens.get(createdPane) === ownershipOpen) {
+          ownershipOpens.delete(createdPane);
         }
       }
     } catch (error) {
@@ -472,15 +487,19 @@
         expectedVersion: null,
         closing: false,
         closeInvalidated: false,
+        attachmentGeneration: 0,
+        activeBarrierTarget: null,
+        operationTail: Promise.resolve(),
       };
       documentAdmissions.set(pane, admission);
     }
     return admission;
   }
 
-  function promotePending(pane, admission) {
+  function promotePending(pane, admission, throughSequence) {
     const pending = admission.pending;
     if (!pending) return;
+    if (Number.isInteger(throughSequence) && pending.lastSequence > throughSequence) return;
     if (pending.timer) clearTimeout(pending.timer);
     admission.pending = null;
     admission.queue.push(pending);
@@ -548,12 +567,20 @@
     edits.sort((left, right) => right.fromUtf16 - left.fromUtf16 || right.toUtf16 - left.toUtf16);
     const baseVersion = document.version;
     const nextVersion = baseVersion + 1;
+    const attachmentGeneration = admission.attachmentGeneration;
+    const documentId = document.documentId;
     const result = await bridge.applyChanges(document.documentId, {
       documentId: document.documentId,
       baseVersion,
       nextVersion,
       changes: edits,
     });
+    const currentDocument = stateStore.get(pane);
+    if (
+      admission.attachmentGeneration !== attachmentGeneration
+      || !currentDocument
+      || currentDocument.documentId !== documentId
+    ) return;
     if (result && result.kind === 'applied') {
       stateStore.setVersion(pane, result.version);
       return;
@@ -584,7 +611,15 @@
       ? Math.max(document.version, expectedVersion)
       : document.version;
     const version = baseVersion + 1;
+    const attachmentGeneration = admission.attachmentGeneration;
+    const documentId = document.documentId;
     const resynced = await bridge.resyncDocument(document.documentId, version, contents);
+    const currentDocument = stateStore.get(pane);
+    if (
+      admission.attachmentGeneration !== attachmentGeneration
+      || !currentDocument
+      || currentDocument.documentId !== documentId
+    ) return;
     stateStore.setVersion(
       pane,
       resynced && Number.isInteger(resynced.version) ? resynced.version : version,
@@ -595,18 +630,21 @@
     admission.expectedVersion = null;
   }
 
-  async function resyncCurrentDocument(pane, admission) {
-    const throughSequence = admission.sequence;
-    const contents = pane.view && pane.view.state.doc.toString();
-    if (typeof contents !== 'string') throw new Error('editor text is unavailable for resync');
-    await resyncSnapshot(pane, admission, throughSequence, contents, admission.expectedVersion);
-  }
-
-  async function drainQueue(pane, admission) {
+  async function drainQueue(pane, admission, targetSequence, snapshotContents) {
     if (admission.reconciling) await admission.reconciling;
-    while (admission.queue.length) {
+    while (admission.queue.length && admission.queue[0].lastSequence <= targetSequence) {
       if (admission.desynchronized) {
-        await resyncCurrentDocument(pane, admission);
+        const contents = typeof snapshotContents === 'string'
+          ? snapshotContents
+          : (pane.view && pane.view.state.doc.toString());
+        if (typeof contents !== 'string') throw new Error('editor text is unavailable for resync');
+        await resyncSnapshot(
+          pane,
+          admission,
+          targetSequence,
+          contents,
+          admission.expectedVersion,
+        );
         continue;
       }
       const entry = admission.queue.shift();
@@ -620,41 +658,103 @@
     }
   }
 
-  async function drainThrough(pane, targetSequence, synchronize) {
+  async function drainThrough(pane, targetSequence, synchronize, snapshotContents) {
     const admission = admissionFor(pane);
-    promotePending(pane, admission);
+    const cappedTarget = Number.isInteger(admission.activeBarrierTarget)
+      ? Math.min(targetSequence, admission.activeBarrierTarget)
+      : targetSequence;
+    promotePending(pane, admission, cappedTarget);
     const stateStore = lspState();
     if (!stateStore || !stateStore.get(pane)) return;
-    while (admission.processed < targetSequence || admission.queue.length || admission.reconciling) {
+    const hasEligibleQueue = () => (
+      admission.queue.length > 0 && admission.queue[0].lastSequence <= cappedTarget
+    );
+    while (admission.processed < cappedTarget || hasEligibleQueue() || admission.reconciling) {
       if (!admission.draining) {
         let current = null;
-        current = drainQueue(pane, admission).finally(() => {
+        current = drainQueue(pane, admission, cappedTarget, snapshotContents).finally(() => {
           if (admission.draining === current) admission.draining = null;
         });
         admission.draining = current;
       }
       await admission.draining;
-      promotePending(pane, admission);
-      if (!admission.queue.length && admission.processed < targetSequence) break;
+      promotePending(pane, admission, cappedTarget);
+      if (!hasEligibleQueue() && admission.processed < cappedTarget) break;
     }
-    if (synchronize && admission.desynchronized) await resyncCurrentDocument(pane, admission);
+    if (synchronize && admission.desynchronized) {
+      const contents = typeof snapshotContents === 'string'
+        ? snapshotContents
+        : (pane.view && pane.view.state.doc.toString());
+      if (typeof contents !== 'string') throw new Error('editor text is unavailable for resync');
+      await resyncSnapshot(pane, admission, cappedTarget, contents, admission.expectedVersion);
+    }
   }
 
   async function flushDocument(pane) {
     const admission = admissionFor(pane);
-    let targetSequence;
-    do {
-      targetSequence = admission.sequence;
-      promotePending(pane, admission);
-      await drainThrough(pane, targetSequence, true);
-    } while (admission.sequence !== targetSequence);
+    const targetSequence = admission.sequence;
+    const contents = pane.view && pane.view.state.doc.toString();
+    promotePending(pane, admission, targetSequence);
+    await drainThrough(pane, targetSequence, true, contents);
+    return { targetSequence, contents };
+  }
+
+  function resumeBackgroundDrain(pane, admission) {
+    Promise.resolve().then(() => {
+      if (admission.closing || admission.activeBarrierTarget !== null) return;
+      const targetSequence = admission.sequence;
+      const contents = pane.view && pane.view.state.doc.toString();
+      promotePending(pane, admission, targetSequence);
+      drainThrough(pane, targetSequence, false, contents)
+        .catch((error) => logLspError('apply changes', error));
+    });
+  }
+
+  function withFixedBarrier(pane, operation) {
+    const admission = admissionFor(pane);
+    const requestedTargetSequence = admission.sequence;
+    const requestedContents = pane.view && pane.view.state.doc.toString();
+    promotePending(pane, admission, requestedTargetSequence);
+    const previous = admission.operationTail;
+    const current = previous.catch(() => {}).then(async () => {
+      const targetSequence = requestedTargetSequence;
+      const contents = requestedContents;
+      admission.activeBarrierTarget = targetSequence;
+      let synchronizationError = null;
+      try {
+        await drainThrough(pane, targetSequence, true, contents);
+      } catch (error) {
+        synchronizationError = error;
+      }
+      const stateStore = lspState();
+      const document = stateStore && stateStore.get(pane);
+      const attachmentGeneration = admission.attachmentGeneration;
+      try {
+        return await operation({
+          targetSequence,
+          contents,
+          synchronizationError,
+          document,
+          version: document && document.version,
+          attachmentGeneration,
+        });
+      } finally {
+        if (admission.activeBarrierTarget === targetSequence) {
+          admission.activeBarrierTarget = null;
+        }
+        resumeBackgroundDrain(pane, admission);
+      }
+    });
+    admission.operationTail = current.then(() => undefined, () => undefined);
+    return current;
   }
 
   async function attachOpenedDocument(pane, opened, openedContents) {
     const stateStore = lspState();
     if (!stateStore || typeof stateStore.attach !== 'function') return null;
-    const state = stateStore.attach(pane, opened);
     const admission = admissionFor(pane);
+    admission.attachmentGeneration += 1;
+    const state = stateStore.attach(pane, opened);
     const throughSequence = admission.sequence;
     const currentContents = pane.view && pane.view.state.doc.toString();
     if (typeof currentContents !== 'string' || currentContents === openedContents) {
@@ -670,81 +770,154 @@
     return stateStore.get(pane);
   }
 
-  async function closeDocument(pane) {
-    const stateStore = lspState();
-    const document = stateStore && stateStore.get(pane);
-    if (!document) return true;
-    const admission = admissionFor(pane);
-    admission.closing = true;
-    admission.closeInvalidated = false;
-    if (pane.view && typeof pane.view.termlabSetReadOnly === 'function') {
-      pane.view.termlabSetReadOnly(true);
-    }
-    try {
-      await flushDocument(pane);
-      if (admission.closeInvalidated) {
-        admission.closing = false;
-        if (pane.view && typeof pane.view.termlabSetReadOnly === 'function') {
-          pane.view.termlabSetReadOnly(false);
-        }
-        return false;
-      }
-      await lspBridge().closeDocument(document.documentId);
-      documentAdmissions.delete(pane);
-      stateStore.clear(pane);
-      return true;
-    } catch (error) {
+  const closesInFlight = new WeakMap();
+
+  function restoreClosePreparation(panes) {
+    for (const pane of panes) {
+      const admission = admissionFor(pane);
       admission.closing = false;
+      admission.closeInvalidated = false;
       if (pane.view && typeof pane.view.termlabSetReadOnly === 'function') {
         pane.view.termlabSetReadOnly(false);
       }
+      resumeBackgroundDrain(pane, admission);
+    }
+  }
+
+  async function closeDocumentGroup(panes) {
+    const stateStore = lspState();
+    for (const pane of panes) {
+      const admission = admissionFor(pane);
+      admission.closing = true;
+      admission.closeInvalidated = false;
+      if (pane.view && typeof pane.view.termlabSetReadOnly === 'function') {
+        pane.view.termlabSetReadOnly(true);
+      }
+    }
+    try {
+      for (const pane of panes) {
+        const ownershipOpen = ownershipOpens.get(pane);
+        if (ownershipOpen) {
+          ownershipOpen.closing = true;
+          await ownershipOpen.promise;
+          if (ownershipOpens.get(pane) === ownershipOpen) ownershipOpens.delete(pane);
+        }
+      }
+      await Promise.all(panes.map(async (pane) => {
+        const admission = admissionFor(pane);
+        await admission.operationTail;
+        await flushDocument(pane);
+      }));
+      if (panes.some((pane) => admissionFor(pane).closeInvalidated)) {
+        restoreClosePreparation(panes);
+        return false;
+      }
+      const documents = panes
+        .map((pane) => stateStore && stateStore.get(pane))
+        .filter(Boolean);
+      const documentIds = documents.map((document) => document.documentId);
+      if (documentIds.length === 1) {
+        await lspBridge().closeDocument(documentIds[0]);
+      } else if (documentIds.length > 1) {
+        await lspBridge().closeDocuments(documentIds);
+      }
+      for (const pane of panes) {
+        documentAdmissions.delete(pane);
+        if (stateStore) stateStore.clear(pane);
+      }
+      return true;
+    } catch (error) {
+      restoreClosePreparation(panes);
       logLspError('close document', error);
       return false;
     }
   }
 
+  function closeDocuments(panes) {
+    const uniquePanes = Array.from(new Set((panes || []).filter(Boolean)));
+    if (!uniquePanes.length) return Promise.resolve(true);
+    const existing = uniquePanes.map((pane) => closesInFlight.get(pane)).filter(Boolean);
+    if (existing.length) {
+      const shared = existing[0];
+      return uniquePanes.every((pane) => closesInFlight.get(pane) === shared)
+        ? shared
+        : Promise.resolve(false);
+    }
+    let closing = null;
+    closing = closeDocumentGroup(uniquePanes).finally(() => {
+      for (const pane of uniquePanes) {
+        if (closesInFlight.get(pane) === closing) closesInFlight.delete(pane);
+      }
+    });
+    for (const pane of uniquePanes) closesInFlight.set(pane, closing);
+    return closing;
+  }
+
+  function closeDocument(pane) {
+    return closeDocuments([pane]);
+  }
+
   async function requestFeature(pane, kind, position, trigger) {
     const bridge = lspBridge();
     const stateStore = lspState();
-    const document = stateStore && stateStore.get(pane);
-    if (!bridge || !document || typeof bridge[kind] !== 'function') return null;
-    try {
-      await flushDocument(pane);
-      return await bridge[kind](document.documentId, position, trigger || null);
-    } catch (error) {
-      logLspError(kind, error);
-      return null;
-    }
+    if (!bridge || typeof bridge[kind] !== 'function') return null;
+    return withFixedBarrier(pane, async (barrier) => {
+      const document = barrier.document;
+      if (!document || barrier.synchronizationError) {
+        if (barrier.synchronizationError) logLspError(kind, barrier.synchronizationError);
+        return null;
+      }
+      try {
+        const result = await bridge[kind](document.documentId, position, trigger || null);
+        const current = stateStore && stateStore.get(pane);
+        const admission = admissionFor(pane);
+        if (
+          admission.sequence !== barrier.targetSequence
+          || admission.attachmentGeneration !== barrier.attachmentGeneration
+          || !current
+          || current.documentId !== document.documentId
+          || current.version !== barrier.version
+        ) return null;
+        return result;
+      } catch (error) {
+        logLspError(kind, error);
+        return null;
+      }
+    });
   }
 
   // One write. Rejects on failure so callers can decide what a failure means;
   // saveActiveEditor turns it into a toast, the close guards turn it into a
   // refusal to close.
   async function writeOnce(pane) {
-    await flushDocument(pane).catch((error) => logLspError('flush before save', error));
-    const contents = pane.view.state.doc.toString();
-    await invoke('editor_write_file', { path: pane.filePath, contents });
+    return withFixedBarrier(pane, async (barrier) => {
+      const managerSynchronized = !barrier.synchronizationError;
+      if (barrier.synchronizationError) {
+        logLspError('flush before save', barrier.synchronizationError);
+      }
+      const contents = barrier.contents;
+      await invoke('editor_write_file', { path: pane.filePath, contents });
     // For a remote file the local write is a staging step, not the save: what
     // "saved" means is that the bytes reached the host. Uploading BEFORE the
     // dirty reset is what makes a failed upload leave the pane dirty, so the
     // close guards still refuse to discard the tab and the temp file is not
     // deleted out from under an edit that never got off this machine. A local
     // pane has no remote and so is unaffected.
-    if (pane.remote) await uploadRemote(pane);
-    const stateStore = lspState();
-    const document = stateStore && stateStore.get(pane);
-    if (document && lspBridge()) {
-      await lspBridge().didSave(document.documentId).catch((error) => logLspError('did save', error));
-    }
+      if (pane.remote) await uploadRemote(pane);
+      const document = barrier.document;
+      if (managerSynchronized && document && lspBridge()) {
+        await lspBridge().didSave(document.documentId).catch((error) => logLspError('did save', error));
+      }
     // `dirty` is a plain boolean, not a diff against the document, and the
     // update listener stops firing once it is set. So a keystroke that lands
     // between the snapshot above and this line is on screen but not in the
     // file — clearing the flag unconditionally would mark it saved and, once
     // the close guards read pane.dirty, discard it without a prompt. Only
     // reset when the buffer still matches the bytes that were written.
-    if (pane.view && pane.view.state.doc.toString() === contents) {
-      pane.view.termlabResetDirty();
-    }
+      if (pane.view && pane.view.state.doc.toString() === contents) {
+        pane.view.termlabResetDirty();
+      }
+    });
   }
 
   // The write currently in flight for a pane, if any. Two overlapping writes
@@ -1036,8 +1209,17 @@
   // Everything fallible, then the atomic rebind. Never called directly —
   // saveAs owns the in-flight guard around it.
   async function writeElsewhere(pane, target) {
-    await flushDocument(pane).catch((error) => logLspError('flush before Save As', error));
-    const contents = pane.view.state.doc.toString();
+    return withFixedBarrier(pane, async (barrier) => {
+      if (barrier.synchronizationError) {
+        logLspError('flush before Save As', barrier.synchronizationError);
+        throw barrier.synchronizationError;
+      }
+      return writeElsewhereAtBarrier(pane, target, barrier);
+    });
+  }
+
+  async function writeElsewhereAtBarrier(pane, target, barrier) {
+    const contents = barrier.contents;
     // Captured BEFORE anything is written: after the rebind, `pane.remote` is
     // the new binding and this file would be unreachable.
     const oldTemp = pane.remote && pane.filePath ? pane.filePath : null;
@@ -1049,7 +1231,7 @@
     let targetCommitted = false;
     const bridge = lspBridge();
     const stateStore = lspState();
-    const sourceDocument = stateStore && stateStore.get(pane);
+    const sourceDocument = barrier.document;
     if (target.scope === 'remote') {
       nextRemote = {
         paneId: target.paneId,
@@ -1252,6 +1434,7 @@
     documentTransaction,
     flushDocument,
     closeDocument,
+    closeDocuments,
     requestFeature,
   };
 })(window);
