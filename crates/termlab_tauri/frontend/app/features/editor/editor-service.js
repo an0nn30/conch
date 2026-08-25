@@ -488,7 +488,7 @@
         closing: false,
         closeInvalidated: false,
         attachmentGeneration: 0,
-        activeBarrierTarget: null,
+        barrierTickets: [],
         operationTail: Promise.resolve(),
       };
       documentAdmissions.set(pane, admission);
@@ -660,8 +660,9 @@
 
   async function drainThrough(pane, targetSequence, synchronize, snapshotContents) {
     const admission = admissionFor(pane);
-    const cappedTarget = Number.isInteger(admission.activeBarrierTarget)
-      ? Math.min(targetSequence, admission.activeBarrierTarget)
+    const earliestTicket = admission.barrierTickets[0];
+    const cappedTarget = earliestTicket
+      ? Math.min(targetSequence, earliestTicket.targetSequence)
       : targetSequence;
     promotePending(pane, admission, cappedTarget);
     const stateStore = lspState();
@@ -701,8 +702,11 @@
 
   function resumeBackgroundDrain(pane, admission) {
     Promise.resolve().then(() => {
-      if (admission.closing || admission.activeBarrierTarget !== null) return;
-      const targetSequence = admission.sequence;
+      if (admission.closing) return;
+      const earliestTicket = admission.barrierTickets[0];
+      const targetSequence = earliestTicket
+        ? Math.min(admission.sequence, earliestTicket.targetSequence)
+        : admission.sequence;
       const contents = pane.view && pane.view.state.doc.toString();
       promotePending(pane, admission, targetSequence);
       drainThrough(pane, targetSequence, false, contents)
@@ -710,16 +714,25 @@
     });
   }
 
+  function closeInProgressError() {
+    return new Error('editor close is in progress');
+  }
+
   function withFixedBarrier(pane, operation) {
     const admission = admissionFor(pane);
+    if (admission.closing) return Promise.reject(closeInProgressError());
     const requestedTargetSequence = admission.sequence;
     const requestedContents = pane.view && pane.view.state.doc.toString();
     promotePending(pane, admission, requestedTargetSequence);
+    const ticket = {
+      targetSequence: requestedTargetSequence,
+      contents: requestedContents,
+    };
+    admission.barrierTickets.push(ticket);
     const previous = admission.operationTail;
     const current = previous.catch(() => {}).then(async () => {
-      const targetSequence = requestedTargetSequence;
-      const contents = requestedContents;
-      admission.activeBarrierTarget = targetSequence;
+      const targetSequence = ticket.targetSequence;
+      const contents = ticket.contents;
       let synchronizationError = null;
       try {
         await drainThrough(pane, targetSequence, true, contents);
@@ -739,9 +752,8 @@
           attachmentGeneration,
         });
       } finally {
-        if (admission.activeBarrierTarget === targetSequence) {
-          admission.activeBarrierTarget = null;
-        }
+        const ticketIndex = admission.barrierTickets.indexOf(ticket);
+        if (ticketIndex >= 0) admission.barrierTickets.splice(ticketIndex, 1);
         resumeBackgroundDrain(pane, admission);
       }
     });
@@ -786,6 +798,7 @@
 
   async function closeDocumentGroup(panes) {
     const stateStore = lspState();
+    const priorOperations = new Map();
     for (const pane of panes) {
       const admission = admissionFor(pane);
       admission.closing = true;
@@ -793,6 +806,9 @@
       if (pane.view && typeof pane.view.termlabSetReadOnly === 'function') {
         pane.view.termlabSetReadOnly(true);
       }
+    }
+    for (const pane of panes) {
+      priorOperations.set(pane, admissionFor(pane).operationTail);
     }
     try {
       for (const pane of panes) {
@@ -804,8 +820,7 @@
         }
       }
       await Promise.all(panes.map(async (pane) => {
-        const admission = admissionFor(pane);
-        await admission.operationTail;
+        await priorOperations.get(pane);
         await flushDocument(pane);
       }));
       if (panes.some((pane) => admissionFor(pane).closeInvalidated)) {
@@ -861,6 +876,7 @@
     const bridge = lspBridge();
     const stateStore = lspState();
     if (!bridge || typeof bridge[kind] !== 'function') return null;
+    if (admissionFor(pane).closing) return null;
     return withFixedBarrier(pane, async (barrier) => {
       const document = barrier.document;
       if (!document || barrier.synchronizationError) {
@@ -941,6 +957,7 @@
   // guards need to save panes that are not focused.
   async function savePane(pane, options) {
     if (!pane || pane.kind !== 'editor' || !pane.view) return;
+    if (admissionFor(pane).closing) throw closeInProgressError();
 
     // THE CHOKE POINT. A pane with no path cannot be written anywhere, so
     // every save path — ⌘S, `:w`, `:wq`, the close guards' Save — asks where
@@ -1369,6 +1386,7 @@
    */
   async function saveAs(pane, target) {
     if (!pane || pane.kind !== 'editor' || !pane.view) return;
+    if (admissionFor(pane).closing) throw closeInProgressError();
     if (!target || (target.scope !== 'local' && target.scope !== 'remote')) {
       throw new Error(`Save As: unknown target scope ${target && target.scope}`);
     }

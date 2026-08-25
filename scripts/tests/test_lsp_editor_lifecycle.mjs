@@ -601,6 +601,63 @@ await check('save uses a fixed admission snapshot and does not claim later conti
   );
 });
 
+await check('a queued save fences background drain at its captured snapshot behind a long feature', async () => {
+  const pane = {
+    paneId: 133, tabId: 134, kind: 'editor', filePath: '/repo/queued-barrier.ts', remote: null, dirty: true,
+    view: {
+      state: { doc: { value: 'ab', toString() { return this.value; } } },
+      termlabResetDirty() { pane.dirty = false; },
+    },
+  };
+  const longFeature = deferred();
+  const order = [];
+  let managerVersion = 1;
+  const h = harness({
+    pane,
+    invoke(command, args) {
+      if (command === 'lsp_apply_changes') {
+        managerVersion = args.batch.nextVersion;
+        order.push(`apply:${managerVersion}`);
+        return { kind: 'applied', version: managerVersion };
+      }
+      if (command === 'lsp_hover') {
+        order.push(`hover:${managerVersion}`);
+        return longFeature.promise;
+      }
+      if (command === 'editor_write_file') order.push(`write:${args.contents}`);
+      if (command === 'lsp_did_save') order.push(`didSave:${managerVersion}`);
+    },
+  });
+  h.state.attach(pane, response('/repo/queued-barrier.ts', 'doc-queued-barrier'));
+  h.service.documentTransaction(pane, {
+    docChanged: true,
+    changes: { iterChanges(fn) { fn(1, 1, 1, 2, { toString: () => 'b' }); } },
+  });
+  const feature = h.service.requestFeature(pane, 'hover', { line: 0, character: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const saving = h.service.savePane(pane);
+  const queuedFeature = h.service.requestFeature(pane, 'hover', { line: 0, character: 2 });
+  pane.view.state.doc.value = 'abc';
+  h.service.documentTransaction(pane, {
+    docChanged: true,
+    changes: { iterChanges(fn) { fn(2, 2, 2, 3, { toString: () => 'c' }); } },
+  });
+
+  longFeature.resolve({ documentId: 'doc-queued-barrier', sourceVersion: 2, blocks: [] });
+  await Promise.all([feature, saving, queuedFeature]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(order, [
+    'apply:2',
+    'hover:2',
+    'write:ab',
+    'didSave:2',
+    'hover:2',
+    'apply:3',
+  ]);
+  assert.equal(pane.dirty, true, 'the edit beyond the queued save ticket remains unclaimed');
+});
+
 await check('feature uses a fixed version and rejects a result made stale by later typing', async () => {
   const pane = {
     paneId: 131, tabId: 132, kind: 'editor', filePath: '/repo/feature-barrier.ts', remote: null, dirty: false,
@@ -721,6 +778,63 @@ await check('concurrent closes join one delayed success without reopening the pa
   assert.equal(h.calls.filter((entry) => entry.command === 'lsp_close_document').length, 1);
   assert.deepEqual(readOnly, [true]);
   assert.equal(h.state.get(pane), null);
+});
+
+await check('close exclusively rejects later save Save As and feature admissions, then failure restores them', async () => {
+  const oldFeature = deferred();
+  const managerClose = deferred();
+  const pane = {
+    paneId: 145, tabId: 146, kind: 'editor', filePath: '/repo/close-exclusive.ts', remote: null, dirty: true,
+    view: {
+      state: { doc: { value: 'body', toString() { return this.value; } } },
+      termlabResetDirty() { pane.dirty = false; },
+      termlabSetReadOnly(value) { pane.readOnly = value; },
+    },
+  };
+  let hoverCalls = 0;
+  const h = harness({
+    pane,
+    invoke(command) {
+      if (command === 'lsp_hover') {
+        hoverCalls += 1;
+        return hoverCalls === 1
+          ? oldFeature.promise
+          : { documentId: 'doc-close-exclusive', sourceVersion: 1, blocks: [] };
+      }
+      if (command === 'lsp_close_document') return managerClose.promise;
+    },
+  });
+  h.state.attach(pane, response('/repo/close-exclusive.ts', 'doc-close-exclusive'));
+  const admittedFeature = h.service.requestFeature(pane, 'hover', { line: 0, character: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const closing = h.service.closeDocument(pane);
+  const lateSave = assert.rejects(h.service.savePane(pane), /editor close is in progress/);
+  const lateSaveAs = assert.rejects(
+    h.service.saveAs(pane, { scope: 'local', path: '/repo/forbidden.ts' }),
+    /editor close is in progress/,
+  );
+  const lateFeature = h.service.requestFeature(pane, 'hover', { line: 0, character: 2 });
+
+  oldFeature.resolve({ documentId: 'doc-close-exclusive', sourceVersion: 1, blocks: [] });
+  await admittedFeature;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(h.calls.filter((entry) => entry.command === 'lsp_close_document').length, 1);
+  assert.equal(h.calls.some((entry) => entry.command === 'editor_write_file'), false);
+  assert.equal(h.calls.some((entry) => entry.command === 'editor_reserve_document'), false);
+  assert.equal(hoverCalls, 1);
+
+  managerClose.reject(new Error('manager close rejected'));
+  assert.equal(await closing, false);
+  await lateSave;
+  await lateSaveAs;
+  assert.equal(await lateFeature, null);
+  assert.equal(pane.readOnly, false);
+
+  await h.service.savePane(pane);
+  const restoredFeature = await h.service.requestFeature(pane, 'hover', { line: 0, character: 3 });
+  assert.equal(h.calls.filter((entry) => entry.command === 'editor_write_file').length, 1);
+  assert.equal(hoverCalls, 2);
+  assert.ok(restoredFeature, 'a failed close restores later feature admission');
 });
 
 await check('a rejected incremental change forces full-text resync before the next feature', async () => {

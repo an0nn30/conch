@@ -911,6 +911,7 @@ impl ManagerCommand {
                 reply.is_closed()
             }
             Self::CloseDocument { reply, .. } => reply.is_closed(),
+            Self::CloseDocuments { reply, .. } => reply.is_closed(),
             _ => false,
         }
     }
@@ -924,6 +925,9 @@ impl ManagerCommand {
                 let _ = reply.send(Err(error));
             }
             Self::CloseDocument { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::CloseDocuments { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             _ => unreachable!("only authority commands are deferred"),
@@ -1525,7 +1529,36 @@ impl LspManager {
                 document_ids,
                 reply,
             } => {
-                let _ = reply.send(self.close_documents(document_ids));
+                let reserved_close = self.policy_reserves_close_group(&document_ids);
+                match self.close_documents(document_ids.clone()) {
+                    Err(ManagerError::Overloaded) if reserved_close => {
+                        // The group matches close work already reserved by the
+                        // front authority command. Keep one bounded actor-owned
+                        // reply at the front until enough physical worker
+                        // credit exists for the entire all-or-none group.
+                        self.defer_policy_command(
+                            ManagerCommand::CloseDocuments {
+                                document_ids,
+                                reply,
+                            },
+                            true,
+                        );
+                        if !self.retrying_policy {
+                            self.retry_policy_requested = true;
+                        }
+                    }
+                    result => {
+                        if result.is_ok() && reserved_close {
+                            // The original authority command is still next in
+                            // FIFO order. Re-running its capacity calculation
+                            // immediately recomputes only the demand left after
+                            // this explicit grouped close.
+                            self.policy_capacity_reservations.clear();
+                            self.retry_policy_requested = !self.pending_policy_commands.is_empty();
+                        }
+                        let _ = reply.send(result);
+                    }
+                }
             }
             ManagerCommand::ProjectCandidates {
                 path,
@@ -2176,7 +2209,19 @@ impl LspManager {
     }
 
     fn close_documents(&mut self, document_ids: Vec<DocumentId>) -> Result<(), ManagerError> {
-        let document_ids = document_ids.into_iter().collect::<HashSet<_>>();
+        let mut seen = HashSet::new();
+        let document_ids = document_ids
+            .into_iter()
+            .filter(|document_id| seen.insert(*document_id))
+            .collect::<Vec<_>>();
+        if self.retrying_policy {
+            // A matching reserved group may contain more already-admitted
+            // didChange batches than one outbox can hold together with every
+            // didClose. Spend each WorkerReady turn moving only a safe prefix
+            // while preserving slots for the whole close group. Ownership is
+            // untouched until the final all-or-none preflight below succeeds.
+            self.advance_reserved_close_group_batches(&document_ids)?;
+        }
         let mut required = HashMap::<SessionKey, usize>::new();
         for document_id in &document_ids {
             let Some(document) = self.state.documents.get(document_id) else {
@@ -2212,6 +2257,69 @@ impl LspManager {
         }
         for document_id in document_ids {
             self.close_document(document_id)?;
+        }
+        Ok(())
+    }
+
+    fn advance_reserved_close_group_batches(
+        &mut self,
+        document_ids: &[DocumentId],
+    ) -> Result<(), ManagerError> {
+        let mut close_required = HashMap::<SessionKey, usize>::new();
+        for document_id in document_ids {
+            let Some(document) = self.state.documents.get(document_id) else {
+                continue;
+            };
+            let Some(key) = document.session_key.clone() else {
+                continue;
+            };
+            let session = self
+                .state
+                .sessions
+                .get(&key)
+                .ok_or(ManagerError::SessionUnavailable)?;
+            if session.protocol_started {
+                *close_required.entry(key).or_default() += 1;
+            }
+        }
+
+        for (key, close_count) in close_required {
+            let outbox_len = self
+                .state
+                .sessions
+                .get(&key)
+                .ok_or(ManagerError::SessionUnavailable)?
+                .outbox
+                .len();
+            let mut batch_credit = SESSION_OUTBOX_CAPACITY
+                .saturating_sub(outbox_len)
+                .saturating_sub(close_count);
+            if batch_credit == 0 {
+                continue;
+            }
+            let mut batches = Vec::new();
+            for document_id in document_ids {
+                if batch_credit == 0 {
+                    break;
+                }
+                let Some(document) = self.state.documents.get_mut(document_id) else {
+                    continue;
+                };
+                if document.session_key.as_ref() != Some(&key) {
+                    continue;
+                }
+                let take = batch_credit.min(document.pending_batches.len());
+                if take == 0 {
+                    continue;
+                }
+                batches.extend(document.pending_batches.drain(..take));
+                document.batch_generation = document.batch_generation.saturating_add(1);
+                batch_credit -= take;
+            }
+            self.enqueue_session_operations(
+                &key,
+                batches.into_iter().map(SessionOperation::DidChange),
+            )?;
         }
         Ok(())
     }
@@ -2470,6 +2578,35 @@ impl LspManager {
         self.policy_capacity_reservations
             .get(key)
             .is_some_and(|reservation| reservation.close_documents.contains(&document_id))
+    }
+
+    fn policy_reserves_close_group(&self, document_ids: &[DocumentId]) -> bool {
+        let mut matched_reserved_work = false;
+        let mut seen = HashSet::new();
+        for document_id in document_ids.iter().copied() {
+            if !seen.insert(document_id) {
+                continue;
+            }
+            let Some(key) = self
+                .state
+                .documents
+                .get(&document_id)
+                .and_then(|document| document.session_key.as_ref())
+            else {
+                // Unknown, already-closed, and plain-editing documents need no
+                // session operation, so they cannot consume unrelated credit.
+                continue;
+            };
+            let reserved = self
+                .policy_capacity_reservations
+                .get(key)
+                .is_some_and(|reservation| reservation.close_documents.contains(&document_id));
+            if !reserved {
+                return false;
+            }
+            matched_reserved_work = true;
+        }
+        matched_reserved_work
     }
 
     fn ensure_close_capacity(
@@ -8824,6 +8961,293 @@ mod tests {
                 .unwrap(),
             ReserveResult::Reserved { .. }
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grouped_close_consumes_a_matching_subset_one_worker_credit_at_a_time() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("reserved-group-subset-a.ts", "a");
+        let second_path = harness.file("reserved-group-subset-b.ts", "b");
+        let third_path = harness.file("reserved-group-subset-c.ts", "c");
+        let first = harness.open(&first_path, "main", "a").await;
+        let second = harness.open(&second_path, "main", "b").await;
+        let third = harness.open(&third_path, "main", "c").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+
+        harness.factory.hold_changes_one_at_a_time();
+        saturate_session_outbox(&harness, first).await;
+        let policy = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        assert!(!policy.is_finished());
+
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_documents(vec![second, third]).await }
+        });
+        spin().await;
+        assert!(
+            !grouped.is_finished(),
+            "a matching close group must retain its reply instead of spuriously overloading"
+        );
+
+        harness.factory.release_one_change();
+        for _ in 0..100 {
+            spin().await;
+            if grouped.is_finished() {
+                break;
+            }
+        }
+        assert!(
+            !grouped.is_finished(),
+            "one physical slot cannot partially release a two-document group"
+        );
+        for (path, expected) in [(&second_path, second), (&third_path, third)] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path.clone(), "observer".into())
+                    .await
+                    .unwrap(),
+                ReserveResult::FocusOwner { document_id, .. } if document_id == expected
+            ));
+        }
+
+        harness.factory.release_one_change();
+        for _ in 0..100 {
+            spin().await;
+            if grouped.is_finished() {
+                break;
+            }
+        }
+        grouped.await.unwrap().unwrap();
+        assert!(
+            !policy.is_finished(),
+            "the front policy still owns one close credit after a matching subset completes"
+        );
+        for path in [second_path, third_path] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path, "reopen".into())
+                    .await
+                    .unwrap(),
+                ReserveResult::Reserved { .. }
+            ));
+        }
+
+        harness.factory.release_one_change();
+        for _ in 0..100 {
+            spin().await;
+            if policy.is_finished() {
+                break;
+            }
+        }
+        policy.await.unwrap().unwrap();
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(first_path, "observer".into())
+                .await
+                .unwrap(),
+            ReserveResult::FocusOwner { document_id, .. } if document_id == first
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grouped_close_consumes_all_matching_policy_credits_atomically() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("reserved-group-all-a.ts", "a");
+        let second_path = harness.file("reserved-group-all-b.ts", "b");
+        let first = harness.open(&first_path, "main", "a").await;
+        let second = harness.open(&second_path, "main", "b").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+
+        harness.factory.hold_changes_one_at_a_time();
+        saturate_session_outbox(&harness, first).await;
+        let policy = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_documents(vec![first, second]).await }
+        });
+        spin().await;
+        assert!(!grouped.is_finished());
+
+        let mut ready_cycles = 0;
+        while !grouped.is_finished() && ready_cycles < 300 {
+            harness.factory.release_one_change();
+            for _ in 0..10 {
+                spin().await;
+                if grouped.is_finished() {
+                    break;
+                }
+            }
+            ready_cycles += 1;
+            if !grouped.is_finished() {
+                for (path, expected) in [(&first_path, first), (&second_path, second)] {
+                    assert!(matches!(
+                        harness
+                            .manager
+                            .reserve_document(path.clone(), "observer".into())
+                            .await
+                            .unwrap(),
+                        ReserveResult::FocusOwner { document_id, .. } if document_id == expected
+                    ));
+                }
+            }
+        }
+        assert!(
+            ready_cycles > 2,
+            "the group must also drain the pressured document's admitted didChange batches"
+        );
+        assert!(
+            grouped.is_finished(),
+            "the reserved group did not progress after {ready_cycles} WorkerReady turns"
+        );
+        grouped.await.unwrap().unwrap();
+        for _ in 0..100 {
+            spin().await;
+            if policy.is_finished() {
+                break;
+            }
+        }
+        policy.await.unwrap().unwrap();
+        for path in [first_path, second_path] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path, "reopen".into())
+                    .await
+                    .unwrap(),
+                ReserveResult::Reserved { .. }
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grouped_close_enqueues_did_close_in_caller_fifo_once_per_document() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("group-fifo-a.ts", "a");
+        let second_path = harness.file("group-fifo-b.ts", "b");
+        let first = harness.open(&first_path, "main", "a").await;
+        let second = harness.open(&second_path, "main", "b").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+
+        harness
+            .manager
+            .close_documents(vec![second, first, second])
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            spin().await;
+            let close_count = harness
+                .factory
+                .observations(&key("typescript", &root))
+                .iter()
+                .filter(|observation| matches!(observation, Observation::Close(_)))
+                .count();
+            if close_count == 2 {
+                break;
+            }
+        }
+        let closes = harness
+            .factory
+            .observations(&key("typescript", &root))
+            .into_iter()
+            .filter_map(|observation| match observation {
+                Observation::Close(document_id) => Some(document_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            closes,
+            [second, first]
+                .into_iter()
+                .map(super::document_id_text)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grouped_close_unrelated_to_the_front_policy_stays_overloaded_and_preserves_owners() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("reserved-unrelated-a.ts", "a");
+        let second_path = harness.file("reserved-unrelated-b.ts", "b");
+        let first = harness.open(&first_path, "main", "a").await;
+        let second = harness.open(&second_path, "main", "b").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+        saturate_session_outbox(&harness, first).await;
+
+        let context = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move {
+                manager
+                    .set_project_context(first, ProjectContextChoice::Disabled)
+                    .await
+            }
+        });
+        spin().await;
+        assert!(!context.is_finished());
+        assert_eq!(
+            harness.manager.close_documents(vec![second]).await,
+            Err(ManagerError::Overloaded)
+        );
+        for (path, expected) in [(&first_path, first), (&second_path, second)] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path.clone(), "observer".into())
+                    .await
+                    .unwrap(),
+                ReserveResult::FocusOwner { document_id, .. } if document_id == expected
+            ));
+        }
+        harness.factory.release_changes();
+        context.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_grouped_close_yields_its_reply_to_priority_shutdown() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("reserved-group-shutdown-a.ts", "a");
+        let second_path = harness.file("reserved-group-shutdown-b.ts", "b");
+        let first = harness.open(&first_path, "main", "a").await;
+        let second = harness.open(&second_path, "main", "b").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+        harness.factory.hold_changes_one_at_a_time();
+        saturate_session_outbox(&harness, first).await;
+
+        let policy = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_documents(vec![first, second]).await }
+        });
+        spin().await;
+        assert!(!grouped.is_finished());
+
+        harness.manager.shutdown().await.unwrap();
+        assert_eq!(grouped.await.unwrap(), Err(ManagerError::ActorStopped));
+        assert_eq!(policy.await.unwrap(), Err(ManagerError::ActorStopped));
     }
 
     #[tokio::test]
