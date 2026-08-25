@@ -147,26 +147,70 @@ where
 mod tests {
     use super::*;
     use crate::transfer::copy::{ControlDecision, CopyOutcome, CopyStage};
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    /// Chunk source over an in-memory buffer that releases completions in a
-    /// scripted order: each read waits until every earlier-scripted read has
-    /// been issued, then completes in the scripted sequence.
+    /// Tracks concurrent in-flight chunk transfers, shared between a
+    /// `ScriptedSource` and `CollectingSink` pair via `Arc`, so a test can
+    /// observe the actual maximum window width the scheduler opens rather
+    /// than inferring it indirectly from issue order.
+    struct InFlight {
+        current: AtomicUsize,
+        max: AtomicUsize,
+    }
+
+    impl InFlight {
+        fn new() -> Self {
+            Self { current: AtomicUsize::new(0), max: AtomicUsize::new(0) }
+        }
+
+        /// Call when a chunk transfer starts (read issued).
+        fn enter(&self) {
+            let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max.fetch_max(now, Ordering::SeqCst);
+        }
+
+        /// Call when a chunk transfer ends (write completed, or aborted).
+        fn exit(&self) {
+            self.current.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Chunk source over an in-memory buffer. Every read takes at least one
+    /// cooperative yield before completing so concurrently issued reads can
+    /// interleave under the test runtime. When `stagger` is set to
+    /// `(chunk_bytes, depth)`, a read at `offset` takes
+    /// `(offset / chunk_bytes) % depth` *additional* yields, so within a
+    /// depth-sized batch of concurrently issued reads, later offsets resolve
+    /// slower — and once the window slides, a fresh low-stagger offset from
+    /// the next batch races ahead of an older high-stagger one still
+    /// pending. That produces genuine out-of-order completions, exercising
+    /// the scheduler's frontier gap-handling instead of merely completing in
+    /// issue order.
     struct ScriptedSource {
         data: Vec<u8>,
         issued: Mutex<Vec<u64>>,
         fail_at: Option<u64>,
+        in_flight: Arc<InFlight>,
+        stagger: Option<(u64, usize)>,
     }
 
     #[async_trait::async_trait]
     impl ChunkSource for ScriptedSource {
         async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
             self.issued.lock().unwrap().push(offset);
+            self.in_flight.enter();
             if self.fail_at == Some(offset) {
+                self.in_flight.exit();
                 return Err(std::io::Error::other("scripted read failure"));
             }
-            // Yield so concurrently issued reads interleave under the test runtime.
-            tokio::task::yield_now().await;
+            let extra_yields = match self.stagger {
+                Some((chunk_bytes, depth)) if depth > 0 => (offset / chunk_bytes) as usize % depth,
+                _ => 0,
+            };
+            for _ in 0..=extra_yields {
+                tokio::task::yield_now().await;
+            }
             let start = offset as usize;
             let end = (start + len).min(self.data.len());
             Ok(self.data.get(start..end).unwrap_or(&[]).to_vec())
@@ -176,29 +220,42 @@ mod tests {
     struct CollectingSink {
         written: Mutex<Vec<(u64, Vec<u8>)>>,
         fail_at: Option<u64>,
+        in_flight: Arc<InFlight>,
     }
 
     #[async_trait::async_trait]
     impl ChunkSink for CollectingSink {
         async fn write_at(&self, offset: u64, data: Vec<u8>) -> Result<(), std::io::Error> {
             if self.fail_at == Some(offset) {
+                self.in_flight.exit();
                 return Err(std::io::Error::other("scripted write failure"));
             }
             self.written.lock().unwrap().push((offset, data));
+            self.in_flight.exit();
             Ok(())
         }
     }
 
-    fn source(bytes: usize) -> ScriptedSource {
+    fn source_with(bytes: usize, in_flight: Arc<InFlight>, stagger: Option<(u64, usize)>) -> ScriptedSource {
         ScriptedSource {
             data: (0..bytes).map(|i| (i % 251) as u8).collect(),
             issued: Mutex::new(Vec::new()),
             fail_at: None,
+            in_flight,
+            stagger,
         }
     }
 
+    fn sink_with(in_flight: Arc<InFlight>) -> CollectingSink {
+        CollectingSink { written: Mutex::new(Vec::new()), fail_at: None, in_flight }
+    }
+
+    fn source(bytes: usize) -> ScriptedSource {
+        source_with(bytes, Arc::new(InFlight::new()), None)
+    }
+
     fn sink() -> CollectingSink {
-        CollectingSink { written: Mutex::new(Vec::new()), fail_at: None }
+        sink_with(Arc::new(InFlight::new()))
     }
 
     fn reassemble(sink: &CollectingSink, total: usize) -> Vec<u8> {
@@ -211,7 +268,10 @@ mod tests {
 
     #[tokio::test]
     async fn copies_everything_and_reports_contiguous_progress() {
-        let src = source(1000);
+        // Stagger completions (see `ScriptedSource` doc comment) so this test
+        // actually exercises out-of-order completion, not just the in-order
+        // happy path.
+        let src = source_with(1000, Arc::new(InFlight::new()), Some((100, 4)));
         let dst = sink();
         let mut reports = Vec::new();
         let outcome = pipelined_copy(
@@ -224,6 +284,14 @@ mod tests {
         assert_eq!(reassemble(&dst, 1000), src.data);
         assert!(reports.windows(2).all(|w| w[0].0 <= w[1].0), "progress is monotonic");
         assert_eq!(reports.last().copied(), Some((1000, 1000)));
+        // With staggered completions, some completion events fill a gap
+        // behind the frontier rather than extending it. If the scheduler
+        // reported progress in raw completion order instead of frontier
+        // order, no two consecutive reports would ever repeat the same
+        // `done` value.
+        assert!(reports.windows(2).any(|w| w[0].0 == w[1].0),
+            "expected at least one completion to be blocked by a gap, proving the frontier — \
+             not completion order — gates reported progress");
     }
 
     #[tokio::test]
@@ -242,22 +310,24 @@ mod tests {
 
     #[tokio::test]
     async fn window_never_exceeds_depth() {
-        let src = source(2000);
-        let dst = sink();
+        // Share one tracker between source and sink so "in flight" spans the
+        // whole read-then-write lifecycle of a chunk, and directly observe
+        // the maximum concurrency the scheduler actually opens.
+        let tracker = Arc::new(InFlight::new());
+        let src = source_with(2000, Arc::clone(&tracker), None);
+        let dst = sink_with(Arc::clone(&tracker));
         pipelined_copy(
             &src, &dst, 0, 2000,
             PipelineTuning { depth: 3, chunk_bytes: 100 },
             || ControlDecision::Continue,
             |_, _| {},
         ).await.expect("copy succeeds");
-        // With depth 3, offset N may only be issued after offset N-3 completed:
-        // the recorded issue order can never contain an offset more than
-        // 3 chunks ahead of the count of chunks issued before it.
-        let issued = src.issued.lock().unwrap();
-        for (index, offset) in issued.iter().enumerate() {
-            assert!(*offset as usize <= (index + 1) * 100 + 200,
-                "offset {offset} issued at position {index} exceeds window depth 3");
-        }
+        let max_in_flight = tracker.max.load(Ordering::SeqCst);
+        assert!(max_in_flight <= 3,
+            "observed {max_in_flight} chunks concurrently in flight, exceeding window depth 3");
+        assert!(max_in_flight > 1,
+            "expected real pipelining (more than one chunk in flight at once) at depth 3, \
+             observed max concurrency {max_in_flight}");
     }
 
     #[tokio::test]
@@ -280,23 +350,37 @@ mod tests {
     async fn pause_drains_and_reports_the_frontier() {
         let src = source(10_000);
         let dst = sink();
-        let mut calls = 0;
+        let depth = 4;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_control = Arc::clone(&calls);
         let outcome = pipelined_copy(
             &src, &dst, 0, 10_000,
-            PipelineTuning { depth: 4, chunk_bytes: 100 },
+            PipelineTuning { depth, chunk_bytes: 100 },
             move || {
-                calls += 1;
-                if calls > 10 { ControlDecision::Pause } else { ControlDecision::Continue }
+                let n = calls_for_control.fetch_add(1, Ordering::SeqCst) + 1;
+                if n > 10 { ControlDecision::Pause } else { ControlDecision::Continue }
             },
             |_, _| {},
         ).await.expect("pause is a success outcome");
         let CopyOutcome::Paused { bytes } = outcome else {
             panic!("expected paused outcome, got {outcome:?}");
         };
+        // A scheduler that ignored Pause and kept copying to completion would
+        // still pass every assertion below unless we also confirm it
+        // actually stopped short of the whole file, and that it did not
+        // issue far more reads than the point at which Pause was decided.
+        assert!(bytes < 10_000,
+            "pause must stop issuing before the whole 10,000-byte file copies, got {bytes} bytes");
         // Every byte up to the reported frontier must actually be in the sink.
         let written = reassemble(&dst, 10_000);
         assert_eq!(written[..bytes as usize], src.data[..bytes as usize],
             "paused frontier only counts contiguous durable bytes");
+        let control_calls = calls.load(Ordering::SeqCst);
+        let issued_reads = src.issued.lock().unwrap().len();
+        assert!(issued_reads <= control_calls + depth,
+            "expected at most {} issued reads (control calls {control_calls} + depth {depth}), \
+             got {issued_reads}; scheduler kept issuing new work after Pause",
+            control_calls + depth);
     }
 
     #[tokio::test]
