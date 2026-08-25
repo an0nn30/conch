@@ -252,10 +252,24 @@ pub(crate) struct AdapterDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedFileIdentity {
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedResourceFile {
+    pub path: PathBuf,
+    pub identity: ResolvedFileIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedServerCommand {
     pub adapter_id: &'static str,
+    pub resource_root: PathBuf,
     pub program: PathBuf,
     pub args: Vec<PathBuf>,
+    pub resource_files: Vec<ResolvedResourceFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,6 +651,12 @@ impl BundledServerCatalog {
         )?;
         require_executable(&program, program_relative_path, descriptor.adapter_id)?;
         validate_macos_arm64_executable(&program, program_relative_path, descriptor.adapter_id)?;
+        let mut resource_files = vec![resolved_resource_file(
+            &receipt,
+            program.clone(),
+            program_relative_path,
+            descriptor.adapter_id,
+        )?];
 
         for required in descriptor.program.required_files() {
             let required_path = Path::new(required);
@@ -649,12 +669,10 @@ impl BundledServerCatalog {
             )?;
         }
 
-        let args = descriptor
-            .program
-            .arguments()
-            .iter()
-            .map(|argument| match argument {
-                CommandArgument::Literal(value) => Ok(PathBuf::from(value)),
+        let mut args = Vec::new();
+        for argument in descriptor.program.arguments() {
+            match argument {
+                CommandArgument::Literal(value) => args.push(PathBuf::from(value)),
                 CommandArgument::ResourcePath(relative_path) => {
                     let relative_path = Path::new(relative_path);
                     let absolute = validated_resource(
@@ -664,15 +682,23 @@ impl BundledServerCatalog {
                         descriptor.adapter_id,
                         &mut validated_resources,
                     )?;
-                    Ok(absolute)
+                    resource_files.push(resolved_resource_file(
+                        &receipt,
+                        absolute.clone(),
+                        relative_path,
+                        descriptor.adapter_id,
+                    )?);
+                    args.push(absolute);
                 }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            }
+        }
 
         Ok(ResolvedServerCommand {
             adapter_id: descriptor.adapter_id,
+            resource_root: root,
             program,
             args,
+            resource_files,
         })
     }
 
@@ -707,6 +733,30 @@ impl BundledServerCatalog {
             data_dir: base.join("data"),
         })
     }
+}
+
+fn resolved_resource_file(
+    receipt: &InstalledLspReceipt,
+    path: PathBuf,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<ResolvedResourceFile, CatalogUnavailable> {
+    let relative_path_text = relative_path.to_string_lossy();
+    let file = receipt
+        .files
+        .iter()
+        .find(|file| file.relative_path == relative_path_text)
+        .ok_or_else(|| CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        })?;
+    Ok(ResolvedResourceFile {
+        path,
+        identity: ResolvedFileIdentity {
+            size: file.size,
+            sha256: file.sha256.to_ascii_lowercase(),
+        },
+    })
 }
 
 fn validated_resource(
@@ -1834,6 +1884,27 @@ mod tests {
         assert!(command.args[0].is_absolute());
         assert!(command.program.starts_with(&root));
         assert!(command.args[0].starts_with(&root));
+        assert_eq!(command.resource_root, root);
+        assert_eq!(command.resource_files.len(), 2);
+        assert_eq!(command.resource_files[0].path, command.program);
+        assert_eq!(
+            command.resource_files[0].identity.size,
+            fs::metadata(&command.program).unwrap().len()
+        );
+        assert_eq!(
+            command.resource_files[0].identity.sha256,
+            format!("{:x}", Sha256::digest(fs::read(&command.program).unwrap()))
+        );
+        assert_eq!(command.resource_files[1].path, command.args[0]);
+        assert_eq!(command.resource_files[1].identity.size, 11);
+        assert_eq!(
+            command.resource_files[1].identity.sha256,
+            "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+        );
+        assert!(command
+            .resource_files
+            .iter()
+            .all(|resource| resource.path != command.args[1]));
     }
 
     #[test]
@@ -1919,6 +1990,8 @@ mod tests {
         assert!(command.args.is_empty());
         assert!(command.program.is_absolute());
         assert!(command.program.starts_with(&root));
+        assert_eq!(command.resource_files.len(), 1);
+        assert_eq!(command.resource_files[0].path, command.program);
     }
 
     #[test]
