@@ -1,9 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use termlab_remote::transfer::SourceFingerprint;
 use ts_rs::TS;
 use uuid::Uuid;
+
+use super::batch::{BatchAggregate, BatchInfo, derive_batch_aggregates};
 
 pub const TRANSFER_STORE_VERSION: u32 = 1;
 pub const TRANSFER_HISTORY_LIMIT: usize = 500;
@@ -474,6 +476,8 @@ pub struct TransferQueueDocument {
     pub jobs: Vec<TransferJob>,
     #[serde(default)]
     pub recovery_error: Option<String>,
+    #[serde(default)]
+    pub batches: BTreeMap<Uuid, BatchInfo>,
 }
 
 impl Default for TransferQueueDocument {
@@ -485,6 +489,7 @@ impl Default for TransferQueueDocument {
             settings: QueueSettings::default(),
             jobs: Vec::new(),
             recovery_error: None,
+            batches: BTreeMap::new(),
         }
     }
 }
@@ -569,6 +574,7 @@ pub struct TransferQueueSnapshot {
     pub jobs: Vec<TransferJob>,
     pub summary: TransferQueueSummary,
     pub recovery_error: Option<String>,
+    pub batches: Vec<BatchAggregate>,
 }
 
 impl From<&TransferQueueDocument> for TransferQueueSnapshot {
@@ -580,6 +586,7 @@ impl From<&TransferQueueDocument> for TransferQueueSnapshot {
             jobs: document.jobs.clone(),
             summary: TransferQueueSummary::from_jobs(&document.jobs, document.queue_paused),
             recovery_error: document.recovery_error.clone(),
+            batches: derive_batch_aggregates(&document.batches, &document.jobs),
         }
     }
 }

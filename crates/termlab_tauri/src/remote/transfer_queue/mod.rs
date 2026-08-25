@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod batch;
 pub mod engine;
 pub mod events;
 pub mod model;
