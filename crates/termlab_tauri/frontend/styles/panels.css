@@ -67,6 +67,25 @@
     }
     .fp-path-input:focus { border-color: var(--dim-fg); }
     .fp-path-input:disabled { opacity: 0.4; }
+    .fp-path-input--hidden { display: none; }
+    /* Breadcrumb path bar — the default view of the pane's location. Click a
+       crumb to jump, the … crumb lists folded ancestors, click empty space to
+       type a path (swaps to .fp-path-input). */
+    .fp-crumbs {
+      flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px;
+      height: 24px; padding: 0 6px; overflow: hidden; cursor: text;
+      background: var(--input-bg); border: 1px solid var(--tab-border); border-radius: 3px;
+      font: 11px "JetBrains Mono", monospace;
+    }
+    .fp-crumb {
+      background: none; border: none; border-radius: 2px; padding: 1px 3px;
+      color: var(--fg); font: inherit; cursor: pointer; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; max-width: 12em;
+    }
+    .fp-crumb:hover { background: var(--active-highlight); }
+    .fp-crumb.is-current { color: var(--fg); cursor: text; font-weight: 500; }
+    .fp-crumb-sep { color: var(--dim-fg); flex-shrink: 0; user-select: none; }
+    .fp-crumb-overflow { color: var(--text-muted); }
     .fp-error { padding: 4px 8px; font-size: var(--ui-font-small); color: var(--red); flex-shrink: 0; }
     /* The listing surface owns the background so it reaches the bottom of the
        pane even when rows don't fill it (docked and panel-host windows alike);

@@ -112,6 +112,37 @@
         : `${visibleEntries.length} items`);
     const activityText = transferActivityText(pane.transferStatus);
 
+    // Breadcrumb path bar: default view of the pane's location. The text
+    // input stays in the DOM (hidden) for click-to-edit; without a session or
+    // without the breadcrumbs module the plain input renders as before.
+    const crumbsApi = global.termlabFilesBreadcrumbs;
+    const crumbPath = pane.currentPath || pane.pathInput || '';
+    const useCrumbs = !!(crumbsApi && crumbPath && !noSession);
+    let hiddenCrumbSegments = [];
+    let pathBarHtml = `<input class="fp-path-input${useCrumbs ? ' fp-path-input--hidden' : ''}" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />`;
+    if (useCrumbs) {
+      const folded = crumbsApi.collapse(crumbsApi.segments(crumbPath), 4);
+      hiddenCrumbSegments = folded.hidden;
+      const ordered = [folded.head, ...folded.tail].filter(Boolean);
+      const lastIndex = ordered.length - 1;
+      const crumbHtml = (seg, isCurrent) => (isCurrent
+        ? `<span class="fp-crumb is-current" title="${attr(seg.path)}">${esc(seg.label)}</span>`
+        : `<button type="button" class="fp-crumb" data-crumb-path="${attr(seg.path)}" title="${attr(seg.path)}">${esc(seg.label)}</button>`);
+      const sep = '<span class="fp-crumb-sep">/</span>';
+      const parts = [];
+      ordered.forEach((seg, index) => {
+        if (index === 1 && folded.hidden.length > 0) {
+          if (ordered[0].label !== '/') parts.push(sep);
+          parts.push('<button type="button" class="fp-crumb fp-crumb-overflow" data-action="crumb-overflow" title="Show folded folders">…</button>');
+          parts.push(sep);
+        } else if (index > 0 && !(index === 1 && ordered[0].label === '/')) {
+          parts.push(sep);
+        }
+        parts.push(crumbHtml(seg, index === lastIndex));
+      });
+      pathBarHtml = `<div class="fp-crumbs" role="navigation" aria-label="Current path">${parts.join('')}</div>${pathBarHtml}`;
+    }
+
     el.innerHTML = `
       ${isRemote ? `
       <div class="fp-host-strip">
@@ -122,7 +153,7 @@
         <span class="fp-tb-group fp-tb-nav">
           <button class="fp-tb-btn" data-action="back" ${pane.backStack.length === 0 ? 'disabled' : ''} title="Back">${d.iconBack || ''}</button>
           <button class="fp-tb-btn" data-action="forward" ${pane.forwardStack.length === 0 ? 'disabled' : ''} title="Forward">${d.iconForward || ''}</button>
-          <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
+          ${pathBarHtml}
           <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${d.iconRefresh || ''}</button>
           <button class="fp-tb-btn" data-action="more" title="More actions" aria-haspopup="menu">${d.iconMore || '⋮'}</button>
         </span>
@@ -230,6 +261,58 @@
         if (!value) return;
         if (typeof d.onNavigate === 'function') d.onNavigate(value);
       });
+    }
+
+    // Crumb bar: ancestor crumbs navigate, the … crumb lists folded folders,
+    // and a click on the bar's empty area swaps to the text input for direct
+    // path entry (Escape or blur returns to crumbs without navigating).
+    const crumbsEl = el.querySelector('.fp-crumbs');
+    if (crumbsEl && pathInput) {
+      const exitEdit = () => {
+        pathInput.classList.add('fp-path-input--hidden');
+        crumbsEl.style.display = '';
+      };
+      const enterEdit = () => {
+        crumbsEl.style.display = 'none';
+        pathInput.classList.remove('fp-path-input--hidden');
+        if (typeof pathInput.focus === 'function') pathInput.focus();
+        if (typeof pathInput.select === 'function') pathInput.select();
+      };
+      crumbsEl.addEventListener('click', (event) => {
+        const target = event.target;
+        const closest = target && typeof target.closest === 'function'
+          ? (sel) => target.closest(sel)
+          : () => null;
+        const crumbBtn = closest('[data-crumb-path]');
+        if (crumbBtn) {
+          const crumbPathValue = crumbBtn.getAttribute('data-crumb-path');
+          if (crumbPathValue && typeof d.onNavigate === 'function') d.onNavigate(crumbPathValue);
+          return;
+        }
+        const overflowBtn = closest('[data-action="crumb-overflow"]');
+        if (overflowBtn) {
+          if (global.tlMenu && typeof global.tlMenu.open === 'function') {
+            const rect = typeof overflowBtn.getBoundingClientRect === 'function'
+              ? overflowBtn.getBoundingClientRect()
+              : { left: 0, bottom: 0 };
+            global.tlMenu.open({
+              x: rect.left,
+              y: rect.bottom + 2,
+              ariaLabel: 'Folded folders',
+              items: hiddenCrumbSegments.map((seg) => ({
+                label: seg.path,
+                onSelect: () => { if (typeof d.onNavigate === 'function') d.onNavigate(seg.path); },
+              })),
+            });
+          }
+          return;
+        }
+        enterEdit();
+      });
+      pathInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') exitEdit();
+      });
+      pathInput.addEventListener('blur', exitEdit);
     }
 
     el.querySelectorAll('th[data-col]').forEach((th) => {

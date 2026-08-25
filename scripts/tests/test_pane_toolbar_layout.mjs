@@ -17,11 +17,16 @@ const PANE_VIEW_PATH = path.resolve(
   import.meta.dirname,
   '../../crates/termlab_tauri/frontend/app/features/files/pane-view.js',
 );
+const BREADCRUMBS_PATH = path.resolve(
+  import.meta.dirname,
+  '../../crates/termlab_tauri/frontend/app/features/files/breadcrumbs.js',
+);
 
 function loadPaneView() {
   const sandbox = { console };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(BREADCRUMBS_PATH, 'utf8'), sandbox, { filename: BREADCRUMBS_PATH });
   vm.runInContext(fs.readFileSync(PANE_VIEW_PATH, 'utf8'), sandbox, { filename: PANE_VIEW_PATH });
   assert.ok(sandbox.termlabFilesPaneView, 'pane-view IIFE must expose window.termlabFilesPaneView');
   return sandbox.termlabFilesPaneView;
@@ -40,7 +45,8 @@ function recordingElement() {
 function pane(isLocal) {
   return {
     isLocal,
-    pathInput: isLocal ? '/home/user' : '/srv',
+    pathInput: isLocal ? '/home/user' : '/srv/deep',
+    currentPath: isLocal ? '/home/user' : '/srv/deep',
     backStack: [],
     forwardStack: [],
     entries: [],
@@ -100,6 +106,47 @@ function pane(isLocal) {
   view.renderPane(pane(false), el, {});
   assert.ok(el.innerHTML.includes('fp-host-status'), 'strip renders its dot while disconnected');
   assert.ok(!el.innerHTML.includes('is-connected'), 'no active session means no connected marker');
+}
+
+// Breadcrumbs replace the visible path box: each ancestor is a clickable
+// crumb, the current directory is inert, and the text input stays in the DOM
+// (hidden) for click-to-edit. A connected remote pane gets the same bar.
+{
+  const view = loadPaneView();
+  const el = recordingElement();
+  view.renderPane(pane(true), el, {});
+  const html = el.innerHTML;
+  assert.ok(html.includes('fp-crumbs'), 'toolbar must render the crumb bar');
+  assert.ok(html.includes('data-crumb-path="/"'), 'root crumb navigates to /');
+  assert.ok(html.includes('data-crumb-path="/home"'), 'ancestor crumb navigates to its path');
+  assert.ok(!html.includes('data-crumb-path="/home/user"'), 'current directory is not a navigation target');
+  assert.ok(html.includes('is-current'), 'current directory renders as the inert current crumb');
+  assert.ok(html.includes('fp-path-input'), 'text input stays in the DOM for click-to-edit');
+}
+
+// Deep paths fold their middle into a crumb-overflow control.
+{
+  const view = loadPaneView();
+  const el = recordingElement();
+  const deep = pane(true);
+  deep.currentPath = '/a/b/c/d/e/f';
+  deep.pathInput = '/a/b/c/d/e/f';
+  view.renderPane(deep, el, {});
+  assert.ok(el.innerHTML.includes('data-action="crumb-overflow"'), 'deep paths render the overflow crumb');
+  assert.ok(!el.innerHTML.includes('data-crumb-path="/a/b"'), 'folded ancestors are not inline crumbs');
+}
+
+// A disconnected remote pane has no path to crumb: it keeps the plain
+// (disabled) input rather than an empty bar.
+{
+  const view = loadPaneView();
+  const el = recordingElement();
+  const disconnected = pane(false);
+  disconnected.currentPath = '';
+  disconnected.pathInput = '';
+  view.renderPane(disconnected, el, {});
+  assert.ok(!el.innerHTML.includes('fp-crumbs'), 'no crumb bar without a session');
+  assert.ok(el.innerHTML.includes('fp-path-input'), 'plain input remains while disconnected');
 }
 
 console.log('pane toolbar layout: all assertions passed');
