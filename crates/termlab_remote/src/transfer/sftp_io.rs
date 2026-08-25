@@ -1,15 +1,19 @@
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use russh_sftp::client::fs::File as SftpFile;
-use russh_sftp::client::{SftpSession, error::Error as SftpClientError};
-use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+use russh_sftp::client::rawsession::Limits;
+use russh_sftp::client::{RawSftpSession, SftpSession, error::Error as SftpClientError};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode, Version};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt};
 
 use super::SourceFingerprint;
 use super::copy::{ControlDecision, CopyOutcome, copy_with_checkpoint};
+use super::pipelined::{ChunkSink, ChunkSource, PipelineTuning, pipelined_copy};
+use super::positional::PositionalFile;
 use crate::error::RemoteError;
 use crate::handler::TermLabSshHandler;
 use crate::sftp::open_sftp;
@@ -148,12 +152,27 @@ pub async fn open_remote_partial(
         .map_err(|error| RemoteError::Transfer(format!("open remote partial failed: {error}")))
 }
 
+/// Flags for a partial file that already holds bytes to resume from: create
+/// if missing, open for writing, but never discard what is already there.
+pub(crate) fn resume_partial_open_flags() -> OpenFlags {
+    OpenFlags::CREATE | OpenFlags::WRITE
+}
+
+/// Flags for a partial file that must start empty: create if missing, open
+/// for writing, and discard any stale bytes left over from a previous run.
+pub(crate) fn fresh_partial_open_flags() -> OpenFlags {
+    OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE
+}
+
+/// Single source of truth for resume-vs-fresh remote partial open flags,
+/// shared by the sequential (`open_remote_partial`) and pipelined transfer
+/// paths so they can never drift apart.
+pub(crate) fn pipelined_remote_open_flags(resume: bool) -> OpenFlags {
+    if resume { resume_partial_open_flags() } else { fresh_partial_open_flags() }
+}
+
 fn remote_partial_open_flags(resume: bool) -> OpenFlags {
-    let mut flags = OpenFlags::CREATE | OpenFlags::WRITE;
-    if !resume {
-        flags |= OpenFlags::TRUNCATE;
-    }
-    flags
+    pipelined_remote_open_flags(resume)
 }
 
 fn resume_partial_from(offset: u64) -> bool {
@@ -598,6 +617,311 @@ where
     finish_after_cleanup(copy_result, cleanup_result)
 }
 
+/// Re-stat a local source and reject if it no longer matches `expected`.
+///
+/// The pipelined upload path fingerprints the source once, hands the
+/// fingerprint to `on_fingerprint` (which may block for an arbitrary time —
+/// e.g. an overwrite confirmation), then opens a brand new [`PositionalFile`]
+/// handle for the actual copy. That second open is a fresh TOCTOU window the
+/// sequential path doesn't have (it keeps the original handle open across
+/// the whole transfer). This closes it.
+pub(crate) async fn revalidate_local_fingerprint(
+    path: &Path,
+    expected: &SourceFingerprint,
+) -> Result<(), RemoteError> {
+    let (_file, current) = fingerprint_open_local(path).await?;
+    if &current != expected {
+        return Err(RemoteError::Transfer(format!(
+            "local source {} changed since it was checked (size {} -> {})",
+            path.display(),
+            expected.size,
+            current.size,
+        )));
+    }
+    Ok(())
+}
+
+/// Remote twin of [`revalidate_local_fingerprint`]. Currently unused in the
+/// pipelined download path: `fingerprint_open_remote` both stats the source
+/// and is the value handed to `on_fingerprint` in the same call, so there is
+/// no separate reopen for it to guard against there. Kept as the symmetric
+/// helper for the remote side and covered indirectly by
+/// `fingerprint_open_remote`'s own tests; not unit-testable on its own
+/// without a live SFTP session, same as `fingerprint_open_remote`.
+#[allow(dead_code)]
+pub(crate) async fn revalidate_remote_fingerprint(
+    sftp: &SftpSessionHandle,
+    path: &str,
+    expected: &SourceFingerprint,
+) -> Result<(), RemoteError> {
+    let (mut file, current) = fingerprint_open_remote(sftp, path).await?;
+    let mismatch = if &current != expected {
+        Some(RemoteError::Transfer(format!(
+            "remote source {path} changed since it was checked (size {} -> {})",
+            expected.size, current.size,
+        )))
+    } else {
+        None
+    };
+    let close_result =
+        super::close_remote_file(&mut file, "close remote source after revalidation").await;
+    match mismatch {
+        Some(error) => Err(error),
+        None => close_result,
+    }
+}
+
+/// OpenSSH's conventional read/write length cap (see
+/// `russh_sftp::client::fs::file::MAX_READ_LENGTH` / `MAX_WRITE_LENGTH`,
+/// 261120 bytes = 255 KiB). `RawSftpSession` negotiates and self-enforces the
+/// `limits@openssh.com` extension internally (`limits()` / `set_limits`) but
+/// keeps the negotiated numbers private — there is no accessor to read them
+/// back — so pipelined chunk sizing clamps to this safe default instead of
+/// the server's exact advertised limit.
+const RAW_SFTP_MAX_CHUNK_BYTES: usize = 255 * 1024;
+
+fn clamp_pipelined_chunk_bytes(tuning: PipelineTuning) -> PipelineTuning {
+    PipelineTuning {
+        depth: tuning.depth,
+        chunk_bytes: tuning.chunk_bytes.min(RAW_SFTP_MAX_CHUNK_BYTES),
+    }
+}
+
+/// Negotiate the `limits@openssh.com` extension the same way
+/// `SftpSession::new_opts` does (see russh-sftp's `client/session.rs`), so
+/// the raw session self-enforces the server's advertised read/write caps.
+async fn negotiate_raw_sftp_limits(raw: &mut RawSftpSession, version: &Version) {
+    if version
+        .extensions
+        .get(russh_sftp::extensions::LIMITS)
+        .is_some_and(|value| value == "1")
+        && let Ok(limits) = raw.limits().await
+    {
+        raw.set_limits(Arc::new(Limits::from(limits)));
+    }
+}
+
+/// Open a second SFTP channel on the already-authenticated SSH handle and
+/// hand back the raw protocol session (mirrors `crate::sftp::open_sftp`, but
+/// returns the low-level `RawSftpSession` instead of the high-level
+/// `SftpSession` wrapper) so the pipelined engine can issue concurrent
+/// offset-addressed reads/writes against one handle instead of the
+/// sequential, cursor-based `File` API.
+pub(crate) async fn open_raw_sftp_session(
+    ssh: &russh::client::Handle<TermLabSshHandler>,
+) -> Result<RawSftpSession, RemoteError> {
+    let channel = ssh.channel_open_session().await.map_err(|error| {
+        RemoteError::Transfer(format!("open pipelined channel failed: {error}"))
+    })?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|error| {
+            RemoteError::Transfer(format!("request sftp subsystem failed: {error}"))
+        })?;
+    let mut raw = RawSftpSession::new(channel.into_stream());
+    let version = raw
+        .init()
+        .await
+        .map_err(|error| RemoteError::Transfer(format!("sftp init failed: {error}")))?;
+    negotiate_raw_sftp_limits(&mut raw, &version).await;
+    Ok(raw)
+}
+
+/// A remote file accessed through a [`RawSftpSession`] handle for the
+/// pipelined engine: unlike `russh_sftp::client::fs::File`, the raw
+/// `read`/`write` calls are offset-addressed and hold no internal cursor, so
+/// concurrent chunk tasks can share one handle safely.
+struct RawRemoteChunkFile {
+    session: RawSftpSession,
+    handle: String,
+}
+
+#[async_trait]
+impl ChunkSource for RawRemoteChunkFile {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+        match self.session.read(self.handle.as_str(), offset, len as u32).await {
+            Ok(data) => Ok(data.data),
+            // The engine's short-read/tail logic owns EOF handling; an SFTP
+            // EOF status is just an empty read, not a transport failure.
+            Err(SftpClientError::Status(status)) if status.status_code == StatusCode::Eof => {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        }
+    }
+}
+
+#[async_trait]
+impl ChunkSink for RawRemoteChunkFile {
+    async fn write_at(&self, offset: u64, data: Vec<u8>) -> Result<(), std::io::Error> {
+        self.session
+            .write(self.handle.as_str(), offset, data)
+            .await
+            .map(|_| ())
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    }
+}
+
+#[async_trait]
+impl ChunkSource for PositionalFile {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+        self.read_at(offset, len).await
+    }
+}
+
+#[async_trait]
+impl ChunkSink for PositionalFile {
+    async fn write_at(&self, offset: u64, data: Vec<u8>) -> Result<(), std::io::Error> {
+        self.write_at(offset, data).await
+    }
+}
+
+/// Pipelined twin of [`upload_to_partial`]: same fingerprint ->
+/// `on_fingerprint` -> open destination -> copy order, but drives the copy
+/// through [`pipelined_copy`] over a dedicated raw SFTP handle instead of
+/// `copy_with_checkpoint`'s single sequential stream.
+pub async fn upload_to_partial_pipelined<F, Fut, C, P>(
+    ssh: &russh::client::Handle<TermLabSshHandler>,
+    local_path: impl AsRef<Path>,
+    remote_partial_path: &str,
+    offset: u64,
+    tuning: PipelineTuning,
+    on_fingerprint: F,
+    control: C,
+    progress: P,
+) -> Result<CopyOutcome, RemoteError>
+where
+    F: FnOnce(SourceFingerprint) -> Fut,
+    Fut: Future<Output = Result<(), RemoteError>>,
+    C: FnMut() -> ControlDecision,
+    P: FnMut(u64, u64),
+{
+    let local_path = local_path.as_ref();
+    let (_local_stat_handle, fingerprint) = fingerprint_open_local(local_path).await?;
+    let total = fingerprint.size;
+    on_fingerprint(fingerprint.clone()).await?;
+    // Close the reopen TOCTOU window: `on_fingerprint` may have taken an
+    // arbitrary amount of time before we open a fresh handle below.
+    revalidate_local_fingerprint(local_path, &fingerprint).await?;
+
+    let source = PositionalFile::open_read(local_path).map_err(|error| {
+        RemoteError::Transfer(format!(
+            "open local source {} for pipelined upload failed: {error}",
+            local_path.display()
+        ))
+    })?;
+
+    let raw = open_raw_sftp_session(ssh).await?;
+    let opened = raw
+        .open(
+            remote_partial_path,
+            pipelined_remote_open_flags(offset > 0),
+            FileAttributes::empty(),
+        )
+        .await
+        .map_err(|error| {
+            RemoteError::Transfer(format!(
+                "open remote partial {remote_partial_path} failed: {error}"
+            ))
+        })?;
+    let sink = RawRemoteChunkFile { session: raw, handle: opened.handle };
+
+    let tuning = clamp_pipelined_chunk_bytes(tuning);
+    let copy_result = pipelined_copy(&source, &sink, offset, total, tuning, control, progress)
+        .await
+        .map_err(RemoteError::from);
+    let close_result = sink
+        .session
+        .close(sink.handle.as_str())
+        .await
+        .map(|_| ())
+        .map_err(|error| RemoteError::Transfer(format!("close remote partial failed: {error}")));
+
+    finish_after_cleanup(copy_result, close_result)
+}
+
+/// Pipelined twin of [`download_to_partial`]: same fingerprint ->
+/// `on_fingerprint` -> open destination -> copy -> sync order, but drives
+/// the copy through [`pipelined_copy`] over a dedicated raw SFTP handle.
+pub async fn download_to_partial_pipelined<F, Fut, C, P>(
+    ssh: &russh::client::Handle<TermLabSshHandler>,
+    remote_path: &str,
+    local_partial_path: impl AsRef<Path>,
+    offset: u64,
+    tuning: PipelineTuning,
+    on_fingerprint: F,
+    control: C,
+    progress: P,
+) -> Result<CopyOutcome, RemoteError>
+where
+    F: FnOnce(SourceFingerprint) -> Fut,
+    Fut: Future<Output = Result<(), RemoteError>>,
+    C: FnMut() -> ControlDecision,
+    P: FnMut(u64, u64),
+{
+    let local_partial_path = local_partial_path.as_ref();
+
+    let sftp_session = open_sftp_session(ssh).await?;
+    let (mut fingerprint_handle, fingerprint) =
+        fingerprint_open_remote(&sftp_session, remote_path).await?;
+    let total = fingerprint.size;
+    // Mirrors the sequential path's `open_after_fingerprint` handling: if
+    // `on_fingerprint` rejects (e.g. a queued overwrite decision), the
+    // fingerprint handle must still be closed rather than left dangling.
+    if let Err(primary) = on_fingerprint(fingerprint).await {
+        let _ = super::close_remote_file(
+            &mut fingerprint_handle,
+            "close remote source after pipelined fingerprint rejection",
+        )
+        .await;
+        return Err(primary);
+    }
+    super::close_remote_file(
+        &mut fingerprint_handle,
+        "close remote source after pipelined fingerprint",
+    )
+    .await?;
+
+    let raw = open_raw_sftp_session(ssh).await?;
+    let opened = raw
+        .open(remote_path, OpenFlags::READ, FileAttributes::empty())
+        .await
+        .map_err(|error| {
+            RemoteError::Transfer(format!(
+                "open remote source {remote_path} for pipelined download failed: {error}"
+            ))
+        })?;
+    let source = RawRemoteChunkFile { session: raw, handle: opened.handle };
+
+    let sink = PositionalFile::open_write(local_partial_path, offset == 0).map_err(|error| {
+        RemoteError::Transfer(format!(
+            "open local partial {} for pipelined download failed: {error}",
+            local_partial_path.display()
+        ))
+    })?;
+
+    let tuning = clamp_pipelined_chunk_bytes(tuning);
+    let copy_result = pipelined_copy(&source, &sink, offset, total, tuning, control, progress)
+        .await
+        .map_err(RemoteError::from);
+
+    let close_result = source
+        .session
+        .close(source.handle.as_str())
+        .await
+        .map(|_| ())
+        .map_err(|error| RemoteError::Transfer(format!("close remote source failed: {error}")));
+    let sync_result = sink.sync().await.map_err(|error| {
+        RemoteError::Transfer(format!(
+            "sync local partial {} failed: {error}",
+            local_partial_path.display()
+        ))
+    });
+
+    finish_after_cleanup(copy_result, close_result.and(sync_result))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -610,10 +934,13 @@ mod tests {
     use super::{
         DownloadPartialRequest, PartialTransferIo, RemotePartialIo, UploadPartialRequest,
         download_to_partial_with_io, fingerprint_local_parts, fingerprint_open_local,
-        fingerprint_remote_parts, map_remote_source_open_error, open_after_fingerprint,
-        open_local_partial, remote_partial_open_flags, resume_partial_from, truncate_local_partial,
-        truncate_remote_partial_with_io, upload_to_partial_with_io,
+        fingerprint_remote_parts, fresh_partial_open_flags, map_remote_source_open_error,
+        open_after_fingerprint, open_local_partial, pipelined_remote_open_flags,
+        remote_partial_open_flags, resume_partial_from, resume_partial_open_flags,
+        revalidate_local_fingerprint, truncate_local_partial, truncate_remote_partial_with_io,
+        upload_to_partial_with_io,
     };
+    use crate::error::RemoteError;
     use russh_sftp::protocol::OpenFlags;
     use russh_sftp::{
         client::error::Error as SftpClientError,
@@ -1058,5 +1385,47 @@ mod tests {
             matches!(result, Err(crate::error::RemoteError::Transfer(message)) if message == "restart or skip required")
         );
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pipelined_open_flags_match_sequential_partial_flags() {
+        // `OpenFlags` (russh-sftp) doesn't implement `PartialEq`; compare the
+        // underlying bits instead.
+        assert_eq!(
+            pipelined_remote_open_flags(true).bits(),
+            resume_partial_open_flags().bits(),
+            "resume must not truncate the partial",
+        );
+        assert_eq!(
+            pipelined_remote_open_flags(false).bits(),
+            fresh_partial_open_flags().bits(),
+            "fresh transfers must truncate",
+        );
+        assert_eq!(
+            pipelined_remote_open_flags(true).bits(),
+            remote_partial_open_flags(true).bits(),
+            "open_remote_partial must share the same resume flags",
+        );
+        assert_eq!(
+            pipelined_remote_open_flags(false).bits(),
+            remote_partial_open_flags(false).bits(),
+            "open_remote_partial must share the same fresh flags",
+        );
+    }
+
+    #[tokio::test]
+    async fn pipelined_upload_rejects_source_changed_since_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.bin");
+        std::fs::write(&path, b"original").expect("seed");
+        let stale = fingerprint_local_parts(999, None); // wrong size on purpose
+        let error = revalidate_local_fingerprint(&path, &stale)
+            .await
+            .expect_err("changed source must be rejected");
+        assert!(matches!(error, RemoteError::Transfer(_)));
+        let live = fingerprint_open_local(&path).await.expect("fingerprint").1;
+        revalidate_local_fingerprint(&path, &live)
+            .await
+            .expect("matching fingerprint passes");
     }
 }
