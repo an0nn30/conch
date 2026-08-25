@@ -1216,10 +1216,16 @@ struct ManagerState {
     projects: ProjectStore,
 }
 
-type ShutdownReply = (
-    HashSet<(SessionKey, u64)>,
-    oneshot::Sender<Result<(), ManagerError>>,
-);
+struct ShutdownReply {
+    pending: HashSet<(SessionKey, u64)>,
+    replies: Vec<oneshot::Sender<Result<(), ManagerError>>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PolicyCapacityReservation {
+    operations: usize,
+    attachments: usize,
+}
 
 pub(crate) struct LspManager {
     state: ManagerState,
@@ -1227,6 +1233,7 @@ pub(crate) struct LspManager {
     cache_root: CacheRootAnchor,
     command_rx: mpsc::Receiver<ManagerCommand>,
     shutdown_rx: mpsc::Receiver<oneshot::Sender<Result<(), ManagerError>>>,
+    shutdown_channel_open: bool,
     input_tx: mpsc::Sender<ActorInput>,
     input_rx: mpsc::Receiver<ActorInput>,
     event_tx: mpsc::Sender<ManagerEvent>,
@@ -1240,6 +1247,7 @@ pub(crate) struct LspManager {
     latest_requests: HashMap<(DocumentId, RequestKind), u64>,
     next_request_id: u64,
     pending_policy_commands: VecDeque<ManagerCommand>,
+    policy_capacity_reservations: HashMap<SessionKey, PolicyCapacityReservation>,
     retrying_policy: bool,
     policy_async_in_flight: bool,
     retry_policy_requested: bool,
@@ -1284,6 +1292,7 @@ impl LspManager {
             cache_root: CacheRootAnchor::capture(&cache_root),
             command_rx,
             shutdown_rx,
+            shutdown_channel_open: true,
             input_tx,
             input_rx,
             event_tx,
@@ -1297,6 +1306,7 @@ impl LspManager {
             latest_requests: HashMap::new(),
             next_request_id: 1,
             pending_policy_commands: VecDeque::new(),
+            policy_capacity_reservations: HashMap::new(),
             retrying_policy: false,
             policy_async_in_flight: false,
             retry_policy_requested: false,
@@ -1312,9 +1322,13 @@ impl LspManager {
         while !self.terminated {
             tokio::select! {
                 biased;
-                shutdown = self.shutdown_rx.recv(), if !self.shutting_down => {
-                    if let Some(reply) = shutdown {
-                        self.begin_shutdown(reply);
+                shutdown = self.shutdown_rx.recv(), if self.shutdown_channel_open
+                    && self.shutdown_reply.as_ref().is_none_or(|shutdown| {
+                        shutdown.replies.len() < COMMAND_CAPACITY
+                    }) => {
+                    match shutdown {
+                        Some(reply) => self.begin_shutdown(reply),
+                        None => self.shutdown_channel_open = false,
                     }
                 }
                 _ = std::future::ready(()), if self.retry_policy_requested && !self.shutting_down => {
@@ -1427,57 +1441,68 @@ impl LspManager {
                 document_id,
                 context,
                 reply,
-            } => match self.set_project_context(document_id, context.clone()) {
-                Err(ManagerError::Overloaded) => self.defer_policy_command(
-                    ManagerCommand::SetProjectContext {
-                        document_id,
-                        context,
-                        reply,
-                    },
-                    self.retrying_policy,
-                ),
-                result => {
-                    let _ = reply.send(result);
+            } => {
+                self.policy_capacity_reservations.clear();
+                match self.set_project_context(document_id, context.clone()) {
+                    Err(ManagerError::Overloaded) => self.defer_policy_command(
+                        ManagerCommand::SetProjectContext {
+                            document_id,
+                            context,
+                            reply,
+                        },
+                        self.retrying_policy,
+                    ),
+                    result => {
+                        self.policy_capacity_reservations.clear();
+                        let _ = reply.send(result);
+                    }
                 }
-            },
+            }
             ManagerCommand::SetProjectTrust {
                 root,
                 adapter_id,
                 decision,
                 reply,
-            } => match self.set_project_trust(root.clone(), adapter_id.clone(), decision) {
-                Err(ManagerError::Overloaded) => {
-                    self.defer_policy_command(
-                        ManagerCommand::SetProjectTrust {
-                            root,
-                            adapter_id,
-                            decision,
-                            reply,
-                        },
-                        self.retrying_policy,
-                    );
+            } => {
+                self.policy_capacity_reservations.clear();
+                match self.set_project_trust(root.clone(), adapter_id.clone(), decision) {
+                    Err(ManagerError::Overloaded) => {
+                        self.defer_policy_command(
+                            ManagerCommand::SetProjectTrust {
+                                root,
+                                adapter_id,
+                                decision,
+                                reply,
+                            },
+                            self.retrying_policy,
+                        );
+                    }
+                    Err(error) => {
+                        self.policy_capacity_reservations.clear();
+                        let _ = reply.send(Err(error));
+                    }
+                    Ok(None) => {
+                        self.policy_capacity_reservations.clear();
+                        let _ = reply.send(Ok(()));
+                    }
+                    Ok(Some(plan)) => {
+                        self.policy_capacity_reservations.clear();
+                        self.policy_async_in_flight = true;
+                        let input = self.input_tx.clone();
+                        tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || plan.remove())
+                                .await
+                                .map_err(|error| ManagerError::Infrastructure(error.to_string()))
+                                .and_then(|result| result);
+                            let _ = input
+                                .send(ActorInput::CacheDeletionFinished { reply, result })
+                                .await;
+                        });
+                    }
                 }
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                }
-                Ok(None) => {
-                    let _ = reply.send(Ok(()));
-                }
-                Ok(Some(plan)) => {
-                    self.policy_async_in_flight = true;
-                    let input = self.input_tx.clone();
-                    tokio::spawn(async move {
-                        let result = tokio::task::spawn_blocking(move || plan.remove())
-                            .await
-                            .map_err(|error| ManagerError::Infrastructure(error.to_string()))
-                            .and_then(|result| result);
-                        let _ = input
-                            .send(ActorInput::CacheDeletionFinished { reply, result })
-                            .await;
-                    });
-                }
-            },
+            }
             ManagerCommand::SetEnablement { enablement, reply } => {
+                self.policy_capacity_reservations.clear();
                 match self.set_enablement_policy(enablement.clone()) {
                     Err(ManagerError::Overloaded) => {
                         self.defer_policy_command(
@@ -1486,6 +1511,7 @@ impl LspManager {
                         );
                     }
                     result => {
+                        self.policy_capacity_reservations.clear();
                         let _ = reply.send(result);
                     }
                 }
@@ -2223,6 +2249,10 @@ impl LspManager {
 
     fn defer_policy_command(&mut self, command: ManagerCommand, retry_at_front: bool) {
         if command.policy_reply_closed() {
+            if retry_at_front {
+                self.policy_capacity_reservations.clear();
+                self.retry_policy_requested = !self.pending_policy_commands.is_empty();
+            }
             return;
         }
         if self.pending_policy_commands.len() >= COMMAND_CAPACITY {
@@ -2235,12 +2265,31 @@ impl LspManager {
     }
 
     fn discard_cancelled_policy_front(&mut self) {
+        let mut discarded = false;
         while self
             .pending_policy_commands
             .front()
             .is_some_and(ManagerCommand::policy_reply_closed)
         {
             self.pending_policy_commands.pop_front();
+            discarded = true;
+        }
+        if discarded {
+            self.policy_capacity_reservations.clear();
+            if !self.policy_async_in_flight && !self.pending_policy_commands.is_empty() {
+                self.retry_policy_requested = true;
+            }
+        }
+    }
+
+    fn reserved_policy_capacity(&self, key: &SessionKey) -> PolicyCapacityReservation {
+        if self.retrying_policy {
+            PolicyCapacityReservation::default()
+        } else {
+            self.policy_capacity_reservations
+                .get(key)
+                .copied()
+                .unwrap_or_default()
         }
     }
 
@@ -2270,7 +2319,13 @@ impl LspManager {
                 .sessions
                 .get(&key)
                 .ok_or(ManagerError::SessionUnavailable)?;
-            if session.outbox.len().saturating_add(count) > SESSION_OUTBOX_CAPACITY {
+            if session
+                .outbox
+                .len()
+                .saturating_add(count)
+                .saturating_add(self.reserved_policy_capacity(&key).operations)
+                > SESSION_OUTBOX_CAPACITY
+            {
                 return Err(ManagerError::Overloaded);
             }
         }
@@ -2303,7 +2358,7 @@ impl LspManager {
     }
 
     fn ensure_transition_capacity(
-        &self,
+        &mut self,
         transitions: impl IntoIterator<Item = (DocumentId, Option<SessionKey>)>,
     ) -> Result<(), ManagerError> {
         let mut operations = HashMap::<SessionKey, usize>::new();
@@ -2338,25 +2393,31 @@ impl LspManager {
                 }
             }
         }
-        for (key, count) in operations {
-            let session = self
-                .state
-                .sessions
-                .get(&key)
-                .ok_or(ManagerError::SessionUnavailable)?;
-            if session.outbox.len().saturating_add(count) > SESSION_OUTBOX_CAPACITY {
-                return Err(ManagerError::Overloaded);
+        for key in operations.keys().chain(attachments.keys()) {
+            if !self.state.sessions.contains_key(key) {
+                return Err(ManagerError::SessionUnavailable);
             }
         }
-        for (key, count) in attachments {
-            if self.state.sessions[&key]
+        let operation_capacity_blocked = operations.iter().any(|(key, count)| {
+            self.state.sessions[key].outbox.len().saturating_add(*count) > SESSION_OUTBOX_CAPACITY
+        });
+        let attachment_capacity_blocked = attachments.iter().any(|(key, count)| {
+            self.state.sessions[key]
                 .documents
                 .len()
-                .saturating_add(count)
+                .saturating_add(*count)
                 > SESSION_OUTBOX_CAPACITY
-            {
-                return Err(ManagerError::Overloaded);
+        });
+        if operation_capacity_blocked || attachment_capacity_blocked {
+            let mut reservations = HashMap::<SessionKey, PolicyCapacityReservation>::new();
+            for (key, count) in operations {
+                reservations.entry(key).or_default().operations = count;
             }
+            for (key, count) in attachments {
+                reservations.entry(key).or_default().attachments = count;
+            }
+            self.policy_capacity_reservations = reservations;
+            return Err(ManagerError::Overloaded);
         }
         Ok(())
     }
@@ -2506,9 +2567,21 @@ impl LspManager {
         }
         self.ensure_close_capacity([document_id])?;
         let needs_start = !self.state.sessions.contains_key(&key);
+        let reserved = self.reserved_policy_capacity(&key);
         if let Some(session) = self.state.sessions.get(&key)
-            && (session.documents.len() >= SESSION_OUTBOX_CAPACITY
-                || (session.worker.is_some() && session.outbox.len() >= SESSION_OUTBOX_CAPACITY))
+            && (session
+                .documents
+                .len()
+                .saturating_add(1)
+                .saturating_add(reserved.attachments)
+                > SESSION_OUTBOX_CAPACITY
+                || (session.worker.is_some()
+                    && session
+                        .outbox
+                        .len()
+                        .saturating_add(1)
+                        .saturating_add(reserved.operations)
+                        > SESSION_OUTBOX_CAPACITY))
         {
             return Err(ManagerError::Overloaded);
         }
@@ -2763,11 +2836,16 @@ impl LspManager {
             }
             return Ok(());
         };
+        let reserved = self.reserved_policy_capacity(&key);
         let available = self
             .state
             .sessions
             .get(&key)
-            .map(|session| SESSION_OUTBOX_CAPACITY.saturating_sub(session.outbox.len()))
+            .map(|session| {
+                SESSION_OUTBOX_CAPACITY
+                    .saturating_sub(session.outbox.len())
+                    .saturating_sub(reserved.operations)
+            })
             .ok_or(ManagerError::SessionUnavailable)?;
         if batch_count > available {
             return Err(ManagerError::Overloaded);
@@ -2790,12 +2868,19 @@ impl LspManager {
         operations: impl IntoIterator<Item = SessionOperation>,
     ) -> Result<(), ManagerError> {
         let operations = operations.into_iter().collect::<Vec<_>>();
+        let reserved = self.reserved_policy_capacity(key);
         let session = self
             .state
             .sessions
             .get_mut(key)
             .ok_or(ManagerError::SessionUnavailable)?;
-        if session.outbox.len().saturating_add(operations.len()) > SESSION_OUTBOX_CAPACITY {
+        if session
+            .outbox
+            .len()
+            .saturating_add(operations.len())
+            .saturating_add(reserved.operations)
+            > SESSION_OUTBOX_CAPACITY
+        {
             return Err(ManagerError::Overloaded);
         }
         session.outbox.extend(operations);
@@ -3217,18 +3302,24 @@ impl LspManager {
                     .get(&key)
                     .is_some_and(|session| session.generation == generation);
                 if current {
-                    self.pump_session(&key);
-                    let documents = self
-                        .state
-                        .sessions
-                        .get(&key)
-                        .map(|session| session.documents.iter().copied().collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    for document in documents {
-                        let _ = self.flush_document(document);
-                    }
+                    // Preserve the order of work already admitted to the
+                    // session, then immediately spend newly freed outbox
+                    // credit on the front policy reservation. New batches do
+                    // not refill that credit while any policy remains ahead.
                     self.pump_session(&key);
                     self.retry_pending_policy_command();
+                    if self.pending_policy_commands.is_empty() && !self.policy_async_in_flight {
+                        let documents = self
+                            .state
+                            .sessions
+                            .get(&key)
+                            .map(|session| session.documents.iter().copied().collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        for document in documents {
+                            let _ = self.flush_document(document);
+                        }
+                        self.pump_session(&key);
+                    }
                 }
             }
             ActorInput::CacheDeletionFinished { reply, result } => {
@@ -3496,12 +3587,14 @@ impl LspManager {
             }
             self.start_session(key.clone());
         }
-        if let Some((pending, _)) = self.shutdown_reply.as_mut() {
-            pending.remove(&(key, generation));
-            if pending.is_empty() {
+        if let Some(shutdown) = self.shutdown_reply.as_mut() {
+            shutdown.pending.remove(&(key, generation));
+            if shutdown.pending.is_empty() {
                 self.state.sessions.clear();
-                if let Some((_, reply)) = self.shutdown_reply.take() {
-                    let _ = reply.send(Ok(()));
+                if let Some(shutdown) = self.shutdown_reply.take() {
+                    for reply in shutdown.replies {
+                        let _ = reply.send(Ok(()));
+                    }
                 }
                 self.terminated = true;
             }
@@ -3917,8 +4010,12 @@ impl LspManager {
     }
 
     fn begin_shutdown(&mut self, reply: oneshot::Sender<Result<(), ManagerError>>) {
-        if self.shutdown_reply.is_some() {
-            let _ = reply.send(Err(ManagerError::ActorStopped));
+        if let Some(shutdown) = self.shutdown_reply.as_mut() {
+            if shutdown.replies.len() >= COMMAND_CAPACITY {
+                let _ = reply.send(Err(ManagerError::Overloaded));
+            } else {
+                shutdown.replies.push(reply);
+            }
             return;
         }
         self.shutting_down = true;
@@ -3926,6 +4023,7 @@ impl LspManager {
             command.fail_policy(ManagerError::ActorStopped);
         }
         self.retry_policy_requested = false;
+        self.policy_capacity_reservations.clear();
         self.event_dispatch_cancel.cancel();
         self.command_rx.close();
         let documents = self.state.documents.keys().copied().collect::<Vec<_>>();
@@ -3950,7 +4048,10 @@ impl LspManager {
             self.terminated = true;
             return;
         }
-        self.shutdown_reply = Some((pending, reply));
+        self.shutdown_reply = Some(ShutdownReply {
+            pending,
+            replies: vec![reply],
+        });
     }
 }
 
@@ -4087,17 +4188,140 @@ fn ensure_cache_device(expected: libc::dev_t, actual: libc::dev_t) -> Result<(),
 }
 
 #[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CacheMountIdentity(Vec<u8>);
+
+#[cfg(unix)]
+struct CacheDescriptorMetadata {
+    stat: libc::stat,
+    mount_identity: CacheMountIdentity,
+}
+
+#[cfg(unix)]
+trait CacheDescriptorMetadataSource {
+    fn metadata(&self, fd: std::os::fd::RawFd) -> Result<CacheDescriptorMetadata, ManagerError>;
+}
+
+#[cfg(unix)]
+struct SystemCacheDescriptorMetadata;
+
+#[cfg(unix)]
+impl CacheDescriptorMetadataSource for SystemCacheDescriptorMetadata {
+    fn metadata(&self, fd: std::os::fd::RawFd) -> Result<CacheDescriptorMetadata, ManagerError> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+            return Err(ManagerError::Infrastructure(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        Ok(CacheDescriptorMetadata {
+            stat: unsafe { stat.assume_init() },
+            mount_identity: system_cache_mount_identity(fd)?,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn system_cache_mount_identity(fd: std::os::fd::RawFd) -> Result<CacheMountIdentity, ManagerError> {
+    #[cfg(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        if unsafe { libc::fstatfs(fd, filesystem.as_mut_ptr()) } != 0 {
+            return Err(ManagerError::Infrastructure(format!(
+                "could not determine the cache mount identity: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let fsid = &filesystem.f_fsid;
+        #[allow(unused_mut)]
+        let mut identity = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(fsid).cast::<u8>(),
+                std::mem::size_of_val(fsid),
+            )
+            .to_vec()
+        };
+
+        // Linux bind mounts share both st_dev and f_fsid with their source.
+        // statx's descriptor-relative mount ID distinguishes the mount point
+        // itself, so a same-device bind cannot become a recursive boundary.
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            let mut statx_buffer = [0_u64; 32];
+            let empty_path = b"\0";
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_statx,
+                    fd,
+                    empty_path.as_ptr().cast::<libc::c_char>(),
+                    libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+                    libc::STATX_MNT_ID,
+                    statx_buffer.as_mut_ptr().cast::<libc::c_void>(),
+                )
+            };
+            if result != 0 {
+                return Err(ManagerError::Infrastructure(format!(
+                    "could not determine the cache mount identity: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let bytes = statx_buffer.as_ptr().cast::<u8>();
+            let mask = unsafe { std::ptr::read_unaligned(bytes.cast::<u32>()) };
+            if mask & libc::STATX_MNT_ID == 0 {
+                return Err(ManagerError::Infrastructure(
+                    "could not determine the cache mount identity".into(),
+                ));
+            }
+            // `stx_mnt_id` is the u64 at byte offset 144 in Linux's stable
+            // `struct statx` ABI.
+            let mount_id = unsafe { std::ptr::read_unaligned(bytes.add(144).cast::<u64>()) };
+            identity.extend_from_slice(&mount_id.to_ne_bytes());
+        }
+
+        Ok(CacheMountIdentity(identity))
+    }
+
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    {
+        let _ = fd;
+        Err(ManagerError::Infrastructure(
+            "safe cache mount identity checks are unavailable on this Unix target".into(),
+        ))
+    }
+}
+
+#[cfg(unix)]
 fn remove_owned_cache_directory_anchored(
     cache_root: &CacheRootAnchor,
     adapter_id: &str,
     project_hash: &str,
     disposable_name: &str,
 ) -> Result<(), ManagerError> {
-    remove_owned_cache_directory_anchored_with_hook(
+    remove_owned_cache_directory_anchored_with_metadata(
         cache_root,
         adapter_id,
         project_hash,
         disposable_name,
+        &SystemCacheDescriptorMetadata,
         || {},
     )
 }
@@ -4108,6 +4332,25 @@ fn remove_owned_cache_directory_anchored_with_hook(
     adapter_id: &str,
     project_hash: &str,
     disposable_name: &str,
+    before_identity_validation: impl FnOnce(),
+) -> Result<(), ManagerError> {
+    remove_owned_cache_directory_anchored_with_metadata(
+        cache_root,
+        adapter_id,
+        project_hash,
+        disposable_name,
+        &SystemCacheDescriptorMetadata,
+        before_identity_validation,
+    )
+}
+
+#[cfg(unix)]
+fn remove_owned_cache_directory_anchored_with_metadata(
+    cache_root: &CacheRootAnchor,
+    adapter_id: &str,
+    project_hash: &str,
+    disposable_name: &str,
+    metadata_source: &dyn CacheDescriptorMetadataSource,
     before_identity_validation: impl FnOnce(),
 ) -> Result<(), ManagerError> {
     use std::ffi::{CStr, CString, OsStr};
@@ -4162,26 +4405,30 @@ fn remove_owned_cache_directory_anchored_with_hook(
         }
     }
 
-    fn stat_fd(fd: i32) -> Result<libc::stat, ManagerError> {
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } == 0 {
-            Ok(unsafe { stat.assume_init() })
-        } else {
-            Err(ManagerError::Infrastructure(
-                std::io::Error::last_os_error().to_string(),
-            ))
-        }
-    }
-
     fn same_identity(left: &libc::stat, right: &libc::stat) -> bool {
         left.st_dev == right.st_dev && left.st_ino == right.st_ino
     }
 
-    fn require_device(actual: &libc::stat, expected: libc::dev_t) -> Result<(), ManagerError> {
-        ensure_cache_device(expected, actual.st_dev)
+    fn require_boundary(
+        actual: &CacheDescriptorMetadata,
+        expected_device: libc::dev_t,
+        expected_mount: &CacheMountIdentity,
+    ) -> Result<(), ManagerError> {
+        ensure_cache_device(expected_device, actual.stat.st_dev)?;
+        if &actual.mount_identity != expected_mount {
+            return Err(ManagerError::Infrastructure(
+                "refused to cross a cache filesystem mount boundary".into(),
+            ));
+        }
+        Ok(())
     }
 
-    fn remove_contents(directory: &File, expected_device: libc::dev_t) -> Result<(), ManagerError> {
+    fn remove_contents(
+        directory: &File,
+        expected_device: libc::dev_t,
+        expected_mount: &CacheMountIdentity,
+        metadata_source: &dyn CacheDescriptorMetadataSource,
+    ) -> Result<(), ManagerError> {
         let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
         if duplicate < 0 {
             return Err(ManagerError::Infrastructure(
@@ -4210,24 +4457,26 @@ fn remove_owned_cache_directory_anchored_with_hook(
 
         for name in names {
             let before = stat_at(directory.as_raw_fd(), &name)?;
-            require_device(&before, expected_device)?;
+            ensure_cache_device(expected_device, before.st_dev)?;
             if before.st_mode & libc::S_IFMT == libc::S_IFDIR {
                 let child =
                     open_directory_at(directory.as_raw_fd(), OsStr::from_bytes(name.to_bytes()))?
                         .ok_or_else(|| {
                         ManagerError::Infrastructure("cache entry changed during removal".into())
                     })?;
-                let child_stat = stat_fd(child.as_raw_fd())?;
-                require_device(&child_stat, expected_device)?;
-                if !same_identity(&before, &child_stat) {
+                let child_metadata = metadata_source.metadata(child.as_raw_fd())?;
+                require_boundary(&child_metadata, expected_device, expected_mount)?;
+                if !same_identity(&before, &child_metadata.stat) {
                     return Err(ManagerError::Infrastructure(
                         "cache entry changed during removal".into(),
                     ));
                 }
-                remove_contents(&child, expected_device)?;
+                remove_contents(&child, expected_device, expected_mount, metadata_source)?;
                 let current = stat_at(directory.as_raw_fd(), &name)?;
-                require_device(&current, expected_device)?;
-                if !same_identity(&current, &stat_fd(child.as_raw_fd())?) {
+                ensure_cache_device(expected_device, current.st_dev)?;
+                let child_metadata = metadata_source.metadata(child.as_raw_fd())?;
+                require_boundary(&child_metadata, expected_device, expected_mount)?;
+                if !same_identity(&current, &child_metadata.stat) {
                     return Err(ManagerError::Infrastructure(
                         "cache directory changed during removal".into(),
                     ));
@@ -4264,38 +4513,54 @@ fn remove_owned_cache_directory_anchored_with_hook(
         .directory
         .as_deref()
         .ok_or_else(|| cache_root.unavailable())?;
-    let root_stat = stat_fd(root.as_raw_fd())?;
-    let expected_device = root_stat.st_dev;
+    let root_metadata = metadata_source.metadata(root.as_raw_fd())?;
+    let expected_device = root_metadata.stat.st_dev;
+    let expected_mount = root_metadata.mount_identity;
     let Some(lsp) = open_directory_at(root.as_raw_fd(), OsStr::new("lsp"))? else {
         return Ok(());
     };
-    require_device(&stat_fd(lsp.as_raw_fd())?, expected_device)?;
+    require_boundary(
+        &metadata_source.metadata(lsp.as_raw_fd())?,
+        expected_device,
+        &expected_mount,
+    )?;
     let Some(adapter) = open_directory_at(lsp.as_raw_fd(), OsStr::new(adapter_id))? else {
         return Ok(());
     };
-    require_device(&stat_fd(adapter.as_raw_fd())?, expected_device)?;
+    require_boundary(
+        &metadata_source.metadata(adapter.as_raw_fd())?,
+        expected_device,
+        &expected_mount,
+    )?;
     let Some(project) = open_directory_at(adapter.as_raw_fd(), OsStr::new(project_hash))? else {
         return Ok(());
     };
-    require_device(&stat_fd(project.as_raw_fd())?, expected_device)?;
+    require_boundary(
+        &metadata_source.metadata(project.as_raw_fd())?,
+        expected_device,
+        &expected_mount,
+    )?;
     let Some(target) = open_directory_at(project.as_raw_fd(), OsStr::new(disposable_name))? else {
         return Ok(());
     };
-    require_device(&stat_fd(target.as_raw_fd())?, expected_device)?;
+    let target_metadata = metadata_source.metadata(target.as_raw_fd())?;
+    require_boundary(&target_metadata, expected_device, &expected_mount)?;
     before_identity_validation();
     let target_name = CString::new(disposable_name).expect("fixed cache component");
     if !same_identity(
         &stat_at(project.as_raw_fd(), &target_name)?,
-        &stat_fd(target.as_raw_fd())?,
+        &target_metadata.stat,
     ) {
         return Err(ManagerError::Infrastructure(
             "cache target changed before removal".into(),
         ));
     }
-    remove_contents(&target, expected_device)?;
+    remove_contents(&target, expected_device, &expected_mount, metadata_source)?;
+    let target_metadata = metadata_source.metadata(target.as_raw_fd())?;
+    require_boundary(&target_metadata, expected_device, &expected_mount)?;
     if !same_identity(
         &stat_at(project.as_raw_fd(), &target_name)?,
-        &stat_fd(target.as_raw_fd())?,
+        &target_metadata.stat,
     ) {
         return Err(ManagerError::Infrastructure(
             "cache target changed during removal".into(),
@@ -4510,13 +4775,13 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
 
     use async_lsp::lsp_types as lsp;
     use async_trait::async_trait;
     use tempfile::TempDir;
-    use tokio::sync::{Notify, mpsc};
+    use tokio::sync::{Notify, Semaphore, mpsc};
 
     use super::{
         Enablement, LspManager, LspManagerHandle, ManagerError, ManagerEvent,
@@ -4565,6 +4830,9 @@ mod tests {
         shutdowns_released: Notify,
         block_changes: AtomicBool,
         changes_released: Notify,
+        step_changes: AtomicBool,
+        change_steps: OnceLock<Semaphore>,
+        completed_changes: AtomicUsize,
         block_starts: AtomicBool,
         starts_released: Notify,
         block_first_pull: AtomicBool,
@@ -4625,6 +4893,16 @@ mod tests {
         fn release_changes(&self) {
             self.block_changes.store(false, Ordering::SeqCst);
             self.changes_released.notify_waiters();
+        }
+
+        fn hold_changes_one_at_a_time(&self) {
+            self.step_changes.store(true, Ordering::SeqCst);
+        }
+
+        fn release_one_change(&self) {
+            self.change_steps
+                .get_or_init(|| Semaphore::new(0))
+                .add_permits(1);
         }
 
         fn hold_starts(&self) {
@@ -4701,9 +4979,22 @@ mod tests {
                     next: batch.next_version,
                 },
             );
+            if self.factory.step_changes.load(Ordering::SeqCst) {
+                self.factory
+                    .change_steps
+                    .get_or_init(|| Semaphore::new(0))
+                    .acquire()
+                    .await
+                    .expect("change-step semaphore remains open")
+                    .forget();
+            } else {
+                self.factory
+                    .wait_if_held(&self.factory.block_changes, &self.factory.changes_released)
+                    .await;
+            }
             self.factory
-                .wait_if_held(&self.factory.block_changes, &self.factory.changes_released)
-                .await;
+                .completed_changes
+                .fetch_add(1, Ordering::SeqCst);
             if self.factory.fail_next_change.swap(false, Ordering::SeqCst) {
                 return Err("synchronization failed with source text: secret".into());
             }
@@ -6629,6 +6920,74 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn cache_deletion_rejects_injected_same_device_mount_identity_change() {
+        use std::os::fd::RawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        struct InjectedMountBoundary {
+            device: libc::dev_t,
+            inode: libc::ino_t,
+        }
+
+        impl super::CacheDescriptorMetadataSource for InjectedMountBoundary {
+            fn metadata(&self, fd: RawFd) -> Result<super::CacheDescriptorMetadata, ManagerError> {
+                let mut metadata = super::CacheDescriptorMetadataSource::metadata(
+                    &super::SystemCacheDescriptorMetadata,
+                    fd,
+                )?;
+                if metadata.stat.st_dev == self.device && metadata.stat.st_ino == self.inode {
+                    metadata.mount_identity = super::CacheMountIdentity(vec![0xa5; 32]);
+                }
+                Ok(metadata)
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let cache_root = temp.path().join("cache-root");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let paths = BundledServerCatalog::new()
+            .cache_paths(LanguageId::TypeScript, &project, &cache_root)
+            .unwrap();
+        let boundary = paths.cache_dir.join("same-device-mounted-child");
+        std::fs::create_dir_all(&boundary).unwrap();
+        let preserved = boundary.join("must-survive");
+        std::fs::write(&preserved, "keep").unwrap();
+        let boundary_metadata = std::fs::metadata(&boundary).unwrap();
+        let injected = InjectedMountBoundary {
+            device: boundary_metadata.dev() as libc::dev_t,
+            inode: boundary_metadata.ino(),
+        };
+        let project_hash = paths
+            .cache_dir
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let anchor = super::CacheRootAnchor::capture(&cache_root);
+
+        let result = super::remove_owned_cache_directory_anchored_with_metadata(
+            &anchor,
+            "typescript",
+            project_hash,
+            "cache",
+            &injected,
+            || {},
+        );
+
+        assert!(matches!(
+            result,
+            Err(ManagerError::Infrastructure(message)) if message.contains("mount boundary")
+        ));
+        assert!(preserved.exists());
+        assert!(paths.cache_dir.exists());
+    }
+
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn cache_deletion_remains_bound_to_the_root_opened_at_manager_creation() {
         let harness = ManagerHarness::new();
@@ -6703,6 +7062,43 @@ mod tests {
         );
         harness.factory.release_shutdowns();
         shutdown.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn priority_shutdown_joins_a_generation_already_shutting_down() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("join-shutdown.ts", "let value = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        harness.factory.hold_shutdowns();
+
+        let first = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.shutdown().await }
+        });
+        spin().await;
+        assert!(
+            harness
+                .factory
+                .observations(&key("typescript", &root))
+                .contains(&Observation::Shutdown)
+        );
+        let joining = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.shutdown().await }
+        });
+        spin().await;
+        assert!(
+            !joining.is_finished(),
+            "priority shutdown returned before the live generation exited"
+        );
+
+        harness.factory.release_shutdowns();
+        first.await.unwrap().unwrap();
+        joining.await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -7189,5 +7585,119 @@ mod tests {
                 ..
             } if window_label == "main"
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_multi_close_policy_reserves_worker_credits_from_continuous_edits() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("policy-fairness-a.ts", "a");
+        let second_path = harness.file("policy-fairness-b.ts", "b");
+        let first = harness.open(&first_path, "main", "a").await;
+        let second = harness.open(&second_path, "main", "b").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        spin().await;
+        assert_eq!(
+            harness.manager.status_snapshot(Some(second)).await.unwrap()[0].state,
+            LspSessionState::Ready
+        );
+
+        harness.factory.hold_changes_one_at_a_time();
+        saturate_session_outbox(&harness, first).await;
+        let mut version = 1;
+        let disable = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        let later_enable = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::all()).await }
+        });
+        spin().await;
+
+        version += 1;
+        harness
+            .manager
+            .apply_changes(second, batch(second, version - 1, version, "pending-0"))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(40)).await;
+        spin().await;
+
+        let mut ready_cycles = 0;
+        while !disable.is_finished() && ready_cycles < 4 {
+            let completed = harness.factory.completed_changes.load(Ordering::SeqCst);
+            harness.factory.release_one_change();
+            for _ in 0..100 {
+                spin().await;
+                if harness.factory.completed_changes.load(Ordering::SeqCst) > completed {
+                    break;
+                }
+            }
+            spin().await;
+            ready_cycles += 1;
+            assert!(
+                disable.is_finished() || !later_enable.is_finished(),
+                "a later policy overtook the capacity-blocked front"
+            );
+            if !disable.is_finished() {
+                let next = version + 1;
+                harness
+                    .manager
+                    .apply_changes(second, batch(second, version, next, "steady-edit"))
+                    .await
+                    .unwrap();
+                version = next;
+                tokio::time::advance(Duration::from_millis(40)).await;
+                spin().await;
+            }
+        }
+
+        assert!(
+            disable.is_finished(),
+            "the front two-close policy was starved for {ready_cycles} worker-ready cycles"
+        );
+        disable.await.unwrap().unwrap();
+        later_enable.await.unwrap().unwrap();
+        for _ in 0..100 {
+            spin().await;
+            if harness.manager.status_snapshot(Some(second)).await.unwrap()[0].state
+                == LspSessionState::Ready
+            {
+                break;
+            }
+        }
+
+        let observations = harness.factory.observations(&key("typescript", &root));
+        let changes = observations
+            .iter()
+            .filter_map(|observation| match observation {
+                Observation::Change {
+                    document_id,
+                    base,
+                    next,
+                } if document_id == &super::document_id_text(second) => Some((*base, *next)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            changes
+                .windows(2)
+                .all(|pair| pair[0].1 == pair[1].0 && pair[1].1 == pair[1].0 + 1),
+            "admitted edits were reordered: {changes:?}"
+        );
+        assert!(
+            observations.iter().any(|observation| {
+                matches!(
+                    observation,
+                    Observation::Open {
+                        document_id,
+                        version: reopened,
+                    } if document_id == &super::document_id_text(second) && *reopened == version
+                )
+            }),
+            "the latest accepted edit version was not restored after policy convergence: {observations:?}"
+        );
     }
 }

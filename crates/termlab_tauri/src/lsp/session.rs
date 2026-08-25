@@ -442,6 +442,37 @@ pub(crate) struct LspSession {
     inner: Arc<SessionInner>,
 }
 
+trait InitializedNotifier: Send + Sync {
+    fn notify(&self, server: &ServerSocket) -> Result<(), SessionError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ProtocolInitializedNotifier;
+
+impl InitializedNotifier for ProtocolInitializedNotifier {
+    fn notify(&self, server: &ServerSocket) -> Result<(), SessionError> {
+        server
+            .notify::<lsp::notification::Initialized>(lsp::InitializedParams {})
+            .map_err(|error| SessionError::Protocol(error.to_string()))
+    }
+}
+
+async fn clean_up_failed_startup(
+    process: &ProcessHandle,
+    mainloop_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
+) {
+    process.kill();
+    // Kill acknowledgement is not an exit fact. Keep both pipe-draining tasks
+    // alive until the process is reaped, then consume their task handles so a
+    // failed start cannot leak detached startup work.
+    let _ = process.wait().await;
+    mainloop_task.abort();
+    stderr_task.abort();
+    let _ = mainloop_task.await;
+    let _ = stderr_task.await;
+}
+
 impl LspSession {
     pub(crate) async fn start<L: ServerLauncher>(
         descriptor: &'static AdapterDescriptor,
@@ -450,15 +481,36 @@ impl LspSession {
         launcher: L,
         events: mpsc::Sender<ClientEvent>,
     ) -> Result<Self, SessionError> {
+        Self::start_with_initialized_notifier(
+            descriptor,
+            command,
+            canonical_project_root,
+            launcher,
+            events,
+            ProtocolInitializedNotifier,
+        )
+        .await
+    }
+
+    async fn start_with_initialized_notifier<L: ServerLauncher, N: InitializedNotifier>(
+        descriptor: &'static AdapterDescriptor,
+        command: ResolvedServerCommand,
+        canonical_project_root: PathBuf,
+        launcher: L,
+        events: mpsc::Sender<ClientEvent>,
+        initialized_notifier: N,
+    ) -> Result<Self, SessionError> {
+        // Validate static adapter data before a child exists. From this point
+        // onward every fallible startup edge shares the kill-and-reap path.
+        let workspace_configuration = serde_json::from_str(descriptor.workspace_configuration_json)
+            .map_err(|error| SessionError::Protocol(error.to_string()))?;
         let launched = launcher
             .launch(command, canonical_project_root.clone())
             .await?;
-        let workspace_configuration = serde_json::from_str(descriptor.workspace_configuration_json)
-            .map_err(|error| SessionError::Protocol(error.to_string()))?;
         let event_sink = EventSink::new(events);
         let stderr_events = event_sink.clone();
         let mut stderr = launched.stderr;
-        tokio::spawn(async move {
+        let stderr_task = tokio::spawn(async move {
             let mut chunk = [0_u8; 4096];
             loop {
                 match stderr.read(&mut chunk).await {
@@ -482,15 +534,6 @@ impl LspSession {
                 .service(router)
         });
         let protocol_events = event_sink.clone();
-        let process_events = event_sink.clone();
-        let process_for_report = launched.process.clone();
-        tokio::spawn(async move {
-            let status = process_for_report.wait().await;
-            process_events.send(ClientEvent::ProcessExited {
-                success: status.success,
-                code: status.code,
-            });
-        });
         let mainloop_task = tokio::spawn(async move {
             let result = mainloop
                 .run_buffered(launched.stdout.compat(), launched.stdin.compat_write())
@@ -509,16 +552,14 @@ impl LspSession {
         let result = match timeout(init_timeout, initialize).await {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
-                launched.process.kill();
-                mainloop_task.abort();
+                clean_up_failed_startup(&launched.process, mainloop_task, stderr_task).await;
                 return Err(SessionError::Protocol(error.to_string()));
             }
             Err(_) => {
                 let _ = server.notify::<lsp::notification::Cancel>(lsp::CancelParams {
                     id: lsp::NumberOrString::Number(0),
                 });
-                launched.process.kill();
-                mainloop_task.abort();
+                clean_up_failed_startup(&launched.process, mainloop_task, stderr_task).await;
                 return Err(SessionError::Timeout("initialize"));
             }
         };
@@ -530,9 +571,21 @@ impl LspSession {
             capabilities.set_features(features);
         }
         event_sink.send(ClientEvent::CapabilitiesChanged(features));
-        server
-            .notify::<lsp::notification::Initialized>(lsp::InitializedParams {})
-            .map_err(|error| SessionError::Protocol(error.to_string()))?;
+        if let Err(error) = initialized_notifier.notify(&server) {
+            clean_up_failed_startup(&launched.process, mainloop_task, stderr_task).await;
+            return Err(error);
+        }
+        // Only successful sessions get an independent process reporter. A
+        // failed start above owns and consumes the sole exit wait instead.
+        let process_events = event_sink.clone();
+        let process_for_report = launched.process.clone();
+        tokio::spawn(async move {
+            let status = process_for_report.wait().await;
+            process_events.send(ClientEvent::ProcessExited {
+                success: status.success,
+                code: status.code,
+            });
+        });
         Ok(Self {
             inner: Arc::new(SessionInner {
                 server,
@@ -1100,7 +1153,8 @@ mod tests {
     use crate::lsp::catalog::{ResolvedFileIdentity, ResolvedResourceFile};
     use crate::lsp::client::{ClientEvent, ProgressPayload};
     use crate::lsp::test_support::{
-        MockServerLauncher, ServerScript, full_feature_script, root, test_command, test_descriptor,
+        MockServerLauncher, ObservedProtocol, ServerScript, full_feature_script, root,
+        test_command, test_descriptor,
     };
     use crate::lsp::types::{LspChangeBatch, LspTextChange};
 
@@ -1119,6 +1173,17 @@ mod tests {
             version: 1,
             text: "con".into(),
         }
+    }
+
+    async fn wait_for_startup_kill(observed: &ObservedProtocol) {
+        for _ in 0..100 {
+            if observed.kill_observed() {
+                tokio::task::yield_now().await;
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("failed startup never killed its launched process");
     }
 
     #[tokio::test]
@@ -1959,6 +2024,110 @@ mod tests {
         assert!(matches!(
             LspSession::start(test_descriptor(), test_command(), root(), launcher, sink,).await,
             Err(SessionError::Timeout("initialize"))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initialize_request_failure_kills_and_waits_for_reap_before_start_returns() {
+        let (launcher, observed) =
+            MockServerLauncher::scripted(ServerScript::InitializeFailureDelayedReap);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let start = tokio::spawn(async move {
+            LspSession::start(test_descriptor(), test_command(), root(), launcher, sink).await
+        });
+
+        wait_for_startup_kill(&observed).await;
+        assert!(
+            !start.is_finished(),
+            "kill acknowledgement is not process reap"
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !start.is_finished(),
+            "startup returned before the exit fact"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            start.await.unwrap(),
+            Err(SessionError::Protocol(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initialize_timeout_kills_and_waits_for_reap_before_start_returns() {
+        let (launcher, observed) =
+            MockServerLauncher::scripted(ServerScript::HangingInitializeDelayedReap);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let start = tokio::spawn(async move {
+            LspSession::start(test_descriptor(), test_command(), root(), launcher, sink).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        wait_for_startup_kill(&observed).await;
+        assert!(
+            !start.is_finished(),
+            "kill acknowledgement is not process reap"
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !start.is_finished(),
+            "startup returned before the exit fact"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            start.await.unwrap(),
+            Err(SessionError::Timeout("initialize"))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initialized_notification_failure_kills_and_waits_for_reap_before_start_returns() {
+        struct RejectInitialized;
+
+        impl super::InitializedNotifier for RejectInitialized {
+            fn notify(&self, _server: &async_lsp::ServerSocket) -> Result<(), SessionError> {
+                Err(SessionError::Protocol(
+                    "initialized notification rejected".into(),
+                ))
+            }
+        }
+
+        let (launcher, observed) =
+            MockServerLauncher::scripted(ServerScript::InitializedNotificationFailureDelayedReap);
+        let (sink, _events) = tokio::sync::mpsc::channel(16);
+        let start = tokio::spawn(async move {
+            LspSession::start_with_initialized_notifier(
+                test_descriptor(),
+                test_command(),
+                root(),
+                launcher,
+                sink,
+                RejectInitialized,
+            )
+            .await
+        });
+
+        wait_for_startup_kill(&observed).await;
+        assert!(
+            !start.is_finished(),
+            "kill acknowledgement is not process reap"
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !start.is_finished(),
+            "startup returned before the exit fact"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            start.await.unwrap(),
+            Err(SessionError::Protocol(_))
         ));
     }
 

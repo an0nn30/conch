@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -27,6 +28,9 @@ pub(crate) enum ServerScript {
     DelayedKillAfterShutdownTimeout,
     MalformedCompletion,
     HangingInitialize,
+    InitializeFailureDelayedReap,
+    HangingInitializeDelayedReap,
+    InitializedNotificationFailureDelayedReap,
     ExitAfterInitialize,
     HangingShutdown,
     StderrFlood,
@@ -61,6 +65,7 @@ pub(crate) struct ObservedProtocol {
     methods: Arc<Mutex<Vec<String>>>,
     messages: Arc<Mutex<Vec<Value>>>,
     client_responses: Arc<Mutex<Vec<Value>>>,
+    kill_observed: Arc<AtomicBool>,
 }
 
 impl ObservedProtocol {
@@ -185,6 +190,10 @@ impl ObservedProtocol {
             ])
         );
     }
+
+    pub(crate) fn kill_observed(&self) -> bool {
+        self.kill_observed.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone)]
@@ -199,6 +208,7 @@ impl MockServerLauncher {
             methods: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
             client_responses: Arc::new(Mutex::new(Vec::new())),
+            kill_observed: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -234,11 +244,20 @@ impl ServerLauncher for MockServerLauncher {
             drop(stderr_write);
         }
         let observed = self.observed.clone();
+        let lifecycle_observed = observed.clone();
         tokio::spawn(async move {
             let success = tokio::select! {
                 result = run_script(script, server_read, server_write, observed) => result.is_ok(),
                 _ = kill_rx => {
-                    if matches!(script, ServerScript::DelayedKillAfterExit | ServerScript::DelayedKillAfterShutdownTimeout) {
+                    lifecycle_observed.kill_observed.store(true, Ordering::SeqCst);
+                    if matches!(
+                        script,
+                        ServerScript::DelayedKillAfterExit
+                            | ServerScript::DelayedKillAfterShutdownTimeout
+                            | ServerScript::InitializeFailureDelayedReap
+                            | ServerScript::HangingInitializeDelayedReap
+                            | ServerScript::InitializedNotificationFailureDelayedReap
+                    ) {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                     false
@@ -288,7 +307,21 @@ async fn run_script(
             .push(message.clone());
         let id = message.get("id").cloned();
         match (script, method) {
-            (ServerScript::HangingInitialize, "initialize") => {}
+            (
+                ServerScript::HangingInitialize | ServerScript::HangingInitializeDelayedReap,
+                "initialize",
+            ) => {}
+            (ServerScript::InitializeFailureDelayedReap, "initialize") => {
+                write_message(
+                    &mut writer,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id.unwrap(),
+                        "error": { "code": -32002, "message": "initialize rejected" }
+                    }),
+                )
+                .await?;
+            }
             (_, "initialize") => {
                 let capabilities = &message["params"]["capabilities"];
                 assert_eq!(capabilities["workspace"], json!({ "configuration": true }));

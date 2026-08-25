@@ -46,7 +46,7 @@ use tauri_plugin_updater::UpdaterExt;
 pub(crate) struct TauriState {
     ptys: Arc<Mutex<HashMap<String, PtyBackend>>>,
     active_panes: Arc<Mutex<HashMap<String, u32>>>,
-    config: RwLock<UserConfig>,
+    config: Arc<RwLock<UserConfig>>,
     /// The user's home directory, used as a stable label for the app's
     /// "workspace" (see `commands::get_workspace_dir`). Captured once via
     /// `dirs::home_dir()` at startup — not the process's actual working
@@ -315,7 +315,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             active_panes: Arc::new(Mutex::new(HashMap::new())),
-            config: RwLock::new(config),
+            config: Arc::new(RwLock::new(config)),
             workspace_dir,
         })
         .manage(settings::SettingsTransactionGate::default())
@@ -1007,7 +1007,7 @@ mod tests {
         let state = TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             active_panes: Arc::new(Mutex::new(HashMap::new())),
-            config: RwLock::new(UserConfig::default()),
+            config: Arc::new(RwLock::new(UserConfig::default())),
             workspace_dir: None,
         };
         assert!(state.ptys.lock().is_empty());
