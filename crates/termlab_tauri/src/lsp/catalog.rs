@@ -1249,6 +1249,10 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
     const SEGMENT_64_SIZE: usize = 72;
     const SECTION_64_SIZE: usize = 80;
     const VM_PROT_EXECUTE: u32 = 0x4;
+    const SECTION_TYPE_MASK: u32 = 0xff;
+    const S_ZEROFILL: u32 = 0x1;
+    const S_GB_ZEROFILL: u32 = 0xc;
+    const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
     if bytes.len() < SEGMENT_64_SIZE
         || bytes.len()
             != SEGMENT_64_SIZE + read_u32(bytes, 64).unwrap_or(u32::MAX) as usize * SECTION_64_SIZE
@@ -1257,6 +1261,8 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
     }
     let fileoff = read_u64(bytes, 40).unwrap_or(u64::MAX);
     let filesize = read_u64(bytes, 48).unwrap_or(u64::MAX);
+    let vmaddr = read_u64(bytes, 24).unwrap_or(u64::MAX);
+    let vmsize = read_u64(bytes, 32).unwrap_or(u64::MAX);
     if fileoff
         .checked_add(filesize)
         .is_none_or(|end| end > file_size)
@@ -1268,16 +1274,31 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
         start: fileoff,
         end: fileoff.checked_add(filesize)?,
     };
+    let vm_range = FileRange {
+        start: vmaddr,
+        end: vmaddr.checked_add(vmsize)?,
+    };
     let mut text_section = None;
     for index in 0..nsects {
         let section = &bytes[SEGMENT_64_SIZE + index * SECTION_64_SIZE
             ..SEGMENT_64_SIZE + (index + 1) * SECTION_64_SIZE];
         let offset = read_u32(section, 48).unwrap_or(u32::MAX) as u64;
         let size = read_u64(section, 40).unwrap_or(u64::MAX);
+        let address = read_u64(section, 32).unwrap_or(u64::MAX);
+        let section_type = read_u32(section, 64).unwrap_or(u32::MAX) & SECTION_TYPE_MASK;
+        let zero_fill = matches!(
+            section_type,
+            S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+        );
         if !read_u32(section, 52).is_some_and(|align| align <= 31)
-            || !offset
+            || !address
                 .checked_add(size)
-                .is_some_and(|end| end <= file_size && range.start <= offset && end <= range.end)
+                .is_some_and(|end| vm_range.start <= address && end <= vm_range.end)
+            || (!zero_fill
+                && !offset.checked_add(size).is_some_and(|end| {
+                    end <= file_size && range.start <= offset && end <= range.end
+                }))
+            || (zero_fill && offset != 0)
         {
             return None;
         }
@@ -2142,13 +2163,48 @@ mod tests {
             .is_ok());
 
         let mut invalid_entry = macho_with_data_segment();
-        let main_offset = 32 + 152 + 72 + 24;
+        let main_offset = 32 + 152 + 312 + 24;
         invalid_entry[main_offset + 8..main_offset + 16].copy_from_slice(&500u64.to_le_bytes());
         resources.install_rust_analyzer_bytes(&invalid_entry, true);
         resources.write_receipt();
         assert!(matches!(
             catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
             Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("rust-analyzer/rust-analyzer")
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_bad_file_backed_and_zero_fill_data_sections() {
+        let resources = ResourceTree::new();
+        let data_command = 32 + 152;
+        let first_section = data_command + 72;
+        let zero_fill_section = first_section + 80;
+        for (offset, value) in [(first_section + 48, 999u32), (zero_fill_section + 64, 0u32)] {
+            let mut bytes = macho_with_data_segment();
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            resources.install_rust_analyzer_bytes(&bytes, true);
+            resources.write_receipt();
+            assert!(matches!(
+                BundledServerCatalog::new().resolve_for_host(
+                    LanguageId::Rust,
+                    resources.root(),
+                    poc_host()
+                ),
+                Err(CatalogUnavailable::CorruptResource { .. })
+            ));
+        }
+        let mut bytes = macho_with_data_segment();
+        bytes[zero_fill_section + 32..zero_fill_section + 40]
+            .copy_from_slice(&0x1_0000_22f0u64.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
         ));
     }
 
@@ -2524,11 +2580,76 @@ mod tests {
     fn macho_with_data_segment() -> Vec<u8> {
         let mut bytes = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
         let insert_at = 32 + 152;
-        let segment = macho_segment("__DATA", 400, 100, 3);
+        let segment = macho_data_segment();
         bytes.splice(insert_at..insert_at, segment);
         bytes[16..20].copy_from_slice(&4u32.to_le_bytes());
-        bytes[20..24].copy_from_slice(&272u32.to_le_bytes());
-        bytes.resize(584, 0);
+        bytes[20..24].copy_from_slice(&512u32.to_le_bytes());
+        bytes.resize(824, 0);
+        bytes
+    }
+
+    fn macho_data_segment() -> Vec<u8> {
+        let mut bytes = macho_segment("__DATA", 400, 100, 3);
+        bytes[4..8].copy_from_slice(&312u32.to_le_bytes());
+        bytes[24..32].copy_from_slice(&0x1_0000_2000u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&0x300u64.to_le_bytes());
+        bytes[64..68].copy_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&macho_section(
+            "__data",
+            "__DATA",
+            0x1_0000_2000,
+            64,
+            400,
+            3,
+            0,
+        ));
+        bytes.extend_from_slice(&macho_section(
+            "__bss",
+            "__DATA",
+            0x1_0000_2100,
+            128,
+            0,
+            3,
+            1,
+        ));
+        bytes.extend_from_slice(&macho_section(
+            "__thread_bss",
+            "__DATA",
+            0x1_0000_2200,
+            128,
+            0,
+            3,
+            0x12,
+        ));
+        bytes
+    }
+
+    fn macho_section(
+        name: &str,
+        segment: &str,
+        addr: u64,
+        size: u64,
+        offset: u32,
+        align: u32,
+        flags: u32,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut name_bytes = [0u8; 16];
+        name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&name_bytes);
+        let mut segment_bytes = [0u8; 16];
+        segment_bytes[..segment.len()].copy_from_slice(segment.as_bytes());
+        bytes.extend_from_slice(&segment_bytes);
+        bytes.extend_from_slice(&addr.to_le_bytes());
+        bytes.extend_from_slice(&size.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+        bytes.extend_from_slice(&align.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes
     }
 
