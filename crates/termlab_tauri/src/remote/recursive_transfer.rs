@@ -66,12 +66,16 @@ impl TreeLister for LocalTreeLister {
                 WalkEntry::SkippedSymlink { path: child_path }
             } else if file_type.is_dir() {
                 WalkEntry::Dir { path: child_path }
-            } else {
+            } else if file_type.is_file() {
                 let size = entry.metadata().await.map(|meta| meta.len()).unwrap_or(0);
                 WalkEntry::File {
                     path: child_path,
                     size,
                 }
+            } else {
+                // A fifo, socket, or device node has no bytes to transfer and
+                // would stall a member job forever if it were enqueued.
+                WalkEntry::SkippedOther { path: child_path }
             };
             children.push((name, entry));
         }
@@ -102,11 +106,9 @@ impl TreeLister for SftpTreeLister {
                         path: child_path,
                         size: child.size,
                     },
-                    // Sockets, fifos and devices have nothing to transfer, so
-                    // they are recorded alongside symlinks as skipped.
-                    DirEntryKind::Symlink | DirEntryKind::Other => {
-                        WalkEntry::SkippedSymlink { path: child_path }
-                    }
+                    DirEntryKind::Symlink => WalkEntry::SkippedSymlink { path: child_path },
+                    // Sockets, fifos and devices have nothing to transfer.
+                    DirEntryKind::Other => WalkEntry::SkippedOther { path: child_path },
                 };
                 (child.name, entry)
             })
@@ -264,7 +266,7 @@ pub(super) async fn start_recursive_transfer(
 
     let (lister, creator): (Box<dyn TreeLister>, Box<dyn DirectoryCreator>) = match direction {
         TransferDirection::Upload => {
-            validate_local_source_dir(&source_path)?;
+            validate_local_source_dir(&source_path).await?;
             (
                 Box::new(LocalTreeLister),
                 Box::new(SftpDirCreator { ssh: ssh.clone() }),
@@ -387,8 +389,9 @@ pub(super) fn batch_name(source_path: &str) -> String {
         .to_string()
 }
 
-pub(super) fn validate_local_source_dir(source_path: &str) -> Result<(), String> {
-    let metadata = std::fs::metadata(Path::new(source_path))
+pub(super) async fn validate_local_source_dir(source_path: &str) -> Result<(), String> {
+    let metadata = tokio::fs::metadata(Path::new(source_path))
+        .await
         .map_err(|error| format!("{source_path}: {error}"))?;
     if !metadata.is_dir() {
         return Err(format!("{source_path} is not a directory"));
@@ -442,20 +445,24 @@ mod tests {
         assert_eq!(join_path("/", "a.txt"), "/a.txt");
     }
 
-    #[test]
-    fn local_source_validation_rejects_files_and_missing_paths() {
+    #[tokio::test]
+    async fn local_source_validation_rejects_files_and_missing_paths() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("report.csv");
         std::fs::write(&file, b"data").unwrap();
 
-        validate_local_source_dir(directory.path().to_str().unwrap()).unwrap();
+        validate_local_source_dir(directory.path().to_str().unwrap())
+            .await
+            .unwrap();
 
-        let file_error =
-            validate_local_source_dir(file.to_str().unwrap()).expect_err("a file is not a folder");
+        let file_error = validate_local_source_dir(file.to_str().unwrap())
+            .await
+            .expect_err("a file is not a folder");
         assert!(file_error.contains("is not a directory"), "{file_error}");
 
         let missing = directory.path().join("gone");
         let missing_error = validate_local_source_dir(missing.to_str().unwrap())
+            .await
             .expect_err("a missing source must not create a batch");
         assert!(missing_error.contains("gone"), "{missing_error}");
     }
@@ -479,7 +486,8 @@ mod tests {
                 let path = match entry {
                     WalkEntry::Dir { path }
                     | WalkEntry::File { path, .. }
-                    | WalkEntry::SkippedSymlink { path } => path,
+                    | WalkEntry::SkippedSymlink { path }
+                    | WalkEntry::SkippedOther { path } => path,
                 };
                 path.rsplit('/').next().unwrap_or(path).to_string()
             })

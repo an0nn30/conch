@@ -71,11 +71,16 @@ fn join_posix(dest: &str, relative: &str) -> String {
     }
 }
 
+/// One entry the walk found. `SkippedOther` covers anything with no bytes to
+/// transfer — a fifo, socket, or device node; the walker treats it exactly
+/// like a skipped symlink, and it exists only so the per-batch note can say
+/// what was actually skipped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WalkEntry {
     Dir { path: String },
     File { path: String, size: u64 },
     SkippedSymlink { path: String },
+    SkippedOther { path: String },
 }
 
 #[async_trait]
@@ -224,12 +229,19 @@ pub async fn run_expansion(
     };
 
     let totals = state.lock().totals.clone();
-    let expansion = match walked {
-        Ok(()) if cancellation.is_cancelled() => BatchExpansion::Interrupted {
+    // Cancellation outranks whatever the walk's proximate error was: a cancel
+    // that lands mid-flight makes the queue refuse the member the walk was
+    // already enqueuing, and "batch cancelled" is the honest reason for that
+    // rejection rather than the rejection's own wording.
+    let expansion = if cancellation.is_cancelled() {
+        BatchExpansion::Interrupted {
             reason: BATCH_CANCELLED_REASON.to_string(),
-        },
-        Ok(()) => BatchExpansion::Complete,
-        Err(reason) => BatchExpansion::Interrupted { reason },
+        }
+    } else {
+        match walked {
+            Ok(()) => BatchExpansion::Complete,
+            Err(reason) => BatchExpansion::Interrupted { reason },
+        }
     };
 
     if let Err(error) = sink.record_batch(expansion.clone(), &totals).await {
@@ -262,8 +274,17 @@ async fn expand_entry(
             state.totals.discovered_files += 1;
             state.totals.discovered_bytes = state.totals.discovered_bytes.saturating_add(size);
         }
+        // The note is what the user reads, so it says what was skipped rather
+        // than leaving a bare path that looks like an ordinary omission.
         WalkEntry::SkippedSymlink { path } => {
-            state.lock().totals.skipped.push(path);
+            state.lock().totals.skipped.push(format!("symlink: {path}"));
+        }
+        WalkEntry::SkippedOther { path } => {
+            state
+                .lock()
+                .totals
+                .skipped
+                .push(format!("special file: {path}"));
         }
     }
 
@@ -738,6 +759,10 @@ mod tests {
         /// Cancels the batch from inside the first enqueue, which is how the
         /// cancellation test reaches a mid-walk cancel deterministically.
         cancel_on_first_file: bool,
+        /// Cancels the batch *before* the first enqueue is attempted, staging
+        /// the hostile mailbox order: the walk decided to enqueue, the actor
+        /// processed the cancel first, and the enqueue arrives afterwards.
+        cancel_before_first_file: bool,
         enqueued: Mutex<Vec<Uuid>>,
     }
 
@@ -747,6 +772,7 @@ mod tests {
                 handle,
                 batch_id,
                 cancel_on_first_file: false,
+                cancel_before_first_file: false,
                 enqueued: Mutex::new(Vec::new()),
             }
         }
@@ -755,11 +781,19 @@ mod tests {
             self.cancel_on_first_file = true;
             self
         }
+
+        fn cancelling_before_first_file(mut self) -> Self {
+            self.cancel_before_first_file = true;
+            self
+        }
     }
 
     #[async_trait]
     impl ExpansionSink for QueueSink {
         async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String> {
+            if self.cancel_before_first_file && self.enqueued.lock().unwrap().is_empty() {
+                self.handle.cancel_batch(self.batch_id).await?;
+            }
             let id = Uuid::new_v4();
             let host_key = build_host_key(&TransferEndpoint::Configured {
                 server_entry_id: "server-1".into(),
@@ -950,7 +984,7 @@ mod tests {
         assert_eq!(info.expansion, BatchExpansion::Complete);
         assert_eq!(info.discovered_files, 3);
         assert_eq!(info.discovered_bytes, 60);
-        assert_eq!(info.skipped, vec!["/src/link".to_string()]);
+        assert_eq!(info.skipped, vec!["symlink: /src/link".to_string()]);
     }
 
     #[tokio::test]
@@ -1023,6 +1057,40 @@ mod tests {
                 reason: BATCH_CANCELLED_REASON.to_string(),
             },
             "a late expansion update must not clobber the cancelled state"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_lands_before_the_enqueue_still_refuses_the_member() {
+        let (_directory, handle) = queue_handle().await;
+        let batch_id = Uuid::from_u128(0xB7);
+        let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
+        let lister = FakeLister::new(expansion_tree());
+        let creator = RecordingDirCreator::default();
+        let sink = QueueSink::new(handle.clone(), batch_id).cancelling_before_first_file();
+
+        let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
+
+        assert_eq!(
+            outcome,
+            BatchExpansion::Interrupted {
+                reason: BATCH_CANCELLED_REASON.to_string(),
+            },
+            "the cancel outranks the enqueue rejection it caused"
+        );
+
+        let snapshot = handle.snapshot();
+        assert!(
+            snapshot.jobs.is_empty(),
+            "a member decided on before the cancel must not slip in after it: {:?}",
+            snapshot.jobs
+        );
+        assert_eq!(
+            snapshot.batches[0].info.expansion,
+            BatchExpansion::Interrupted {
+                reason: BATCH_CANCELLED_REASON.to_string(),
+            },
+            "the rejection must not clobber the cancelled reason"
         );
     }
 

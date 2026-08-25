@@ -1369,6 +1369,17 @@ impl QueueActor {
         if self.document.jobs.iter().any(|job| job.id == request.id) {
             return Err(format!("transfer job {} already exists", request.id));
         }
+        // An expansion task decides to enqueue before the actor sees the
+        // decision. A cancel that was already sitting in the mailbox is
+        // processed first, finds no such member, and cancels nothing — so
+        // without this guard that file would transfer after the user
+        // cancelled its batch, with no row left to cancel it from. The actor
+        // is the only place where the two orders are comparable.
+        if let Some(batch_id) = request.batch_id
+            && self.batch_is_cancelled(batch_id)
+        {
+            return Err(format!("transfer batch {batch_id} was cancelled"));
+        }
 
         let now_ms = self.clock.now_ms();
         let queue_order = self
@@ -1721,6 +1732,24 @@ impl QueueActor {
     // expansion task polls, so no reducer transition is involved.
     // -----------------------------------------------------------------------
 
+    /// Whether this batch has been cancelled, from either side of the fence:
+    /// the runtime stop flag while its expansion task is alive, and the
+    /// persisted expansion state afterwards (the flag is dropped once the
+    /// batch is terminal, but late members must still be refused).
+    fn batch_is_cancelled(&self, id: Uuid) -> bool {
+        if self
+            .batch_cancellations
+            .get(&id)
+            .is_some_and(BatchCancellation::is_cancelled)
+        {
+            return true;
+        }
+        matches!(
+            self.document.batches.get(&id).map(|batch| &batch.expansion),
+            Some(BatchExpansion::Interrupted { reason }) if reason == BATCH_CANCELLED_REASON
+        )
+    }
+
     async fn create_batch(&mut self, info: BatchInfo) -> Result<BatchCancellation, String> {
         let id = info.id;
         if self.document.batches.contains_key(&id) {
@@ -1746,10 +1775,7 @@ impl QueueActor {
         // state: the task's final write may still grow the discovered totals,
         // but it must not report a walk that a user already stopped as either
         // running or complete.
-        let cancelled = self
-            .batch_cancellations
-            .get(&id)
-            .is_some_and(BatchCancellation::is_cancelled);
+        let cancelled = self.batch_is_cancelled(id);
 
         let mut next = self.document.clone();
         let batch = next
@@ -1817,6 +1843,11 @@ impl QueueActor {
             }
             self.commit(next).await?;
         }
+
+        // The walk polls its own clone of the flag, and `batch_is_cancelled`
+        // falls back to the persisted cancelled state, so the map entry has
+        // no reader left once the record says cancelled.
+        self.batch_cancellations.remove(&id);
 
         match failures.into_iter().next() {
             Some(error) => Err(error),
@@ -4256,6 +4287,45 @@ mod tests {
             }
         );
         assert_eq!(expansion_of(other_batch_id), BatchExpansion::Running);
+    }
+
+    #[tokio::test]
+    async fn enqueue_refuses_a_member_of_an_already_cancelled_batch() {
+        let batch_id = Uuid::from_u128(0x9_808);
+        let harness = ActorHarness::new();
+        harness
+            .handle
+            .create_batch(new_batch(batch_id))
+            .await
+            .unwrap();
+        harness.handle.cancel_batch(batch_id).await.unwrap();
+
+        // This is the hostile order the expansion task can produce: its walk
+        // read `cancelled()` as false, the actor processed CancelBatch first
+        // (finding no members), and the Enqueue arrives afterwards.
+        let mut member = new_job(Uuid::from_u128(0x9_809), "late.bin");
+        member.batch_id = Some(batch_id);
+        let error = harness.handle.enqueue(member).await.unwrap_err();
+
+        assert!(error.contains(&batch_id.to_string()), "{error}");
+        assert!(
+            harness.handle.snapshot().jobs.is_empty(),
+            "no job may be inserted into a cancelled batch"
+        );
+        assert!(
+            harness
+                .store
+                .load()
+                .unwrap()
+                .into_document()
+                .jobs
+                .is_empty(),
+            "and nothing may reach the durable document either"
+        );
+
+        // Batchless work and other batches are unaffected by the guard.
+        harness.handle.enqueue(sample_new_job()).await.unwrap();
+        assert_eq!(harness.handle.snapshot().jobs.len(), 1);
     }
 
     #[tokio::test]
