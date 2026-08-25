@@ -23,6 +23,7 @@
   function projectSnapshot(snapshot) {
     const projected = clone(snapshot);
     projected.jobs = Array.isArray(projected.jobs) ? projected.jobs.map(projectJob) : [];
+    projected.batches = Array.isArray(projected.batches) ? projected.batches : [];
     return projected;
   }
 
@@ -32,6 +33,7 @@
       queuePaused: true,
       settings: { globalLimit: 3, perHostLimit: 2 },
       jobs: [],
+      batches: [],
       summary: {
         queued: 0,
         running: 0,
@@ -75,6 +77,11 @@
         jobs,
         queuePaused: !!event.queuePaused,
         settings: clone(event.settings),
+        // Batches are a full projection on every emission (no per-batch
+        // deltas). A payload without the field is from a producer that
+        // never touched batches this revision, so the prior projection
+        // still holds.
+        batches: Array.isArray(event.batches) ? clone(event.batches) : state.batches,
         summary: {
           ...state.summary,
           queuePaused: !!event.queuePaused,

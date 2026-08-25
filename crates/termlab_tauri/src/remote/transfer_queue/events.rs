@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 use ts_rs::TS;
 use uuid::Uuid;
 
+use super::batch::BatchAggregate;
 use super::model::{
     CommitPhase, ManagedArtifacts, QueueSettings, TransferDirection, TransferJob, TransferJobState,
     TransferQueueSummary,
@@ -64,6 +65,11 @@ pub struct QueueEventPayload {
     pub removed_ids: Vec<Uuid>,
     pub queue_paused: bool,
     pub settings: QueueSettings,
+    /// Full batch-aggregate projection, derived fresh from the committed
+    /// document on every emission. There are no per-batch deltas: batch
+    /// counts are small enough that resending the whole list each time is
+    /// simpler than tracking incremental batch changes.
+    pub batches: Vec<BatchAggregate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
@@ -151,6 +157,7 @@ pub fn legacy_progress_for(job: &TransferJob) -> TransferProgress {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use serde_json::json;
@@ -161,6 +168,9 @@ mod tests {
         QueueEventPayload, QueueSummaryPayload, TRANSFER_JOB_UPDATED_EVENT,
         TRANSFER_PROGRESS_EVENT, TRANSFER_QUEUE_SUMMARY_EVENT, TauriTransferEventSink,
         TransferEventSink, legacy_progress_for,
+    };
+    use crate::remote::transfer_queue::batch::{
+        BatchExpansion, BatchInfo, derive_batch_aggregates,
     };
     use crate::remote::transfer_queue::model::{
         AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ManagedArtifacts,
@@ -212,6 +222,26 @@ mod tests {
     #[test]
     fn job_event_payload_is_a_complete_atomic_delta() {
         let removed = Uuid::from_u128(9);
+        let batch_id = Uuid::from_u128(55);
+        let mut member = job(TransferJobState::Running);
+        member.batch_id = Some(batch_id);
+        member.bytes_transferred = 3072;
+        member.total_bytes = 4096;
+        member.speed_bytes_per_second = 512;
+        let mut batches = BTreeMap::new();
+        batches.insert(
+            batch_id,
+            BatchInfo {
+                id: batch_id,
+                name: "vendor-assets".into(),
+                direction: TransferDirection::Download,
+                expansion: BatchExpansion::Running,
+                discovered_files: 2,
+                discovered_bytes: 8192,
+                skipped: Vec::new(),
+                created_at_ms: 5,
+            },
+        );
         let payload = QueueEventPayload {
             revision: 17,
             upserts: Vec::new(),
@@ -222,6 +252,7 @@ mod tests {
                 per_host_limit: 6,
                 ..QueueSettings::default()
             },
+            batches: derive_batch_aggregates(&batches, std::slice::from_ref(&member)),
         };
 
         assert_eq!(
@@ -236,7 +267,23 @@ mod tests {
                     "perHostLimit": 6,
                     "pipelineDepth": 16,
                     "pipelineChunkBytes": 262144
-                }
+                },
+                "batches": [{
+                    "info": {
+                        "id": batch_id,
+                        "name": "vendor-assets",
+                        "direction": "download",
+                        "expansion": { "kind": "running" },
+                        "discoveredFiles": 2,
+                        "discoveredBytes": 8192,
+                        "skipped": [],
+                        "createdAtMs": 5
+                    },
+                    "filesDone": 0,
+                    "bytesDone": 3072,
+                    "speedBytesPerSecond": 512,
+                    "etaSeconds": 10
+                }]
             })
         );
     }
@@ -362,6 +409,7 @@ mod tests {
                 per_host_limit: 2,
                 ..QueueSettings::default()
             },
+            batches: Vec::new(),
         };
         let summary = QueueSummaryPayload {
             revision: 41,

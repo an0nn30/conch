@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use super::{
+    batch::{compact_batches, derive_batch_aggregates},
     events::{
         QueueEventPayload, QueueSummaryPayload, RunnerEvent, TransferEventSink, legacy_progress_for,
     },
@@ -1630,6 +1631,7 @@ impl QueueActor {
         if removed == 0 {
             return Ok(0);
         }
+        compact_batches(&mut next.batches, &next.jobs);
         self.commit(next).await?;
         Ok(removed)
     }
@@ -1717,6 +1719,7 @@ fn queue_delta(
         removed_ids,
         queue_paused: next.queue_paused,
         settings: next.settings.clone(),
+        batches: derive_batch_aggregates(&next.batches, &next.jobs),
     }
 }
 
@@ -1818,6 +1821,7 @@ mod tests {
 
     use super::{QueueActor, QueueClock, QueueStore, TransferQueueHandle};
     use crate::remote::transfer_queue::{
+        batch::{BatchExpansion, BatchInfo, derive_batch_aggregates},
         events::{QueueEventPayload, QueueSummaryPayload, TransferEventSink},
         model::{
             AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ConflictResolution,
@@ -3335,6 +3339,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_includes_batch_aggregates() {
+        let batch_id = Uuid::from_u128(0x9_600);
+        let member_id = Uuid::from_u128(0x9_601);
+        // Paused with a matching durable checkpoint survives startup
+        // recovery unchanged, so the seeded bytes are still there once the
+        // actor boots and the snapshot is read.
+        let mut member = stored_job(member_id, TransferJobState::Paused, 1);
+        member.batch_id = Some(batch_id);
+        member.durable_checkpoint = 40;
+        member.bytes_transferred = 40;
+        member.total_bytes = 100;
+        let mut document = document_with(vec![member]);
+        document.batches.insert(
+            batch_id,
+            BatchInfo {
+                id: batch_id,
+                name: "vendor-assets".into(),
+                direction: TransferDirection::Upload,
+                expansion: BatchExpansion::Running,
+                discovered_files: 1,
+                discovered_bytes: 100,
+                skipped: Vec::new(),
+                created_at_ms: 10,
+            },
+        );
+        let harness = ActorHarness::with_document(document);
+
+        let snapshot = harness.handle.snapshot();
+        let on_disk = harness.store.load().unwrap().into_document();
+
+        assert_eq!(
+            snapshot.batches,
+            derive_batch_aggregates(&on_disk.batches, &on_disk.jobs)
+        );
+        assert_eq!(snapshot.batches.len(), 1);
+        assert_eq!(snapshot.batches[0].files_done, 0);
+        assert_eq!(snapshot.batches[0].bytes_done, 40);
+        assert_eq!(snapshot.batches[0].speed_bytes_per_second, None);
+    }
+
+    #[tokio::test]
+    async fn job_delta_carries_the_full_batch_aggregate_projection() {
+        let batch_id = Uuid::from_u128(0x9_700);
+        let member_id = Uuid::from_u128(0x9_701);
+        let mut member = stored_job(member_id, TransferJobState::Queued, 1);
+        member.batch_id = Some(batch_id);
+        let mut document = document_with(vec![member]);
+        document.batches.insert(
+            batch_id,
+            BatchInfo {
+                id: batch_id,
+                name: "vendor-assets".into(),
+                direction: TransferDirection::Upload,
+                expansion: BatchExpansion::Running,
+                discovered_files: 1,
+                discovered_bytes: 500,
+                skipped: Vec::new(),
+                created_at_ms: 10,
+            },
+        );
+        let harness = ActorHarness::with_document(document);
+        harness.events.clear();
+
+        harness.handle.pause(member_id).await.unwrap();
+
+        let delta = harness.events.take_delta_containing(member_id);
+        let on_disk = harness.store.load().unwrap().into_document();
+        assert_eq!(
+            delta.batches,
+            derive_batch_aggregates(&on_disk.batches, &on_disk.jobs)
+        );
+        assert_eq!(delta.batches.len(), 1);
+    }
+
+    #[tokio::test]
     async fn cloned_handles_share_one_actor_snapshot() {
         let harness = ActorHarness::new();
         let second_handle = harness.handle.clone();
@@ -3783,6 +3862,41 @@ mod tests {
         assert!(delta.upserts.is_empty());
         assert_eq!(delta.removed_ids, [completed_id]);
         client.assert_matches(&harness.handle.snapshot());
+    }
+
+    #[tokio::test]
+    async fn clear_completed_compacts_batches_with_no_remaining_members() {
+        let batch_id = Uuid::from_u128(9_500);
+        let completed_id = Uuid::from_u128(9_501);
+        let mut completed = stored_job(
+            completed_id,
+            TransferJobState::Completed {
+                result: CompletionResult::Transferred,
+            },
+            1,
+        );
+        completed.batch_id = Some(batch_id);
+        let mut document = document_with(vec![completed]);
+        document.batches.insert(
+            batch_id,
+            BatchInfo {
+                id: batch_id,
+                name: "vendor-assets".into(),
+                direction: TransferDirection::Upload,
+                expansion: BatchExpansion::Complete,
+                discovered_files: 1,
+                discovered_bytes: 100,
+                skipped: Vec::new(),
+                created_at_ms: 10,
+            },
+        );
+        let harness = ActorHarness::with_document(document);
+
+        assert_eq!(harness.handle.clear_completed().await.unwrap(), 1);
+
+        let on_disk = harness.store.load().unwrap().into_document();
+        assert!(on_disk.batches.is_empty());
+        assert!(harness.handle.snapshot().batches.is_empty());
     }
 
     #[tokio::test]

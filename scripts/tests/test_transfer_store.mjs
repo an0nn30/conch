@@ -30,6 +30,26 @@ function job(id, kind, queueOrder = 0, batchId = null) {
   };
 }
 
+function batchAggregate(id, overrides = {}) {
+  return {
+    info: {
+      id,
+      name: `${id}-batch`,
+      direction: 'upload',
+      expansion: { kind: 'running' },
+      discoveredFiles: 3,
+      discoveredBytes: 300,
+      skipped: [],
+      createdAtMs: 10,
+    },
+    filesDone: 1,
+    bytesDone: 100,
+    speedBytesPerSecond: 50,
+    etaSeconds: 4,
+    ...overrides,
+  };
+}
+
 function summary(queuePaused, values = {}) {
   return {
     queued: 0,
@@ -50,6 +70,7 @@ function snapshot(revision, jobs, values = {}) {
     queuePaused: false,
     settings: { globalLimit: 3, perHostLimit: 2 },
     jobs,
+    batches: [],
     summary: summary(false),
     recoveryError: null,
     ...values,
@@ -166,6 +187,35 @@ function loadRuntime(options = {}) {
   const exposed = store.getSnapshot();
   exposed.jobs[0].state.kind = 'cancelled';
   assert.deepEqual(plain(store.getSnapshot().jobs), [job('fresh', 'queued')]);
+}
+
+// Batches ride the same hydrate/delta contract as jobs: wholesale
+// replacement per payload, defensive clones on both ingress and egress, and
+// legacy tolerance when a delta omits the field entirely.
+{
+  const store = loadStore();
+  const firstBatches = [batchAggregate('alpha')];
+  store.hydrate(snapshot(2, [job('old', 'running')], { batches: firstBatches }));
+  firstBatches[0].filesDone = 99;
+  assert.equal(store.getSnapshot().batches[0].filesDone, 1, 'hydrate must clone batches on ingress');
+
+  const exposed = store.getSnapshot();
+  exposed.batches[0].filesDone = 42;
+  assert.equal(store.getSnapshot().batches[0].filesDone, 1, 'getSnapshot must clone batches on egress');
+
+  store.applyJobEvent(delta(3, { batches: [batchAggregate('beta', { filesDone: 2 })] }));
+  assert.deepEqual(
+    plain(store.getSnapshot().batches),
+    [batchAggregate('beta', { filesDone: 2 })],
+    'a delta with batches replaces the previous projection wholesale',
+  );
+
+  store.applyJobEvent(delta(4, { upserts: [job('old', 'paused')] }));
+  assert.deepEqual(
+    plain(store.getSnapshot().batches),
+    [batchAggregate('beta', { filesDone: 2 })],
+    'a delta without batches keeps the previous projection (legacy tolerance)',
+  );
 }
 
 // Schema v1 persists transfer speed as a number for backward compatibility.
