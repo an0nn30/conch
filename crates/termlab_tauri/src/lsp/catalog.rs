@@ -1166,6 +1166,7 @@ fn validate_macos_arm64_executable(
     let mut build_versions = 0usize;
     let mut executable_text = None;
     let mut main_entryoff = None;
+    let mut file_backed_segments = Vec::new();
     for _ in 0..ncmds {
         let command = read_u32(&table, offset)
             .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
@@ -1193,9 +1194,19 @@ fn validate_macos_arm64_executable(
             build_versions += 1;
             platform = read_u32(command_bytes, 8);
         } else if command == LC_SEGMENT_64 {
-            let text = validate_segment_64(command_bytes, file_size)
+            let segment = validate_segment_64(command_bytes, file_size, command_table_end)
                 .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
-            if let Some(text) = text {
+            if segment.file_range.is_some_and(|range| {
+                file_backed_segments
+                    .iter()
+                    .any(|existing| range.overlaps(*existing))
+            }) {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            if let Some(range) = segment.file_range {
+                file_backed_segments.push(range);
+            }
+            if let Some(text) = segment.executable_text {
                 if executable_text.replace(text).is_some() {
                     return Err(corrupt_executable(adapter_id, relative_path));
                 }
@@ -1243,9 +1254,22 @@ impl FileRange {
     fn contains(self, offset: u64) -> bool {
         self.start <= offset && offset < self.end
     }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
 }
 
-fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>> {
+struct ValidatedSegment {
+    file_range: Option<FileRange>,
+    executable_text: Option<FileRange>,
+}
+
+fn validate_segment_64(
+    bytes: &[u8],
+    file_size: u64,
+    command_table_end: u64,
+) -> Option<ValidatedSegment> {
     const SEGMENT_64_SIZE: usize = 72;
     const SECTION_64_SIZE: usize = 80;
     const VM_PROT_EXECUTE: u32 = 0x4;
@@ -1279,6 +1303,11 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
         end: vmaddr.checked_add(vmsize)?,
     };
     let mut text_section = None;
+    let mut file_backed_sections = Vec::new();
+    let header_and_commands = FileRange {
+        start: 0,
+        end: command_table_end,
+    };
     let segment_name = c_string(&bytes[8..24]);
     for index in 0..nsects {
         let section = &bytes[SEGMENT_64_SIZE + index * SECTION_64_SIZE
@@ -1291,18 +1320,34 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
             section_type,
             S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
         );
+        let section_file_range = if zero_fill {
+            None
+        } else {
+            Some(FileRange {
+                start: offset,
+                end: offset.checked_add(size)?,
+            })
+        };
         if c_string(&section[16..32]) != segment_name
             || !read_u32(section, 52).is_some_and(|align| align <= 31)
             || !address
                 .checked_add(size)
                 .is_some_and(|end| vm_range.start <= address && end <= vm_range.end)
-            || (!zero_fill
-                && !offset.checked_add(size).is_some_and(|end| {
-                    end <= file_size && range.start <= offset && end <= range.end
-                }))
+            || section_file_range.is_some_and(|section_range| {
+                section_range.end > file_size
+                    || section_range.start < range.start
+                    || section_range.end > range.end
+                    || section_range.overlaps(header_and_commands)
+                    || file_backed_sections
+                        .iter()
+                        .any(|existing| section_range.overlaps(*existing))
+            })
             || (zero_fill && offset != 0)
         {
             return None;
+        }
+        if let Some(section_range) = section_file_range {
+            file_backed_sections.push(section_range);
         }
         if !zero_fill
             && segment_name == b"__TEXT"
@@ -1319,40 +1364,22 @@ fn validate_segment_64(bytes: &[u8], file_size: u64) -> Option<Option<FileRange>
             }
         }
     }
-    if segment_name != b"__TEXT" {
-        return Some(None);
-    }
-    (read_u32(bytes, 60).unwrap_or(0) & VM_PROT_EXECUTE != 0)
-        .then_some(text_section)
-        .flatten()
-        .map(Some)
+    let executable_text = if segment_name == b"__TEXT" {
+        if read_u32(bytes, 60).unwrap_or(0) & VM_PROT_EXECUTE == 0 {
+            return None;
+        }
+        Some(text_section?)
+    } else {
+        None
+    };
+    Some(ValidatedSegment {
+        file_range: (range.start < range.end).then_some(range),
+        executable_text,
+    })
 }
 
 fn c_string(bytes: &[u8]) -> &[u8] {
     bytes.split(|byte| *byte == 0).next().unwrap_or(bytes)
-}
-
-#[allow(dead_code)]
-fn structurally_valid_unixthread(bytes: &[u8]) -> bool {
-    let mut offset = 8usize;
-    let mut has_state = false;
-    while offset < bytes.len() {
-        let Some(count) = read_u32(bytes, offset + 4) else {
-            return false;
-        };
-        let Some(next) = offset
-            .checked_add(8)
-            .and_then(|value| value.checked_add(count as usize * 4))
-        else {
-            return false;
-        };
-        if count == 0 || next > bytes.len() {
-            return false;
-        }
-        has_state = true;
-        offset = next;
-    }
-    has_state && offset == bytes.len()
 }
 
 fn corrupt_executable(adapter_id: &str, relative_path: &Path) -> CatalogUnavailable {
@@ -2159,15 +2186,17 @@ mod tests {
     fn validation_accepts_a_normal_multi_segment_executable_and_requires_main_in_text() {
         let resources = ResourceTree::new();
         let catalog = BundledServerCatalog::new();
-        resources.install_rust_analyzer_bytes(&macho_with_data_segment(), true);
+        let fixture = macho_with_data_segment();
+        fixture.assert_invariants();
+        resources.install_rust_analyzer_bytes(&fixture.bytes, true);
         resources.write_receipt();
         assert!(catalog
             .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
             .is_ok());
 
-        let mut invalid_entry = macho_with_data_segment();
-        let main_offset = 32 + 152 + 312 + 24;
-        invalid_entry[main_offset + 8..main_offset + 16].copy_from_slice(&500u64.to_le_bytes());
+        let mut invalid_entry = fixture.bytes;
+        invalid_entry[fixture.main_command_offset + 8..fixture.main_command_offset + 16]
+            .copy_from_slice(&fixture.data_file_range.start.to_le_bytes());
         resources.install_rust_analyzer_bytes(&invalid_entry, true);
         resources.write_receipt();
         assert!(matches!(
@@ -2179,11 +2208,12 @@ mod tests {
     #[test]
     fn validation_rejects_bad_file_backed_and_zero_fill_data_sections() {
         let resources = ResourceTree::new();
-        let data_command = 32 + 152;
-        let first_section = data_command + 72;
-        let zero_fill_section = first_section + 80;
-        for (offset, value) in [(first_section + 48, 999u32), (zero_fill_section + 64, 0u32)] {
-            let mut bytes = macho_with_data_segment();
+        let fixture = macho_with_data_segment();
+        for (offset, value) in [
+            (fixture.data_section_offset + 48, 999u32),
+            (fixture.bss_section_offset + 64, 0u32),
+        ] {
+            let mut bytes = fixture.bytes.clone();
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             resources.install_rust_analyzer_bytes(&bytes, true);
             resources.write_receipt();
@@ -2196,11 +2226,80 @@ mod tests {
                 Err(CatalogUnavailable::CorruptResource { .. })
             ));
         }
-        let mut bytes = macho_with_data_segment();
-        bytes[zero_fill_section + 32..zero_fill_section + 40]
-            .copy_from_slice(&0x1_0000_22f0u64.to_le_bytes());
+        let mut bytes = fixture.bytes;
+        bytes[fixture.bss_section_offset + 32..fixture.bss_section_offset + 40]
+            .copy_from_slice(&(fixture.data_vm_range.end - 16).to_le_bytes());
         resources.install_rust_analyzer_bytes(&bytes, true);
         resources.write_receipt();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_file_backed_section_overlapping_header_and_load_commands() {
+        let resources = ResourceTree::new();
+        let fixture = macho_with_data_segment();
+        let mut bytes = fixture.bytes;
+        let overlapping_text_offset = fixture.command_table_end as u64 - 8;
+        bytes[fixture.text_section_offset + 48..fixture.text_section_offset + 52]
+            .copy_from_slice(&(overlapping_text_offset as u32).to_le_bytes());
+        bytes[fixture.main_command_offset + 8..fixture.main_command_offset + 16]
+            .copy_from_slice(&overlapping_text_offset.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_overlapping_file_backed_segment_ranges() {
+        let resources = ResourceTree::new();
+        let fixture = macho_with_data_segment();
+        let mut bytes = fixture.bytes;
+        let overlapping_data_offset = fixture.text_file_range.end - 128;
+        bytes[fixture.data_segment_offset + 40..fixture.data_segment_offset + 48]
+            .copy_from_slice(&overlapping_data_offset.to_le_bytes());
+        bytes[fixture.data_section_offset + 48..fixture.data_section_offset + 52]
+            .copy_from_slice(&(overlapping_data_offset as u32).to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_overlapping_file_backed_section_ranges() {
+        let resources = ResourceTree::new();
+        let fixture = macho_with_data_segment();
+        let mut bytes = fixture.bytes;
+        let overlapping_bss_offset = fixture.data_file_range.start + 32;
+        bytes[fixture.bss_section_offset + 48..fixture.bss_section_offset + 52]
+            .copy_from_slice(&(overlapping_bss_offset as u32).to_le_bytes());
+        bytes[fixture.bss_section_offset + 64..fixture.bss_section_offset + 68]
+            .copy_from_slice(&0u32.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+
         assert!(matches!(
             BundledServerCatalog::new().resolve_for_host(
                 LanguageId::Rust,
@@ -2613,51 +2712,222 @@ mod tests {
         bytes
     }
 
-    fn macho_with_data_segment() -> Vec<u8> {
-        let mut bytes = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
-        let insert_at = 32 + 152;
-        let segment = macho_data_segment();
-        bytes.splice(insert_at..insert_at, segment);
-        bytes[16..20].copy_from_slice(&4u32.to_le_bytes());
-        bytes[20..24].copy_from_slice(&512u32.to_le_bytes());
-        bytes.resize(824, 0);
-        bytes
+    struct MultiSegmentMachoFixture {
+        bytes: Vec<u8>,
+        command_table_end: usize,
+        pagezero_segment_offset: usize,
+        text_segment_offset: usize,
+        text_section_offset: usize,
+        data_segment_offset: usize,
+        data_section_offset: usize,
+        bss_section_offset: usize,
+        thread_bss_section_offset: usize,
+        linkedit_segment_offset: usize,
+        main_command_offset: usize,
+        text_file_range: std::ops::Range<u64>,
+        data_file_range: std::ops::Range<u64>,
+        linkedit_file_range: std::ops::Range<u64>,
+        text_vm_range: std::ops::Range<u64>,
+        data_vm_range: std::ops::Range<u64>,
+        linkedit_vm_range: std::ops::Range<u64>,
     }
 
-    fn macho_data_segment() -> Vec<u8> {
-        let mut bytes = macho_segment("__DATA", 400, 100, 3);
-        bytes[4..8].copy_from_slice(&312u32.to_le_bytes());
-        bytes[24..32].copy_from_slice(&0x1_0000_2000u64.to_le_bytes());
-        bytes[32..40].copy_from_slice(&0x300u64.to_le_bytes());
-        bytes[64..68].copy_from_slice(&3u32.to_le_bytes());
-        bytes.extend_from_slice(&macho_section(
+    impl MultiSegmentMachoFixture {
+        fn assert_invariants(&self) {
+            let u32_at =
+                |offset| u32::from_le_bytes(self.bytes[offset..offset + 4].try_into().unwrap());
+            let u64_at =
+                |offset| u64::from_le_bytes(self.bytes[offset..offset + 8].try_into().unwrap());
+            assert_eq!(u32_at(16), 6);
+            assert_eq!(self.command_table_end, 32 + u32_at(20) as usize);
+            assert!(self.command_table_end as u64 <= u32_at(self.text_section_offset + 48) as u64);
+            assert_eq!(u64_at(self.pagezero_segment_offset + 40), 0);
+            assert_eq!(u64_at(self.pagezero_segment_offset + 48), 0);
+            assert_eq!(
+                u64_at(self.text_segment_offset + 40),
+                self.text_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.text_segment_offset + 48),
+                self.text_file_range.end - self.text_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 40),
+                self.data_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 48),
+                self.data_file_range.end - self.data_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 40),
+                self.linkedit_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 48),
+                self.linkedit_file_range.end - self.linkedit_file_range.start
+            );
+            assert_eq!(self.text_file_range.end, self.data_file_range.start);
+            assert_eq!(self.data_file_range.end, self.linkedit_file_range.start);
+            assert_eq!(self.text_vm_range.end, self.data_vm_range.start);
+            assert_eq!(self.data_vm_range.end, self.linkedit_vm_range.start);
+            assert_eq!(
+                u64_at(self.text_segment_offset + 24),
+                self.text_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.text_segment_offset + 32),
+                self.text_vm_range.end - self.text_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 24),
+                self.data_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 32),
+                self.data_vm_range.end - self.data_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 24),
+                self.linkedit_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 32),
+                self.linkedit_vm_range.end - self.linkedit_vm_range.start
+            );
+            assert_eq!(
+                u32_at(self.data_section_offset + 48) as u64,
+                self.data_file_range.start
+            );
+            assert!(
+                u32_at(self.data_section_offset + 48) as u64
+                    + u64_at(self.data_section_offset + 40)
+                    <= self.data_file_range.end
+            );
+            assert_eq!(u32_at(self.bss_section_offset + 48), 0);
+            assert_eq!(u32_at(self.bss_section_offset + 64) & 0xff, 1);
+            assert_eq!(u32_at(self.thread_bss_section_offset + 48), 0);
+            assert_eq!(u32_at(self.thread_bss_section_offset + 64) & 0xff, 0x12);
+            let entryoff = u64_at(self.main_command_offset + 8);
+            let text_start = u32_at(self.text_section_offset + 48) as u64;
+            let text_end = text_start + u64_at(self.text_section_offset + 40);
+            assert!(text_start <= entryoff && entryoff < text_end);
+            assert_eq!(self.bytes.len() as u64, self.linkedit_file_range.end);
+        }
+    }
+
+    fn macho_with_data_segment() -> MultiSegmentMachoFixture {
+        let text_file_range = 0..0x800;
+        let data_file_range = 0x800..0x900;
+        let linkedit_file_range = 0x900..0xa00;
+        let text_vm_range = 0x1_0000_0000..0x1_0000_2000;
+        let data_vm_range = 0x1_0000_2000..0x1_0000_3000;
+        let linkedit_vm_range = 0x1_0000_3000..0x1_0000_4000;
+        let text_section = macho_section(
+            "__text",
+            "__TEXT",
+            text_vm_range.start + 0x400,
+            64,
+            0x400,
+            4,
+            0,
+        );
+        let data_section = macho_section(
             "__data",
             "__DATA",
-            0x1_0000_2000,
+            data_vm_range.start,
             64,
-            400,
+            data_file_range.start as u32,
             3,
             0,
-        ));
-        bytes.extend_from_slice(&macho_section(
-            "__bss",
-            "__DATA",
-            0x1_0000_2100,
-            128,
-            0,
-            3,
-            1,
-        ));
-        bytes.extend_from_slice(&macho_section(
+        );
+        let bss_section =
+            macho_section("__bss", "__DATA", data_vm_range.start + 0x100, 128, 0, 3, 1);
+        let thread_bss_section = macho_section(
             "__thread_bss",
             "__DATA",
-            0x1_0000_2200,
+            data_vm_range.start + 0x200,
             128,
             0,
             3,
             0x12,
-        ));
-        bytes
+        );
+        let commands = [
+            macho_segment("__PAGEZERO", 0, 0x1_0000_0000, 0, 0, 0, 0, &[]),
+            macho_segment(
+                "__TEXT",
+                text_vm_range.start,
+                text_vm_range.end - text_vm_range.start,
+                text_file_range.start,
+                text_file_range.end - text_file_range.start,
+                7,
+                5,
+                &[text_section],
+            ),
+            macho_segment(
+                "__DATA",
+                data_vm_range.start,
+                data_vm_range.end - data_vm_range.start,
+                data_file_range.start,
+                data_file_range.end - data_file_range.start,
+                7,
+                3,
+                &[data_section, bss_section, thread_bss_section],
+            ),
+            macho_segment(
+                "__LINKEDIT",
+                linkedit_vm_range.start,
+                linkedit_vm_range.end - linkedit_vm_range.start,
+                linkedit_file_range.start,
+                linkedit_file_range.end - linkedit_file_range.start,
+                7,
+                1,
+                &[],
+            ),
+            macho_build_version(PLATFORM_MACOS),
+            macho_main(0x400),
+        ];
+        let sizeofcmds = commands.iter().map(Vec::len).sum::<usize>();
+        let command_offsets = commands
+            .iter()
+            .scan(32usize, |offset, command| {
+                let current = *offset;
+                *offset += command.len();
+                Some(current)
+            })
+            .collect::<Vec<_>>();
+        let mut bytes = Vec::with_capacity(linkedit_file_range.end as usize);
+        bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
+        bytes.extend_from_slice(&ARM64.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&MH_EXECUTE.to_le_bytes());
+        bytes.extend_from_slice(&(commands.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(sizeofcmds as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for command in commands {
+            bytes.extend_from_slice(&command);
+        }
+        bytes.resize(linkedit_file_range.end as usize, 0);
+        MultiSegmentMachoFixture {
+            bytes,
+            command_table_end: 32 + sizeofcmds,
+            pagezero_segment_offset: command_offsets[0],
+            text_segment_offset: command_offsets[1],
+            text_section_offset: command_offsets[1] + 72,
+            data_segment_offset: command_offsets[2],
+            data_section_offset: command_offsets[2] + 72,
+            bss_section_offset: command_offsets[2] + 72 + 80,
+            thread_bss_section_offset: command_offsets[2] + 72 + 160,
+            linkedit_segment_offset: command_offsets[3],
+            main_command_offset: command_offsets[5],
+            text_file_range,
+            data_file_range,
+            linkedit_file_range,
+            text_vm_range,
+            data_vm_range,
+            linkedit_vm_range,
+        }
     }
 
     fn macho_section(
@@ -2689,21 +2959,54 @@ mod tests {
         bytes
     }
 
-    fn macho_segment(name: &str, fileoff: u64, filesize: u64, initprot: u32) -> Vec<u8> {
+    #[allow(clippy::too_many_arguments)]
+    fn macho_segment(
+        name: &str,
+        vmaddr: u64,
+        vmsize: u64,
+        fileoff: u64,
+        filesize: u64,
+        maxprot: u32,
+        initprot: u32,
+        sections: &[Vec<u8>],
+    ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
-        bytes.extend_from_slice(&72u32.to_le_bytes());
+        bytes.extend_from_slice(&(72u32 + sections.len() as u32 * 80).to_le_bytes());
         let mut name_bytes = [0u8; 16];
         name_bytes[..name.len()].copy_from_slice(name.as_bytes());
         bytes.extend_from_slice(&name_bytes);
-        bytes.extend_from_slice(&0x1_0000_0000u64.to_le_bytes());
-        bytes.extend_from_slice(&filesize.to_le_bytes());
+        bytes.extend_from_slice(&vmaddr.to_le_bytes());
+        bytes.extend_from_slice(&vmsize.to_le_bytes());
         bytes.extend_from_slice(&fileoff.to_le_bytes());
         bytes.extend_from_slice(&filesize.to_le_bytes());
-        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&maxprot.to_le_bytes());
         bytes.extend_from_slice(&initprot.to_le_bytes());
+        bytes.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for section in sections {
+            bytes.extend_from_slice(section);
+        }
+        bytes
+    }
+
+    fn macho_build_version(platform: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&LC_BUILD_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&platform.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
+
+    fn macho_main(entryoff: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&LC_MAIN.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&entryoff.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes
     }
 
