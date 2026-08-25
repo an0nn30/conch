@@ -60,6 +60,33 @@
     }
   }
 
+  // The ⋮ overflow menu holds the low-frequency actions the toolbar no longer
+  // shows inline: Go home and the checkable hidden-files toggle. Anchored to
+  // the button's rect (keyboard activation synthesizes 0,0 click coords).
+  function openMoreMenu(btn, pane, d) {
+    if (!global.tlMenu || typeof global.tlMenu.open !== 'function') return;
+    const rect = typeof btn.getBoundingClientRect === 'function'
+      ? btn.getBoundingClientRect()
+      : { left: 0, bottom: 0 };
+    global.tlMenu.open({
+      x: rect.left,
+      y: rect.bottom + 2,
+      ariaLabel: 'More file actions',
+      items: [
+        {
+          label: 'Go home',
+          disabled: !pane.isLocal && !d.activeRemotePaneId,
+          onSelect: () => { if (typeof d.onHome === 'function') d.onHome(); },
+        },
+        {
+          label: 'Show hidden files',
+          checked: !!pane.showHidden,
+          onSelect: () => { if (typeof d.onToggleHidden === 'function') d.onToggleHidden(); },
+        },
+      ],
+    });
+  }
+
   function renderPane(pane, el, deps) {
     if (!el || !pane) return;
     const d = deps || {};
@@ -86,15 +113,18 @@
     const activityText = transferActivityText(pane.transferStatus);
 
     el.innerHTML = `
+      ${isRemote ? `
+      <div class="fp-host-strip">
+        <span class="fp-host-status${noSession ? '' : ' is-connected'}" title="${noSession ? 'Not connected' : 'Connected'}"></span>
+        <span class="fp-host-combo-slot"></span>
+      </div>` : ''}
       <div class="fp-toolbar">
-        ${isRemote ? '<span class="fp-tb-group fp-tb-conn"><span class="fp-host-combo-slot"></span></span>' : ''}
         <span class="fp-tb-group fp-tb-nav">
           <button class="fp-tb-btn" data-action="back" ${pane.backStack.length === 0 ? 'disabled' : ''} title="Back">${d.iconBack || ''}</button>
           <button class="fp-tb-btn" data-action="forward" ${pane.forwardStack.length === 0 ? 'disabled' : ''} title="Forward">${d.iconForward || ''}</button>
           <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
-          <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${d.iconHome || ''}</button>
           <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${d.iconRefresh || ''}</button>
-          <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">${d.iconHidden || '.*'}</button>
+          <button class="fp-tb-btn" data-action="more" title="More actions" aria-haspopup="menu">${d.iconMore || '⋮'}</button>
         </span>
       </div>
       ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}
@@ -187,9 +217,8 @@
         const action = btn.dataset.action;
         if (action === 'back' && typeof d.onBack === 'function') d.onBack();
         else if (action === 'forward' && typeof d.onForward === 'function') d.onForward();
-        else if (action === 'home' && typeof d.onHome === 'function') d.onHome();
         else if (action === 'refresh' && typeof d.onRefresh === 'function') d.onRefresh();
-        else if (action === 'hidden' && typeof d.onToggleHidden === 'function') d.onToggleHidden();
+        else if (action === 'more') openMoreMenu(btn, pane, d);
       });
     });
 

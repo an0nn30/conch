@@ -53,39 +53,53 @@ function pane(isLocal) {
   };
 }
 
-// The local pane has no connection identity: navigation group only.
+// The local pane has no connection identity: no host strip, and a slim nav
+// row of back/forward, path, refresh, and the overflow menu button.
 {
   const view = loadPaneView();
   const el = recordingElement();
   view.renderPane(pane(true), el, {});
+  assert.ok(!el.innerHTML.includes('fp-host-strip'), 'local pane must not render a host strip');
   assert.ok(el.innerHTML.includes('fp-tb-nav'), 'local toolbar must render the navigation group');
-  assert.ok(!el.innerHTML.includes('fp-tb-conn'), 'local toolbar must not render a connection group');
-  assert.ok(!el.innerHTML.includes('fp-host-combo-slot'), 'local toolbar must not render a host slot');
+  assert.ok(el.innerHTML.includes('data-action="more"'), 'local toolbar must render the overflow button');
+  assert.ok(!el.innerHTML.includes('data-action="home"'), 'home moves into the overflow menu');
+  assert.ok(!el.innerHTML.includes('data-action="hidden"'), 'hidden toggle moves into the overflow menu');
 }
 
-// The remote pane renders the connection group before the navigation group,
-// with the host slot inside it.
+// The remote pane renders a host header strip ABOVE the toolbar — status dot,
+// the host slot (tl-combo mounts there), and disconnect — then the same slim
+// navigation row as the local pane.
 {
   const view = loadPaneView();
   const el = recordingElement();
   view.renderPane(pane(false), el, { activeRemotePaneId: 3 });
   const html = el.innerHTML;
-  const connAt = html.indexOf('fp-tb-conn');
-  const navAt = html.indexOf('fp-tb-nav');
-  assert.ok(connAt >= 0, 'remote toolbar must render the connection group');
-  assert.ok(navAt >= 0, 'remote toolbar must render the navigation group');
-  assert.ok(connAt < navAt, 'connection group must precede navigation in the DOM');
+  const stripAt = html.indexOf('fp-host-strip');
+  const toolbarAt = html.indexOf('fp-toolbar');
+  assert.ok(stripAt >= 0, 'remote pane must render the host strip');
+  assert.ok(toolbarAt >= 0, 'remote pane must render the toolbar');
+  assert.ok(stripAt < toolbarAt, 'host strip must sit above the toolbar');
 
   const slotAt = html.indexOf('fp-host-combo-slot');
-  assert.ok(slotAt > connAt && slotAt < navAt, 'host slot must live inside the connection group');
-
-  const toolbarAt = html.indexOf('fp-toolbar');
-  assert.ok(toolbarAt >= 0 && toolbarAt < connAt, 'both groups must live inside the toolbar');
+  assert.ok(slotAt > stripAt && slotAt < toolbarAt, 'host slot must live inside the strip');
+  assert.ok(html.includes('fp-host-status'), 'strip must render a connection status dot');
+  assert.ok(html.includes('is-connected'), 'an active session must mark the dot connected');
 
   for (const control of ['data-action="back"', 'data-action="forward"', 'fp-path-input',
-    'data-action="home"', 'data-action="refresh"', 'data-action="hidden"']) {
-    assert.ok(html.indexOf(control) > navAt, `${control} must live inside the navigation group`);
+    'data-action="refresh"', 'data-action="more"']) {
+    assert.ok(html.indexOf(control) > toolbarAt, `${control} must live inside the toolbar`);
   }
+  assert.ok(!html.includes('data-action="home"'), 'home moves into the overflow menu');
+  assert.ok(!html.includes('data-action="hidden"'), 'hidden toggle moves into the overflow menu');
+}
+
+// Disconnected remote pane: the dot is not marked connected.
+{
+  const view = loadPaneView();
+  const el = recordingElement();
+  view.renderPane(pane(false), el, {});
+  assert.ok(el.innerHTML.includes('fp-host-status'), 'strip renders its dot while disconnected');
+  assert.ok(!el.innerHTML.includes('is-connected'), 'no active session means no connected marker');
 }
 
 console.log('pane toolbar layout: all assertions passed');

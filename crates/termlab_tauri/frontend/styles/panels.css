@@ -21,27 +21,29 @@
     .tool-zone[data-zone^="right"] .fp-pane-divider {
       cursor: row-resize; border-left: none; border-top: 1px solid var(--tl-border);
     }
+    /* Remote pane context header: connection status dot + host picker +
+       disconnect. The whole strip reads as the pane's identity; the tl-combo
+       inside renders "ghost" (borderless) so it looks like a header, not a
+       form control. */
+    .fp-host-strip {
+      display: flex; align-items: center; gap: 6px; padding: 4px 8px; flex-shrink: 0;
+      background: var(--panel-bg); border-bottom: 1px solid var(--tab-border);
+    }
+    .fp-host-status {
+      width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+      background: var(--dim-fg);
+    }
+    .fp-host-status.is-connected { background: var(--green); }
+    .fp-host-strip .fp-host-combo-slot { flex: 1; max-width: none; margin-left: 0; }
+    .fp-host-strip .fp-host-combo-slot .tl-combo {
+      flex: 1; max-width: none; border-color: transparent; background: transparent; font-weight: 500;
+    }
+    .fp-host-strip .fp-host-combo-slot .tl-combo:hover { background: var(--active-highlight); }
     .fp-toolbar {
-      display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0; flex-wrap: wrap;
+      display: flex; align-items: center; gap: 3px; padding: 5px 8px 4px; flex-shrink: 0;
     }
-    /* Toolbar groups: connection identity (remote host picker + disconnect)
-       and navigation (history, path, view controls). The connection group is
-       first in the DOM — it is the pane's context — but sits visually on the
-       right in the wide single-row layout via `order`. */
-    .fp-tb-group { display: flex; align-items: center; gap: 2px; min-width: 0; }
+    .fp-tb-group { display: flex; align-items: center; gap: 3px; min-width: 0; }
     .fp-tb-nav { flex: 1 1 auto; }
-    .fp-tb-conn { order: 1; }
-    /* Narrow panes stack the groups: host row on top at full width, then the
-       navigation row where the path input finally gets room to breathe. */
-    @container fp-pane (max-width: 420px) {
-      /* Two dense rows need their own rhythm: separate them vertically and
-         inset the toolbar a touch more than the wide single-row layout. */
-      .fp-toolbar { row-gap: 6px; column-gap: 3px; padding: 6px 8px 5px; }
-      .fp-tb-conn { order: 0; flex: 1 1 100%; }
-      .fp-tb-nav { flex: 1 1 100%; gap: 3px; }
-      .fp-tb-conn .fp-host-combo-slot { flex: 1; max-width: none; margin-left: 0; }
-      .fp-tb-conn .fp-host-combo-slot .tl-combo { flex: 1; max-width: none; }
-    }
     .fp-tb-btn {
       background: none; border: 1px solid transparent; border-radius: 3px;
       color: var(--text-muted); cursor: pointer; padding: 2px 5px; font-size: var(--ui-font-small); line-height: 1;
@@ -56,8 +58,8 @@
        pane-view.js after every toolbar rebuild (app/ui/tl-combo.js wraps the
        hidden .fp-host-select; see files-panel.js's onComboMount). Sized down
        from tl-combo's 26px default to match this toolbar's 24px controls. */
-    .fp-host-combo-slot { display: flex; align-items: center; gap: 4px; margin-left: 4px; min-width: 0; max-width: 220px; }
-    .fp-host-combo-slot .tl-combo { height: 24px; font-size: var(--ui-font-small); max-width: 200px; }
+    .fp-host-combo-slot { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .fp-host-combo-slot .tl-combo { height: 24px; font-size: var(--ui-font-small); }
     .fp-host-disconnect { flex-shrink: 0; }
     .fp-path-input {
       flex: 1; min-width: 0; height: 24px; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
