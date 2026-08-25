@@ -17,10 +17,10 @@ pub mod positional;
 pub mod sftp_io;
 pub use copy::{ControlDecision, CopyOutcome, copy_with_checkpoint};
 pub use sftp_io::{
-    SftpFileHandle, SftpSessionHandle, download_to_partial, download_to_partial_pipelined,
-    fingerprint_local_parts, fingerprint_open_local, fingerprint_open_remote,
-    fingerprint_remote_parts, open_local_partial, open_remote_partial, open_sftp_session,
-    truncate_local_partial, truncate_remote_partial, upload_to_partial,
+    SftpFileHandle, SftpSessionHandle, clamp_pipelined_chunk_bytes, download_to_partial,
+    download_to_partial_pipelined, fingerprint_local_parts, fingerprint_open_local,
+    fingerprint_open_remote, fingerprint_remote_parts, open_local_partial, open_remote_partial,
+    open_sftp_session, truncate_local_partial, truncate_remote_partial, upload_to_partial,
     upload_to_partial_pipelined,
 };
 

@@ -14,6 +14,7 @@ use termlab_remote::{
     error::RemoteError,
     transfer::{
         ControlDecision, CopyOutcome, SftpFileHandle, SftpSessionHandle, SourceFingerprint,
+        clamp_pipelined_chunk_bytes,
         copy::{CopyError, CopyStage, copy_with_checkpoint_typed},
         download_to_partial_pipelined, fingerprint_open_local, fingerprint_open_remote,
         open_local_partial, open_remote_partial, open_sftp_session,
@@ -397,9 +398,10 @@ impl CopyRangesError {
     }
 }
 
-/// Strip the `"<stage> failed: "` prefix [`CopyError::Io`] renders, so only
-/// transport's own words are ever classified.
-fn copy_stage_cause(message: &str) -> Option<&str> {
+/// Recover the copy stage and transport's own words from the `"<stage> failed:
+/// <cause>"` text [`CopyError::Io`] renders, so neither the stage nor a
+/// user-controlled path is ever fed to a text classifier.
+fn copy_stage_cause(message: &str) -> Option<(CopyStage, &str)> {
     for stage in [
         CopyStage::SeekSource,
         CopyStage::SeekDestination,
@@ -408,10 +410,25 @@ fn copy_stage_cause(message: &str) -> Option<&str> {
     ] {
         let prefix = format!("{stage} failed: ");
         if let Some(cause) = message.strip_prefix(prefix.as_str()) {
-            return Some(cause);
+            return Some((stage, cause));
         }
     }
     None
+}
+
+/// Recover the [`std::io::ErrorKind`] that flattening to `RemoteError::Transfer`
+/// erased.
+///
+/// Only the pipelined engine's own synthetic truncated read is recoverable —
+/// it is raised with `ErrorKind::UnexpectedEof` and a fixed message shape (see
+/// `pipelined::transfer_chunk`) — so a short remote read keeps the sequential
+/// engine's transient classification instead of degrading to text matching.
+fn pipelined_cause_kind(cause: &str) -> std::io::ErrorKind {
+    if cause.starts_with("short read of ") {
+        std::io::ErrorKind::UnexpectedEof
+    } else {
+        std::io::ErrorKind::Other
+    }
 }
 
 /// Classify a failure one of the pipelined engines reported.
@@ -420,20 +437,40 @@ fn copy_stage_cause(message: &str) -> Option<&str> {
 /// [`TransferIoError::from_remote`] deliberately treats as permanent so a
 /// user-controlled path can never fake a transient cause. A copy-stage prefix
 /// proves the text really is transport's own, so a pipelined copy failure
-/// keeps the same transient/permanent split the sequential engine gives it;
-/// everything else falls back to the conservative mapping.
-fn classify_pipelined_failure(error: RemoteError) -> TransferIoError {
+/// keeps the same transient/permanent split the sequential engine gives it —
+/// including [`TransferIoError::from_copy`]'s rule that only the stages that
+/// are *remote for this direction* may be classified transient at all. A local
+/// stage stays permanent no matter what its `io::Error` text says, which
+/// matters because local partials can live on NFS/SMB/sshfs mounts that report
+/// real "Connection timed out" and "Broken pipe" errors. Everything without a
+/// stage prefix falls back to the conservative mapping.
+fn classify_pipelined_failure(
+    direction: &TransferDirection,
+    error: RemoteError,
+) -> TransferIoError {
     let RemoteError::Transfer(message) = &error else {
         return TransferIoError::from_remote(error);
     };
-    match copy_stage_cause(message) {
-        Some(cause) => TransferIoError {
-            class: classify_transport_failure(cause),
-            message: message.clone(),
-            source_missing: false,
-        },
-        None => TransferIoError::from_remote(error),
+    let Some((stage, cause)) = copy_stage_cause(message) else {
+        return TransferIoError::from_remote(error);
+    };
+    let class = if copy_stage_is_remote(direction, stage) {
+        classify_remote_io_failure(pipelined_cause_kind(cause), cause)
+    } else {
+        FailureClass::Permanent
+    };
+    TransferIoError {
+        class,
+        message: message.clone(),
+        source_missing: false,
     }
+}
+
+/// The operator-facing warning emitted when a pipelined attempt degrades to
+/// the sequential engine. A named function so its shape is testable without
+/// standing up a process-global logger.
+fn sequential_fallback_warning(job_id: Uuid, cause: &str) -> String {
+    format!("pipelined transfer for job {job_id} degraded to sequential: {cause}")
 }
 
 /// The last offset the pipelined engine's first window can reach.
@@ -442,8 +479,15 @@ fn classify_pipelined_failure(error: RemoteError) -> TransferIoError {
 /// completing out of order, so re-running the same range sequentially is
 /// safe. `total` clamps it: when the whole remaining range fits inside one
 /// window, every failure is a first-window failure.
+///
+/// The tuning goes through [`clamp_pipelined_chunk_bytes`] first because that
+/// is what the engines actually run with — queue settings allow a `chunk_bytes`
+/// several times larger than the raw SFTP cap, and trusting the configured
+/// value would overestimate the window and degrade transfers that were well
+/// past it.
 fn pipeline_first_window_end(offset: u64, total: u64, tuning: PipelineTuning) -> u64 {
-    let window = (tuning.depth as u64).saturating_mul(tuning.chunk_bytes as u64);
+    let effective = clamp_pipelined_chunk_bytes(tuning);
+    let window = (effective.depth as u64).saturating_mul(effective.chunk_bytes as u64);
     offset.saturating_add(window).min(total)
 }
 
@@ -841,11 +885,7 @@ where
             // attempt already opened: both engines address absolute offsets,
             // so the retry overwrites rather than appends.
             if let Err(error) = &copy_result {
-                log::warn!(
-                    "pipelined transfer for job {} degraded to sequential: {}",
-                    job.id,
-                    error.message()
-                );
+                log::warn!("{}", sequential_fallback_warning(job.id, &error.message()));
             }
             copy_result = self
                 .io
@@ -1609,7 +1649,7 @@ impl TransferIo<ResolvedSftpConnection> for RealTransferIo {
                 actual,
             });
         }
-        let classified = classify_pipelined_failure(error);
+        let classified = classify_pipelined_failure(&job.direction, error);
         if furthest <= pipeline_first_window_end(request.offset, request.total, request.tuning) {
             return Err(CopyRangesError::DegradeToSequential(classified));
         }
@@ -2107,7 +2147,7 @@ mod tests {
         config::ServerEntry,
         ssh::{SshCredentials, connect_and_auth},
         transfer::{
-            ControlDecision, CopyOutcome, SourceFingerprint,
+            ControlDecision, CopyOutcome, SourceFingerprint, clamp_pipelined_chunk_bytes,
             copy::{CopyError, CopyStage, copy_with_checkpoint_typed},
             fingerprint_open_local, open_sftp_session,
             pipelined::PipelineTuning,
@@ -2125,6 +2165,7 @@ mod tests {
         RunnerResult, SftpTransferJobRunner, TransferIo, TransferIoError, TransferJobRunner,
         cached_resource, classify_pipelined_failure, failed, pipeline_first_window_end,
         recover_commit, remove_local_artifact, select_live_connection_key, sequential_copy_ranges,
+        sequential_fallback_warning,
     };
     use crate::remote::transfer_queue::{
         artifacts::ArtifactInventory,
@@ -3219,12 +3260,25 @@ mod tests {
         fn flush(&self) {}
     }
 
-    fn install_warning_capture() {
+    static CAPTURE_IS_LIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Returns whether records actually reach [`CAPTURED_WARNINGS`].
+    ///
+    /// `log` allows exactly one logger per process, so if some other test (or
+    /// a future `env_logger::init`) wins the race, ours never receives
+    /// anything. Callers must treat a `false` here as "cannot observe", not as
+    /// "nothing was logged" — the message shape itself is pinned separately by
+    /// `the_fallback_warning_names_the_job_and_the_cause`, which needs no
+    /// logger at all.
+    fn install_warning_capture() -> bool {
         CAPTURE_INSTALLED.call_once(|| {
             if log::set_boxed_logger(Box::new(CapturedWarnings)).is_ok() {
                 log::set_max_level(log::LevelFilter::Warn);
+                CAPTURE_IS_LIVE.store(true, Ordering::SeqCst);
             }
         });
+        CAPTURE_IS_LIVE.load(Ordering::SeqCst)
     }
 
     fn captured_warnings_for(job_id: Uuid) -> Vec<String> {
@@ -3241,9 +3295,13 @@ mod tests {
     #[tokio::test]
     async fn a_pipelined_copy_disconnect_keeps_the_sequential_transient_classification() {
         // What `pipelined_copy` produces once `From<CopyError>` flattens it.
-        let error = classify_pipelined_failure(RemoteError::Transfer(
-            "write destination failed: the SFTP channel closed while writing".into(),
-        ));
+        // WriteDestination is the remote stage for an upload.
+        let error = classify_pipelined_failure(
+            &TransferDirection::Upload,
+            RemoteError::Transfer(
+                "write destination failed: the SFTP channel closed while writing".into(),
+            ),
+        );
         let sequential = classify_copy_write_failure(
             TransferDirection::Upload,
             ErrorKind::Other,
@@ -3258,23 +3316,92 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_transient_looking_local_stage_failure_stays_permanent_in_both_engines() {
+        // The quadrant a direction-blind classifier gets wrong: for an upload
+        // the source is LOCAL, and a local partial on NFS/SMB/sshfs really
+        // does report "Connection timed out". The sequential engine calls that
+        // permanent; so must the pipelined one.
+        let cause = "Connection timed out (os error 110)";
+        let pipelined = classify_pipelined_failure(
+            &TransferDirection::Upload,
+            RemoteError::Transfer(format!("read source failed: {cause}")),
+        );
+        let sequential =
+            classify_copy_read_failure(TransferDirection::Upload, ErrorKind::Other, cause).await;
+
+        assert_eq!(pipelined.class, FailureClass::Permanent);
+        assert_eq!(pipelined.class, sequential.class);
+
+        // The mirror image: a download writes to a LOCAL partial.
+        let broken_pipe = classify_pipelined_failure(
+            &TransferDirection::Download,
+            RemoteError::Transfer("write destination failed: Broken pipe (os error 32)".into()),
+        );
+        assert_eq!(broken_pipe.class, FailureClass::Permanent);
+
+        // And the same causes on the stage that really is remote for that
+        // direction stay transient, so this is a direction split rather than a
+        // blanket downgrade.
+        let remote_read = classify_pipelined_failure(
+            &TransferDirection::Download,
+            RemoteError::Transfer(format!("read source failed: {cause}")),
+        );
+        let remote_write = classify_pipelined_failure(
+            &TransferDirection::Upload,
+            RemoteError::Transfer("write destination failed: Broken pipe (os error 32)".into()),
+        );
+        assert_eq!(remote_read.class, FailureClass::Transient);
+        assert_eq!(remote_write.class, FailureClass::Transient);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_remote_read_is_transient_like_the_sequential_unexpected_eof() {
+        // `pipelined::transfer_chunk` raises this with `UnexpectedEof`, which
+        // flattening to `RemoteError::Transfer` erases.
+        let pipelined = classify_pipelined_failure(
+            &TransferDirection::Download,
+            RemoteError::Transfer("read source failed: short read of 3 bytes at offset 12".into()),
+        );
+        let sequential = classify_copy_read_failure(
+            TransferDirection::Download,
+            ErrorKind::UnexpectedEof,
+            "short read of 3 bytes at offset 12",
+        )
+        .await;
+
+        assert_eq!(pipelined.class, FailureClass::Transient);
+        assert_eq!(pipelined.class, sequential.class);
+
+        // A short read on the local side of an upload is still permanent.
+        let local = classify_pipelined_failure(
+            &TransferDirection::Upload,
+            RemoteError::Transfer("read source failed: short read of 3 bytes at offset 12".into()),
+        );
+        assert_eq!(local.class, FailureClass::Permanent);
+    }
+
     #[test]
     fn a_pipelined_setup_failure_stays_permanent_even_with_a_disconnecting_path() {
         // No copy-stage prefix, so the user-controlled path text is never
         // allowed to fake a transient cause.
-        let error = classify_pipelined_failure(RemoteError::Transfer(
-            "open local source /tmp/timeout/connection reset.bin for pipelined upload failed: permission denied"
-                .into(),
-        ));
+        let error = classify_pipelined_failure(
+            &TransferDirection::Upload,
+            RemoteError::Transfer(
+                "open local source /tmp/timeout/connection reset.bin for pipelined upload failed: permission denied"
+                    .into(),
+            ),
+        );
 
         assert_eq!(error.class, FailureClass::Permanent);
     }
 
     #[test]
     fn a_pipelined_copy_permission_failure_stays_permanent() {
-        let error = classify_pipelined_failure(RemoteError::Transfer(
-            "read source failed: permission denied".into(),
-        ));
+        let error = classify_pipelined_failure(
+            &TransferDirection::Download,
+            RemoteError::Transfer("read source failed: permission denied".into()),
+        );
 
         assert_eq!(error.class, FailureClass::Permanent);
     }
@@ -3306,6 +3433,27 @@ mod tests {
             pipeline_first_window_end(10, 10, tuning),
             10,
             "a zero-length copy reports no progress at all, so it degrades"
+        );
+    }
+
+    #[test]
+    fn the_window_uses_the_chunk_size_the_engine_will_really_run_with() {
+        // Queue settings allow up to 1 MiB, but the raw SFTP session clamps to
+        // 255 KiB. Trusting the configured value would put the boundary ~4x too
+        // far out and degrade transfers that were well past their first window.
+        let configured = PipelineTuning {
+            depth: 16,
+            chunk_bytes: 1024 * 1024,
+        };
+        let effective = clamp_pipelined_chunk_bytes(configured);
+
+        assert!(
+            effective.chunk_bytes < configured.chunk_bytes,
+            "this test is only meaningful while the engine clamps"
+        );
+        assert_eq!(
+            pipeline_first_window_end(0, u64::MAX, configured),
+            16 * effective.chunk_bytes as u64
         );
     }
 
@@ -3382,7 +3530,7 @@ mod tests {
 
     #[tokio::test]
     async fn pipelined_failure_in_first_window_falls_back_to_sequential() {
-        install_warning_capture();
+        let capture_is_live = install_warning_capture();
         let log = Arc::new(StdMutex::new(Vec::new()));
         let inner = FakeIo::new(log.clone(), fingerprint(4, Some("v1"))).with_inventory(
             ArtifactInventory {
@@ -3437,15 +3585,32 @@ mod tests {
             operations.contains(&"phase:Complete".to_string()),
             "the fallback still commits: {operations:?}"
         );
-        let warnings = captured_warnings_for(job_id);
+        if capture_is_live {
+            let warnings = captured_warnings_for(job_id);
+            assert_eq!(
+                warnings.len(),
+                1,
+                "exactly one warn-level fallback record: {warnings:?}"
+            );
+            assert!(
+                warnings[0].starts_with("WARN") && warnings[0].contains("concurrency rejected"),
+                "the warning names the failure that caused the degrade: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fallback_warning_names_the_job_and_the_cause() {
+        let job_id = Uuid::from_u128(0x5eed);
+
+        let warning = sequential_fallback_warning(job_id, "write destination failed: whatever");
+
         assert_eq!(
-            warnings.len(),
-            1,
-            "exactly one warn-level fallback record: {warnings:?}"
-        );
-        assert!(
-            warnings[0].starts_with("WARN") && warnings[0].contains("concurrency rejected"),
-            "the warning names the failure that caused the degrade: {warnings:?}"
+            warning,
+            format!(
+                "pipelined transfer for job {job_id} degraded to sequential: \
+                 write destination failed: whatever"
+            )
         );
     }
 

@@ -680,7 +680,13 @@ pub(crate) async fn revalidate_remote_fingerprint(
 /// the server's exact advertised limit.
 const RAW_SFTP_MAX_CHUNK_BYTES: usize = 255 * 1024;
 
-fn clamp_pipelined_chunk_bytes(tuning: PipelineTuning) -> PipelineTuning {
+/// The tuning the pipelined engines will actually run with.
+///
+/// Callers that need to reason about the real window size — the transfer
+/// runner's first-window fallback boundary, for one — must clamp through this
+/// rather than trusting the configured `chunk_bytes`, which queue settings
+/// allow up to 1 MiB.
+pub fn clamp_pipelined_chunk_bytes(tuning: PipelineTuning) -> PipelineTuning {
     PipelineTuning {
         depth: tuning.depth,
         chunk_bytes: tuning.chunk_bytes.min(RAW_SFTP_MAX_CHUNK_BYTES),
