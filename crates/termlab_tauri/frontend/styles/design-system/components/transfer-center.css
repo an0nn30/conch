@@ -103,6 +103,9 @@
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  /* Size container so the narrow (sidebar) card layout below keys off the
+     panel's own width, not the window's. */
+  container: tl-transfer-center / inline-size;
 }
 
 .tl-transfer-center__table {
@@ -223,4 +226,44 @@
 
 .tl-transfer-center__action + .tl-transfer-center__action {
   margin-left: var(--tl-space-1);
+}
+
+/* Narrow docks (left/right sidebars, skinny splits): the six-column table
+   reflows into two-line cards — same DOM, CSS-only. Line 1: file + speed +
+   actions; line 2: status + full-width progress; line 3: host and paths,
+   muted. Wide docks keep the dense table above. */
+@container tl-transfer-center (max-width: 560px) {
+  .tl-transfer-center__table { display: block; min-width: 0; width: 100%; }
+  .tl-transfer-center__table thead { display: none; }
+  .tl-transfer-center__table tbody { display: block; }
+  .tl-transfer-center__row {
+    display: flex; flex-wrap: wrap; align-items: center;
+    height: auto; padding: 5px var(--tl-space-2); column-gap: 6px; row-gap: 3px;
+    border-bottom: 1px solid var(--tl-border);
+  }
+  .tl-transfer-center__cell {
+    display: block; height: auto; padding: 0; border-bottom: none;
+  }
+  .tl-transfer-center__cell--file {
+    order: 1; flex: 1 1 auto; min-width: 0;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .tl-transfer-center__cell--speed { order: 2; flex: 0 0 auto; }
+  /* Cards show their actions on the selected (or hovered) row only; the
+     keyboard path is unaffected — arrow selection reveals them, and the
+     Space/Enter/Delete shortcuts never depended on the buttons being shown. */
+  .tl-transfer-center__cell--actions { order: 3; flex: 0 0 auto; display: none; }
+  .tl-transfer-center__row.is-selected .tl-transfer-center__cell--actions,
+  .tl-transfer-center__row:hover .tl-transfer-center__cell--actions,
+  .tl-transfer-center__row:focus-within .tl-transfer-center__cell--actions { display: block; }
+  .tl-transfer-center__cell--status { order: 4; flex: 1 1 100%; }
+  .tl-transfer-center__cell--host { order: 5; flex: 0 0 auto; }
+  .tl-transfer-center__cell--destination { order: 6; flex: 1 1 0; min-width: 0; }
+  .tl-transfer-center__cell--host,
+  .tl-transfer-center__cell--destination,
+  .tl-transfer-center__cell--speed {
+    font-size: 10px;
+    color: var(--tl-fg-muted);
+  }
+  .tl-transfer-center__progress { width: 100%; display: block; margin-top: 2px; margin-left: 0; }
 }
