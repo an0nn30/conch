@@ -594,10 +594,22 @@ function dialogButton(dialog, label) {
   const concurrency = harness.dialogs.at(-1);
   concurrency.bodyEl.querySelector('[data-transfer-field="global-limit"]').value = '6';
   concurrency.bodyEl.querySelector('[data-transfer-field="per-host-limit"]').value = '3';
+  concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-depth"]').value = '8';
+  concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-chunk-kib"]').value = '512';
   await dialogButton(concurrency, 'Save').onSelect();
   assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.runtimeCalls.at(-1))), {
-    method: 'updateSettings', args: [{ globalLimit: 6, perHostLimit: 3 }],
+    method: 'updateSettings',
+    args: [{ globalLimit: 6, perHostLimit: 3, pipelineDepth: 8, pipelineChunkBytes: 512 * 1024 }],
   });
+
+  const priorCallCount = harness.runtimeCalls.length;
+  click(harness.panelEl, harness.panelEl.querySelector('[data-transfer-action="concurrency"]'));
+  const invalidConcurrency = harness.dialogs.at(-1);
+  invalidConcurrency.bodyEl.querySelector('[data-transfer-field="pipeline-depth"]').value = '0';
+  await dialogButton(invalidConcurrency, 'Save').onSelect();
+  const concurrencyError = invalidConcurrency.bodyEl.querySelector('[data-transfer-error="concurrency"]');
+  assert.strictEqual(concurrencyError.hidden, false);
+  assert.strictEqual(harness.runtimeCalls.length, priorCallCount, 'invalid pipeline depth records no updateSettings call');
 }
 
 // Mutating dialogs restore focus through the live keyed table, not a detached
@@ -749,6 +761,8 @@ function dialogButton(dialog, label) {
   const concurrency = harness.dialogs.at(-1);
   const globalInput = concurrency.bodyEl.querySelector('[data-transfer-field="global-limit"]');
   const hostInput = concurrency.bodyEl.querySelector('[data-transfer-field="per-host-limit"]');
+  const depthInput = concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-depth"]');
+  const chunkInput = concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-chunk-kib"]');
   const settingsError = concurrency.bodyEl.querySelector('[data-transfer-error="concurrency"]');
   globalInput.value = '0';
   hostInput.value = '2.5';
@@ -757,10 +771,15 @@ function dialogButton(dialog, label) {
   assert.strictEqual(settingsError.hidden, false);
   globalInput.value = '8';
   hostInput.value = '4';
+  depthInput.value = '12';
+  chunkInput.value = '128';
   await dialogButton(concurrency, 'Save').onSelect();
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(settings)), [{ globalLimit: 8, perHostLimit: 4 }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(settings)),
+    [{ globalLimit: 8, perHostLimit: 4, pipelineDepth: 12, pipelineChunkBytes: 128 * 1024 }]);
   assert.strictEqual(globalInput.value, '');
   assert.strictEqual(hostInput.value, '');
+  assert.strictEqual(depthInput.value, '');
+  assert.strictEqual(chunkInput.value, '');
 }
 
 // Every backend attention reason has its own safe copy and resolution set.

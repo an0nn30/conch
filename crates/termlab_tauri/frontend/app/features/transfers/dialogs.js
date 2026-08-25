@@ -257,15 +257,17 @@
     const inputs = [];
     let globalInput = null;
     let hostInput = null;
+    let depthInput = null;
+    let chunkInput = null;
     let errorEl = null;
 
-    function limitField(bodyEl, label, dataName, value) {
+    function limitField(bodyEl, label, dataName, value, min, max) {
       const field = append(bodyEl, 'label', 'tl-field');
       append(field, 'span', 'tl-field__label', label);
       const input = append(field, 'input', 'tl-input');
       input.setAttribute('type', 'number');
-      input.setAttribute('min', '1');
-      input.setAttribute('max', '32');
+      input.setAttribute('min', String(min));
+      input.setAttribute('max', String(max));
       input.setAttribute('step', '1');
       input.setAttribute('data-transfer-field', dataName);
       input.value = String(value);
@@ -273,10 +275,10 @@
       return input;
     }
 
-    function integerLimit(input) {
+    function integerLimit(input, min, max) {
       const text = String(input && input.value !== undefined ? input.value : '').trim();
       const value = Number(text);
-      return text !== '' && Number.isInteger(value) && value >= 1 && value <= 32 ? value : null;
+      return text !== '' && Number.isInteger(value) && value >= min && value <= max ? value : null;
     }
 
     handleRef.current = openDialog({
@@ -285,9 +287,13 @@
       size: 'sm',
       body(bodyEl) {
         const current = settings || {};
-        globalInput = limitField(bodyEl, 'All hosts', 'global-limit', current.globalLimit || 1);
-        hostInput = limitField(bodyEl, 'Per host', 'per-host-limit', current.perHostLimit || 1);
-        errorEl = append(bodyEl, 'div', 'tl-field__error', 'Enter whole numbers from 1 to 32 for both limits.');
+        globalInput = limitField(bodyEl, 'All hosts', 'global-limit', current.globalLimit || 1, 1, 32);
+        hostInput = limitField(bodyEl, 'Per host', 'per-host-limit', current.perHostLimit || 1, 1, 32);
+        depthInput = limitField(bodyEl, 'Pipeline depth', 'pipeline-depth',
+          current.pipelineDepth || 16, 1, 64);
+        chunkInput = limitField(bodyEl, 'Chunk size (KiB)', 'pipeline-chunk-kib',
+          Math.round((current.pipelineChunkBytes || 262144) / 1024), 32, 1024);
+        errorEl = append(bodyEl, 'div', 'tl-field__error', "Enter whole numbers within each field's range.");
         errorEl.setAttribute('data-transfer-error', 'concurrency');
         errorEl.setAttribute('role', 'alert');
         errorEl.hidden = true;
@@ -298,14 +304,20 @@
           label: 'Save',
           primary: true,
           onSelect: () => {
-            const globalLimit = integerLimit(globalInput);
-            const perHostLimit = integerLimit(hostInput);
-            if (globalLimit === null || perHostLimit === null) {
+            const globalLimit = integerLimit(globalInput, 1, 32);
+            const perHostLimit = integerLimit(hostInput, 1, 32);
+            const pipelineDepth = integerLimit(depthInput, 1, 64);
+            const chunkKib = integerLimit(chunkInput, 32, 1024);
+            if (globalLimit === null || perHostLimit === null || pipelineDepth === null || chunkKib === null) {
               if (errorEl) errorEl.hidden = false;
               return Promise.resolve();
             }
             if (errorEl) errorEl.hidden = true;
-            return closeAfter(handleRef, onSave, { globalLimit, perHostLimit });
+            return closeAfter(handleRef, onSave, {
+              globalLimit, perHostLimit,
+              pipelineDepth,
+              pipelineChunkBytes: chunkKib * 1024,
+            });
           },
         },
       ],
