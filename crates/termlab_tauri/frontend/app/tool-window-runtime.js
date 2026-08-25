@@ -600,6 +600,17 @@
         if (typeof global.toolWindowManager.summonPendingWindowHosts === 'function') {
           global.toolWindowManager.summonPendingWindowHosts();
         }
+
+        // Main window only — a panel host projects panels but must never
+        // steal a zone tab in response to queue events; the parent window
+        // does the summoning. The runtime finished hydrating above, so the
+        // subscription baseline is the restored queue, not an empty store.
+        if (global.termlabTransferAutoOpen && global.termlabTransferRuntime) {
+          global.termlabTransferAutoOpen.init({
+            runtime: global.termlabTransferRuntime,
+            toolWindowManager: global.toolWindowManager,
+          });
+        }
       }
 
       global.addEventListener('resize', debouncedSaveLayout);
