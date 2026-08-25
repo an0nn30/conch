@@ -34,8 +34,11 @@
     /* Narrow panes stack the groups: host row on top at full width, then the
        navigation row where the path input finally gets room to breathe. */
     @container fp-pane (max-width: 420px) {
+      /* Two dense rows need their own rhythm: separate them vertically and
+         inset the toolbar a touch more than the wide single-row layout. */
+      .fp-toolbar { row-gap: 6px; column-gap: 3px; padding: 6px 8px 5px; }
       .fp-tb-conn { order: 0; flex: 1 1 100%; }
-      .fp-tb-nav { flex: 1 1 100%; }
+      .fp-tb-nav { flex: 1 1 100%; gap: 3px; }
       .fp-tb-conn .fp-host-combo-slot { flex: 1; max-width: none; margin-left: 0; }
       .fp-tb-conn .fp-host-combo-slot .tl-combo { flex: 1; max-width: none; }
     }
