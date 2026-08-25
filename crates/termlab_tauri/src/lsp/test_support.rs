@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, watch};
 
@@ -27,6 +27,7 @@ pub(crate) enum ServerScript {
     HangingInitialize,
     ExitAfterInitialize,
     HangingShutdown,
+    StderrFlood,
 }
 
 pub(crate) fn full_feature_script() -> ServerScript {
@@ -215,11 +216,21 @@ impl ServerLauncher for MockServerLauncher {
         _canonical_project_root: PathBuf,
     ) -> Result<LaunchedServer, SessionError> {
         let (client, server) = tokio::io::duplex(64 * 1024);
+        let (stderr_read, mut stderr_write) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = tokio::io::split(client);
         let (server_read, server_write) = tokio::io::split(server);
         let (kill_tx, kill_rx) = oneshot::channel();
         let (exit_tx, exit_rx) = watch::channel(None);
         let script = self.script;
+        if script == ServerScript::StderrFlood {
+            tokio::spawn(async move {
+                let source_like_secret = vec![b's'; 256 * 1024];
+                let _ = stderr_write.write_all(&source_like_secret).await;
+                let _ = stderr_write.shutdown().await;
+            });
+        } else {
+            drop(stderr_write);
+        }
         let observed = self.observed.clone();
         tokio::spawn(async move {
             let success = tokio::select! {
@@ -233,6 +244,7 @@ impl ServerLauncher for MockServerLauncher {
         });
         Ok(LaunchedServer {
             stdout: Box::new(client_read),
+            stderr: Box::new(stderr_read),
             stdin: Box::new(client_write),
             process: ProcessHandle::new(kill_tx, exit_rx),
         })
@@ -318,9 +330,11 @@ async fn run_script(
                     "definition",
                     "diagnostic",
                 ] {
-                    assert!(capabilities["textDocument"][feature]
-                        .get("dynamicRegistration")
-                        .is_none());
+                    assert!(
+                        capabilities["textDocument"][feature]
+                            .get("dynamicRegistration")
+                            .is_none()
+                    );
                 }
                 let text_document_sync = match script {
                     ServerScript::FullSync => Some(json!({

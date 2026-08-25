@@ -27,15 +27,18 @@ use super::root::{LanguageId, discover_project_roots};
 use super::session::{LspSession, ProcessServerLauncher, SessionDocument};
 use super::trust::{ProjectTrustStore, RootBinding, TrustDecision};
 use super::types::{
-    ApplyChangesResponse, CompletionResponse, DefinitionResponse, Diagnostic, DiagnosticSnapshot,
-    DocumentId, EditorPosition, HoverResponse, LspCapabilities, LspChangeBatch, LspSessionState,
-    LspStatus, LspUnavailableReason, OpenDocumentResponse, ProjectCandidate, ReservationId,
-    ReserveResult, ResyncDocumentResponse, SignatureHelpResponse,
+    ApplyChangesResponse, CompletionResponse, DefinitionResponse, Diagnostic, DiagnosticSeverity,
+    DiagnosticSnapshot, DiagnosticUpdate, DocumentId, EditorPosition, HoverResponse,
+    LspCapabilities, LspChangeBatch, LspSessionState, LspStatus, LspUnavailableReason,
+    OpenDocumentResponse, ProjectCandidate, ReservationId, ReserveResult, ResyncDocumentResponse,
+    SignatureHelpResponse,
 };
 
 const COMMAND_CAPACITY: usize = 64;
 const ACTOR_INPUT_CAPACITY: usize = 128;
 const SESSION_OPERATION_CAPACITY: usize = 64;
+const SESSION_OUTBOX_CAPACITY: usize = 128;
+const DOCUMENT_PENDING_CAPACITY: usize = 128;
 const PUBLIC_EVENT_CAPACITY: usize = 128;
 const CHANGE_BATCH_DELAY: Duration = Duration::from_millis(40);
 const IDLE_SHUTDOWN_DELAY: Duration = Duration::from_secs(120);
@@ -199,7 +202,7 @@ impl Enablement {
         }
     }
 
-    fn enables(&self, adapter_id: &str) -> bool {
+    pub(crate) fn enables(&self, adapter_id: &str) -> bool {
         self.global && self.adapters.contains(adapter_id)
     }
 }
@@ -232,7 +235,7 @@ pub(crate) enum ManagerEvent {
         window_label: String,
         status: LspStatus,
     },
-    DiagnosticsUpdated(DiagnosticSnapshot),
+    DiagnosticsUpdated(DiagnosticUpdate),
     DocumentOwnerFocused {
         window_label: String,
         document_id: Option<DocumentId>,
@@ -243,6 +246,7 @@ pub(crate) enum ManagerEvent {
 
 #[async_trait]
 pub(crate) trait SessionClient: Send + Sync + 'static {
+    fn capabilities(&self) -> LspCapabilities;
     async fn did_open(&self, document: SessionDocument) -> Result<(), String>;
     async fn did_change(&self, batch: LspChangeBatch) -> Result<i32, String>;
     async fn did_save(&self, document_id: &str) -> Result<(), String>;
@@ -304,6 +308,10 @@ struct RealSessionClient(LspSession);
 
 #[async_trait]
 impl SessionClient for RealSessionClient {
+    fn capabilities(&self) -> LspCapabilities {
+        self.0.capabilities()
+    }
+
     async fn did_open(&self, document: SessionDocument) -> Result<(), String> {
         self.0
             .did_open(document)
@@ -425,6 +433,7 @@ impl SessionFactory for RealSessionFactory {
 #[derive(Clone)]
 pub(crate) struct LspManagerHandle {
     commands: mpsc::Sender<ManagerCommand>,
+    shutdown: mpsc::Sender<oneshot::Sender<Result<(), ManagerError>>>,
 }
 
 impl LspManagerHandle {
@@ -732,7 +741,10 @@ impl LspManagerHandle {
 
     pub(crate) async fn shutdown(&self) -> Result<(), ManagerError> {
         let (reply, result) = oneshot::channel();
-        self.send(ManagerCommand::Shutdown { reply }).await?;
+        self.shutdown
+            .send(reply)
+            .await
+            .map_err(|_| ManagerError::ActorStopped)?;
         result.await.map_err(|_| ManagerError::ActorStopped)?
     }
 
@@ -851,9 +863,6 @@ enum ManagerCommand {
     TrustedProjects {
         reply: oneshot::Sender<Result<Vec<TrustedProject>, ManagerError>>,
     },
-    Shutdown {
-        reply: oneshot::Sender<Result<(), ManagerError>>,
-    },
     #[cfg(test)]
     ExpireReservationsForTest {
         reply: oneshot::Sender<Result<(), ManagerError>>,
@@ -931,8 +940,13 @@ enum SessionOperation {
         uri: String,
         source_version: i32,
         previous_result_id: Option<String>,
+        pull_generation: u64,
     },
-    Shutdown,
+}
+
+struct SessionWorkerHandle {
+    operations: mpsc::Sender<SessionOperation>,
+    shutdown: Option<oneshot::Sender<()>>,
 }
 
 enum ActorInput {
@@ -963,6 +977,7 @@ enum ActorInput {
         uri: String,
         source_version: i32,
         previous_result_id: Option<String>,
+        pull_generation: u64,
         result: Result<(Option<String>, Vec<Diagnostic>), String>,
     },
     BatchDue {
@@ -977,16 +992,28 @@ enum ActorInput {
         key: SessionKey,
         generation: u64,
     },
+    ReservationExpired {
+        reservation_id: ReservationId,
+    },
     ShutdownFinished {
         key: SessionKey,
         generation: u64,
     },
+    WorkerReady {
+        key: SessionKey,
+        generation: u64,
+    },
+    CacheDeletionFinished {
+        reply: oneshot::Sender<Result<(), ManagerError>>,
+        result: Result<(), ManagerError>,
+    },
 }
 
+#[derive(Clone)]
 struct ReservationRecord {
     canonical_path: PathBuf,
     window_label: String,
-    expires_at: Instant,
+    expires_at: tokio::time::Instant,
     has_waiter: bool,
 }
 
@@ -1000,12 +1027,15 @@ struct ManagedDocument {
     adapter_id: Option<String>,
     text: VersionedDocument,
     candidates: Vec<ProjectCandidate>,
+    binding_scope: PathBuf,
     session_key: Option<SessionKey>,
     selected_root: Option<PathBuf>,
     deferred_for_session: bool,
     pending_batches: Vec<LspChangeBatch>,
     batch_generation: u64,
     pull_result_id: Option<String>,
+    pull_generation: u64,
+    synchronization_dirty: bool,
     status: LspStatus,
 }
 
@@ -1013,7 +1043,10 @@ struct ManagedSession {
     session_id: String,
     language: LanguageId,
     generation: u64,
-    worker: Option<mpsc::Sender<SessionOperation>>,
+    worker: Option<SessionWorkerHandle>,
+    startup_cancel: Option<CancellationToken>,
+    outbox: VecDeque<SessionOperation>,
+    restart_after_stop: bool,
     documents: HashSet<DocumentId>,
     idle_generation: u64,
     crash_timestamps: VecDeque<tokio::time::Instant>,
@@ -1021,11 +1054,26 @@ struct ManagedSession {
     exit_observed: bool,
     logs: VecDeque<SessionLogEntry>,
     next_log_sequence: u64,
+    capabilities: LspCapabilities,
 }
 
 struct ProjectStore {
     persisted: ProjectTrustStore,
     enablement: Enablement,
+}
+
+struct CacheDeletionPlan {
+    cache_root: PathBuf,
+    targets: Vec<(String, PathBuf)>,
+}
+
+impl CacheDeletionPlan {
+    fn remove(self) -> Result<(), ManagerError> {
+        for (adapter, target) in self.targets {
+            remove_owned_cache_directory(&self.cache_root, &adapter, &target)?;
+        }
+        Ok(())
+    }
 }
 
 struct ManagerState {
@@ -1036,20 +1084,30 @@ struct ManagerState {
     projects: ProjectStore,
 }
 
+type ShutdownReply = (
+    HashSet<(SessionKey, u64)>,
+    oneshot::Sender<Result<(), ManagerError>>,
+);
+
 pub(crate) struct LspManager {
     state: ManagerState,
     factory: Arc<dyn SessionFactory>,
     cache_root: PathBuf,
     command_rx: mpsc::Receiver<ManagerCommand>,
+    shutdown_rx: mpsc::Receiver<oneshot::Sender<Result<(), ManagerError>>>,
     input_tx: mpsc::Sender<ActorInput>,
     input_rx: mpsc::Receiver<ActorInput>,
     event_tx: mpsc::Sender<ManagerEvent>,
+    focus_event_tx: mpsc::Sender<ManagerEvent>,
+    event_dispatch_cancel: CancellationToken,
     reservations: HashMap<ReservationId, ReservationRecord>,
     pending_requests: HashMap<u64, PendingRequest>,
     latest_requests: HashMap<(DocumentId, RequestKind), u64>,
     next_request_id: u64,
     status_revision: u32,
-    shutdown_reply: Option<(usize, oneshot::Sender<Result<(), ManagerError>>)>,
+    shutdown_reply: Option<ShutdownReply>,
+    shutting_down: bool,
+    terminated: bool,
 }
 
 impl LspManager {
@@ -1060,14 +1118,37 @@ impl LspManager {
         enablement: Enablement,
     ) -> (LspManagerHandle, Self, mpsc::Receiver<ManagerEvent>) {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let (input_tx, input_rx) = mpsc::channel(ACTOR_INPUT_CAPACITY);
         let (event_tx, event_rx) = mpsc::channel(PUBLIC_EVENT_CAPACITY);
+        let (focus_event_tx, mut focus_event_rx) = mpsc::channel(PUBLIC_EVENT_CAPACITY);
+        let event_dispatch_cancel = CancellationToken::new();
+        let dispatch_cancel = event_dispatch_cancel.clone();
+        let dispatched_events = event_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    _ = dispatch_cancel.cancelled() => break,
+                    event = focus_event_rx.recv() => {
+                        let Some(event) = event else { break };
+                        event
+                    }
+                };
+                if !tokio::select! {
+                    _ = dispatch_cancel.cancelled() => false,
+                    result = dispatched_events.send(event) => result.is_ok(),
+                } {
+                    break;
+                }
+            }
+        });
         let loaded = ProjectTrustStore::load(config_dir);
         if let Some(warning) = loaded.warning {
             log::warn!("LSP project policy was ignored: {}", warning.message);
         }
         let handle = LspManagerHandle {
             commands: command_tx,
+            shutdown: shutdown_tx,
         };
         let manager = Self {
             state: ManagerState {
@@ -1083,25 +1164,38 @@ impl LspManager {
             factory,
             cache_root,
             command_rx,
+            shutdown_rx,
             input_tx,
             input_rx,
             event_tx,
+            focus_event_tx,
+            event_dispatch_cancel,
             reservations: HashMap::new(),
             pending_requests: HashMap::new(),
             latest_requests: HashMap::new(),
             next_request_id: 1,
             status_revision: 0,
             shutdown_reply: None,
+            shutting_down: false,
+            terminated: false,
         };
         (handle, manager, event_rx)
     }
 
     pub(crate) async fn run(mut self) {
-        loop {
+        while !self.terminated {
             tokio::select! {
-                command = self.command_rx.recv() => {
+                biased;
+                shutdown = self.shutdown_rx.recv(), if !self.shutting_down => {
+                    if let Some(reply) = shutdown {
+                        self.begin_shutdown(reply);
+                    }
+                }
+                command = self.command_rx.recv(), if !self.shutting_down => {
                     let Some(command) = command else { break };
-                    self.handle_command(command);
+                    if !self.shutting_down {
+                        self.handle_command(command);
+                    }
                 }
                 input = self.input_rx.recv() => {
                     let Some(input) = input else { break };
@@ -1200,9 +1294,26 @@ impl LspManager {
                 adapter_id,
                 decision,
                 reply,
-            } => {
-                let _ = reply.send(self.set_project_trust(root, adapter_id, decision));
-            }
+            } => match self.set_project_trust(root, adapter_id, decision) {
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+                Ok(None) => {
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(Some(plan)) => {
+                    let input = self.input_tx.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || plan.remove())
+                            .await
+                            .map_err(|error| ManagerError::Infrastructure(error.to_string()))
+                            .and_then(|result| result);
+                        let _ = input
+                            .send(ActorInput::CacheDeletionFinished { reply, result })
+                            .await;
+                    });
+                }
+            },
             ManagerCommand::SetEnablement { enablement, reply } => {
                 self.state.projects.enablement = enablement;
                 let documents = self.state.documents.keys().copied().collect::<Vec<_>>();
@@ -1317,10 +1428,9 @@ impl LspManager {
                     .collect();
                 let _ = reply.send(Ok(projects));
             }
-            ManagerCommand::Shutdown { reply } => self.begin_shutdown(reply),
             #[cfg(test)]
             ManagerCommand::ExpireReservationsForTest { reply } => {
-                self.cleanup_reservations_at(Instant::now() + RESERVATION_TTL);
+                self.cleanup_reservations_at(tokio::time::Instant::now() + RESERVATION_TTL);
                 let _ = reply.send(Ok(()));
             }
         }
@@ -1331,7 +1441,7 @@ impl LspManager {
         path: PathBuf,
         window_label: String,
     ) -> Result<ReserveResult, ManagerError> {
-        self.cleanup_reservations_at(Instant::now());
+        self.cleanup_reservations_at(tokio::time::Instant::now());
         let result = self
             .state
             .ownership
@@ -1341,15 +1451,24 @@ impl LspManager {
                 reservation_id,
                 canonical_path,
             } => {
+                let expires_at = tokio::time::Instant::now() + RESERVATION_TTL;
                 self.reservations.insert(
                     *reservation_id,
                     ReservationRecord {
                         canonical_path: PathBuf::from(canonical_path),
                         window_label,
-                        expires_at: Instant::now() + RESERVATION_TTL,
+                        expires_at,
                         has_waiter: false,
                     },
                 );
+                let input = self.input_tx.clone();
+                let reservation_id = *reservation_id;
+                tokio::spawn(async move {
+                    tokio::time::sleep_until(expires_at).await;
+                    let _ = input
+                        .send(ActorInput::ReservationExpired { reservation_id })
+                        .await;
+                });
             }
             ReserveResult::FocusPending { window_label } => {
                 if let Ok(canonical) = canonicalize_allow_missing(&path)
@@ -1379,16 +1498,8 @@ impl LspManager {
     }
 
     fn release_document(&mut self, reservation_id: ReservationId) -> Result<(), ManagerError> {
-        let record = self.reservations.remove(&reservation_id);
         self.state.ownership.release(reservation_id);
-        if let Some(record) = record.filter(|record| record.has_waiter) {
-            self.emit(ManagerEvent::DocumentOwnerFocused {
-                window_label: record.window_label,
-                document_id: None,
-                pane_id: None,
-                reservation_failed: true,
-            });
-        }
+        self.finalize_reservation(reservation_id, None, None);
         Ok(())
     }
 
@@ -1401,19 +1512,31 @@ impl LspManager {
     ) -> Result<OpenDocumentResponse, ManagerError> {
         let reservation = self
             .reservations
-            .remove(&reservation_id)
+            .get(&reservation_id)
+            .cloned()
             .ok_or(ManagerError::InvalidReservation)?;
-        if Instant::now() >= reservation.expires_at {
+        if tokio::time::Instant::now() >= reservation.expires_at {
             self.state.ownership.release(reservation_id);
+            self.finalize_reservation(reservation_id, None, None);
             return Err(ManagerError::InvalidReservation);
         }
-        let document_id = self.state.ownership.commit(reservation_id, &pane_id)?;
-        let path = self
+        let document_id = match self.state.ownership.commit(reservation_id, &pane_id) {
+            Ok(document_id) => document_id,
+            Err(error) => {
+                self.finalize_reservation(reservation_id, None, None);
+                return Err(error.into());
+            }
+        };
+        let Some(path) = self
             .state
             .ownership
             .canonical_path(document_id)
             .map(Path::to_path_buf)
-            .ok_or(ManagerError::InvalidReservation)?;
+        else {
+            self.state.ownership.close(document_id);
+            self.finalize_reservation(reservation_id, None, None);
+            return Err(ManagerError::InvalidReservation);
+        };
         let language = resolve_language(&language_id, &path).ok();
         let catalog = BundledServerCatalog::new();
         let adapter_id =
@@ -1428,6 +1551,7 @@ impl LspManager {
             Ok(uri) => uri.to_string(),
             Err(()) => {
                 self.state.ownership.close(document_id);
+                self.finalize_reservation(reservation_id, None, None);
                 return Err(ManagerError::InvalidProjectRoot);
             }
         };
@@ -1436,12 +1560,21 @@ impl LspManager {
             Ok(text) => text,
             Err(error) => {
                 self.state.ownership.close(document_id);
+                self.finalize_reservation(reservation_id, None, None);
                 return Err(ManagerError::InvalidChange(format!("{error:?}")));
             }
         };
         let candidates = language
             .and_then(|language| discover_project_roots(&path, language).ok())
             .unwrap_or_default();
+        let binding_scope = match project_binding_scope(&path, &candidates) {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.state.ownership.close(document_id);
+                self.finalize_reservation(reservation_id, None, None);
+                return Err(error);
+            }
+        };
         let status = self.blank_status(document_id, adapter_id.as_deref());
         self.state.documents.insert(
             document_id,
@@ -1455,23 +1588,19 @@ impl LspManager {
                 adapter_id,
                 text,
                 candidates: candidates.clone(),
+                binding_scope,
                 session_key: None,
                 selected_root: None,
                 deferred_for_session: false,
                 pending_batches: Vec::new(),
                 batch_generation: 0,
                 pull_result_id: None,
+                pull_generation: 0,
+                synchronization_dirty: false,
                 status,
             },
         );
-        if reservation.has_waiter {
-            self.emit(ManagerEvent::DocumentOwnerFocused {
-                window_label: reservation.window_label,
-                document_id: Some(document_id),
-                pane_id: Some(pane_id),
-                reservation_failed: false,
-            });
-        }
+        self.finalize_reservation(reservation_id, Some(document_id), Some(pane_id));
         self.reevaluate_document(document_id);
         let document = self
             .state
@@ -1496,8 +1625,9 @@ impl LspManager {
         let reservation = self
             .reservations
             .get(&target_reservation_id)
+            .cloned()
             .ok_or(ManagerError::InvalidReservation)?;
-        if Instant::now() >= reservation.expires_at {
+        if tokio::time::Instant::now() >= reservation.expires_at {
             return Err(ManagerError::InvalidReservation);
         }
         let document = self
@@ -1508,33 +1638,39 @@ impl LspManager {
         if document.owner_window != window_label || document.owner_pane != pane_id {
             return Err(ManagerError::OwnerMismatch);
         }
-        self.flush_document(document_id)?;
-        self.detach_document(document_id, false);
-        self.state
-            .ownership
-            .transfer(document_id, target_reservation_id)?;
-        let reservation = self
-            .reservations
-            .remove(&target_reservation_id)
-            .ok_or(ManagerError::InvalidReservation)?;
+        // Precompute every fallible target value before the atomic ownership
+        // transition or any protocol detachment.
+        let target_path = reservation.canonical_path.clone();
         let language = resolve_language(
-            reservation
-                .canonical_path
+            target_path
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .unwrap_or(""),
-            &reservation.canonical_path,
+            &target_path,
         )
         .ok();
         let catalog = BundledServerCatalog::new();
         let adapter_id =
             language.map(|language| catalog.descriptor(language).adapter_id.to_owned());
-        let uri = lsp::Url::from_file_path(&reservation.canonical_path)
+        let uri = lsp::Url::from_file_path(&target_path)
             .map_err(|_| ManagerError::InvalidProjectRoot)?
             .to_string();
         let candidates = language
-            .and_then(|language| discover_project_roots(&reservation.canonical_path, language).ok())
+            .and_then(|language| discover_project_roots(&target_path, language).ok())
             .unwrap_or_default();
+        let binding_scope = project_binding_scope(&target_path, &candidates)?;
+        let transfer_time = Instant::now();
+        self.state.ownership.validate_transfer_at(
+            document_id,
+            target_reservation_id,
+            transfer_time,
+        )?;
+        self.flush_document(document_id)?;
+        self.enqueue_close(document_id)?;
+        self.state
+            .ownership
+            .transfer_at(document_id, target_reservation_id, transfer_time)?;
+        self.detach_document(document_id, false, false);
         if let Some(document) = self.state.documents.get_mut(&document_id) {
             document.path = reservation.canonical_path;
             document.uri = uri;
@@ -1547,10 +1683,13 @@ impl LspManager {
                     .unwrap_or_else(|| lsp_language_id(language).to_owned())
             });
             document.candidates = candidates;
+            document.binding_scope = binding_scope;
             document.selected_root = None;
             document.deferred_for_session = false;
             document.pull_result_id = None;
+            document.pull_generation = document.pull_generation.saturating_add(1);
         }
+        self.finalize_reservation(target_reservation_id, Some(document_id), Some(pane_id));
         self.reevaluate_document(document_id);
         Ok(())
     }
@@ -1565,21 +1704,33 @@ impl LspManager {
             .documents
             .get_mut(&document_id)
             .ok_or(ManagerError::UnknownDocument)?;
+        if document.synchronization_dirty {
+            return Ok(ApplyChangesResponse::ResyncRequired {
+                expected_version: document.text.version(),
+                received_base_version: batch.base_version,
+            });
+        }
+        if document.pending_batches.len() >= DOCUMENT_PENDING_CAPACITY {
+            return Err(ManagerError::Overloaded);
+        }
         match document.text.apply_batch(batch.clone()) {
             Ok(applied) => {
+                let arm_deadline = document.pending_batches.is_empty();
                 document.pending_batches.push(batch);
-                document.batch_generation = document.batch_generation.saturating_add(1);
-                let generation = document.batch_generation;
-                let input = self.input_tx.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(CHANGE_BATCH_DELAY).await;
-                    let _ = input
-                        .send(ActorInput::BatchDue {
-                            document_id,
-                            generation,
-                        })
-                        .await;
-                });
+                if arm_deadline {
+                    document.batch_generation = document.batch_generation.saturating_add(1);
+                    let generation = document.batch_generation;
+                    let input = self.input_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(CHANGE_BATCH_DELAY).await;
+                        let _ = input
+                            .send(ActorInput::BatchDue {
+                                document_id,
+                                generation,
+                            })
+                            .await;
+                    });
+                }
                 self.cancel_document_requests(document_id, ManagerError::StaleResponse);
                 Ok(ApplyChangesResponse::Applied {
                     version: applied.version,
@@ -1601,29 +1752,26 @@ impl LspManager {
         version: i32,
         contents: String,
     ) -> Result<ResyncDocumentResponse, ManagerError> {
-        self.cancel_document_requests(document_id, ManagerError::StaleResponse);
-        let document = self
-            .state
-            .documents
-            .get_mut(&document_id)
-            .ok_or(ManagerError::UnknownDocument)?;
-        document
-            .text
-            .resync(&contents, version)
-            .map_err(|error| ManagerError::InvalidChange(format!("{error:?}")))?;
-        document.pending_batches.clear();
-        document.batch_generation = document.batch_generation.saturating_add(1);
-        if let Some(key) = document.session_key.clone()
-            && let Some(worker) = self
+        let (key, open) = {
+            let document = self
                 .state
-                .sessions
-                .get(&key)
-                .and_then(|session| session.worker.clone())
-        {
-            let id = document_id_text(document_id);
-            let _ = worker.try_send(SessionOperation::DidClose(id.clone()));
-            let _ = worker.try_send(SessionOperation::DidOpen(SessionDocument {
-                document_id: id,
+                .documents
+                .get(&document_id)
+                .ok_or(ManagerError::UnknownDocument)?;
+            if version <= document.text.version() {
+                return Err(ManagerError::InvalidChange(format!(
+                    "{:?}",
+                    DocumentError::NonMonotonicVersion {
+                        base: document.text.version(),
+                        next: version,
+                    }
+                )));
+            }
+            let replacement =
+                VersionedDocument::new(&document_id_text(document_id), &contents, version)
+                    .map_err(|error| ManagerError::InvalidChange(format!("{error:?}")))?;
+            let open = SessionDocument {
+                document_id: document_id_text(document_id),
                 uri: lsp::Url::parse(&document.uri)
                     .map_err(|_| ManagerError::InvalidProjectRoot)?,
                 language_id: document
@@ -1631,9 +1779,26 @@ impl LspManager {
                     .clone()
                     .ok_or(ManagerError::SessionUnavailable)?,
                 version,
-                text: document.text.text(),
-            }));
+                text: replacement.text(),
+            };
+            (document.session_key.clone(), open)
+        };
+        if let Some(key) = key {
+            self.enqueue_session_operations(
+                &key,
+                [
+                    SessionOperation::DidClose(document_id_text(document_id)),
+                    SessionOperation::DidOpen(open),
+                ],
+            )?;
         }
+        self.cancel_document_requests(document_id, ManagerError::StaleResponse);
+        let document = self.state.documents.get_mut(&document_id).expect("checked");
+        document.text = VersionedDocument::new(&document_id_text(document_id), &contents, version)
+            .map_err(|error| ManagerError::InvalidChange(format!("{error:?}")))?;
+        document.pending_batches.clear();
+        document.batch_generation = document.batch_generation.saturating_add(1);
+        document.synchronization_dirty = false;
         Ok(ResyncDocumentResponse {
             document_id: document_id_text(document_id),
             version,
@@ -1646,32 +1811,32 @@ impl LspManager {
         let document = self
             .state
             .documents
-            .get(&document_id)
+            .get_mut(&document_id)
             .ok_or(ManagerError::UnknownDocument)?;
+        document.pull_generation = document.pull_generation.saturating_add(1);
+        let pull_generation = document.pull_generation;
         let Some(key) = document.session_key.clone() else {
             return Ok(());
         };
-        let Some(worker) = self
-            .state
-            .sessions
-            .get(&key)
-            .and_then(|session| session.worker.clone())
-        else {
+        if !self.state.sessions.contains_key(&key) {
             return Ok(());
-        };
+        }
         let id_text = document_id_text(document_id);
-        worker
-            .try_send(SessionOperation::DidSave(id_text.clone()))
-            .map_err(|_| ManagerError::Overloaded)?;
-        worker
-            .try_send(SessionOperation::PullDiagnostics {
-                document_id,
-                document_id_text: id_text,
-                uri: document.uri.clone(),
-                source_version: document.text.version(),
-                previous_result_id: document.pull_result_id.clone(),
-            })
-            .map_err(|_| ManagerError::Overloaded)?;
+        let operation = SessionOperation::PullDiagnostics {
+            document_id,
+            document_id_text: id_text,
+            uri: document.uri.clone(),
+            source_version: document.text.version(),
+            previous_result_id: document.pull_result_id.clone(),
+            pull_generation,
+        };
+        self.enqueue_session_operations(
+            &key,
+            [
+                SessionOperation::DidSave(document_id_text(document_id)),
+                operation,
+            ],
+        )?;
         Ok(())
     }
 
@@ -1681,8 +1846,9 @@ impl LspManager {
             return Ok(());
         }
         self.flush_document(document_id)?;
+        self.enqueue_close(document_id)?;
         self.cancel_document_requests(document_id, ManagerError::Cancelled);
-        self.detach_document(document_id, true);
+        self.detach_document(document_id, true, false);
         self.state.documents.remove(&document_id);
         self.state.ownership.close(document_id);
         Ok(())
@@ -1693,58 +1859,64 @@ impl LspManager {
         document_id: DocumentId,
         context: ProjectContextChoice,
     ) -> Result<LspStatus, ManagerError> {
-        let (path, parent) = self
+        let (path, binding_scope, candidates) = self
             .state
             .documents
             .get(&document_id)
             .map(|document| {
                 (
                     document.path.clone(),
-                    document.path.parent().map(Path::to_path_buf),
+                    document.binding_scope.clone(),
+                    document.candidates.clone(),
                 )
             })
             .ok_or(ManagerError::UnknownDocument)?;
-        self.detach_document(document_id, false);
+        let mut staged = self.state.projects.persisted.clone();
         match context {
             ProjectContextChoice::Root { root } => {
                 let root = canonical_directory(Path::new(&root))?;
-                if !path.starts_with(&root) {
+                if !path.starts_with(&root)
+                    || !candidates
+                        .iter()
+                        .any(|candidate| Path::new(&candidate.canonical_path) == root)
+                {
                     return Err(ManagerError::InvalidProjectRoot);
                 }
-                self.state
-                    .projects
-                    .persisted
-                    .set_root_binding(&root, RootBinding::Root(root.clone()))
+                staged
+                    .set_root_binding(&binding_scope, RootBinding::Root(root.clone()))
                     .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+                staged
+                    .save()
+                    .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+                self.state.projects.persisted = staged;
+                self.detach_document(document_id, false, true);
                 if let Some(document) = self.state.documents.get_mut(&document_id) {
                     document.deferred_for_session = false;
                     document.selected_root = Some(root);
                 }
             }
             ProjectContextChoice::Disabled => {
-                let scope = parent.ok_or(ManagerError::InvalidProjectRoot)?;
-                self.state
-                    .projects
-                    .persisted
-                    .set_root_binding(&scope, RootBinding::Disabled)
+                staged
+                    .set_root_binding(&binding_scope, RootBinding::Disabled)
                     .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+                staged
+                    .save()
+                    .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+                self.state.projects.persisted = staged;
+                self.detach_document(document_id, false, true);
                 if let Some(document) = self.state.documents.get_mut(&document_id) {
                     document.deferred_for_session = false;
                     document.selected_root = None;
                 }
             }
             ProjectContextChoice::DeferForSession => {
+                self.detach_document(document_id, false, true);
                 if let Some(document) = self.state.documents.get_mut(&document_id) {
                     document.deferred_for_session = true;
                     document.selected_root = None;
                 }
             }
         }
-        self.state
-            .projects
-            .persisted
-            .save()
-            .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
         self.reevaluate_document(document_id);
         self.state
             .documents
@@ -1758,21 +1930,24 @@ impl LspManager {
         root: PathBuf,
         adapter_id: Option<String>,
         decision: TrustDecision,
-    ) -> Result<(), ManagerError> {
+    ) -> Result<Option<CacheDeletionPlan>, ManagerError> {
         let root = canonical_directory(&root)?;
-        self.state
-            .projects
-            .persisted
-            .set_trust(&root, adapter_id.as_deref(), decision, now_ms())
-            .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
-        self.state
-            .projects
-            .persisted
+        let mut staged = self.state.projects.persisted.clone();
+        if decision == TrustDecision::Revoked && adapter_id.is_none() {
+            staged
+                .revoke_all_at_root(&root, now_ms())
+                .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+        } else {
+            staged
+                .set_trust(&root, adapter_id.as_deref(), decision, now_ms())
+                .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+        }
+        staged
             .save()
             .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+        self.state.projects.persisted = staged;
         if decision == TrustDecision::Revoked {
             self.revoke_sessions(&root, adapter_id.as_deref());
-            self.remove_disposable_caches(&root, adapter_id.as_deref());
         }
         let documents = self
             .state
@@ -1795,7 +1970,8 @@ impl LspManager {
         for document in documents {
             self.reevaluate_document(document);
         }
-        Ok(())
+        Ok((decision == TrustDecision::Revoked)
+            .then(|| self.disposable_cache_plan(&root, adapter_id.as_deref())))
     }
 }
 
@@ -1805,7 +1981,7 @@ impl LspManager {
             return;
         };
         let Some(adapter_id) = document.adapter_id.clone() else {
-            self.detach_document(document_id, false);
+            self.detach_document(document_id, false, true);
             self.set_document_status(
                 document_id,
                 LspSessionState::Disabled,
@@ -1819,7 +1995,7 @@ impl LspManager {
         let deferred_for_session = document.deferred_for_session;
         let candidates = document.candidates.clone();
         if !self.state.projects.enablement.enables(&adapter_id) {
-            self.detach_document(document_id, false);
+            self.detach_document(document_id, false, true);
             self.set_document_status(
                 document_id,
                 LspSessionState::Disabled,
@@ -1830,7 +2006,7 @@ impl LspManager {
             return;
         }
         if deferred_for_session {
-            self.detach_document(document_id, false);
+            self.detach_document(document_id, false, true);
             self.set_document_status(
                 document_id,
                 LspSessionState::ChoosingProject,
@@ -1844,7 +2020,7 @@ impl LspManager {
         let binding = self.state.projects.persisted.binding_for(&path);
         match binding {
             Some(RootBinding::Disabled) => {
-                self.detach_document(document_id, false);
+                self.detach_document(document_id, false, true);
                 self.set_document_status(
                     document_id,
                     LspSessionState::Disabled,
@@ -1855,7 +2031,7 @@ impl LspManager {
             }
             Some(RootBinding::Root(root)) => {
                 if !path.starts_with(&root) {
-                    self.detach_document(document_id, false);
+                    self.detach_document(document_id, false, true);
                     self.set_document_status(
                         document_id,
                         LspSessionState::ChoosingProject,
@@ -1875,7 +2051,7 @@ impl LspManager {
                     .trust_for(&root, Some(&adapter_id))
                     .is_some_and(|record| record.decision == TrustDecision::Trusted);
                 if !trusted {
-                    self.detach_document(document_id, false);
+                    self.detach_document(document_id, false, true);
                     self.set_document_status(
                         document_id,
                         LspSessionState::Untrusted,
@@ -1888,7 +2064,7 @@ impl LspManager {
                 self.attach_document(document_id, root);
             }
             None => {
-                self.detach_document(document_id, false);
+                self.detach_document(document_id, false, true);
                 let non_fallback = candidates
                     .iter()
                     .filter(|candidate| !candidate.is_fallback)
@@ -1938,7 +2114,7 @@ impl LspManager {
         if current_key.as_ref() == Some(&key) {
             return;
         }
-        self.detach_document(document_id, false);
+        self.detach_document(document_id, false, true);
         let needs_start = !self.state.sessions.contains_key(&key);
         if needs_start {
             let session_id = format!("{}-{}", key.adapter_id, uuid::Uuid::new_v4());
@@ -1949,6 +2125,9 @@ impl LspManager {
                     language,
                     generation: 0,
                     worker: None,
+                    startup_cancel: None,
+                    outbox: VecDeque::new(),
+                    restart_after_stop: false,
                     documents: HashSet::new(),
                     idle_generation: 0,
                     crash_timestamps: VecDeque::new(),
@@ -1956,15 +2135,16 @@ impl LspManager {
                     exit_observed: false,
                     logs: VecDeque::new(),
                     next_log_sequence: 1,
+                    capabilities: capabilities(false),
                 },
             );
         }
-        let (worker, session_state) = {
+        let (ready, session_state) = {
             let session = self.state.sessions.get_mut(&key).expect("inserted session");
             session.documents.insert(document_id);
             session.idle_generation = session.idle_generation.saturating_add(1);
             (
-                session.worker.clone(),
+                session.worker.is_some(),
                 if session.worker.is_some() {
                     LspSessionState::Ready
                 } else {
@@ -1976,25 +2156,54 @@ impl LspManager {
             document.session_key = Some(key.clone());
             document.selected_root = Some(key.root.clone());
         }
-        if let Some(worker) = worker {
-            let _ = self.enqueue_open(document_id, &worker);
+        if ready {
+            if self.enqueue_open(document_id, &key).is_err() {
+                if let Some(document) = self.state.documents.get_mut(&document_id) {
+                    document.synchronization_dirty = true;
+                }
+                self.set_document_status(
+                    document_id,
+                    LspSessionState::Failed,
+                    Some(key),
+                    Some("Language server synchronization requires a resync".into()),
+                    None,
+                );
+                return;
+            }
+            if let Some(document) = self.state.documents.get_mut(&document_id) {
+                document.synchronization_dirty = false;
+            }
         } else if needs_start {
             self.start_session(key.clone());
         }
         self.set_document_status(document_id, session_state, Some(key), None, None);
     }
 
-    fn detach_document(&mut self, document_id: DocumentId, closing: bool) {
-        let key = self
+    fn detach_document(&mut self, document_id: DocumentId, closing: bool, queue_close: bool) {
+        self.cancel_document_requests(document_id, ManagerError::Cancelled);
+        if let Some(document) = self.state.documents.get_mut(&document_id) {
+            document.pull_generation = document.pull_generation.saturating_add(1);
+        }
+        let attachment = self.state.documents.get(&document_id).and_then(|document| {
+            document
+                .session_key
+                .clone()
+                .map(|key| (key, document.uri.clone()))
+        });
+        let Some((key, uri)) = attachment else {
+            return;
+        };
+        let session_id = self
             .state
-            .documents
-            .get(&document_id)
-            .and_then(|document| document.session_key.clone());
-        let Some(key) = key else { return };
+            .sessions
+            .get(&key)
+            .map(|session| session.session_id.clone());
+        if let Some(session_id) = session_id
+            && self.state.diagnostics.clear_session_uri(&session_id, &uri)
+        {
+            self.emit_diagnostics(Some(session_id), Some(document_id), Some(uri));
+        }
         if let Some(session) = self.state.sessions.get_mut(&key) {
-            if let Some(worker) = session.worker.clone() {
-                let _ = worker.try_send(SessionOperation::DidClose(document_id_text(document_id)));
-            }
             session.documents.remove(&document_id);
             if session.documents.is_empty() {
                 session.idle_generation = session.idle_generation.saturating_add(1);
@@ -2012,12 +2221,40 @@ impl LspManager {
                 });
             }
         }
+        if queue_close
+            && self
+                .enqueue_session_operations(
+                    &key,
+                    [SessionOperation::DidClose(document_id_text(document_id))],
+                )
+                .is_err()
+            && let Some(document) = self.state.documents.get_mut(&document_id)
+        {
+            document.synchronization_dirty = true;
+        }
         if let Some(document) = self.state.documents.get_mut(&document_id) {
             document.session_key = None;
             if closing {
                 document.selected_root = None;
             }
         }
+    }
+
+    fn enqueue_close(&mut self, document_id: DocumentId) -> Result<(), ManagerError> {
+        let key = self
+            .state
+            .documents
+            .get(&document_id)
+            .ok_or(ManagerError::UnknownDocument)?
+            .session_key
+            .clone();
+        if let Some(key) = key {
+            self.enqueue_session_operations(
+                &key,
+                [SessionOperation::DidClose(document_id_text(document_id))],
+            )?;
+        }
+        Ok(())
     }
 
     fn start_session(&mut self, key: SessionKey) {
@@ -2030,6 +2267,7 @@ impl LspManager {
         session.generation = session.generation.saturating_add(1);
         session.exit_observed = false;
         session.worker = None;
+        session.outbox.clear();
         let generation = session.generation;
         let start = SessionStart {
             key: key.clone(),
@@ -2038,40 +2276,38 @@ impl LspManager {
         };
         let factory = self.factory.clone();
         let input = self.input_tx.clone();
+        let cancellation = CancellationToken::new();
+        session.startup_cancel = Some(cancellation.clone());
         tokio::spawn(async move {
             let (client_events, mut client_event_rx) = mpsc::channel(ACTOR_INPUT_CAPACITY);
-            let event_input = input.clone();
-            let event_key = key.clone();
-            tokio::spawn(async move {
-                while let Some(event) = client_event_rx.recv().await {
-                    if event_input
-                        .send(ActorInput::ClientEvent {
-                            key: event_key.clone(),
-                            generation,
-                            event,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    let _ = input.send(ActorInput::ShutdownFinished { key, generation }).await;
+                }
+                result = factory.start(start, client_events) => {
+                    // FIFO on actor input is the lifecycle barrier: no client
+                    // event for this generation can overtake SessionStarted.
+                    if input.send(ActorInput::SessionStarted {
+                        key: key.clone(), generation, result,
+                    }).await.is_err() {
+                        return;
+                    }
+                    while let Some(event) = client_event_rx.recv().await {
+                        if input.send(ActorInput::ClientEvent {
+                            key: key.clone(), generation, event,
+                        }).await.is_err() {
+                            break;
+                        }
                     }
                 }
-            });
-            let result = factory.start(start, client_events).await;
-            let _ = input
-                .send(ActorInput::SessionStarted {
-                    key,
-                    generation,
-                    result,
-                })
-                .await;
+            }
         });
     }
 
     fn enqueue_open(
-        &self,
+        &mut self,
         document_id: DocumentId,
-        worker: &mpsc::Sender<SessionOperation>,
+        key: &SessionKey,
     ) -> Result<(), ManagerError> {
         let document = self
             .state
@@ -2079,48 +2315,95 @@ impl LspManager {
             .get(&document_id)
             .ok_or(ManagerError::UnknownDocument)?;
         let uri = lsp::Url::parse(&document.uri).map_err(|_| ManagerError::InvalidProjectRoot)?;
-        worker
-            .try_send(SessionOperation::DidOpen(SessionDocument {
-                document_id: document_id_text(document_id),
-                uri,
-                language_id: document
-                    .lsp_language_id
-                    .clone()
-                    .ok_or(ManagerError::SessionUnavailable)?,
-                version: document.text.version(),
-                text: document.text.text(),
-            }))
-            .map_err(|_| ManagerError::Overloaded)
+        let operation = SessionOperation::DidOpen(SessionDocument {
+            document_id: document_id_text(document_id),
+            uri,
+            language_id: document
+                .lsp_language_id
+                .clone()
+                .ok_or(ManagerError::SessionUnavailable)?,
+            version: document.text.version(),
+            text: document.text.text(),
+        });
+        self.enqueue_session_operations(key, [operation])
     }
 
     fn flush_document(&mut self, document_id: DocumentId) -> Result<(), ManagerError> {
-        let (key, batches) = {
+        let (key, batch_count) = {
             let document = self
                 .state
                 .documents
-                .get_mut(&document_id)
+                .get(&document_id)
                 .ok_or(ManagerError::UnknownDocument)?;
-            document.batch_generation = document.batch_generation.saturating_add(1);
-            (
-                document.session_key.clone(),
-                std::mem::take(&mut document.pending_batches),
-            )
+            (document.session_key.clone(), document.pending_batches.len())
         };
-        let Some(key) = key else { return Ok(()) };
-        let Some(worker) = self
+        let Some(key) = key else {
+            if let Some(document) = self.state.documents.get_mut(&document_id) {
+                document.pending_batches.clear();
+                document.batch_generation = document.batch_generation.saturating_add(1);
+            }
+            return Ok(());
+        };
+        let available = self
             .state
             .sessions
             .get(&key)
-            .and_then(|session| session.worker.clone())
-        else {
-            return Ok(());
-        };
-        for batch in batches {
-            worker
-                .try_send(SessionOperation::DidChange(batch))
-                .map_err(|_| ManagerError::Overloaded)?;
+            .map(|session| SESSION_OUTBOX_CAPACITY.saturating_sub(session.outbox.len()))
+            .ok_or(ManagerError::SessionUnavailable)?;
+        if batch_count > available {
+            return Err(ManagerError::Overloaded);
         }
+        let batches = {
+            let document = self.state.documents.get_mut(&document_id).expect("checked");
+            document.batch_generation = document.batch_generation.saturating_add(1);
+            std::mem::take(&mut document.pending_batches)
+        };
+        self.enqueue_session_operations(
+            &key,
+            batches.into_iter().map(SessionOperation::DidChange),
+        )?;
         Ok(())
+    }
+
+    fn enqueue_session_operations(
+        &mut self,
+        key: &SessionKey,
+        operations: impl IntoIterator<Item = SessionOperation>,
+    ) -> Result<(), ManagerError> {
+        let operations = operations.into_iter().collect::<Vec<_>>();
+        let session = self
+            .state
+            .sessions
+            .get_mut(key)
+            .ok_or(ManagerError::SessionUnavailable)?;
+        if session.outbox.len().saturating_add(operations.len()) > SESSION_OUTBOX_CAPACITY {
+            return Err(ManagerError::Overloaded);
+        }
+        session.outbox.extend(operations);
+        self.pump_session(key);
+        Ok(())
+    }
+
+    fn pump_session(&mut self, key: &SessionKey) {
+        let Some(session) = self.state.sessions.get_mut(key) else {
+            return;
+        };
+        let Some(worker) = session.worker.as_ref() else {
+            return;
+        };
+        while let Some(operation) = session.outbox.pop_front() {
+            match worker.operations.try_send(operation) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(operation)) => {
+                    session.outbox.push_front(operation);
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(operation)) => {
+                    session.outbox.push_front(operation);
+                    break;
+                }
+            }
+        }
     }
 
     fn start_request(
@@ -2146,10 +2429,13 @@ impl LspManager {
             reply.send_error(ManagerError::SessionUnavailable);
             return;
         };
-        let Some(worker) = session.worker.clone() else {
+        if session.worker.is_none() {
             reply.send_error(ManagerError::SessionUnavailable);
             return;
-        };
+        }
+        let session_generation = session.generation;
+        let version = document.text.version();
+        let uri = document.uri.clone();
         if let Some(previous_id) = self.latest_requests.remove(&(document_id, kind))
             && let Some(previous) = self.pending_requests.remove(&previous_id)
         {
@@ -2161,10 +2447,10 @@ impl LspManager {
         let cancellation = CancellationToken::new();
         let pending = PendingRequest {
             document_id,
-            version: document.text.version(),
-            uri: document.uri.clone(),
+            version,
+            uri,
             session_key: session_key.clone(),
-            session_generation: session.generation,
+            session_generation,
             kind,
             cancellation: cancellation.clone(),
             reply,
@@ -2179,7 +2465,10 @@ impl LspManager {
         };
         self.pending_requests.insert(request_id, pending);
         self.latest_requests.insert((document_id, kind), request_id);
-        if worker.try_send(operation).is_err() {
+        if self
+            .enqueue_session_operations(&session_key, [operation])
+            .is_err()
+        {
             self.latest_requests.remove(&(document_id, kind));
             if let Some(pending) = self.pending_requests.remove(&request_id) {
                 pending.reply.send_error(ManagerError::Overloaded);
@@ -2218,9 +2507,31 @@ impl LspManager {
             .as_ref()
             .and_then(|key| self.state.sessions.get(key))
             .map(|session| session.session_id.clone());
+        let negotiated_capabilities = session_key
+            .as_ref()
+            .and_then(|key| self.state.sessions.get(key))
+            .map(|session| session.capabilities)
+            .unwrap_or_else(|| capabilities(false));
         let Some(document) = self.state.documents.get_mut(&document_id) else {
             return;
         };
+        let (error_count, warning_count) = self
+            .state
+            .diagnostics
+            .snapshot(None)
+            .items
+            .iter()
+            .filter(|diagnostic| diagnostic.uri == document.uri)
+            .fold(
+                (0_u32, 0_u32),
+                |(errors, warnings), diagnostic| match diagnostic.severity {
+                    DiagnosticSeverity::Error => (errors.saturating_add(1), warnings),
+                    DiagnosticSeverity::Warning => (errors, warnings.saturating_add(1)),
+                    DiagnosticSeverity::Information | DiagnosticSeverity::Hint => {
+                        (errors, warnings)
+                    }
+                },
+            );
         let status = LspStatus {
             revision: self.status_revision,
             document_id: Some(document_id_text(document_id)),
@@ -2233,9 +2544,13 @@ impl LspManager {
             state,
             message,
             unavailable_reason,
-            capabilities: capabilities(state == LspSessionState::Ready),
-            error_count: 0,
-            warning_count: 0,
+            capabilities: if matches!(state, LspSessionState::Ready | LspSessionState::Indexing) {
+                negotiated_capabilities
+            } else {
+                capabilities(false)
+            },
+            error_count,
+            warning_count,
         };
         document.status = status.clone();
         let window_label = document.owner_window.clone();
@@ -2243,6 +2558,20 @@ impl LspManager {
             window_label,
             status,
         });
+    }
+
+    fn refresh_document_status(&mut self, document_id: DocumentId) {
+        let Some(document) = self.state.documents.get(&document_id) else {
+            return;
+        };
+        let status = document.status.clone();
+        self.set_document_status(
+            document_id,
+            status.state,
+            document.session_key.clone(),
+            status.message,
+            status.unavailable_reason,
+        );
     }
 
     fn blank_status(&self, document_id: DocumentId, adapter_id: Option<&str>) -> LspStatus {
@@ -2262,7 +2591,16 @@ impl LspManager {
     }
 
     fn emit(&self, event: ManagerEvent) {
-        let _ = self.event_tx.try_send(event);
+        if matches!(event, ManagerEvent::DocumentOwnerFocused { .. }) {
+            // Owner-focus delivery has a dedicated bounded lane and one
+            // cancellable forwarder, so status floods cannot silently consume
+            // it and shutdown never leaves detached send tasks alive.
+            if self.focus_event_tx.try_send(event).is_err() {
+                log::warn!("LSP owner-focus delivery lane is unavailable");
+            }
+        } else {
+            let _ = self.event_tx.try_send(event);
+        }
     }
 }
 
@@ -2291,7 +2629,24 @@ impl LspManager {
                     .get(&key)
                     .is_some_and(|session| session.generation == generation)
                 {
-                    self.push_log(&key, "protocol", format!("{operation} failed: {message}"));
+                    self.push_log(
+                        &key,
+                        "protocol",
+                        format!("{operation} failed ({} bytes redacted)", message.len()),
+                    );
+                    if matches!(operation, "didOpen" | "didChange" | "didSave" | "didClose") {
+                        let documents = self
+                            .state
+                            .sessions
+                            .get(&key)
+                            .map(|session| session.documents.iter().copied().collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        for document in documents {
+                            if let Some(document) = self.state.documents.get_mut(&document) {
+                                document.synchronization_dirty = true;
+                            }
+                        }
+                    }
                 }
             }
             ActorInput::RequestCompleted { request_id, result } => {
@@ -2304,6 +2659,7 @@ impl LspManager {
                 uri,
                 source_version,
                 previous_result_id,
+                pull_generation,
                 result,
             } => self.pull_diagnostics_completed(
                 key,
@@ -2312,6 +2668,7 @@ impl LspManager {
                 uri,
                 source_version,
                 previous_result_id,
+                pull_generation,
                 result,
             ),
             ActorInput::BatchDue {
@@ -2346,23 +2703,64 @@ impl LspManager {
                     self.start_session(key);
                 }
             }
+            ActorInput::ReservationExpired { reservation_id } => {
+                let expired = self
+                    .reservations
+                    .get(&reservation_id)
+                    .is_some_and(|record| tokio::time::Instant::now() >= record.expires_at);
+                if expired {
+                    self.state.ownership.release(reservation_id);
+                    self.finalize_reservation(reservation_id, None, None);
+                }
+            }
             ActorInput::ShutdownFinished { key, generation } => {
-                let remove = self
+                let restart = self.state.sessions.get(&key).is_some_and(|session| {
+                    session.generation == generation && session.restart_after_stop
+                });
+                if restart && !self.shutting_down {
+                    if let Some(session) = self.state.sessions.get_mut(&key) {
+                        session.restart_after_stop = false;
+                        session.worker = None;
+                        session.startup_cancel = None;
+                    }
+                    self.start_session(key.clone());
+                }
+                if let Some((pending, _)) = self.shutdown_reply.as_mut() {
+                    pending.remove(&(key.clone(), generation));
+                    if pending.is_empty() {
+                        self.state.sessions.clear();
+                        if let Some((_, reply)) = self.shutdown_reply.take() {
+                            let _ = reply.send(Ok(()));
+                        }
+                        self.terminated = true;
+                    }
+                }
+            }
+            ActorInput::WorkerReady { key, generation } => {
+                let current = self
                     .state
                     .sessions
                     .get(&key)
                     .is_some_and(|session| session.generation == generation);
-                if remove {
-                    self.state.sessions.remove(&key);
-                }
-                if let Some((remaining, _)) = self.shutdown_reply.as_mut() {
-                    *remaining = remaining.saturating_sub(1);
-                    if *remaining == 0
-                        && let Some((_, reply)) = self.shutdown_reply.take()
-                    {
-                        let _ = reply.send(Ok(()));
+                if current {
+                    self.pump_session(&key);
+                    let documents = self
+                        .state
+                        .sessions
+                        .get(&key)
+                        .map(|session| session.documents.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    for document in documents {
+                        let _ = self.flush_document(document);
                     }
+                    self.pump_session(&key);
                 }
+            }
+            ActorInput::CacheDeletionFinished { reply, result } => {
+                if let Err(error) = &result {
+                    log::warn!("LSP cache removal failed: {error}");
+                }
+                let _ = reply.send(result);
             }
         }
     }
@@ -2390,19 +2788,23 @@ impl LspManager {
         }
         match result {
             Ok(client) => {
+                let negotiated_capabilities = client.capabilities();
                 let worker =
                     spawn_session_worker(key.clone(), generation, client, self.input_tx.clone());
                 let documents = {
                     let session = self.state.sessions.get_mut(&key).expect("current session");
-                    session.worker = Some(worker.clone());
+                    session.startup_cancel = None;
+                    session.worker = Some(worker);
                     session.exit_observed = false;
+                    session.capabilities = negotiated_capabilities;
                     session.documents.iter().copied().collect::<Vec<_>>()
                 };
                 for document in documents {
-                    if self.enqueue_open(document, &worker).is_ok() {
+                    if self.enqueue_open(document, &key).is_ok() {
                         if let Some(managed) = self.state.documents.get_mut(&document) {
                             managed.pending_batches.clear();
                             managed.batch_generation = managed.batch_generation.saturating_add(1);
+                            managed.synchronization_dirty = false;
                         }
                         self.set_document_status(
                             document,
@@ -2411,8 +2813,20 @@ impl LspManager {
                             None,
                             None,
                         );
+                    } else {
+                        if let Some(managed) = self.state.documents.get_mut(&document) {
+                            managed.synchronization_dirty = true;
+                        }
+                        self.set_document_status(
+                            document,
+                            LspSessionState::Failed,
+                            Some(key.clone()),
+                            Some("Language server synchronization requires a resync".into()),
+                            None,
+                        );
                     }
                 }
+                self.pump_session(&key);
             }
             Err(error) => {
                 let (state, unavailable) = match &error {
@@ -2427,13 +2841,21 @@ impl LspManager {
                     .get(&key)
                     .map(|session| session.documents.iter().copied().collect::<Vec<_>>())
                     .unwrap_or_default();
-                self.push_log(&key, "startup", error.to_string());
+                self.push_log(&key, "startup", "session startup failed".into());
+                if let Some(session) = self.state.sessions.get_mut(&key) {
+                    session.startup_cancel = None;
+                }
                 for document in documents {
                     self.set_document_status(
                         document,
                         state,
                         Some(key.clone()),
-                        Some(error.to_string()),
+                        Some(match &error {
+                            ManagerError::Unavailable(_) => {
+                                "Bundled language server is unavailable".into()
+                            }
+                            _ => "Language server could not start".into(),
+                        }),
                         unavailable.clone(),
                     );
                 }
@@ -2456,12 +2878,18 @@ impl LspManager {
                 version,
                 diagnostics,
             } => {
-                let stale = self.state.documents.values().any(|document| {
-                    document.session_key.as_ref() == Some(&key)
-                        && document.uri == uri
-                        && version.is_some_and(|incoming| incoming < document.text.version())
-                });
-                if stale {
+                let Some((document_id, current_version)) =
+                    self.state
+                        .documents
+                        .iter()
+                        .find_map(|(document_id, document)| {
+                            (document.session_key.as_ref() == Some(&key) && document.uri == uri)
+                                .then_some((*document_id, document.text.version()))
+                        })
+                else {
+                    return;
+                };
+                if version.is_some_and(|incoming| incoming < current_version) {
                     return;
                 }
                 let session_id = self
@@ -2470,16 +2898,21 @@ impl LspManager {
                     .get(&key)
                     .map(|session| session.session_id.clone())
                     .unwrap_or_default();
-                if let Some(diagnostic_key) = DiagnosticKey::new(session_id, &uri)
+                if let Some(diagnostic_key) = DiagnosticKey::new(session_id.clone(), &uri)
                     && self
                         .state
                         .diagnostics
                         .replace(diagnostic_key, version, diagnostics)
                 {
-                    self.emit_diagnostics();
+                    self.emit_diagnostics(Some(session_id), Some(document_id), Some(uri.clone()));
+                    self.refresh_document_status(document_id);
                 }
             }
-            ClientEvent::Message { kind, message } => self.push_log(&key, &kind, message),
+            ClientEvent::Message { kind, message } => self.push_log(
+                &key,
+                &kind,
+                format!("server message redacted ({} bytes)", message.len()),
+            ),
             ClientEvent::Progress { progress, .. } => {
                 let state = if matches!(progress, super::client::ProgressPayload::End { .. }) {
                     LspSessionState::Ready
@@ -2497,6 +2930,20 @@ impl LspManager {
                 }
             }
             ClientEvent::RegistrationsChanged(_) => {}
+            ClientEvent::CapabilitiesChanged(capabilities) => {
+                let documents = if let Some(session) = self.state.sessions.get_mut(&key) {
+                    session.capabilities = capabilities;
+                    session.documents.iter().copied().collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                for document in documents {
+                    self.refresh_document_status(document);
+                }
+            }
+            ClientEvent::Stderr { bytes } => {
+                self.push_log(&key, "stderr", format!("{bytes} bytes redacted"));
+            }
             ClientEvent::Overflow { dropped } => {
                 self.push_log(
                     &key,
@@ -2506,7 +2953,11 @@ impl LspManager {
             }
             ClientEvent::ProtocolExited(error) => {
                 if let Some(error) = error {
-                    self.push_log(&key, "protocol", error);
+                    self.push_log(
+                        &key,
+                        "protocol",
+                        format!("protocol exited with {} error bytes redacted", error.len()),
+                    );
                 }
                 self.session_crashed(key, generation);
             }
@@ -2598,6 +3049,7 @@ impl LspManager {
         uri: String,
         source_version: i32,
         previous_result_id: Option<String>,
+        pull_generation: u64,
         result: Result<(Option<String>, Vec<Diagnostic>), String>,
     ) {
         let fresh = self
@@ -2606,6 +3058,7 @@ impl LspManager {
             .get(&document_id)
             .is_some_and(|document| {
                 document.text.version() == source_version
+                    && document.pull_generation == pull_generation
                     && document.uri == uri
                     && document.session_key.as_ref() == Some(&key)
                     && self
@@ -2635,13 +3088,14 @@ impl LspManager {
             .get(&key)
             .map(|session| session.session_id.clone())
             .unwrap_or_default();
-        if let Some(diagnostic_key) = DiagnosticKey::new(session_id, &uri)
+        if let Some(diagnostic_key) = DiagnosticKey::new(session_id.clone(), &uri)
             && self
                 .state
                 .diagnostics
                 .replace(diagnostic_key, Some(source_version), diagnostics)
         {
-            self.emit_diagnostics();
+            self.emit_diagnostics(Some(session_id), Some(document_id), Some(uri.clone()));
+            self.refresh_document_status(document_id);
         }
     }
 
@@ -2676,9 +3130,10 @@ impl LspManager {
             )
         };
         if self.state.diagnostics.clear_session(&session_id) {
-            self.emit_diagnostics();
+            self.emit_diagnostics(Some(session_id.clone()), None, None);
         }
         for document in &documents {
+            self.cancel_document_requests(*document, ManagerError::SessionUnavailable);
             self.set_document_status(
                 *document,
                 LspSessionState::Failed,
@@ -2711,14 +3166,26 @@ impl LspManager {
         let Some(session) = self.state.sessions.get_mut(&key) else {
             return Err(ManagerError::SessionUnavailable);
         };
-        if let Some(worker) = session.worker.take() {
-            let _ = worker.try_send(SessionOperation::Shutdown);
-        }
         session.crash_timestamps.clear();
         session.automatic_restart_blocked = false;
         session.exit_observed = false;
+        session.restart_after_stop = true;
+        let mut waiting = false;
+        if let Some(mut worker) = session.worker.take()
+            && let Some(shutdown) = worker.shutdown.take()
+        {
+            let _ = shutdown.send(());
+            waiting = true;
+        }
+        if let Some(cancellation) = session.startup_cancel.take() {
+            cancellation.cancel();
+            waiting = true;
+        }
         let documents = session.documents.iter().copied().collect::<Vec<_>>();
-        self.start_session(key.clone());
+        if !waiting {
+            session.restart_after_stop = false;
+            self.start_session(key.clone());
+        }
         for document in documents {
             self.set_document_status(
                 document,
@@ -2757,10 +3224,20 @@ impl LspManager {
         }
     }
 
-    fn emit_diagnostics(&self) {
-        self.emit(ManagerEvent::DiagnosticsUpdated(
-            self.state.diagnostics.snapshot(None),
-        ));
+    fn emit_diagnostics(
+        &self,
+        session_id: Option<String>,
+        document_id: Option<DocumentId>,
+        uri: Option<String>,
+    ) {
+        let snapshot = self.state.diagnostics.snapshot(None);
+        self.emit(ManagerEvent::DiagnosticsUpdated(DiagnosticUpdate {
+            revision: snapshot.revision,
+            session_id,
+            document_id: document_id.map(document_id_text),
+            uri,
+            snapshot,
+        }));
     }
 }
 
@@ -2782,11 +3259,16 @@ impl LspManager {
         let Some(mut session) = self.state.sessions.remove(key) else {
             return;
         };
-        if let Some(worker) = session.worker.take() {
-            let _ = worker.try_send(SessionOperation::Shutdown);
+        if let Some(mut worker) = session.worker.take()
+            && let Some(shutdown) = worker.shutdown.take()
+        {
+            let _ = shutdown.send(());
+        }
+        if let Some(cancellation) = session.startup_cancel.take() {
+            cancellation.cancel();
         }
         if self.state.diagnostics.clear_session(&session.session_id) {
-            self.emit_diagnostics();
+            self.emit_diagnostics(Some(session.session_id.clone()), None, None);
         }
         for document in session.documents {
             if let Some(managed) = self.state.documents.get_mut(&document)
@@ -2827,7 +3309,7 @@ impl LspManager {
         }
     }
 
-    fn remove_disposable_caches(&self, root: &Path, adapter_id: Option<&str>) {
+    fn disposable_cache_plan(&self, root: &Path, adapter_id: Option<&str>) -> CacheDeletionPlan {
         let adapters = adapter_id
             .map(|adapter| vec![adapter.to_owned()])
             .unwrap_or_else(|| {
@@ -2844,6 +3326,7 @@ impl LspManager {
                 .map(str::to_owned)
                 .collect()
             });
+        let mut targets = Vec::new();
         for adapter in adapters {
             let Some(language) = language_for_adapter(&adapter) else {
                 continue;
@@ -2854,29 +3337,44 @@ impl LspManager {
                 continue;
             };
             for path in [paths.cache_dir, paths.data_dir] {
-                let _ = remove_owned_cache_directory(&self.cache_root, &adapter, &path);
+                targets.push((adapter.clone(), path));
             }
+        }
+        CacheDeletionPlan {
+            cache_root: self.cache_root.clone(),
+            targets,
         }
     }
 
-    fn cleanup_reservations_at(&mut self, now: Instant) {
-        self.state.ownership.cleanup_expired_at(now);
+    fn cleanup_reservations_at(&mut self, now: tokio::time::Instant) {
+        self.state.ownership.cleanup_expired_at(Instant::now());
         let expired = self
             .reservations
             .iter()
             .filter_map(|(token, record)| (now >= record.expires_at).then_some(*token))
             .collect::<Vec<_>>();
         for token in expired {
-            if let Some(record) = self.reservations.remove(&token)
-                && record.has_waiter
-            {
-                self.emit(ManagerEvent::DocumentOwnerFocused {
-                    window_label: record.window_label,
-                    document_id: None,
-                    pane_id: None,
-                    reservation_failed: true,
-                });
-            }
+            self.state.ownership.release(token);
+            self.finalize_reservation(token, None, None);
+        }
+    }
+
+    fn finalize_reservation(
+        &mut self,
+        reservation_id: ReservationId,
+        document_id: Option<DocumentId>,
+        pane_id: Option<String>,
+    ) {
+        let Some(record) = self.reservations.remove(&reservation_id) else {
+            return;
+        };
+        if record.has_waiter {
+            self.emit(ManagerEvent::DocumentOwnerFocused {
+                window_label: record.window_label,
+                document_id,
+                pane_id,
+                reservation_failed: document_id.is_none(),
+            });
         }
     }
 
@@ -2885,46 +3383,34 @@ impl LspManager {
             let _ = reply.send(Err(ManagerError::ActorStopped));
             return;
         }
+        self.shutting_down = true;
+        self.event_dispatch_cancel.cancel();
+        self.command_rx.close();
         let documents = self.state.documents.keys().copied().collect::<Vec<_>>();
         for document in documents {
-            let _ = self.flush_document(document);
             self.cancel_document_requests(document, ManagerError::Cancelled);
-            self.detach_document(document, true);
             self.state.ownership.close(document);
         }
         self.state.documents.clear();
-        let sessions = self
-            .state
-            .sessions
-            .iter()
-            .filter_map(|(key, session)| {
-                session
-                    .worker
-                    .clone()
-                    .map(|worker| (key.clone(), session.generation, worker))
-            })
-            .collect::<Vec<_>>();
-        if sessions.is_empty() {
-            self.state.sessions.clear();
-            let _ = reply.send(Ok(()));
-            return;
-        }
-        self.shutdown_reply = Some((sessions.len(), reply));
-        for (_, _, worker) in sessions {
-            if worker.try_send(SessionOperation::Shutdown).is_err()
-                && let Some((remaining, _)) = self.shutdown_reply.as_mut()
+        let mut pending = HashSet::new();
+        for (key, session) in &mut self.state.sessions {
+            if let Some(mut worker) = session.worker.take()
+                && let Some(shutdown) = worker.shutdown.take()
             {
-                *remaining = remaining.saturating_sub(1);
+                pending.insert((key.clone(), session.generation));
+                let _ = shutdown.send(());
+            } else if let Some(cancellation) = session.startup_cancel.take() {
+                pending.insert((key.clone(), session.generation));
+                cancellation.cancel();
             }
         }
-        if self
-            .shutdown_reply
-            .as_ref()
-            .is_some_and(|(remaining, _)| *remaining == 0)
-            && let Some((_, reply)) = self.shutdown_reply.take()
-        {
+        if pending.is_empty() {
+            self.state.sessions.clear();
             let _ = reply.send(Ok(()));
+            self.terminated = true;
+            return;
         }
+        self.shutdown_reply = Some((pending, reply));
     }
 }
 
@@ -3011,6 +3497,22 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, ManagerError> {
         .ok_or(ManagerError::InvalidProjectRoot)
 }
 
+fn project_binding_scope(
+    document_path: &Path,
+    candidates: &[ProjectCandidate],
+) -> Result<PathBuf, ManagerError> {
+    if let Some(candidate) = candidates
+        .iter()
+        .max_by_key(|candidate| Path::new(&candidate.canonical_path).components().count())
+    {
+        return canonical_directory(Path::new(&candidate.canonical_path));
+    }
+    document_path
+        .parent()
+        .ok_or(ManagerError::InvalidProjectRoot)
+        .and_then(canonical_directory)
+}
+
 fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf, ManagerError> {
     if !path.is_absolute() {
         return Err(ManagerError::InvalidProjectRoot);
@@ -3073,30 +3575,59 @@ fn remove_owned_cache_directory(
     adapter_id: &str,
     target: &Path,
 ) -> Result<(), ManagerError> {
-    if !target.exists() {
-        return Ok(());
+    let root_metadata = fs::symlink_metadata(cache_root)
+        .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ManagerError::Infrastructure(
+            "refused to remove cache through a symlinked root".into(),
+        ));
     }
     let cache_root = fs::canonicalize(cache_root)
         .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
-    let target = fs::canonicalize(target)
-        .map_err(|error| ManagerError::Infrastructure(error.to_string()))?;
-    let owned_adapter_root = cache_root.join("lsp").join(adapter_id);
     let disposable_name = target.file_name().and_then(|name| name.to_str());
-    let has_project_key = target
+    let project_key = target
         .parent()
         .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
+        .and_then(|name| name.to_str());
+    let valid_project_key = project_key
         .is_some_and(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    if !target.is_dir()
-        || !target.starts_with(&owned_adapter_root)
+    let expected_parent =
+        project_key.map(|hash| cache_root.join("lsp").join(adapter_id).join(hash));
+    if target.parent() != expected_parent.as_deref()
         || !matches!(disposable_name, Some("cache" | "data"))
-        || !has_project_key
+        || !valid_project_key
     {
         return Err(ManagerError::Infrastructure(
             "refused to remove an unresolved or non-TermLab cache path".into(),
         ));
     }
-    fs::remove_dir_all(&target).map_err(|error| ManagerError::Infrastructure(error.to_string()))
+    let Some(hash) = project_key else {
+        unreachable!("validated")
+    };
+    let components = [
+        cache_root.join("lsp"),
+        cache_root.join("lsp").join(adapter_id),
+        cache_root.join("lsp").join(adapter_id).join(hash),
+        target.to_path_buf(),
+    ];
+    for component in components {
+        match fs::symlink_metadata(&component) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ManagerError::Infrastructure(
+                    "refused to remove cache through a symlinked component".into(),
+                ));
+            }
+            Ok(metadata) if component == target && !metadata.is_dir() => {
+                return Err(ManagerError::Infrastructure(
+                    "refused to remove a non-directory cache target".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(ManagerError::Infrastructure(error.to_string())),
+        }
+    }
+    fs::remove_dir_all(target).map_err(|error| ManagerError::Infrastructure(error.to_string()))
 }
 
 fn spawn_session_worker(
@@ -3104,28 +3635,69 @@ fn spawn_session_worker(
     generation: u64,
     client: Arc<dyn SessionClient>,
     input: mpsc::Sender<ActorInput>,
-) -> mpsc::Sender<SessionOperation> {
+) -> SessionWorkerHandle {
     let (operations, mut receiver) = mpsc::channel(SESSION_OPERATION_CAPACITY);
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let stopping = CancellationToken::new();
+    let shutdown_client = client.clone();
+    let shutdown_input = input.clone();
+    let shutdown_key = key.clone();
+    let shutdown_stopping = stopping.clone();
     tokio::spawn(async move {
-        while let Some(operation) = receiver.recv().await {
+        let _ = shutdown_rx.await;
+        shutdown_stopping.cancel();
+        let _ = shutdown_client.shutdown().await;
+        let _ = shutdown_input
+            .send(ActorInput::ShutdownFinished {
+                key: shutdown_key,
+                generation,
+            })
+            .await;
+    });
+    tokio::spawn(async move {
+        loop {
+            let operation = tokio::select! {
+                biased;
+                _ = stopping.cancelled() => break,
+                operation = receiver.recv() => {
+                    let Some(operation) = operation else { break };
+                    operation
+                }
+            };
             match operation {
                 SessionOperation::DidOpen(document) => {
-                    if let Err(message) = client.did_open(document).await {
+                    let result = tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        result = client.did_open(document) => result,
+                    };
+                    if let Err(message) = result {
                         send_operation_error(&input, &key, generation, "didOpen", message).await;
                     }
                 }
                 SessionOperation::DidChange(batch) => {
-                    if let Err(message) = client.did_change(batch).await {
+                    let result = tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        result = client.did_change(batch) => result,
+                    };
+                    if let Err(message) = result {
                         send_operation_error(&input, &key, generation, "didChange", message).await;
                     }
                 }
                 SessionOperation::DidSave(document_id) => {
-                    if let Err(message) = client.did_save(&document_id).await {
+                    let result = tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        result = client.did_save(&document_id) => result,
+                    };
+                    if let Err(message) = result {
                         send_operation_error(&input, &key, generation, "didSave", message).await;
                     }
                 }
                 SessionOperation::DidClose(document_id) => {
-                    if let Err(message) = client.did_close(&document_id).await {
+                    let result = tokio::select! {
+                        _ = stopping.cancelled() => break,
+                        result = client.did_close(&document_id) => result,
+                    };
+                    if let Err(message) = result {
                         send_operation_error(&input, &key, generation, "didClose", message).await;
                     }
                 }
@@ -3139,6 +3711,7 @@ fn spawn_session_worker(
                 } => {
                     let client = client.clone();
                     let input = input.clone();
+                    let stopping = stopping.clone();
                     tokio::spawn(async move {
                         let request = async {
                             match kind {
@@ -3163,6 +3736,7 @@ fn spawn_session_worker(
                             }
                         };
                         tokio::select! {
+                            _ = stopping.cancelled() => {}
                             _ = cancellation.cancelled() => {}
                             result = request => {
                                 let _ = input.send(ActorInput::RequestCompleted { request_id, result }).await;
@@ -3176,14 +3750,17 @@ fn spawn_session_worker(
                     uri,
                     source_version,
                     previous_result_id,
+                    pull_generation,
                 } => {
                     let client = client.clone();
                     let input = input.clone();
                     let key = key.clone();
+                    let stopping = stopping.clone();
                     tokio::spawn(async move {
-                        let result = client
-                            .pull_diagnostics(&document_id_text, previous_result_id.clone())
-                            .await;
+                        let result = tokio::select! {
+                            _ = stopping.cancelled() => return,
+                            result = client.pull_diagnostics(&document_id_text, previous_result_id.clone()) => result,
+                        };
                         let _ = input
                             .send(ActorInput::PullDiagnosticsCompleted {
                                 key,
@@ -3192,25 +3769,25 @@ fn spawn_session_worker(
                                 uri,
                                 source_version,
                                 previous_result_id,
+                                pull_generation,
                                 result,
                             })
                             .await;
                     });
                 }
-                SessionOperation::Shutdown => {
-                    let _ = client.shutdown().await;
-                    let _ = input
-                        .send(ActorInput::ShutdownFinished {
-                            key: key.clone(),
-                            generation,
-                        })
-                        .await;
-                    break;
-                }
             }
+            let _ = input
+                .send(ActorInput::WorkerReady {
+                    key: key.clone(),
+                    generation,
+                })
+                .await;
         }
     });
-    operations
+    SessionWorkerHandle {
+        operations,
+        shutdown: Some(shutdown_tx),
+    }
 }
 
 async fn send_operation_error(
@@ -3234,8 +3811,9 @@ async fn send_operation_error(
 mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use async_lsp::lsp_types as lsp;
     use async_trait::async_trait;
@@ -3243,8 +3821,9 @@ mod tests {
     use tokio::sync::{Notify, mpsc};
 
     use super::{
-        Enablement, LspManager, LspManagerHandle, ManagerError, ManagerEvent, ProjectContextChoice,
-        SessionClient, SessionFactory, SessionKey, SessionStart,
+        Enablement, LspManager, LspManagerHandle, ManagerError, ManagerEvent,
+        PUBLIC_EVENT_CAPACITY, ProjectContextChoice, RESERVATION_TTL, SessionClient,
+        SessionFactory, SessionKey, SessionStart,
     };
     use crate::lsp::catalog::BundledServerCatalog;
     use crate::lsp::client::ClientEvent;
@@ -3286,6 +3865,16 @@ mod tests {
         requests_released: Notify,
         block_shutdown: AtomicBool,
         shutdowns_released: Notify,
+        block_changes: AtomicBool,
+        changes_released: Notify,
+        block_starts: AtomicBool,
+        starts_released: Notify,
+        block_first_pull: AtomicBool,
+        first_pull_released: Notify,
+        pull_calls: AtomicUsize,
+        fail_next_change: AtomicBool,
+        immediate_exit: AtomicBool,
+        fail_start: AtomicBool,
     }
 
     impl FakeFactory {
@@ -3331,6 +3920,33 @@ mod tests {
             self.shutdowns_released.notify_waiters();
         }
 
+        fn hold_changes(&self) {
+            self.block_changes.store(true, Ordering::SeqCst);
+        }
+
+        fn release_changes(&self) {
+            self.block_changes.store(false, Ordering::SeqCst);
+            self.changes_released.notify_waiters();
+        }
+
+        fn hold_starts(&self) {
+            self.block_starts.store(true, Ordering::SeqCst);
+        }
+
+        fn release_starts(&self) {
+            self.block_starts.store(false, Ordering::SeqCst);
+            self.starts_released.notify_waiters();
+        }
+
+        fn hold_first_pull(&self) {
+            self.block_first_pull.store(true, Ordering::SeqCst);
+        }
+
+        fn release_first_pull(&self) {
+            self.block_first_pull.store(false, Ordering::SeqCst);
+            self.first_pull_released.notify_waiters();
+        }
+
         async fn wait_if_held(&self, held: &AtomicBool, notify: &Notify) {
             while held.load(Ordering::SeqCst) {
                 notify.notified().await;
@@ -3354,6 +3970,16 @@ mod tests {
 
     #[async_trait]
     impl SessionClient for FakeSession {
+        fn capabilities(&self) -> crate::lsp::types::LspCapabilities {
+            crate::lsp::types::LspCapabilities {
+                completion: true,
+                hover: true,
+                signature_help: true,
+                definition: true,
+                diagnostics: true,
+            }
+        }
+
         async fn did_open(
             &self,
             document: crate::lsp::session::SessionDocument,
@@ -3377,6 +4003,12 @@ mod tests {
                     next: batch.next_version,
                 },
             );
+            self.factory
+                .wait_if_held(&self.factory.block_changes, &self.factory.changes_released)
+                .await;
+            if self.factory.fail_next_change.swap(false, Ordering::SeqCst) {
+                return Err("synchronization failed with source text: secret".into());
+            }
             Ok(batch.next_version)
         }
 
@@ -3475,7 +4107,14 @@ mod tests {
         ) -> Result<(Option<String>, Vec<Diagnostic>), String> {
             self.factory
                 .record(&self.key, Observation::PullDiagnostics(document_id.into()));
-            Ok((Some("result-1".into()), Vec::new()))
+            let call = self.factory.pull_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 && self.factory.block_first_pull.load(Ordering::SeqCst) {
+                self.factory.first_pull_released.notified().await;
+            }
+            Ok((
+                Some(format!("result-{call}")),
+                vec![diagnostic(if call == 0 { "old pull" } else { "new pull" })],
+            ))
         }
 
         async fn shutdown(&self) -> Result<(), String> {
@@ -3498,10 +4137,34 @@ mod tests {
             events: mpsc::Sender<ClientEvent>,
         ) -> Result<Arc<dyn SessionClient>, ManagerError> {
             self.launches.lock().unwrap().push(start.clone());
+            self.wait_if_held(&self.block_starts, &self.starts_released)
+                .await;
+            if self.fail_start.load(Ordering::SeqCst) {
+                return Err(ManagerError::Infrastructure(
+                    "server echoed source: const SECRET = true".into(),
+                ));
+            }
             self.events
                 .lock()
                 .unwrap()
                 .insert(start.key.clone(), events);
+            if self.immediate_exit.load(Ordering::SeqCst) {
+                let sender = {
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .get(&start.key)
+                        .cloned()
+                        .unwrap()
+                };
+                sender
+                    .send(ClientEvent::ProcessExited {
+                        success: false,
+                        code: Some(1),
+                    })
+                    .await
+                    .unwrap();
+            }
             Ok(Arc::new(FakeSession {
                 factory: self,
                 key: start.key,
@@ -3512,6 +4175,7 @@ mod tests {
     struct ManagerHarness {
         _temp: TempDir,
         root: PathBuf,
+        config_root: PathBuf,
         cache_root: PathBuf,
         manager: LspManagerHandle,
         factory: Arc<FakeFactory>,
@@ -3529,7 +4193,7 @@ mod tests {
             let factory = Arc::new(FakeFactory::default());
             let (manager, actor, events) = LspManager::new(
                 factory.clone(),
-                config,
+                config.clone(),
                 cache_root.clone(),
                 Enablement::all(),
             );
@@ -3537,6 +4201,7 @@ mod tests {
             Self {
                 _temp: temp,
                 root,
+                config_root: config,
                 cache_root,
                 manager,
                 factory,
@@ -3621,6 +4286,28 @@ mod tests {
                 to_utf16: 0,
                 inserted_text: inserted.into(),
             }],
+        }
+    }
+
+    fn diagnostic(message: &str) -> Diagnostic {
+        Diagnostic {
+            id: format!("diagnostic-{message}"),
+            uri: "file:///placeholder".into(),
+            range: EditorRange {
+                start: EditorPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: EditorPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: DiagnosticSeverity::Warning,
+            code: None,
+            source: Some("fake".into()),
+            message: message.into(),
+            related_information: Vec::new(),
         }
     }
 
@@ -3806,6 +4493,113 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn pending_focus_gets_timer_failure_and_successful_transfer_finalization() {
+        let harness = ManagerHarness::new();
+        let expiring = harness.root.join("expiring.ts");
+        let first = harness
+            .manager
+            .reserve_document(expiring.clone(), "main".into())
+            .await
+            .unwrap();
+        assert!(matches!(first, ReserveResult::Reserved { .. }));
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(expiring, "popup".into())
+                .await
+                .unwrap(),
+            ReserveResult::FocusPending { .. }
+        ));
+        tokio::time::advance(RESERVATION_TTL).await;
+        spin().await;
+        assert!(matches!(
+            harness.next_owner_event().await,
+            ManagerEvent::DocumentOwnerFocused {
+                document_id: None,
+                reservation_failed: true,
+                ..
+            }
+        ));
+
+        let source = harness.file("source.ts", "let value = 1;");
+        let document = harness.open(&source, "main", "pane").await;
+        let target = harness.root.join("target.ts");
+        let target_reservation = harness
+            .manager
+            .reserve_document(target.clone(), "main".into())
+            .await
+            .unwrap();
+        let ReserveResult::Reserved { reservation_id, .. } = target_reservation else {
+            panic!()
+        };
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(target, "popup".into())
+                .await
+                .unwrap(),
+            ReserveResult::FocusPending { .. }
+        ));
+        harness
+            .manager
+            .transfer_document(document, reservation_id, "main".into(), "pane".into())
+            .await
+            .unwrap();
+        assert!(matches!(
+            harness.next_owner_event().await,
+            ManagerEvent::DocumentOwnerFocused {
+                document_id: Some(owner),
+                reservation_failed: false,
+                ..
+            } if owner == document
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_focus_is_not_dropped_when_the_public_event_channel_is_full() {
+        let harness = ManagerHarness::new();
+        for index in 0..=PUBLIC_EVENT_CAPACITY {
+            let path = harness.file(&format!("plain-{index}.txt"), "plain");
+            let _ = harness.open(&path, "main", &format!("pane-{index}")).await;
+        }
+        let path = harness.root.join("pending.ts");
+        let reserved = harness
+            .manager
+            .reserve_document(path.clone(), "main".into())
+            .await
+            .unwrap();
+        let ReserveResult::Reserved { reservation_id, .. } = reserved else {
+            panic!()
+        };
+        let _ = harness
+            .manager
+            .reserve_document(path, "popup".into())
+            .await
+            .unwrap();
+        let opened = harness
+            .manager
+            .open_document(
+                reservation_id,
+                "owner".into(),
+                "let value = 1;".into(),
+                "typescript".into(),
+            )
+            .await
+            .unwrap();
+        let document: DocumentId =
+            serde_json::from_value(serde_json::Value::String(opened.document_id)).unwrap();
+
+        assert!(matches!(
+            harness.next_owner_event().await,
+            ManagerEvent::DocumentOwnerFocused {
+                document_id: Some(owner),
+                reservation_failed: false,
+                ..
+            } if owner == document
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_remembered_exact_root_and_trust_share_one_session() {
         let harness = ManagerHarness::new();
         let root = harness.root.clone();
@@ -3829,6 +4623,47 @@ mod tests {
                 .filter(|event| matches!(event, Observation::Open { .. }))
                 .count(),
             2
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_wide_revocation_overrides_and_removes_adapter_specific_trust() {
+        let harness = ManagerHarness::new();
+        let root = harness.root.clone();
+        let path = harness.file("a.ts", "let a = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        assert_eq!(harness.factory.launch_count("typescript", &root), 1);
+
+        harness
+            .manager
+            .set_project_trust(root.clone(), None, TrustDecision::Revoked)
+            .await
+            .unwrap();
+        spin().await;
+
+        assert_eq!(harness.factory.launch_count("typescript", &root), 1);
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Untrusted
+        );
+        assert!(
+            !harness
+                .manager
+                .trusted_projects()
+                .await
+                .unwrap()
+                .iter()
+                .any(|record| record.root == root
+                    && record.adapter_id.as_deref() == Some("typescript")
+                    && record.decision == TrustDecision::Trusted)
         );
     }
 
@@ -3914,6 +4749,142 @@ mod tests {
             LspSessionState::Untrusted
         );
         assert_eq!(harness.factory.launch_count("typescript", &nested), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn project_context_rejects_an_ancestor_that_was_not_discovered() {
+        let harness = ManagerHarness::new();
+        std::fs::write(harness.root.join("tsconfig.json"), "{}").unwrap();
+        let path = harness.file("src/a.ts", "let a = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let undiscovered = harness.root.parent().unwrap().to_path_buf();
+
+        assert_eq!(
+            harness
+                .manager
+                .set_project_context(document, ProjectContextChoice::from(undiscovered))
+                .await,
+            Err(ManagerError::InvalidProjectRoot)
+        );
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Untrusted
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chosen_outer_root_replaces_the_same_document_scope_disabled_record() {
+        let harness = ManagerHarness::new();
+        std::fs::write(harness.root.join("tsconfig.json"), "{}").unwrap();
+        let nested = harness.root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("package.json"), "{}").unwrap();
+        let path = harness.file("nested/shadow.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        harness
+            .manager
+            .set_project_context(document, ProjectContextChoice::Disabled)
+            .await
+            .unwrap();
+        harness
+            .manager
+            .set_project_context(document, ProjectContextChoice::root(harness.root.clone()))
+            .await
+            .unwrap();
+        harness
+            .manager
+            .set_project_trust(
+                harness.root.clone(),
+                Some("typescript".into()),
+                TrustDecision::Trusted,
+            )
+            .await
+            .unwrap();
+        spin().await;
+        assert_eq!(harness.factory.launch_count("typescript", &harness.root), 1);
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Ready
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_context_save_cannot_leave_in_memory_launch_authority() {
+        let harness = ManagerHarness::new();
+        std::fs::write(harness.root.join("tsconfig.json"), "{}").unwrap();
+        let path = harness.file("a.ts", "let a = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        std::fs::write(&harness.config_root, "not a directory").unwrap();
+
+        assert!(matches!(
+            harness
+                .manager
+                .set_project_context(document, ProjectContextChoice::from(harness.root.clone()))
+                .await,
+            Err(ManagerError::Infrastructure(_))
+        ));
+        std::fs::remove_file(&harness.config_root).unwrap();
+        std::fs::create_dir(&harness.config_root).unwrap();
+        harness
+            .manager
+            .set_project_trust(
+                harness.root.clone(),
+                Some("typescript".into()),
+                TrustDecision::Trusted,
+            )
+            .await
+            .unwrap();
+        spin().await;
+
+        assert_eq!(harness.factory.launch_count("typescript", &harness.root), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_trust_save_cannot_grant_in_memory_launch_authority() {
+        let harness = ManagerHarness::new();
+        std::fs::write(harness.root.join("tsconfig.json"), "{}").unwrap();
+        let path = harness.file("trust-save.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        harness
+            .manager
+            .set_project_context(document, ProjectContextChoice::root(harness.root.clone()))
+            .await
+            .unwrap();
+        let store = harness.config_root.join("lsp-projects.toml");
+        std::fs::remove_file(&store).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        assert!(matches!(
+            harness
+                .manager
+                .set_project_trust(
+                    harness.root.clone(),
+                    Some("typescript".into()),
+                    TrustDecision::Trusted,
+                )
+                .await,
+            Err(ManagerError::Infrastructure(_))
+        ));
+        spin().await;
+        assert_eq!(harness.factory.launch_count("typescript", &harness.root), 0);
+        assert!(
+            !harness
+                .manager
+                .trusted_projects()
+                .await
+                .unwrap()
+                .iter()
+                .any(|record| record.decision == TrustDecision::Trusted)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4100,6 +5071,85 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn continuous_edits_do_not_reset_the_original_forty_millisecond_deadline() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("deadline.ts", "let value = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        let session = key("typescript", &root);
+
+        harness
+            .manager
+            .apply_changes(document, batch(document, 1, 2, "a"))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(39)).await;
+        harness
+            .manager
+            .apply_changes(document, batch(document, 2, 3, "b"))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        spin().await;
+
+        let changes = harness
+            .factory
+            .observations(&session)
+            .into_iter()
+            .filter(|operation| matches!(operation, Observation::Change { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn save_as_owner_mismatch_leaves_old_session_attachment_untouched() {
+        let harness = ManagerHarness::new();
+        let source = harness.file("source.ts", "let value = 1;");
+        let target = harness.root.join("target.ts");
+        let document = harness.open(&source, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        let session = key("typescript", &root);
+        let baseline = harness.factory.observations(&session).len();
+        let reserved = harness
+            .manager
+            .reserve_document(target, "popup".into())
+            .await
+            .unwrap();
+        let ReserveResult::Reserved { reservation_id, .. } = reserved else {
+            panic!("expected target reservation")
+        };
+
+        assert_eq!(
+            harness
+                .manager
+                .transfer_document(document, reservation_id, "main".into(), "pane".into())
+                .await,
+            Err(ManagerError::OwnerMismatch)
+        );
+        spin().await;
+        assert!(
+            !harness.factory.observations(&session)[baseline..]
+                .iter()
+                .any(|operation| matches!(operation, Observation::Close(_)))
+        );
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Ready
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn interactive_requests_flush_cancel_same_kind_and_discard_stale_results() {
         let harness = ManagerHarness::new();
         let path = harness.file("a.ts", "let value = 1;");
@@ -4277,6 +5327,166 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn same_version_pull_generation_discards_aba_and_crash_cancels_promptly() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("pull.ts", "let value = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        harness.factory.hold_first_pull();
+
+        harness.manager.did_save(document).await.unwrap();
+        spin().await;
+        harness.manager.did_save(document).await.unwrap();
+        spin().await;
+        let snapshot = harness.manager.problems_snapshot(None).await.unwrap();
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].message, "new pull");
+        harness.factory.release_first_pull();
+        spin().await;
+        let snapshot = harness.manager.problems_snapshot(None).await.unwrap();
+        assert_eq!(snapshot.items[0].message, "new pull");
+
+        harness.factory.hold_requests();
+        let hover = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move {
+                manager
+                    .hover(
+                        document,
+                        EditorPosition {
+                            line: 0,
+                            character: 0,
+                        },
+                    )
+                    .await
+            }
+        });
+        spin().await;
+        harness
+            .factory
+            .emit(
+                &key("typescript", &root),
+                ClientEvent::ProcessExited {
+                    success: false,
+                    code: Some(1),
+                },
+            )
+            .await;
+        spin().await;
+        assert_eq!(hover.await.unwrap(), Err(ManagerError::SessionUnavailable));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_outbox_retains_admitted_changes_and_resync_recovers_dirty_state() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("pressure.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        harness.factory.hold_changes();
+
+        let mut last_admitted = 1;
+        let mut overloaded_at = None;
+        for next in 2..400 {
+            let result = harness
+                .manager
+                .apply_changes(document, batch(document, next - 1, next, "x"))
+                .await;
+            match result {
+                Ok(ApplyChangesResponse::Applied { version }) => last_admitted = version,
+                Err(ManagerError::Overloaded) => {
+                    overloaded_at = Some(next);
+                    break;
+                }
+                other => panic!("unexpected admission outcome: {other:?}"),
+            }
+            tokio::time::advance(Duration::from_millis(40)).await;
+            spin().await;
+        }
+        assert!(
+            overloaded_at.is_some(),
+            "bounded admission must exert backpressure"
+        );
+        assert_eq!(
+            harness.manager.close_document(document).await,
+            Err(ManagerError::Overloaded),
+            "a close is not acknowledged while its preceding changes cannot be admitted"
+        );
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "failed close must leave ownership and document state intact"
+        );
+        harness.factory.release_changes();
+        for _ in 0..400 {
+            spin().await;
+        }
+        let changes = harness
+            .factory
+            .observations(&key("typescript", &root))
+            .into_iter()
+            .filter_map(|observation| match observation {
+                Observation::Change { base, next, .. } => Some((base, next)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), (last_admitted - 1) as usize);
+        assert!(changes.windows(2).all(|pair| pair[0].1 == pair[1].0));
+
+        harness
+            .factory
+            .fail_next_change
+            .store(true, Ordering::SeqCst);
+        harness
+            .manager
+            .apply_changes(
+                document,
+                batch(document, last_admitted, last_admitted + 1, "y"),
+            )
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(40)).await;
+        spin().await;
+        assert!(matches!(
+            harness
+                .manager
+                .apply_changes(
+                    document,
+                    batch(document, last_admitted + 1, last_admitted + 2, "z"),
+                )
+                .await
+                .unwrap(),
+            ApplyChangesResponse::ResyncRequired { .. }
+        ));
+        harness
+            .manager
+            .resync_document(document, last_admitted + 2, "canonical".into())
+            .await
+            .unwrap();
+        assert!(matches!(
+            harness
+                .manager
+                .apply_changes(
+                    document,
+                    batch(document, last_admitted + 2, last_admitted + 3, "ok"),
+                )
+                .await
+                .unwrap(),
+            ApplyChangesResponse::Applied { .. }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn diagnostics_are_authoritative_revisioned_and_cleared_on_crash() {
         let harness = ManagerHarness::new();
         let path = harness.file("a.ts", "let value = 1;");
@@ -4298,7 +5508,7 @@ mod tests {
                     version: Some(1),
                     diagnostics: vec![Diagnostic {
                         id: "d1".into(),
-                        uri,
+                        uri: uri.clone(),
                         range: EditorRange {
                             start: EditorPosition {
                                 line: 0,
@@ -4319,6 +5529,34 @@ mod tests {
             )
             .await;
         spin().await;
+        let status = harness
+            .manager
+            .status_snapshot(Some(document))
+            .await
+            .unwrap();
+        assert_eq!(status[0].warning_count, 1);
+        let update = loop {
+            let event = harness.next_event().await;
+            if let ManagerEvent::DiagnosticsUpdated(update) = event {
+                break update;
+            }
+        };
+        assert!(update.revision > 0);
+        assert_eq!(
+            update.document_id,
+            serde_json::to_value(document)
+                .unwrap()
+                .as_str()
+                .map(str::to_owned)
+        );
+        assert_eq!(update.uri.as_deref(), Some(uri.as_str()));
+        assert!(
+            update
+                .session_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("typescript-"))
+        );
+        assert_eq!(update.snapshot.revision, update.revision);
         let before = harness.manager.problems_snapshot(None).await.unwrap();
         assert_eq!(before.items.len(), 1);
         harness
@@ -4335,6 +5573,79 @@ mod tests {
         let after = harness.manager.problems_snapshot(None).await.unwrap();
         assert!(after.revision > before.revision);
         assert!(after.items.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_one_shared_document_clears_its_uri_and_rejects_late_pushes() {
+        let harness = ManagerHarness::new();
+        let first_path = harness.file("a.ts", "let a = 1;");
+        let second_path = harness.file("b.ts", "let b = 1;");
+        let first = harness.open(&first_path, "main", "a").await;
+        let root = harness.root.clone();
+        harness.choose_and_trust(first, &root, "typescript").await;
+        let _second = harness.open(&second_path, "main", "b").await;
+        let session = key("typescript", &root);
+        let uri = lsp::Url::from_file_path(first_path.canonicalize().unwrap())
+            .unwrap()
+            .to_string();
+        let publication = || ClientEvent::Diagnostics {
+            uri: uri.clone(),
+            version: Some(1),
+            diagnostics: vec![Diagnostic {
+                id: "closed".into(),
+                uri: uri.clone(),
+                range: EditorRange {
+                    start: EditorPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: EditorPosition {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+                severity: DiagnosticSeverity::Error,
+                code: None,
+                source: Some("fake".into()),
+                message: "closed document".into(),
+                related_information: Vec::new(),
+            }],
+        };
+        harness.factory.emit(&session, publication()).await;
+        spin().await;
+        assert_eq!(
+            harness
+                .manager
+                .problems_snapshot(None)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+
+        harness.manager.close_document(first).await.unwrap();
+        spin().await;
+        assert!(
+            harness
+                .manager
+                .problems_snapshot(None)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        harness.factory.emit(&session, publication()).await;
+        spin().await;
+        assert!(
+            harness
+                .manager
+                .problems_snapshot(None)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4390,6 +5701,73 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn startup_failures_redact_arbitrary_server_text_from_status_and_logs() {
+        let harness = ManagerHarness::new();
+        harness.factory.fail_start.store(true, Ordering::SeqCst);
+        let path = harness.file("failure.ts", "const SECRET = true");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        let status = harness
+            .manager
+            .status_snapshot(Some(document))
+            .await
+            .unwrap();
+        assert_eq!(status[0].state, LspSessionState::Failed);
+        assert!(!format!("{status:?}").contains("SECRET"));
+        let logs = harness
+            .manager
+            .session_logs("typescript".into(), root)
+            .await
+            .unwrap();
+        assert!(!format!("{logs:?}").contains("SECRET"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn status_tracks_negotiated_and_dynamic_capability_snapshots() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("capabilities.ts", "let value = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        let ready = harness
+            .manager
+            .status_snapshot(Some(document))
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(ready.capabilities.completion);
+        let changed = crate::lsp::types::LspCapabilities {
+            completion: false,
+            hover: true,
+            signature_help: false,
+            definition: true,
+            diagnostics: false,
+        };
+        harness
+            .factory
+            .emit(
+                &key("typescript", &root),
+                ClientEvent::CapabilitiesChanged(changed),
+            )
+            .await;
+        spin().await;
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .capabilities,
+            changed
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn revocation_stops_session_clears_diagnostics_and_only_removes_owned_cache_dirs() {
         let harness = ManagerHarness::new();
         let path = harness.file("a.ts", "let value = 1;");
@@ -4436,6 +5814,44 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn cache_deletion_rejects_final_symlink_without_blocking_actor() {
+        use std::os::unix::fs::symlink;
+
+        let harness = ManagerHarness::new();
+        let root_a = harness.root.clone();
+        let root_b = harness.root.parent().unwrap().join("other-repo");
+        std::fs::create_dir_all(&root_b).unwrap();
+        let path = harness.file("symlink.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        harness
+            .choose_and_trust(document, &root_a, "typescript")
+            .await;
+        let catalog = BundledServerCatalog::new();
+        let paths_a = catalog
+            .cache_paths(LanguageId::TypeScript, &root_a, &harness.cache_root)
+            .unwrap();
+        let paths_b = catalog
+            .cache_paths(LanguageId::TypeScript, &root_b, &harness.cache_root)
+            .unwrap();
+        std::fs::create_dir_all(&paths_b.cache_dir).unwrap();
+        std::fs::write(paths_b.cache_dir.join("owned-by-b"), "keep").unwrap();
+        std::fs::create_dir_all(paths_a.cache_dir.parent().unwrap()).unwrap();
+        symlink(&paths_b.cache_dir, &paths_a.cache_dir).unwrap();
+
+        let revoke = harness.manager.set_project_trust(
+            root_a,
+            Some("typescript".into()),
+            TrustDecision::Revoked,
+        );
+        let status = harness.manager.status_snapshot(Some(document));
+        let (revoke, status) = tokio::join!(revoke, status);
+        assert!(matches!(revoke, Err(ManagerError::Infrastructure(_))));
+        assert_eq!(status.unwrap()[0].state, LspSessionState::Untrusted);
+        assert!(paths_b.cache_dir.join("owned-by-b").exists());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn app_shutdown_starts_all_process_ceilings_concurrently() {
         let harness = ManagerHarness::new();
@@ -4466,5 +5882,54 @@ mod tests {
         );
         harness.factory.release_shutdowns();
         shutdown.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_inflight_start_and_closes_actor_and_public_events() {
+        let harness = ManagerHarness::new();
+        harness.factory.hold_starts();
+        let path = harness.file("starting.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .manager
+            .set_project_context(document, ProjectContextChoice::root(root.clone()))
+            .await
+            .unwrap();
+        harness
+            .manager
+            .set_project_trust(root, Some("typescript".into()), TrustDecision::Trusted)
+            .await
+            .unwrap();
+        spin().await;
+
+        harness.manager.shutdown().await.unwrap();
+        assert_eq!(
+            harness.manager.status_snapshot(None).await,
+            Err(ManagerError::ActorStopped)
+        );
+        let mut events = harness.events.lock().await;
+        while events.try_recv().is_ok() {}
+        assert!(events.recv().await.is_none());
+        harness.factory.release_starts();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn immediate_startup_exit_never_resurrects_a_ready_generation() {
+        let harness = ManagerHarness::new();
+        harness.factory.immediate_exit.store(true, Ordering::SeqCst);
+        let path = harness.file("immediate.ts", "x");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        spin().await;
+        let status = harness
+            .manager
+            .status_snapshot(Some(document))
+            .await
+            .unwrap();
+        assert_eq!(status[0].state, LspSessionState::Failed);
     }
 }

@@ -423,6 +423,20 @@ impl DiagnosticStore {
         changed
     }
 
+    /// Clears one exact local URI for one session, including its version
+    /// tombstone. This is used when a document detaches while the shared
+    /// session continues serving other documents.
+    pub(crate) fn clear_session_uri(&mut self, session_id: &str, uri: &str) -> bool {
+        let Some(key) = DiagnosticKey::new(session_id, uri) else {
+            return false;
+        };
+        let changed = self.entries.remove(&key).is_some();
+        if changed {
+            self.bump_revision();
+        }
+        changed
+    }
+
     /// Produces an order independent of HashMap layout. `workspace_root` is
     /// compared as path components, never by URI or string prefix.
     pub(crate) fn snapshot(&self, workspace_root: Option<&Path>) -> DiagnosticSnapshot {

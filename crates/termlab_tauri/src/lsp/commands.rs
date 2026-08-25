@@ -19,6 +19,123 @@ pub(crate) const SESSION_STATUS_EVENT: &str = "lsp-session-status";
 pub(crate) const DIAGNOSTICS_UPDATED_EVENT: &str = "lsp-diagnostics-updated";
 pub(crate) const DOCUMENT_OWNER_FOCUSED_EVENT: &str = "editor-document-owner-focused";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CommandContract {
+    pub name: &'static str,
+    pub args: &'static [&'static str],
+    pub result: &'static str,
+}
+
+/// Auditable invoke surface. This registry is consumed by boundary tests and
+/// keeps frontend argument names and normalized result types explicit.
+pub(crate) const LSP_COMMAND_CONTRACTS: &[CommandContract] = &[
+    CommandContract {
+        name: "editor_reserve_document",
+        args: &["path", "windowLabel"],
+        result: "ReserveResult",
+    },
+    CommandContract {
+        name: "editor_release_document",
+        args: &["reservationId"],
+        result: "void",
+    },
+    CommandContract {
+        name: "editor_transfer_document",
+        args: &["documentId", "targetReservationId", "windowLabel", "paneId"],
+        result: "void",
+    },
+    CommandContract {
+        name: "lsp_open_document",
+        args: &["reservationId", "paneId", "contents", "languageId"],
+        result: "OpenDocumentResponse",
+    },
+    CommandContract {
+        name: "lsp_apply_changes",
+        args: &["documentId", "batch"],
+        result: "ApplyChangesResponse",
+    },
+    CommandContract {
+        name: "lsp_resync_document",
+        args: &["documentId", "version", "contents"],
+        result: "ResyncDocumentResponse",
+    },
+    CommandContract {
+        name: "lsp_did_save",
+        args: &["documentId"],
+        result: "void",
+    },
+    CommandContract {
+        name: "lsp_close_document",
+        args: &["documentId"],
+        result: "void",
+    },
+    CommandContract {
+        name: "lsp_project_candidates",
+        args: &["path", "languageId"],
+        result: "ProjectCandidate[]",
+    },
+    CommandContract {
+        name: "lsp_set_project_context",
+        args: &["documentId", "context"],
+        result: "LspStatus",
+    },
+    CommandContract {
+        name: "lsp_set_project_trust",
+        args: &["root", "adapterId", "decision"],
+        result: "void",
+    },
+    CommandContract {
+        name: "lsp_completion",
+        args: &["documentId", "position", "trigger"],
+        result: "CompletionResponse",
+    },
+    CommandContract {
+        name: "lsp_hover",
+        args: &["documentId", "position"],
+        result: "HoverResponse",
+    },
+    CommandContract {
+        name: "lsp_signature_help",
+        args: &["documentId", "position", "trigger"],
+        result: "SignatureHelpResponse",
+    },
+    CommandContract {
+        name: "lsp_definition",
+        args: &["documentId", "position"],
+        result: "DefinitionResponse",
+    },
+    CommandContract {
+        name: "lsp_problems_snapshot",
+        args: &["root"],
+        result: "DiagnosticSnapshot",
+    },
+    CommandContract {
+        name: "lsp_status_snapshot",
+        args: &["documentId"],
+        result: "LspStatus[]",
+    },
+    CommandContract {
+        name: "lsp_restart_session",
+        args: &["adapterId", "root"],
+        result: "void",
+    },
+    CommandContract {
+        name: "lsp_session_logs",
+        args: &["adapterId", "root"],
+        result: "SessionLogEntry[]",
+    },
+    CommandContract {
+        name: "lsp_trusted_projects",
+        args: &[],
+        result: "TrustedProject[]",
+    },
+    CommandContract {
+        name: "lsp_revoke_project_trust",
+        args: &["root", "adapterId"],
+        result: "void",
+    },
+];
+
 #[derive(Clone)]
 pub(crate) struct LspState {
     manager: LspManagerHandle,
@@ -362,7 +479,7 @@ pub(crate) async fn lsp_revoke_project_trust(
 
 #[cfg(test)]
 mod tests {
-    use super::{DocumentOwnerFocusedPayload, LspState};
+    use super::{DocumentOwnerFocusedPayload, LSP_COMMAND_CONTRACTS, LspState};
     use crate::lsp::manager::ProjectContextChoice;
     use crate::lsp::trust::TrustDecision;
     use crate::lsp::types::DocumentId;
@@ -407,5 +524,107 @@ mod tests {
     #[test]
     fn typed_tauri_lsp_state_exists() {
         let _ = std::mem::size_of::<LspState>();
+    }
+
+    #[test]
+    fn all_twenty_one_invoke_contracts_have_exact_names_args_and_results() {
+        let expected = [
+            (
+                "editor_reserve_document",
+                &["path", "windowLabel"][..],
+                "ReserveResult",
+            ),
+            ("editor_release_document", &["reservationId"][..], "void"),
+            (
+                "editor_transfer_document",
+                &["documentId", "targetReservationId", "windowLabel", "paneId"][..],
+                "void",
+            ),
+            (
+                "lsp_open_document",
+                &["reservationId", "paneId", "contents", "languageId"][..],
+                "OpenDocumentResponse",
+            ),
+            (
+                "lsp_apply_changes",
+                &["documentId", "batch"][..],
+                "ApplyChangesResponse",
+            ),
+            (
+                "lsp_resync_document",
+                &["documentId", "version", "contents"][..],
+                "ResyncDocumentResponse",
+            ),
+            ("lsp_did_save", &["documentId"][..], "void"),
+            ("lsp_close_document", &["documentId"][..], "void"),
+            (
+                "lsp_project_candidates",
+                &["path", "languageId"][..],
+                "ProjectCandidate[]",
+            ),
+            (
+                "lsp_set_project_context",
+                &["documentId", "context"][..],
+                "LspStatus",
+            ),
+            (
+                "lsp_set_project_trust",
+                &["root", "adapterId", "decision"][..],
+                "void",
+            ),
+            (
+                "lsp_completion",
+                &["documentId", "position", "trigger"][..],
+                "CompletionResponse",
+            ),
+            (
+                "lsp_hover",
+                &["documentId", "position"][..],
+                "HoverResponse",
+            ),
+            (
+                "lsp_signature_help",
+                &["documentId", "position", "trigger"][..],
+                "SignatureHelpResponse",
+            ),
+            (
+                "lsp_definition",
+                &["documentId", "position"][..],
+                "DefinitionResponse",
+            ),
+            ("lsp_problems_snapshot", &["root"][..], "DiagnosticSnapshot"),
+            ("lsp_status_snapshot", &["documentId"][..], "LspStatus[]"),
+            ("lsp_restart_session", &["adapterId", "root"][..], "void"),
+            (
+                "lsp_session_logs",
+                &["adapterId", "root"][..],
+                "SessionLogEntry[]",
+            ),
+            ("lsp_trusted_projects", &[][..], "TrustedProject[]"),
+            (
+                "lsp_revoke_project_trust",
+                &["root", "adapterId"][..],
+                "void",
+            ),
+        ];
+        assert_eq!(LSP_COMMAND_CONTRACTS.len(), 21);
+        for (contract, (name, args, result)) in LSP_COMMAND_CONTRACTS.iter().zip(expected) {
+            assert_eq!(
+                (contract.name, contract.args, contract.result),
+                (name, args, result)
+            );
+            let invoke_args = contract
+                .args
+                .iter()
+                .map(|arg| ((*arg).to_owned(), serde_json::Value::Null))
+                .collect::<serde_json::Map<_, _>>();
+            assert_eq!(
+                invoke_args
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::HashSet<_>>(),
+                args.iter().copied().collect()
+            );
+        }
     }
 }

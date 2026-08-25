@@ -283,6 +283,17 @@ pub(crate) struct DiagnosticSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DiagnosticUpdate {
+    pub revision: u64,
+    pub session_id: Option<String>,
+    pub document_id: Option<String>,
+    pub uri: Option<String>,
+    pub snapshot: DiagnosticSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectCandidate {
     pub root_uri: String,
     pub canonical_path: String,
@@ -390,9 +401,9 @@ pub(crate) struct ResyncDocumentResponse {
 mod tests {
     use super::{
         ApplyChangesResponse, CompletionItem, CompletionTextEdit, CompletionUnsupportedEffect,
-        Diagnostic, EditorLocation, EditorPosition, EditorRange, HoverBlock, LspCapabilities,
-        LspChangeBatch, LspSessionState, LspStatus, LspTextChange, LspUnavailableReason,
-        ProjectCandidate, SignatureHelpResponse,
+        Diagnostic, DiagnosticCounts, DiagnosticSnapshot, DiagnosticUpdate, EditorLocation,
+        EditorPosition, EditorRange, HoverBlock, LspCapabilities, LspChangeBatch, LspSessionState,
+        LspStatus, LspTextChange, LspUnavailableReason, ProjectCandidate, SignatureHelpResponse,
     };
     use ts_rs::TS;
 
@@ -429,12 +440,40 @@ mod tests {
             SignatureHelpResponse::decl(&config),
             EditorLocation::decl(&config),
             Diagnostic::decl(&config),
+            DiagnosticUpdate::decl(&config),
             ProjectCandidate::decl(&config),
             LspStatus::decl(&config),
             ApplyChangesResponse::decl(&config),
         ] {
             assert!(declaration.starts_with("type ") || declaration.starts_with("interface "));
         }
+    }
+
+    #[test]
+    fn diagnostic_update_carries_revision_and_origin_identity() {
+        let update = DiagnosticUpdate {
+            revision: 9,
+            session_id: Some("typescript-session".into()),
+            document_id: Some("document-id".into()),
+            uri: Some("file:///repo/a.ts".into()),
+            snapshot: DiagnosticSnapshot {
+                revision: 9,
+                items: Vec::new(),
+                counts: DiagnosticCounts {
+                    errors: 0,
+                    warnings: 0,
+                    information: 0,
+                    hints: 0,
+                },
+            },
+        };
+        let value = serde_json::to_value(update).unwrap();
+        assert_eq!(value["revision"], 9);
+        assert_eq!(value["sessionId"], "typescript-session");
+        assert_eq!(value["documentId"], "document-id");
+        assert_eq!(value["uri"], "file:///repo/a.ts");
+        assert_eq!(value["snapshot"]["revision"], 9);
+        assert!(DiagnosticUpdate::decl(&ts_rs::Config::default()).contains("sessionId"));
     }
 
     #[test]

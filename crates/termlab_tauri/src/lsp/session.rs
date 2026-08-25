@@ -6,8 +6,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_lsp::concurrency::ConcurrencyLayer;
@@ -17,23 +17,23 @@ use async_lsp::router::Router;
 use async_lsp::{LanguageServer, MainLoop, ServerSocket};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tower::ServiceBuilder;
 
 use super::catalog::{AdapterDescriptor, ResolvedServerCommand};
 use super::client::{
-    normalize_completion, normalize_definition, normalize_diagnostics, normalize_hover,
-    normalize_resolved_completion, normalize_signature_help, ClientEvent, ClientState, EventSink,
-    SessionCapabilityState, SyncPolicy,
+    ClientEvent, ClientState, EventSink, SessionCapabilityState, SyncPolicy, normalize_completion,
+    normalize_definition, normalize_diagnostics, normalize_hover, normalize_resolved_completion,
+    normalize_signature_help,
 };
 use super::document::{DocumentError, VersionedDocument};
 use super::types::{
     CompletionItem, CompletionResponse, DefinitionResponse, Diagnostic, HoverResponse,
-    LspChangeBatch, SignatureHelpResponse,
+    LspCapabilities, LspChangeBatch, SignatureHelpResponse,
 };
 
 const SHORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -95,6 +95,7 @@ impl ProcessHandle {
 
 pub(crate) struct LaunchedServer {
     pub stdout: BoxReader,
+    pub stderr: BoxReader,
     pub stdin: BoxWriter,
     pub process: ProcessHandle,
 }
@@ -140,6 +141,10 @@ impl ServerLauncher for ProcessServerLauncher {
             .stdin
             .take()
             .ok_or_else(|| SessionError::Launch("language server stdin was not piped".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| SessionError::Launch("language server stderr was not piped".into()))?;
         let (kill_tx, kill_rx) = oneshot::channel();
         let (exit_tx, exit_rx) = watch::channel(None);
         tokio::spawn(async move {
@@ -164,6 +169,7 @@ impl ServerLauncher for ProcessServerLauncher {
         });
         Ok(LaunchedServer {
             stdout: Box::new(stdout),
+            stderr: Box::new(stderr),
             stdin: Box::new(stdin),
             process: ProcessHandle::new(kill_tx, exit_rx),
         })
@@ -177,7 +183,7 @@ fn sanitized_command(command: &ResolvedServerCommand, root: &Path) -> Command {
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env_clear()
         .env(
@@ -450,6 +456,19 @@ impl LspSession {
         let workspace_configuration = serde_json::from_str(descriptor.workspace_configuration_json)
             .map_err(|error| SessionError::Protocol(error.to_string()))?;
         let event_sink = EventSink::new(events);
+        let stderr_events = event_sink.clone();
+        let mut stderr = launched.stderr;
+        tokio::spawn(async move {
+            let mut chunk = [0_u8; 4096];
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(bytes) => stderr_events.send(ClientEvent::Stderr {
+                        bytes: bytes.try_into().unwrap_or(u32::MAX),
+                    }),
+                }
+            }
+        });
         let capabilities = Arc::new(std::sync::Mutex::new(SessionCapabilityState::default()));
         let router = Router::from_language_client(ClientState::new(
             event_sink.clone(),
@@ -503,11 +522,14 @@ impl LspSession {
                 return Err(SessionError::Timeout("initialize"));
             }
         };
+        let features = normalized_capabilities(&result.capabilities);
         let sync = sync_policy(result.capabilities.text_document_sync);
-        capabilities
-            .lock()
-            .expect("LSP capability state poisoned")
-            .set_static_sync(sync);
+        {
+            let mut capabilities = capabilities.lock().expect("LSP capability state poisoned");
+            capabilities.set_static_sync(sync);
+            capabilities.set_features(features);
+        }
+        event_sink.send(ClientEvent::CapabilitiesChanged(features));
         server
             .notify::<lsp::notification::Initialized>(lsp::InitializedParams {})
             .map_err(|error| SessionError::Protocol(error.to_string()))?;
@@ -570,6 +592,14 @@ impl LspSession {
                 .map_err(|error| SessionError::Protocol(error.to_string()))?;
         }
         Ok(())
+    }
+
+    pub(crate) fn capabilities(&self) -> LspCapabilities {
+        self.inner
+            .capabilities
+            .lock()
+            .expect("LSP capability state poisoned")
+            .features()
     }
 
     pub(crate) async fn did_change(&self, batch: LspChangeBatch) -> Result<i32, SessionError> {
@@ -1026,6 +1056,24 @@ fn sync_policy(capability: Option<lsp::TextDocumentSyncCapability>) -> SyncPolic
     }
 }
 
+fn normalized_capabilities(capabilities: &lsp::ServerCapabilities) -> LspCapabilities {
+    let hover = capabilities
+        .hover_provider
+        .as_ref()
+        .is_some_and(|provider| !matches!(provider, lsp::HoverProviderCapability::Simple(false)));
+    let definition = capabilities
+        .definition_provider
+        .as_ref()
+        .is_some_and(|provider| !matches!(provider, lsp::OneOf::Left(false)));
+    LspCapabilities {
+        completion: capabilities.completion_provider.is_some(),
+        hover,
+        signature_help: capabilities.signature_help_provider.is_some(),
+        definition,
+        diagnostics: capabilities.diagnostic_provider.is_some(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1048,7 +1096,7 @@ mod tests {
     use crate::lsp::catalog::{ResolvedFileIdentity, ResolvedResourceFile};
     use crate::lsp::client::{ClientEvent, ProgressPayload};
     use crate::lsp::test_support::{
-        full_feature_script, root, test_command, test_descriptor, MockServerLauncher, ServerScript,
+        MockServerLauncher, ServerScript, full_feature_script, root, test_command, test_descriptor,
     };
     use crate::lsp::types::{LspChangeBatch, LspTextChange};
 
@@ -1076,6 +1124,16 @@ mod tests {
         let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
             .await
             .unwrap();
+        assert_eq!(
+            session.capabilities(),
+            crate::lsp::types::LspCapabilities {
+                completion: true,
+                hover: true,
+                signature_help: true,
+                definition: true,
+                diagnostics: true,
+            }
+        );
         session
             .did_open(SessionDocument {
                 document_id: "doc-1".into(),
@@ -1139,12 +1197,14 @@ mod tests {
                 .active_parameter,
             Some(0)
         );
-        assert!(!session
-            .definition("doc-1", Position::new(0, 3))
-            .await
-            .unwrap()
-            .locations
-            .is_empty());
+        assert!(
+            !session
+                .definition("doc-1", Position::new(0, 3))
+                .await
+                .unwrap()
+                .locations
+                .is_empty()
+        );
         let (result_id, diagnostics) = session.pull_diagnostics("doc-1", None).await.unwrap();
         assert_eq!(result_id.as_deref(), Some("diagnostics-1"));
         assert_eq!(diagnostics[0].message, "pull error");
@@ -1154,12 +1214,16 @@ mod tests {
         while let Ok(event) = events.try_recv() {
             received_events.push(event);
         }
-        assert!(received_events
-            .iter()
-            .any(|event| matches!(event, ClientEvent::Diagnostics { .. })));
-        assert!(received_events
-            .iter()
-            .any(|event| matches!(event, ClientEvent::Progress { .. })));
+        assert!(
+            received_events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::Diagnostics { .. }))
+        );
+        assert!(
+            received_events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::Progress { .. }))
+        );
         assert!(received_events
             .iter()
             .any(|event| matches!(event, ClientEvent::Message { kind, message } if kind == "warning" && message == "mock warning")));
@@ -1185,6 +1249,31 @@ mod tests {
         observed.assert_incremental_changes_descend();
         observed.assert_saved_text("CoN");
         observed.assert_configuration_and_unsupported_request_responses();
+    }
+
+    #[tokio::test]
+    async fn stderr_is_drained_as_bounded_redacted_facts() {
+        let (launcher, _observed) = MockServerLauncher::scripted(ServerScript::StderrFlood);
+        let (sink, mut events) = tokio::sync::mpsc::channel(64);
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        let mut chunks = 0_usize;
+        let mut bytes = 0_u64;
+        while bytes < 256 * 1024 {
+            let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let ClientEvent::Stderr { bytes: chunk } = event {
+                chunks += 1;
+                bytes += u64::from(chunk);
+                assert!(chunk <= 4096);
+                assert!(!format!("{event:?}").contains("ssssssss"));
+            }
+        }
+        assert!(chunks <= 64);
+        session.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1571,7 +1660,8 @@ mod tests {
         session
             .did_open(session_document(
                 "doc-terminal-flood",
-                async_lsp::lsp_types::Url::from_file_path(root().join("terminal-flood.ts")).unwrap(),
+                async_lsp::lsp_types::Url::from_file_path(root().join("terminal-flood.ts"))
+                    .unwrap(),
             ))
             .await
             .unwrap();

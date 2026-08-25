@@ -66,7 +66,7 @@ pub(crate) struct LoadResult {
 }
 
 /// Synchronous policy data owned by the future single LSP manager actor.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProjectTrustStore {
     config_dir: PathBuf,
     bindings: BTreeMap<PathBuf, RootBinding>,
@@ -215,6 +215,20 @@ impl ProjectTrustStore {
             });
         }
         Ok(())
+    }
+
+    /// Records a root-wide revocation and removes every adapter-specific
+    /// decision for that exact canonical root, so no more-specific stale
+    /// `Trusted` record can outrank the revocation.
+    pub(crate) fn revoke_all_at_root(
+        &mut self,
+        workspace: &Path,
+        updated_at_ms: u64,
+    ) -> io::Result<()> {
+        let workspace = canonical_path(workspace)?;
+        self.trust
+            .retain(|record| record.workspace != workspace || record.adapter_id.is_none());
+        self.set_trust(&workspace, None, TrustDecision::Revoked, updated_at_ms)
     }
 
     pub(crate) fn mark_trust_used(
@@ -668,11 +682,13 @@ last_used_at_ms = 9
         let loaded = ProjectTrustStore::load(temp.path());
         assert_eq!(loaded.warning, None);
         assert_eq!(loaded.store.trust.len(), 2);
-        assert!(loaded
-            .store
-            .trust
-            .iter()
-            .any(|record| record.workspace == unmounted));
+        assert!(
+            loaded
+                .store
+                .trust
+                .iter()
+                .any(|record| record.workspace == unmounted)
+        );
         assert_eq!(
             loaded
                 .store

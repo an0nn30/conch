@@ -246,6 +246,43 @@ impl<P: PathIdentityPolicy> OwnershipRegistry<P> {
         self.transfer_at(source_document, target_token, Instant::now())
     }
 
+    pub(crate) fn validate_transfer_at(
+        &self,
+        source_document: DocumentId,
+        target_token: ReservationId,
+        now: Instant,
+    ) -> Result<(), OwnershipError> {
+        let source_window = self
+            .leases
+            .values()
+            .find_map(|lease| match lease {
+                UriLease::Owned {
+                    document_id,
+                    window_label,
+                    ..
+                } if *document_id == source_document => Some(window_label),
+                _ => None,
+            })
+            .ok_or(OwnershipError::DocumentNotOwned)?;
+        let target_window = self
+            .leases
+            .values()
+            .find_map(|lease| match lease {
+                UriLease::Reserved {
+                    token,
+                    window_label,
+                    expires_at,
+                    ..
+                } if *token == target_token && now < *expires_at => Some(window_label),
+                _ => None,
+            })
+            .ok_or(OwnershipError::InvalidReservation)?;
+        if source_window != target_window {
+            return Err(OwnershipError::OwnerMismatch);
+        }
+        Ok(())
+    }
+
     /// Atomically moves one document from its owned local path to a live target
     /// reservation. All validation completes before either lease is mutated.
     pub(crate) fn transfer_at(

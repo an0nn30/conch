@@ -2,18 +2,18 @@ use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
-use async_lsp::lsp_types as lsp;
 use async_lsp::LanguageClient;
+use async_lsp::lsp_types as lsp;
 use futures::future::BoxFuture;
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use super::types::{
     CompletionItem, CompletionResponse, CompletionTextEdit, CompletionUnsupportedEffect,
     DefinitionResponse, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
     EditorLocation, EditorPosition, EditorRange, EditorTextEdit, HoverBlock, HoverResponse,
-    SignatureHelpResponse, SignatureInformation, SignatureParameter,
+    LspCapabilities, SignatureHelpResponse, SignatureInformation, SignatureParameter,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +50,7 @@ pub(crate) enum ClientEvent {
         progress: ProgressPayload,
     },
     RegistrationsChanged(Vec<DynamicRegistration>),
+    CapabilitiesChanged(LspCapabilities),
     Overflow {
         dropped: u64,
     },
@@ -57,6 +58,11 @@ pub(crate) enum ClientEvent {
     ProcessExited {
         success: bool,
         code: Option<i32>,
+    },
+    /// A bounded stderr chunk was drained. Raw bytes deliberately never cross
+    /// this boundary, preventing server output from leaking document source.
+    Stderr {
+        bytes: u32,
     },
 }
 
@@ -96,15 +102,40 @@ impl Default for SyncPolicy {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct SessionCapabilityState {
     static_sync: SyncPolicy,
+    features: LspCapabilities,
     registrations: Vec<DynamicRegistration>,
+}
+
+impl Default for SessionCapabilityState {
+    fn default() -> Self {
+        Self {
+            static_sync: SyncPolicy::default(),
+            features: LspCapabilities {
+                completion: false,
+                hover: false,
+                signature_help: false,
+                definition: false,
+                diagnostics: false,
+            },
+            registrations: Vec::new(),
+        }
+    }
 }
 
 impl SessionCapabilityState {
     pub(crate) fn set_static_sync(&mut self, sync: SyncPolicy) {
         self.static_sync = sync;
+    }
+
+    pub(crate) fn set_features(&mut self, features: LspCapabilities) {
+        self.features = features;
+    }
+
+    pub(crate) fn features(&self) -> LspCapabilities {
+        self.features
     }
 
     pub(crate) fn sync_policy(&self) -> SyncPolicy {
@@ -198,9 +229,7 @@ impl EventMailbox {
                 .queue
                 .iter()
                 .position(|queued| match incoming_priority {
-                    EventPriority::Terminal => {
-                        event_priority(queued) != EventPriority::Terminal
-                    }
+                    EventPriority::Terminal => event_priority(queued) != EventPriority::Terminal,
                     EventPriority::State => event_priority(queued) == EventPriority::Ordinary,
                     EventPriority::Ordinary => false,
                 });
@@ -232,6 +261,7 @@ fn same_state_key(left: &ClientEvent, right: &ClientEvent) -> bool {
             ClientEvent::Diagnostics { uri: right, .. },
         ) => left == right,
         (ClientEvent::RegistrationsChanged(_), ClientEvent::RegistrationsChanged(_)) => true,
+        (ClientEvent::CapabilitiesChanged(_), ClientEvent::CapabilitiesChanged(_)) => true,
         (ClientEvent::Progress { token: left, .. }, ClientEvent::Progress { token: right, .. }) => {
             left == right
         }
@@ -255,8 +285,11 @@ fn event_priority(event: &ClientEvent) -> EventPriority {
         }
         ClientEvent::Diagnostics { .. }
         | ClientEvent::RegistrationsChanged(_)
+        | ClientEvent::CapabilitiesChanged(_)
         | ClientEvent::Progress { .. } => EventPriority::State,
-        ClientEvent::Message { .. } | ClientEvent::Overflow { .. } => EventPriority::Ordinary,
+        ClientEvent::Message { .. } | ClientEvent::Overflow { .. } | ClientEvent::Stderr { .. } => {
+            EventPriority::Ordinary
+        }
     }
 }
 
@@ -336,6 +369,12 @@ impl LanguageClient for ClientState {
                 capabilities.registrations()
             };
             self.send(ClientEvent::RegistrationsChanged(snapshot));
+            let features = self
+                .capabilities
+                .lock()
+                .expect("LSP capability state poisoned")
+                .features();
+            self.send(ClientEvent::CapabilitiesChanged(features));
             Ok(())
         });
         Box::pin(async move { result })
@@ -371,6 +410,12 @@ impl LanguageClient for ClientState {
                 let snapshot = capabilities.registrations();
                 drop(capabilities);
                 self.send(ClientEvent::RegistrationsChanged(snapshot));
+                let features = self
+                    .capabilities
+                    .lock()
+                    .expect("LSP capability state poisoned")
+                    .features();
+                self.send(ClientEvent::CapabilitiesChanged(features));
                 Ok(())
             }
         };
@@ -446,7 +491,7 @@ fn parse_registration(
         _ => {
             return Err(invalid_registration(
                 "unsupported dynamic registration method",
-            ))
+            ));
         }
     };
     let selector_is_supported = match &options {
@@ -878,9 +923,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        normalize_completion, normalize_definition, normalize_diagnostics, normalize_hover,
-        normalize_progress, normalize_resolved_completion, normalize_signature_help,
-        resolve_workspace_configuration, ProgressPayload,
+        ProgressPayload, normalize_completion, normalize_definition, normalize_diagnostics,
+        normalize_hover, normalize_progress, normalize_resolved_completion,
+        normalize_signature_help, resolve_workspace_configuration,
     };
     use crate::lsp::types::{CompletionTextEdit, CompletionUnsupportedEffect, DiagnosticSeverity};
 

@@ -1,13 +1,15 @@
 //! Settings dialog Tauri commands.
 
-use termlab_core::config::{self, UserConfig};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::Emitter;
+use termlab_core::config::{self, UserConfig};
 use ts_rs::TS;
 
 use crate::TauriState;
+use crate::lsp::commands::LspState;
+use crate::lsp::manager::Enablement;
 use crate::plugins::PluginState;
 
 fn normalize_plugin_search_paths(cfg: &mut UserConfig) {
@@ -43,9 +45,10 @@ pub(crate) fn get_all_settings(state: tauri::State<'_, TauriState>) -> serde_jso
 }
 
 #[tauri::command]
-pub(crate) fn save_settings(
+pub(crate) async fn save_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, TauriState>,
+    lsp_state: tauri::State<'_, LspState>,
     plugin_state: tauri::State<'_, Arc<Mutex<PluginState>>>,
     settings: serde_json::Value,
 ) -> Result<SaveSettingsResult, String> {
@@ -59,13 +62,21 @@ pub(crate) fn save_settings(
         needs_restart(&old_config, &new_config)
     };
 
-    // Update in-memory config before disk write.
+    config::save_user_config(&new_config).map_err(|e| format!("Failed to save config: {e}"))?;
+    if let Err(error) = lsp_state
+        .manager()
+        .set_enablement(Enablement::from_config(&new_config.editor.lsp))
+        .await
+    {
+        // Keep persistent settings and live manager authority coherent when
+        // the actor cannot accept the runtime policy transition.
+        let _ = config::save_user_config(&state.config.read().clone());
+        return Err(format!("Failed to apply LSP settings: {error}"));
+    }
     {
         let mut cfg = state.config.write();
         *cfg = new_config.clone();
     }
-
-    config::save_user_config(&new_config).map_err(|e| format!("Failed to save config: {e}"))?;
 
     let _ = app.emit("config-changed", ());
 
@@ -203,6 +214,19 @@ mod tests {
         assert!(
             !needs_restart(&a, &b),
             "vim mode is applied live via config-changed; asking for a restart would be a lie"
+        );
+    }
+
+    #[test]
+    fn changed_lsp_enablement_is_a_live_runtime_policy() {
+        let old = UserConfig::default();
+        let mut new = old.clone();
+        new.editor.lsp.enabled = !old.editor.lsp.enabled;
+        assert!(!needs_restart(&old, &new));
+        let policy = Enablement::from_config(&new.editor.lsp);
+        assert_eq!(
+            policy.enables("typescript"),
+            new.editor.lsp.enabled && new.editor.lsp.languages.typescript
         );
     }
 
