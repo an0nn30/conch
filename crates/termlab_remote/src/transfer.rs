@@ -12,6 +12,7 @@ pub use fingerprint::SourceFingerprint;
 
 pub mod copy;
 pub mod frontier;
+pub mod pipelined;
 pub mod positional;
 pub mod sftp_io;
 pub use copy::{ControlDecision, CopyOutcome, copy_with_checkpoint};

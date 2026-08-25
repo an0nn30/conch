@@ -6152,6 +6152,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "dirs",
+ "futures",
  "log",
  "parking_lot",
  "russh",
