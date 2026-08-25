@@ -87,13 +87,15 @@
 
     el.innerHTML = `
       <div class="fp-toolbar">
-        <button class="fp-tb-btn" data-action="back" ${pane.backStack.length === 0 ? 'disabled' : ''} title="Back">${d.iconBack || ''}</button>
-        <button class="fp-tb-btn" data-action="forward" ${pane.forwardStack.length === 0 ? 'disabled' : ''} title="Forward">${d.iconForward || ''}</button>
-        <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
-        <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${d.iconHome || ''}</button>
-        <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${d.iconRefresh || ''}</button>
-        <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
-        ${isRemote ? '<span class="fp-host-combo-slot"></span>' : ''}
+        ${isRemote ? '<span class="fp-tb-group fp-tb-conn"><span class="fp-host-combo-slot"></span></span>' : ''}
+        <span class="fp-tb-group fp-tb-nav">
+          <button class="fp-tb-btn" data-action="back" ${pane.backStack.length === 0 ? 'disabled' : ''} title="Back">${d.iconBack || ''}</button>
+          <button class="fp-tb-btn" data-action="forward" ${pane.forwardStack.length === 0 ? 'disabled' : ''} title="Forward">${d.iconForward || ''}</button>
+          <input class="fp-path-input" type="text" value="${attr(pane.pathInput)}" spellcheck="false" ${noSession ? 'disabled' : ''} />
+          <button class="fp-tb-btn" data-action="home" title="Home" ${noSession ? 'disabled' : ''}>${d.iconHome || ''}</button>
+          <button class="fp-tb-btn" data-action="refresh" title="Refresh" ${noSession ? 'disabled' : ''}>${d.iconRefresh || ''}</button>
+          <button class="fp-tb-btn ${pane.showHidden ? 'active' : ''}" data-action="hidden" title="${pane.showHidden ? 'Hide hidden files' : 'Show hidden files'}">.*</button>
+        </span>
       </div>
       ${pane.error ? `<div class="fp-error">${esc(pane.error)}</div>` : ''}
       <div class="fp-table-wrap">

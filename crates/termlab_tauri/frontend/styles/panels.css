@@ -3,7 +3,9 @@
       flex: 1; display: flex; flex-direction: column; overflow: hidden;
     }
     .fp-pane-container { flex: 1; display: flex; flex-direction: row; overflow: hidden; }
-    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; }
+    /* Each pane is a size container so the toolbar can restack on the pane's
+       own width — narrow sidebar docks and skinny splits alike. */
+    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; container: fp-pane / inline-size; }
     /* The divider between the panes is both the visual border and the drag
        handle for the resizable split (app/features/files/split.js). */
     .fp-pane-divider {
@@ -20,7 +22,22 @@
       cursor: row-resize; border-left: none; border-top: 1px solid var(--tl-border);
     }
     .fp-toolbar {
-      display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0;
+      display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0; flex-wrap: wrap;
+    }
+    /* Toolbar groups: connection identity (remote host picker + disconnect)
+       and navigation (history, path, view controls). The connection group is
+       first in the DOM — it is the pane's context — but sits visually on the
+       right in the wide single-row layout via `order`. */
+    .fp-tb-group { display: flex; align-items: center; gap: 2px; min-width: 0; }
+    .fp-tb-nav { flex: 1 1 auto; }
+    .fp-tb-conn { order: 1; }
+    /* Narrow panes stack the groups: host row on top at full width, then the
+       navigation row where the path input finally gets room to breathe. */
+    @container fp-pane (max-width: 420px) {
+      .fp-tb-conn { order: 0; flex: 1 1 100%; }
+      .fp-tb-nav { flex: 1 1 100%; }
+      .fp-tb-conn .fp-host-combo-slot { flex: 1; max-width: none; margin-left: 0; }
+      .fp-tb-conn .fp-host-combo-slot .tl-combo { flex: 1; max-width: none; }
     }
     .fp-tb-btn {
       background: none; border: 1px solid transparent; border-radius: 3px;
