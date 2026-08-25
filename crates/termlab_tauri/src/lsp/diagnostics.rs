@@ -173,6 +173,78 @@ mod tests {
         assert_eq!(snapshot.counts.warnings, 0);
     }
 
+    // Catches a missing descendant below a symlinked workspace alias retaining
+    // the alias instead of its real canonical workspace identity.
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_descendant_through_workspace_symlink_has_one_key_and_is_scoped() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        use async_lsp::lsp_types::Url;
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("real-workspace");
+        fs::create_dir(&workspace).unwrap();
+        let workspace_alias = temp.path().join("workspace-alias");
+        symlink(&workspace, &workspace_alias).unwrap();
+        let workspace_link = temp.path().join("repo-link");
+        symlink(&workspace_alias, &workspace_link).unwrap();
+
+        let unavailable_through_link = workspace_link.join("missing/../gone.ts");
+        let unavailable_direct = workspace.join("gone.ts");
+        let linked_key = DiagnosticKey::new(
+            "ts",
+            &Url::from_file_path(&unavailable_through_link)
+                .unwrap()
+                .to_string(),
+        )
+        .unwrap();
+        let direct_key = DiagnosticKey::new(
+            "ts",
+            &Url::from_file_path(&unavailable_direct)
+                .unwrap()
+                .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(linked_key, direct_key);
+
+        let mut store = DiagnosticStore::default();
+        store.replace(linked_key, Some(1), vec![diag("through-link")]);
+        let messages: Vec<_> = store
+            .snapshot(Some(&workspace))
+            .items
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect();
+        assert_eq!(messages, vec!["through-link"]);
+    }
+
+    // Catches lexical fallback accepting paths below a regular file or a
+    // broken symlink, where no real directory ancestor can contain the suffix.
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_descendants_without_a_resolvable_directory_fail_closed() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        use async_lsp::lsp_types::Url;
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let regular_file = temp.path().join("regular-file");
+        fs::write(&regular_file, "not a directory").unwrap();
+        let broken_link = temp.path().join("broken-link");
+        symlink(temp.path().join("missing-target"), &broken_link).unwrap();
+
+        for path in [regular_file.join("child.ts"), broken_link.join("child.ts")] {
+            let uri = Url::from_file_path(path).unwrap().to_string();
+            assert!(DiagnosticKey::new("ts", &uri).is_none());
+        }
+    }
+
     // Catches unversioned publications discarding known version authority and admitting later stale data.
     #[test]
     fn unversioned_publish_replaces_contents_but_preserves_stale_version_rejection() {
@@ -431,7 +503,29 @@ fn canonical_path(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
-    Some(fs::canonicalize(path).unwrap_or_else(|_| normalize_absolute_path(path)))
+    let normalized = normalize_absolute_path(path);
+    let mut candidate = normalized.as_path();
+    let mut unresolved_suffix = Vec::new();
+
+    loop {
+        match fs::symlink_metadata(candidate) {
+            Ok(_) => {
+                let mut resolved = fs::canonicalize(candidate).ok()?;
+                if !unresolved_suffix.is_empty() && !fs::metadata(&resolved).ok()?.is_dir() {
+                    return None;
+                }
+                for component in unresolved_suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                unresolved_suffix.push(candidate.file_name()?.to_os_string());
+                candidate = candidate.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Normalizes `.` and `..` components without touching the filesystem. This
