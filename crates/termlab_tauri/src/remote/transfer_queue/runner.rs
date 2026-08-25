@@ -4506,6 +4506,57 @@ mod tests {
         (ssh_handle, session, remote_directory)
     }
 
+    fn mib_per_second(bytes: usize, elapsed: std::time::Duration) -> f64 {
+        bytes as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0)
+    }
+
+    /// Times one pipelined upload attempt end-to-end (transfer + content
+    /// verification) and hands back the elapsed duration.
+    ///
+    /// A single sample is noisy: on a low-RTT LAN or a loaded test runner,
+    /// depth-1 can already sit near link capacity, so one unlucky sample per
+    /// depth can invert a strict `<` comparison. Callers run this multiple
+    /// times per depth to distinct remote paths and compare the minimum
+    /// elapsed per depth instead — the minimum filters transient stalls
+    /// (a slow scheduler tick, a GC pause, a momentary link hiccup) without
+    /// softening the strict less-than the design mandates.
+    async fn timed_pipelined_upload(
+        ssh_handle: &termlab_remote::russh::client::Handle<
+            termlab_remote::handler::TermLabSshHandler,
+        >,
+        session: &termlab_remote::transfer::SftpSessionHandle,
+        source_path: &std::path::Path,
+        source_bytes: &[u8],
+        remote_path: &str,
+        tuning: PipelineTuning,
+        label: &str,
+    ) -> Result<std::time::Duration, String> {
+        let started = std::time::Instant::now();
+        let outcome = upload_to_partial_pipelined(
+            ssh_handle,
+            source_path,
+            remote_path,
+            0,
+            tuning,
+            |_fingerprint| async { Ok::<(), RemoteError>(()) },
+            || ControlDecision::Continue,
+            |_bytes, _total| {},
+        )
+        .await
+        .map_err(|error| format!("{label} pipelined upload failed: {error}"))?;
+        let elapsed = started.elapsed();
+        require_live(
+            matches!(outcome, CopyOutcome::Completed { bytes } if bytes == source_bytes.len() as u64),
+            format!("{label} upload did not complete all bytes: {outcome:?}"),
+        )?;
+        let uploaded = read_live_remote(session, remote_path).await?;
+        require_live(
+            uploaded == source_bytes,
+            format!("{label} upload did not preserve source content"),
+        )?;
+        Ok(elapsed)
+    }
+
     /// Deterministic, non-repeating fill so a 64 MiB fixture doesn't need the
     /// `rand` crate: an xorshift64* stream seeded from `seed`.
     fn pseudo_random_bytes(seed: u64, len: usize) -> Vec<u8> {
@@ -4533,6 +4584,14 @@ mod tests {
         let (ssh_handle, session, remote_directory) = connect_live_sftp(&env, local.path()).await;
 
         let verification = async {
+            // Two samples per depth, compared by minimum rather than a single
+            // shot: one unlucky sample (a loaded runner, a momentary link
+            // hiccup, or depth-1 already sitting near link capacity on a
+            // low-RTT LAN) can otherwise invert a single-sample `<`
+            // comparison. The minimum filters transient stalls without
+            // softening the strict less-than the design mandates on the
+            // *comparison*.
+            const SAMPLES_PER_DEPTH: usize = 2;
             const SIZE: usize = 64 * 1024 * 1024;
             let source_bytes = pseudo_random_bytes(0x517C_ADE5, SIZE);
             let source_path = local.path().join("pipelined-upload-source.bin");
@@ -4540,8 +4599,6 @@ mod tests {
                 .await
                 .map_err(|error| format!("write local pipelined upload source failed: {error}"))?;
 
-            let sequential_remote_path = format!("{remote_directory}/sequential-upload.bin");
-            let pipelined_remote_path = format!("{remote_directory}/pipelined-upload.bin");
             let sequential_tuning = PipelineTuning {
                 depth: 1,
                 chunk_bytes: 262_144,
@@ -4551,74 +4608,69 @@ mod tests {
                 chunk_bytes: 262_144,
             };
 
-            let sequential_started = std::time::Instant::now();
-            let sequential_outcome = upload_to_partial_pipelined(
-                &ssh_handle,
-                &source_path,
-                &sequential_remote_path,
-                0,
-                sequential_tuning,
-                |_fingerprint| async { Ok::<(), RemoteError>(()) },
-                || ControlDecision::Continue,
-                |_bytes, _total| {},
-            )
-            .await
-            .map_err(|error| format!("depth-1 pipelined upload failed: {error}"))?;
-            let sequential_elapsed = sequential_started.elapsed();
-            require_live(
-                matches!(sequential_outcome, CopyOutcome::Completed { bytes } if bytes == SIZE as u64),
-                format!("depth-1 upload did not complete all bytes: {sequential_outcome:?}"),
-            )?;
+            let mut sequential_samples = Vec::with_capacity(SAMPLES_PER_DEPTH);
+            for attempt in 0..SAMPLES_PER_DEPTH {
+                let remote_path = format!("{remote_directory}/sequential-upload-{attempt}.bin");
+                let elapsed = timed_pipelined_upload(
+                    &ssh_handle,
+                    &session,
+                    &source_path,
+                    &source_bytes,
+                    &remote_path,
+                    sequential_tuning,
+                    &format!("depth-1 attempt {attempt}"),
+                )
+                .await?;
+                eprintln!(
+                    "live_pipelined_upload_matches_content_and_beats_sequential: \
+                     depth=1 attempt {attempt} {elapsed:?} ({:.2} MiB/s)",
+                    mib_per_second(source_bytes.len(), elapsed)
+                );
+                sequential_samples.push(elapsed);
+            }
 
-            let pipelined_started = std::time::Instant::now();
-            let pipelined_outcome = upload_to_partial_pipelined(
-                &ssh_handle,
-                &source_path,
-                &pipelined_remote_path,
-                0,
-                pipelined_tuning,
-                |_fingerprint| async { Ok::<(), RemoteError>(()) },
-                || ControlDecision::Continue,
-                |_bytes, _total| {},
-            )
-            .await
-            .map_err(|error| format!("depth-16 pipelined upload failed: {error}"))?;
-            let pipelined_elapsed = pipelined_started.elapsed();
-            require_live(
-                matches!(pipelined_outcome, CopyOutcome::Completed { bytes } if bytes == SIZE as u64),
-                format!("depth-16 upload did not complete all bytes: {pipelined_outcome:?}"),
-            )?;
+            let mut pipelined_samples = Vec::with_capacity(SAMPLES_PER_DEPTH);
+            for attempt in 0..SAMPLES_PER_DEPTH {
+                let remote_path = format!("{remote_directory}/pipelined-upload-{attempt}.bin");
+                let elapsed = timed_pipelined_upload(
+                    &ssh_handle,
+                    &session,
+                    &source_path,
+                    &source_bytes,
+                    &remote_path,
+                    pipelined_tuning,
+                    &format!("depth-16 attempt {attempt}"),
+                )
+                .await?;
+                eprintln!(
+                    "live_pipelined_upload_matches_content_and_beats_sequential: \
+                     depth=16 attempt {attempt} {elapsed:?} ({:.2} MiB/s)",
+                    mib_per_second(source_bytes.len(), elapsed)
+                );
+                pipelined_samples.push(elapsed);
+            }
 
-            let sequential_uploaded = read_live_remote(&session, &sequential_remote_path).await?;
-            let pipelined_uploaded = read_live_remote(&session, &pipelined_remote_path).await?;
-            require_live(
-                sequential_uploaded.len() == source_bytes.len()
-                    && pipelined_uploaded.len() == source_bytes.len(),
-                "uploaded remote file sizes did not match the source",
-            )?;
-            require_live(
-                sequential_uploaded == source_bytes,
-                "depth-1 upload did not preserve source content",
-            )?;
-            require_live(
-                pipelined_uploaded == source_bytes,
-                "depth-16 upload did not preserve source content",
-            )?;
-
-            let mib = 1024.0 * 1024.0;
-            let sequential_mib_s = source_bytes.len() as f64 / sequential_elapsed.as_secs_f64() / mib;
-            let pipelined_mib_s = source_bytes.len() as f64 / pipelined_elapsed.as_secs_f64() / mib;
+            let sequential_min = *sequential_samples
+                .iter()
+                .min()
+                .expect("at least one depth-1 sample was recorded");
+            let pipelined_min = *pipelined_samples
+                .iter()
+                .min()
+                .expect("at least one depth-16 sample was recorded");
             eprintln!(
                 "live_pipelined_upload_matches_content_and_beats_sequential: \
-                 depth=1 {sequential_elapsed:?} ({sequential_mib_s:.2} MiB/s), \
-                 depth=16 {pipelined_elapsed:?} ({pipelined_mib_s:.2} MiB/s)"
+                 depth=1 min {sequential_min:?} ({:.2} MiB/s), \
+                 depth=16 min {pipelined_min:?} ({:.2} MiB/s)",
+                mib_per_second(source_bytes.len(), sequential_min),
+                mib_per_second(source_bytes.len(), pipelined_min)
             );
 
             require_live(
-                pipelined_elapsed < sequential_elapsed,
+                pipelined_min < sequential_min,
                 format!(
-                    "depth-16 upload ({pipelined_elapsed:?}) was not faster than depth-1 \
-                     ({sequential_elapsed:?})"
+                    "depth-16 minimum ({pipelined_min:?}) was not faster than depth-1 minimum \
+                     ({sequential_min:?})"
                 ),
             )?;
 
