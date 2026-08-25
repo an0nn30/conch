@@ -14,13 +14,45 @@
     function clearBadge(pane, fileName, transferId) {
       if (!pane || !pane.transferStatus) return false;
       const current = pane.transferStatus[fileName];
-      if (!current || (current.transferId && current.transferId !== transferId)) return false;
+      if (!current
+          || current.provisional
+          || (current.transferId && current.transferId !== transferId)) return false;
       delete pane.transferStatus[fileName];
       return true;
     }
 
     function renderTransferStatus(pane) {
       if (typeof d.renderTransferStatus === 'function') d.renderTransferStatus(pane);
+    }
+
+    function transferProgressStatus(job, current) {
+      const kind = job && job.state && job.state.kind;
+      const direction = job && job.direction === 'download' ? 'download' : 'upload';
+      const transferId = job && job.id;
+      if (['queued', 'connecting', 'checking'].includes(kind)) {
+        return { status: 'preparing', direction, transferId };
+      }
+      if (kind === 'retryWaiting') {
+        return { status: 'waiting', direction, transferId };
+      }
+      if (kind === 'paused') {
+        return { status: 'paused', direction, transferId };
+      }
+
+      const bytes = Number(job && job.bytesTransferred) || 0;
+      const total = Number(job && job.totalBytes) || 0;
+      if (bytes > 0 && total > 0) {
+        return {
+          status: 'in_progress',
+          direction,
+          percent: Math.min(100, (bytes / total) * 100),
+          transferId,
+        };
+      }
+      if (current && current.transferId === transferId && Number(current.percent) > 0) {
+        return { ...current, direction };
+      }
+      return { status: 'starting', direction, transferId };
     }
 
     function reportCommandError(error) {
@@ -89,15 +121,33 @@
       }
       if (progress.status !== 'in_progress') return;
 
+      const current = pane.transferStatus[progress.file_name];
+      if (current
+          && (current.provisional
+            || (current.transferId && current.transferId !== progress.transfer_id))) return;
+      if (Number(progress.bytes_transferred) <= 0) {
+        if (!current) {
+          pane.transferStatus[progress.file_name] = {
+            status: 'starting',
+            direction: progress.kind === 'download' ? 'download' : 'upload',
+            transferId: progress.transfer_id,
+          };
+          renderTransferStatus(pane);
+        }
+        return;
+      }
+
       const pct = progress.total_bytes > 0
-        ? Math.round((progress.bytes_transferred / progress.total_bytes) * 100)
+        ? Math.min(100, (progress.bytes_transferred / progress.total_bytes) * 100)
         : 0;
 
       pane.transferStatus[progress.file_name] = {
         status: 'in_progress',
+        direction: progress.kind === 'download' ? 'download' : 'upload',
         percent: pct,
         transferId: progress.transfer_id,
       };
+      renderTransferStatus(pane);
     }
 
     function handleTransferSnapshot(snapshot) {
@@ -125,12 +175,11 @@
           if (clearBadge(pane, job.fileName, job.id)) panesToRender.add(pane);
         } else {
           const current = pane.transferStatus[job.fileName];
-          if (!current || current.transferId === job.id) {
-            pane.transferStatus[job.fileName] = {
-              status: 'in_progress',
-              percent: current && Number(current.percent) ? Number(current.percent) : 0,
-              transferId: job.id,
-            };
+          const newlyObserved = !previousJobs.has(job.id);
+          if (!current
+              || (current.provisional && newlyObserved)
+              || current.transferId === job.id) {
+            pane.transferStatus[job.fileName] = transferProgressStatus(job, current);
             panesToRender.add(pane);
           }
         }

@@ -102,6 +102,51 @@ vm.runInContext(source, sandbox, { filename: 'transfers.js' });
     }),
     '<button type="button" class="fp-transfer-attention" data-transfer-id="upload-2" aria-label="Resolve transfer issue">Needs attention</button>',
   );
+  assert.equal(
+    paneSandbox.termlabFilesPaneView.transferBadgeHtml({
+      status: 'preparing',
+      direction: 'upload',
+    }),
+    '<span class="fp-transfer-phase" role="status">Preparing upload…</span>',
+    'preflight is visibly different from byte progress',
+  );
+  assert.equal(
+    paneSandbox.termlabFilesPaneView.transferBadgeHtml({
+      status: 'starting',
+      direction: 'download',
+    }),
+    '<span class="fp-transfer-phase" role="status">Starting download…</span>',
+  );
+  assert.equal(
+    paneSandbox.termlabFilesPaneView.transferBadgeHtml({
+      status: 'waiting',
+      direction: 'upload',
+    }),
+    '<span class="fp-transfer-waiting" role="status">Waiting to retry upload…</span>',
+    'retry backoff is not presented as active preflight work',
+  );
+  assert.equal(
+    paneSandbox.termlabFilesPaneView.transferBadgeHtml({
+      status: 'in_progress',
+      percent: 0.025,
+    }),
+    '<span class="fp-transfer-pct">&lt;1%</span>',
+    'large transfers show byte movement before a whole percentage is reached',
+  );
+  assert.equal(
+    paneSandbox.termlabFilesPaneView.transferActivityText({
+      'large.iso': { status: 'preparing', direction: 'upload' },
+    }),
+    'Preparing upload: large.iso',
+    'footer activity remains visible when the destination has no row yet',
+  );
+  assert.equal(
+    paneSandbox.termlabFilesPaneView.transferActivityText({
+      'retry.iso': { status: 'waiting', direction: 'upload' },
+    }),
+    '',
+    'a retry backoff does not animate the active-transfer footer',
+  );
 
   const invoker = { id: 'attention-control' };
   const activations = [];
@@ -213,6 +258,140 @@ vm.runInContext(source, sandbox, { filename: 'transfers.js' });
   attentionButton.dispatchBubbling('keydown', { key: 'Enter' });
   assert.deepEqual(rowActivations, [], 'Enter on the attention button must not activate the file row');
   assert.deepEqual(keyboardActivations, ['upload-keyboard'], 'Enter activates the attention button');
+}
+
+// Queue phases must describe the real work instead of presenting all preflight
+// and zero-byte states as a frozen 0%. A legacy zero-byte event follows each
+// durable snapshot and must not erase that more precise phase.
+{
+  const phaseLocalPane = { transferStatus: {} };
+  const phaseRemotePane = { transferStatus: {} };
+  const phaseController = sandbox.window.termlabFilesTransfers.createController({
+    localPane: phaseLocalPane,
+    remotePane: phaseRemotePane,
+  });
+  const phaseJob = (kind, extra = {}) => ({
+    id: 'large-upload',
+    direction: 'upload',
+    origin: { kind: 'filesPanel' },
+    fileName: 'large.iso',
+    state: { kind },
+    bytesTransferred: 0,
+    totalBytes: 1_000_000_000,
+    ...extra,
+  });
+
+  phaseRemotePane.transferStatus['large.iso'] = {
+    status: 'preparing', direction: 'upload', provisional: true,
+  };
+  phaseController.handleTransferSnapshot({ revision: 1, jobs: [phaseJob('queued')] });
+  assert.deepEqual(JSON.parse(JSON.stringify(phaseRemotePane.transferStatus['large.iso'])), {
+    status: 'preparing', direction: 'upload', transferId: 'large-upload',
+  }, 'the first authoritative snapshot claims the provisional activity');
+
+  phaseController.handleTransferSnapshot({ revision: 2, jobs: [phaseJob('running')] });
+  assert.deepEqual(JSON.parse(JSON.stringify(phaseRemotePane.transferStatus['large.iso'])), {
+    status: 'starting', direction: 'upload', transferId: 'large-upload',
+  });
+  phaseController.handleTransferProgress({
+    payload: {
+      transfer_id: 'large-upload',
+      kind: 'upload',
+      status: 'in_progress',
+      bytes_transferred: 0,
+      total_bytes: 1_000_000_000,
+      file_name: 'large.iso',
+      error: null,
+    },
+  });
+  assert.equal(
+    phaseRemotePane.transferStatus['large.iso'].status,
+    'starting',
+    'zero-byte compatibility progress preserves the authoritative starting phase',
+  );
+
+  phaseController.handleTransferProgress({
+    payload: {
+      transfer_id: 'large-upload',
+      kind: 'upload',
+      status: 'in_progress',
+      bytes_transferred: 262_144,
+      total_bytes: 1_000_000_000,
+      file_name: 'large.iso',
+      error: null,
+    },
+  });
+  assert.equal(phaseRemotePane.transferStatus['large.iso'].status, 'in_progress');
+  assert.equal(phaseRemotePane.transferStatus['large.iso'].direction, 'upload');
+  assert.ok(
+    phaseRemotePane.transferStatus['large.iso'].percent > 0
+      && phaseRemotePane.transferStatus['large.iso'].percent < 1,
+    'sub-one-percent byte progress is retained rather than rounded back to zero',
+  );
+
+  phaseController.handleTransferSnapshot({ revision: 3, jobs: [phaseJob('retryWaiting')] });
+  assert.deepEqual(JSON.parse(JSON.stringify(phaseRemotePane.transferStatus['large.iso'])), {
+    status: 'waiting', direction: 'upload', transferId: 'large-upload',
+  }, 'retry backoff has a non-spinning waiting presentation');
+}
+
+// A repeat submission can share a filename with an older active/history job.
+// Only the newly observed queue job may claim the provisional marker, and
+// delayed compatibility progress from the older UUID must not erase it.
+{
+  const repeatRemotePane = { transferStatus: {} };
+  const repeatController = sandbox.window.termlabFilesTransfers.createController({
+    localPane: { transferStatus: {} },
+    remotePane: repeatRemotePane,
+  });
+  const repeatJob = (id, kind) => ({
+    id,
+    direction: 'upload',
+    origin: { kind: 'filesPanel' },
+    fileName: 'repeat.iso',
+    state: { kind },
+    bytesTransferred: 0,
+    totalBytes: 1_000_000_000,
+  });
+
+  repeatController.handleTransferSnapshot({ revision: 1, jobs: [repeatJob('old-upload', 'running')] });
+  repeatRemotePane.transferStatus['repeat.iso'] = {
+    status: 'preparing', direction: 'upload', provisional: true,
+  };
+  repeatController.handleTransferProgress({
+    payload: {
+      transfer_id: 'old-upload', kind: 'upload', status: 'completed',
+      bytes_transferred: 1_000_000_000, total_bytes: 1_000_000_000,
+      file_name: 'repeat.iso', error: null,
+    },
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(repeatRemotePane.transferStatus['repeat.iso'] || null)),
+    { status: 'preparing', direction: 'upload', provisional: true },
+    'an older terminal event cannot clear a new provisional submission',
+  );
+
+  repeatController.handleTransferSnapshot({
+    revision: 2,
+    jobs: [repeatJob('old-upload', 'running'), repeatJob('new-upload', 'queued')],
+  });
+  assert.equal(
+    repeatRemotePane.transferStatus['repeat.iso'].transferId,
+    'new-upload',
+    'only the newly observed same-name job claims the provisional submission',
+  );
+  repeatController.handleTransferProgress({
+    payload: {
+      transfer_id: 'old-upload', kind: 'upload', status: 'in_progress',
+      bytes_transferred: 524_288, total_bytes: 1_000_000_000,
+      file_name: 'repeat.iso', error: null,
+    },
+  });
+  assert.equal(
+    repeatRemotePane.transferStatus['repeat.iso'].transferId,
+    'new-upload',
+    'older byte progress cannot replace the newer queued transfer state',
+  );
 }
 
 const localPane = { transferStatus: {} };

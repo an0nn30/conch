@@ -1,6 +1,16 @@
 (function initTermLabFilesPaneView(global) {
   'use strict';
 
+  function transferDirection(status) {
+    return status && status.direction === 'download' ? 'download' : 'upload';
+  }
+
+  function transferPercentText(percent) {
+    const value = Number(percent) || 0;
+    if (value > 0 && value < 1) return '&lt;1%';
+    return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+  }
+
   function transferBadgeHtml(status) {
     if (!status) return '';
     if (status.status === 'attention') {
@@ -14,10 +24,33 @@
       }
       return '<span class="fp-transfer-attention" role="status">Needs attention</span>';
     }
+    if (status.status === 'preparing' || status.status === 'starting') {
+      const phase = status.status === 'preparing' ? 'Preparing' : 'Starting';
+      return `<span class="fp-transfer-phase" role="status">${phase} ${transferDirection(status)}…</span>`;
+    }
+    if (status.status === 'waiting') {
+      return `<span class="fp-transfer-waiting" role="status">Waiting to retry ${transferDirection(status)}…</span>`;
+    }
     if (status.status === 'in_progress') {
-      return `<span class="fp-transfer-pct">${status.percent || 0}%</span>`;
+      return `<span class="fp-transfer-pct">${transferPercentText(status.percent)}</span>`;
     }
     return '';
+  }
+
+  function transferActivityText(transferStatus) {
+    const active = Object.entries(transferStatus || {}).filter(([, status]) => (
+      status
+      && ['preparing', 'starting', 'in_progress'].includes(status.status)
+    ));
+    if (active.length === 0) return '';
+    if (active.length > 1) return `${active.length} transfers active`;
+
+    const [fileName, status] = active[0];
+    const direction = transferDirection(status);
+    if (status.status === 'preparing') return `Preparing ${direction}: ${fileName}`;
+    if (status.status === 'starting') return `Starting ${direction}: ${fileName}`;
+    const action = direction === 'download' ? 'Downloading' : 'Uploading';
+    return `${action} ${fileName}: ${transferPercentText(status.percent).replace('&lt;', '<')}`;
   }
 
   function activateTransferBadge(status, invoker, deps) {
@@ -50,6 +83,7 @@
       : (hiddenCount > 0
         ? `${visibleEntries.length} items (${hiddenCount} hidden)`
         : `${visibleEntries.length} items`);
+    const activityText = transferActivityText(pane.transferStatus);
 
     el.innerHTML = `
       <div class="fp-toolbar">
@@ -73,7 +107,10 @@
           <tbody></tbody>
         </table>
       </div>
-      <div class="fp-footer">${esc(footerText)}</div>
+      <div class="fp-footer">
+        <span>${esc(footerText)}</span>
+        ${activityText ? `<span class="fp-footer__activity" role="status" aria-live="polite">${esc(activityText)}</span>` : ''}
+      </div>
     `;
 
     const tbody = el.querySelector('tbody');
@@ -85,7 +122,7 @@
       const ts = pane.transferStatus && pane.transferStatus[entry.name];
       if (ts) {
         if (ts.status === 'completed') tr.classList.add('fp-transferred');
-        else if (ts.status === 'in_progress') tr.classList.add('fp-transferring');
+        else if (['preparing', 'starting', 'in_progress'].includes(ts.status)) tr.classList.add('fp-transferring');
       }
       tr.dataset.name = entry.name;
 
@@ -303,6 +340,7 @@
   global.termlabFilesPaneView = {
     renderPane,
     transferBadgeHtml,
+    transferActivityText,
     activateTransferBadge,
     showColumnMenu,
     showRowContextMenu,

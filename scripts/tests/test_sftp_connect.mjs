@@ -229,6 +229,8 @@ async function setupLogicHarness(invokeExtra, opts = {}) {
     listen: (name, handler) => { listeners[name] = handler; },
   });
   await settle();
+  const initialLocalRender = renderCalls.find((call) => call.pane.prefix === 'local');
+  const initialRemoteRender = renderCalls.find((call) => call.pane.prefix === 'remote');
   invokeCalls.length = 0; // discard boot traffic (getHomeDir/settings/local_list_dir/servers/sessions)
   renderCalls.length = 0;
 
@@ -237,6 +239,10 @@ async function setupLogicHarness(invokeExtra, opts = {}) {
     invoke,
     invokeCalls,
     renderCalls,
+    initialLocalRender,
+    initialRemoteRender,
+    localPane: initialLocalRender.pane,
+    remotePane: initialRemoteRender.pane,
     listeners,
     setServersFixture: (v) => { serversFixture = v; },
     setSessionsFixture: (v) => { sessionsFixture = v; },
@@ -783,6 +789,76 @@ function lastRemoteCall(renderCalls) {
   rendered.deps.onTransferAttention('upload-2', invoker);
   assert.deepEqual(activations, [{ transferId: 'upload-2', invoker }]);
   console.log('12c. file-pane attention control reaches transfer resolution: ok');
+}
+
+// --- 12d. Transfer submission paints immediately and a late invoke reply ---
+// cannot overwrite a newer authoritative queue state. The durable enqueue may
+// fsync before replying; that wait must never look like a dead click.
+{
+  let resolveUpload;
+  const pendingUpload = new Promise((resolve) => { resolveUpload = resolve; });
+  const h = await setupLogicHarness((cmd) => {
+    if (cmd === 'transfer_upload') return pendingUpload;
+    return undefined;
+  });
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+
+  let menuItems = [];
+  h.sandbox.termlabFilesPaneView.showRowContextMenu = (_event, items) => { menuItems = items; };
+  const entry = { name: 'large.iso', is_dir: false, size: 1_000_000_000, modified: 1 };
+  h.initialLocalRender.deps.onOpenRowMenu({}, entry);
+  const upload = menuItems.find((item) => item.label === 'Upload to remote host');
+  const submission = upload.action();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.remotePane.transferStatus['large.iso'])), {
+    status: 'preparing', direction: 'upload', provisional: true,
+  }, 'Preparing upload is rendered before transfer_upload resolves');
+  assert.equal(
+    lastRemoteCall(h.renderCalls).pane.transferStatus['large.iso'].status,
+    'preparing',
+    'the immediate provisional state triggers a pane render',
+  );
+
+  h.remotePane.transferStatus['large.iso'] = {
+    status: 'attention', percent: 0, transferId: 'upload-authoritative',
+  };
+  resolveUpload('upload-authoritative');
+  await submission;
+  assert.equal(
+    h.remotePane.transferStatus['large.iso'].status,
+    'attention',
+    'the command response does not overwrite a newer conflict snapshot',
+  );
+  console.log('12d. transfer submission paints immediately and preserves newer queue state: ok');
+}
+
+// --- 12e. A rejected durable enqueue removes only its own provisional state.
+{
+  let rejectUpload;
+  const pendingUpload = new Promise((_resolve, reject) => { rejectUpload = reject; });
+  const h = await setupLogicHarness((cmd) => {
+    if (cmd === 'transfer_upload') return pendingUpload;
+    return undefined;
+  });
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+
+  let menuItems = [];
+  h.sandbox.termlabFilesPaneView.showRowContextMenu = (_event, items) => { menuItems = items; };
+  h.initialLocalRender.deps.onOpenRowMenu({}, {
+    name: 'failed.iso', is_dir: false, size: 1_000_000_000, modified: 1,
+  });
+  const submission = menuItems.find((item) => item.label === 'Upload to remote host').action();
+  assert.equal(h.remotePane.transferStatus['failed.iso'].status, 'preparing');
+  rejectUpload(new Error('queue unavailable'));
+  await submission;
+  assert.equal(
+    h.remotePane.transferStatus['failed.iso'],
+    undefined,
+    'failed enqueue clears the provisional activity instead of leaving it stuck',
+  );
+  console.log('12e. failed transfer submission clears provisional activity: ok');
 }
 
 console.log('sftp connect part 1 (host dropdown + pinning): all assertions passed');
