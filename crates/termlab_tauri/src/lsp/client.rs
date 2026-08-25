@@ -193,17 +193,22 @@ impl EventMailbox {
         }
         if pending.queue.len() == EVENT_MAILBOX_CAPACITY {
             pending.dropped = pending.dropped.saturating_add(1);
-            if is_state_event(&event) {
-                let remove = pending
-                    .queue
-                    .iter()
-                    .position(|queued| !is_state_event(queued))
-                    .unwrap_or(0);
-                pending.queue.remove(remove);
-            } else {
+            let incoming_priority = event_priority(&event);
+            let removable = pending
+                .queue
+                .iter()
+                .position(|queued| match incoming_priority {
+                    EventPriority::Terminal => {
+                        event_priority(queued) != EventPriority::Terminal
+                    }
+                    EventPriority::State => event_priority(queued) == EventPriority::Ordinary,
+                    EventPriority::Ordinary => false,
+                });
+            let Some(remove) = removable else {
                 self.ready.notify_one();
                 return;
-            }
+            };
+            pending.queue.remove(remove);
         }
         pending.queue.push_back(event);
         drop(pending);
@@ -230,17 +235,29 @@ fn same_state_key(left: &ClientEvent, right: &ClientEvent) -> bool {
         (ClientEvent::Progress { token: left, .. }, ClientEvent::Progress { token: right, .. }) => {
             left == right
         }
+        (ClientEvent::ProtocolExited(_), ClientEvent::ProtocolExited(_)) => true,
+        (ClientEvent::ProcessExited { .. }, ClientEvent::ProcessExited { .. }) => true,
         _ => false,
     }
 }
 
-fn is_state_event(event: &ClientEvent) -> bool {
-    matches!(
-        event,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EventPriority {
+    Ordinary,
+    State,
+    Terminal,
+}
+
+fn event_priority(event: &ClientEvent) -> EventPriority {
+    match event {
+        ClientEvent::ProtocolExited(_) | ClientEvent::ProcessExited { .. } => {
+            EventPriority::Terminal
+        }
         ClientEvent::Diagnostics { .. }
-            | ClientEvent::RegistrationsChanged(_)
-            | ClientEvent::Progress { .. }
-    )
+        | ClientEvent::RegistrationsChanged(_)
+        | ClientEvent::Progress { .. } => EventPriority::State,
+        ClientEvent::Message { .. } | ClientEvent::Overflow { .. } => EventPriority::Ordinary,
+    }
 }
 
 pub(crate) struct ClientState {

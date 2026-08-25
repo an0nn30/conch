@@ -1556,6 +1556,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_lifecycle_survives_capacity_one_event_flood() {
+        let (launcher, observed) = MockServerLauncher::scripted(ServerScript::EventFlood);
+        let (sink, mut events) = tokio::sync::mpsc::channel(1);
+        sink.send(ClientEvent::Message {
+            kind: "test-blocker".into(),
+            message: "block forwarding".into(),
+        })
+        .await
+        .unwrap();
+        let session = LspSession::start(test_descriptor(), test_command(), root(), launcher, sink)
+            .await
+            .unwrap();
+        session
+            .did_open(session_document(
+                "doc-terminal-flood",
+                async_lsp::lsp_types::Url::from_file_path(root().join("terminal-flood.ts")).unwrap(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed.has_client_response(142) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        session.shutdown().await.unwrap();
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            matches!(events.recv().await, Some(ClientEvent::Message { kind, .. }) if kind == "test-blocker")
+        );
+        let mut protocol_exit = None;
+        let mut process_exit = None;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while protocol_exit.is_none() || process_exit.is_none() {
+                match events.recv().await {
+                    Some(ClientEvent::ProtocolExited(error)) => protocol_exit = Some(error),
+                    Some(ClientEvent::ProcessExited { success, code }) => {
+                        process_exit = Some((success, code));
+                    }
+                    Some(_) => {}
+                    None => panic!("event forwarder stopped"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            protocol_exit,
+            Some(Some("the underlying channel reached EOF".into()))
+        );
+        assert_eq!(process_exit, Some((true, Some(0))));
+    }
+
+    #[tokio::test]
     async fn full_sync_sends_the_complete_document_and_absent_sync_sends_no_change() {
         for (script, expected_changes) in [
             (
