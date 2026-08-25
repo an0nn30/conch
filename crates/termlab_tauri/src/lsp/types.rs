@@ -264,9 +264,20 @@ pub(crate) struct Diagnostic {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DiagnosticCounts {
+    pub errors: u32,
+    pub warnings: u32,
+    pub information: u32,
+    pub hints: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DiagnosticSnapshot {
-    pub revision: u32,
-    pub diagnostics: Vec<Diagnostic>,
+    pub revision: u64,
+    pub items: Vec<Diagnostic>,
+    pub counts: DiagnosticCounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

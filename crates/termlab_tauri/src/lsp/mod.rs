@@ -4,6 +4,7 @@
 
 pub(crate) mod catalog;
 pub(crate) mod client;
+pub(crate) mod diagnostics;
 pub(crate) mod document;
 pub(crate) mod ownership;
 pub(crate) mod root;
