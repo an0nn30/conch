@@ -220,6 +220,7 @@ mod tests {
             settings: QueueSettings {
                 global_limit: 4,
                 per_host_limit: 6,
+                ..QueueSettings::default()
             },
         };
 
@@ -232,7 +233,9 @@ mod tests {
                 "queuePaused": false,
                 "settings": {
                     "globalLimit": 4,
-                    "perHostLimit": 6
+                    "perHostLimit": 6,
+                    "pipelineDepth": 16,
+                    "pipelineChunkBytes": 262144
                 }
             })
         );
@@ -357,6 +360,7 @@ mod tests {
             settings: QueueSettings {
                 global_limit: 4,
                 per_host_limit: 2,
+                ..QueueSettings::default()
             },
         };
         let summary = QueueSummaryPayload {

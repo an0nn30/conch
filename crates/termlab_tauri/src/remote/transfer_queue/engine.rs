@@ -2531,6 +2531,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 2,
             per_host_limit: 2,
+            ..QueueSettings::default()
         };
         let runner = Arc::new(GatedRunner::default());
         let first_release = runner.gate(first);
@@ -2633,6 +2634,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 1,
             per_host_limit: 1,
+            ..QueueSettings::default()
         };
         let (release, gate) = oneshot::channel();
         let runner = Arc::new(PanickingFirstRunner {
@@ -2770,6 +2772,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 2,
             per_host_limit: 1,
+            ..QueueSettings::default()
         };
         let runner = Arc::new(GatedRunner::default());
         let release_a_first = runner.gate(host_a_first);
@@ -3693,6 +3696,7 @@ mod tests {
         let settings = QueueSettings {
             global_limit: 7,
             per_host_limit: 9,
+            ..QueueSettings::default()
         };
 
         harness
@@ -3814,18 +3818,22 @@ mod tests {
             QueueSettings {
                 global_limit: 0,
                 per_host_limit: 1,
+                ..QueueSettings::default()
             },
             QueueSettings {
                 global_limit: 33,
                 per_host_limit: 1,
+                ..QueueSettings::default()
             },
             QueueSettings {
                 global_limit: 1,
                 per_host_limit: 0,
+                ..QueueSettings::default()
             },
             QueueSettings {
                 global_limit: 1,
                 per_host_limit: 33,
+                ..QueueSettings::default()
             },
         ] {
             assert!(harness.handle.update_settings(settings).await.is_err());
@@ -3835,6 +3843,7 @@ mod tests {
         let accepted = QueueSettings {
             global_limit: 2,
             per_host_limit: 32,
+            ..QueueSettings::default()
         };
         harness
             .handle
@@ -4237,6 +4246,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 1,
             per_host_limit: 1,
+            ..QueueSettings::default()
         };
         let runner = Arc::new(GatedRunner::default());
         let ordinary_release = runner.gate(ordinary);
@@ -4296,6 +4306,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 2,
             per_host_limit: 1,
+            ..QueueSettings::default()
         };
         let runner = Arc::new(GatedRunner::default());
         let first_release = runner.gate(first_host_a);
@@ -4365,6 +4376,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 1,
             per_host_limit: 1,
+            ..QueueSettings::default()
         };
         let runner = Arc::new(GatedRunner::default());
         let blocker_release = runner.gate(blocker);
@@ -4469,6 +4481,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 1,
             per_host_limit: 1,
+            ..QueueSettings::default()
         };
         let runner = Arc::new(GatedRunner::default());
         let blocker_release = runner.gate(blocker);
@@ -4541,6 +4554,7 @@ mod tests {
         document.settings = QueueSettings {
             global_limit: 1,
             per_host_limit: 1,
+            ..QueueSettings::default()
         };
         let runner = Arc::new(GatedRunner::default());
         let rejected_release = runner.gate(rejected);

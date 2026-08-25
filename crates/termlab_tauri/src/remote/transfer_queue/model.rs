@@ -347,12 +347,26 @@ impl TransferJobState {
     }
 }
 
+fn default_pipeline_depth() -> usize {
+    16
+}
+
+fn default_pipeline_chunk_bytes() -> usize {
+    256 * 1024
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct QueueSettings {
     pub global_limit: usize,
     pub per_host_limit: usize,
+    /// Chunk requests kept in flight per transfer attempt (1 = sequential).
+    #[serde(default = "default_pipeline_depth")]
+    pub pipeline_depth: usize,
+    /// Requested bytes per chunk; clamped to the server limit at attempt time.
+    #[serde(default = "default_pipeline_chunk_bytes")]
+    pub pipeline_chunk_bytes: usize,
 }
 
 impl Default for QueueSettings {
@@ -360,6 +374,8 @@ impl Default for QueueSettings {
         Self {
             global_limit: 3,
             per_host_limit: 2,
+            pipeline_depth: default_pipeline_depth(),
+            pipeline_chunk_bytes: default_pipeline_chunk_bytes(),
         }
     }
 }
@@ -370,6 +386,12 @@ pub(super) fn validate_queue_settings(settings: &QueueSettings) -> Result<(), St
     }
     if !(1..=32).contains(&settings.per_host_limit) {
         return Err("per-host transfer limit must be between 1 and 32".into());
+    }
+    if !(1..=64).contains(&settings.pipeline_depth) {
+        return Err("pipeline depth must be between 1 and 64".into());
+    }
+    if !(32 * 1024..=1024 * 1024).contains(&settings.pipeline_chunk_bytes) {
+        return Err("pipeline chunk size must be between 32 KiB and 1 MiB".into());
     }
     Ok(())
 }
@@ -617,9 +639,54 @@ mod tests {
             QueueSettings {
                 global_limit: 3,
                 per_host_limit: 2,
+                pipeline_depth: 16,
+                pipeline_chunk_bytes: 256 * 1024,
             }
         );
         assert!(doc.jobs.is_empty());
+    }
+
+    #[test]
+    fn queue_settings_default_pipeline_tuning() {
+        let settings = QueueSettings::default();
+        assert_eq!(settings.pipeline_depth, 16);
+        assert_eq!(settings.pipeline_chunk_bytes, 256 * 1024);
+    }
+
+    #[test]
+    fn queue_settings_v1_json_without_pipeline_fields_defaults() {
+        let parsed: QueueSettings = serde_json::from_str(r#"{"globalLimit":3,"perHostLimit":2}"#)
+            .expect("v1 settings without pipeline fields must deserialize");
+        assert_eq!(parsed.pipeline_depth, 16);
+        assert_eq!(parsed.pipeline_chunk_bytes, 262144);
+    }
+
+    #[test]
+    fn queue_settings_pipeline_validation_bounds() {
+        let mut settings = QueueSettings::default();
+        settings.pipeline_depth = 0;
+        assert!(
+            validate_queue_settings(&settings).is_err(),
+            "depth 0 rejected"
+        );
+        settings.pipeline_depth = 65;
+        assert!(
+            validate_queue_settings(&settings).is_err(),
+            "depth 65 rejected"
+        );
+        settings.pipeline_depth = 1;
+        settings.pipeline_chunk_bytes = 1024;
+        assert!(
+            validate_queue_settings(&settings).is_err(),
+            "tiny chunk rejected"
+        );
+        settings.pipeline_chunk_bytes = 2 * 1024 * 1024;
+        assert!(
+            validate_queue_settings(&settings).is_err(),
+            "huge chunk rejected"
+        );
+        settings.pipeline_chunk_bytes = 262144;
+        assert!(validate_queue_settings(&settings).is_ok());
     }
 
     #[test]
