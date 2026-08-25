@@ -8,27 +8,31 @@
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub struct Frontier {
+pub(crate) struct Frontier {
     position: u64,
     /// Completed ranges beyond `position`, keyed by start offset.
     pending: BTreeMap<u64, u64>, // start -> end (exclusive)
 }
 
 impl Frontier {
-    pub fn new(start: u64) -> Self {
+    pub(crate) fn new(start: u64) -> Self {
         Self { position: start, pending: BTreeMap::new() }
     }
 
-    pub fn position(&self) -> u64 {
+    pub(crate) fn position(&self) -> u64 {
         self.position
     }
 
-    pub fn pending(&self) -> usize {
+    /// How many completed-but-not-yet-contiguous ranges are held back.
+    /// Test-only introspection: the scheduler itself only ever asks for
+    /// [`Frontier::position`].
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> usize {
         self.pending.len()
     }
 
     /// Record a completed chunk and return the new contiguous frontier.
-    pub fn complete(&mut self, offset: u64, len: u64) -> u64 {
+    pub(crate) fn complete(&mut self, offset: u64, len: u64) -> u64 {
         let end = offset.saturating_add(len);
         if end > self.position {
             let start = offset.max(self.position);

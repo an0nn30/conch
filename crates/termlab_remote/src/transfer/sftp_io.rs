@@ -642,9 +642,9 @@ pub(crate) async fn revalidate_local_fingerprint(
 }
 
 /// Remote twin of [`revalidate_local_fingerprint`]. Currently unused in the
-/// pipelined download path: `fingerprint_open_remote` both stats the source
-/// and is the value handed to `on_fingerprint` in the same call, so there is
-/// no separate reopen for it to guard against there. Kept as the symmetric
+/// pipelined download path: that path fstats the very handle it then reads
+/// from ([`RawRemoteChunkFile::fingerprint`]), so there is no reopen — and so
+/// no TOCTOU window — for it to guard against there. Kept as the symmetric
 /// helper for the remote side and covered indirectly by
 /// `fingerprint_open_remote`'s own tests; not unit-testable on its own
 /// without a live SFTP session, same as `fingerprint_open_remote`.
@@ -743,18 +743,88 @@ struct RawRemoteChunkFile {
     handle: String,
 }
 
+impl RawRemoteChunkFile {
+    /// Fingerprint the open handle with `fstat`.
+    ///
+    /// Deliberately byte-for-byte equivalent to what [`fingerprint_open_remote`]
+    /// produces for the same file: `File::metadata` *is* `fstat(handle).attrs`
+    /// (russh-sftp `client/fs/file.rs`), and both feed `size` and `mtime`
+    /// through [`fingerprint_remote_parts`]. That equivalence is what lets the
+    /// pipelined download path fingerprint over its own raw session instead of
+    /// opening a second SFTP channel, without changing the value callers'
+    /// `on_fingerprint` hooks compare against.
+    async fn fingerprint(&self, path: &str) -> Result<SourceFingerprint, RemoteError> {
+        let attributes = self
+            .session
+            .fstat(self.handle.as_str())
+            .await
+            .map_err(|error| map_remote_source_stat_error(path, error))?
+            .attrs;
+        let size = attributes.size.ok_or_else(|| {
+            RemoteError::Transfer("stat open remote source did not return a size".into())
+        })?;
+        Ok(fingerprint_remote_parts(size, attributes.mtime.map(u64::from)))
+    }
+
+    /// Best-effort close for error paths that must surface the primary error.
+    async fn close_quietly(&self) {
+        if let Err(error) = self.session.close(self.handle.as_str()).await {
+            log::warn!("close remote pipelined handle failed: {error}");
+        }
+    }
+}
+
+/// Accumulate `len` bytes at `offset` by re-issuing reads for whatever a
+/// single `read_once` call did not return.
+///
+/// A server answering SSH_FXP_READ with fewer bytes than were asked for is
+/// legal: draft-ietf-secsh-filexfer guarantees a full-length answer only "for
+/// normal disk files", and servers do return less for non-regular files, FUSE
+/// and network-backed paths, or their own internal limits. OpenSSH's client
+/// loops for exactly this reason, and so does our sequential engine (over its
+/// own cursor). The pipelined engine cannot: it treats any non-tail short read
+/// as `UnexpectedEof` (see `pipelined::transfer_chunk`). So the endpoint
+/// absorbs it here, which keeps the engine's tail/short-read logic the sole
+/// EOF authority — after this loop, a short result means the server really
+/// has no more bytes at that offset.
+async fn read_exact_at<F, Fut>(
+    offset: u64,
+    len: usize,
+    mut read_once: F,
+) -> Result<Vec<u8>, std::io::Error>
+where
+    F: FnMut(u64, usize) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, std::io::Error>>,
+{
+    let mut buffer: Vec<u8> = Vec::with_capacity(len);
+    while buffer.len() < len {
+        let received = read_once(offset + buffer.len() as u64, len - buffer.len()).await?;
+        if received.is_empty() {
+            break; // EOF — return what we have and let the engine judge it.
+        }
+        buffer.extend_from_slice(&received);
+    }
+    // Defensive: a server that over-answers must not push overlapping bytes
+    // past the chunk the engine asked for.
+    buffer.truncate(len);
+    Ok(buffer)
+}
+
 #[async_trait]
 impl ChunkSource for RawRemoteChunkFile {
     async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
-        match self.session.read(self.handle.as_str(), offset, len as u32).await {
-            Ok(data) => Ok(data.data),
-            // The engine's short-read/tail logic owns EOF handling; an SFTP
-            // EOF status is just an empty read, not a transport failure.
-            Err(SftpClientError::Status(status)) if status.status_code == StatusCode::Eof => {
-                Ok(Vec::new())
+        read_exact_at(offset, len, |at, remaining| async move {
+            match self.session.read(self.handle.as_str(), at, remaining as u32).await {
+                Ok(data) => Ok(data.data),
+                // The engine's short-read/tail logic owns EOF handling; an SFTP
+                // EOF status is just an empty read, not a transport failure.
+                Err(SftpClientError::Status(status)) if status.status_code == StatusCode::Eof => {
+                    Ok(Vec::new())
+                }
+                Err(error) => Err(std::io::Error::other(error.to_string())),
             }
-            Err(error) => Err(std::io::Error::other(error.to_string())),
-        }
+        })
+        .await
     }
 }
 
@@ -850,6 +920,12 @@ where
 /// Pipelined twin of [`download_to_partial`]: same fingerprint ->
 /// `on_fingerprint` -> open destination -> copy -> sync order, but drives
 /// the copy through [`pipelined_copy`] over a dedicated raw SFTP handle.
+///
+/// The source is opened *before* it is fingerprinted so that one raw session
+/// serves both roles — the design's "one additional channel" rule — and, as a
+/// bonus, the bytes copied provably come from the handle that was stat'd, so
+/// this path needs no [`revalidate_remote_fingerprint`] the way the upload
+/// twin needs [`revalidate_local_fingerprint`].
 pub async fn download_to_partial_pipelined<F, Fut, C, P>(
     ssh: &russh::client::Handle<TermLabSshHandler>,
     remote_path: &str,
@@ -868,37 +944,31 @@ where
 {
     let local_partial_path = local_partial_path.as_ref();
 
-    let sftp_session = open_sftp_session(ssh).await?;
-    let (mut fingerprint_handle, fingerprint) =
-        fingerprint_open_remote(&sftp_session, remote_path).await?;
-    let total = fingerprint.size;
-    // Mirrors the sequential path's `open_after_fingerprint` handling: if
-    // `on_fingerprint` rejects (e.g. a queued overwrite decision), the
-    // fingerprint handle must still be closed rather than left dangling.
-    if let Err(primary) = on_fingerprint(fingerprint).await {
-        let _ = super::close_remote_file(
-            &mut fingerprint_handle,
-            "close remote source after pipelined fingerprint rejection",
-        )
-        .await;
-        return Err(primary);
-    }
-    super::close_remote_file(
-        &mut fingerprint_handle,
-        "close remote source after pipelined fingerprint",
-    )
-    .await?;
-
+    // One additional channel for the whole attempt (design product rule 5):
+    // the raw session opened here is both the fingerprint source and the read
+    // handle, so this path never opens a second `SftpSession` just to stat.
     let raw = open_raw_sftp_session(ssh).await?;
     let opened = raw
         .open(remote_path, OpenFlags::READ, FileAttributes::empty())
         .await
-        .map_err(|error| {
-            RemoteError::Transfer(format!(
-                "open remote source {remote_path} for pipelined download failed: {error}"
-            ))
-        })?;
+        .map_err(|error| map_remote_source_open_error(remote_path, error))?;
     let source = RawRemoteChunkFile { session: raw, handle: opened.handle };
+
+    let fingerprint = match source.fingerprint(remote_path).await {
+        Ok(fingerprint) => fingerprint,
+        Err(primary) => {
+            source.close_quietly().await;
+            return Err(primary);
+        }
+    };
+    let total = fingerprint.size;
+    // Mirrors the sequential path's `open_after_fingerprint` handling: if
+    // `on_fingerprint` rejects (e.g. a queued overwrite decision), the read
+    // handle must still be closed rather than left dangling.
+    if let Err(primary) = on_fingerprint(fingerprint).await {
+        source.close_quietly().await;
+        return Err(primary);
+    }
 
     let sink = match PositionalFile::open_write(local_partial_path, offset == 0) {
         Ok(sink) => sink,
@@ -912,7 +982,7 @@ where
             // remote read handle was already opened, so it must be closed
             // (best-effort) rather than dropped, even though the primary
             // error here is the local open failure.
-            let _ = source.session.close(source.handle.as_str()).await;
+            source.close_quietly().await;
             return Err(primary);
         }
     };
@@ -948,11 +1018,12 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        DownloadPartialRequest, PartialTransferIo, RemotePartialIo, UploadPartialRequest,
+        ChunkSource, ControlDecision, CopyOutcome, DownloadPartialRequest, PartialTransferIo,
+        PipelineTuning, PositionalFile, RemotePartialIo, UploadPartialRequest,
         download_to_partial_with_io, fingerprint_local_parts, fingerprint_open_local,
         fingerprint_remote_parts, fresh_partial_open_flags, map_remote_source_open_error,
-        open_after_fingerprint, open_local_partial, pipelined_remote_open_flags,
-        remote_partial_open_flags, resume_partial_from, resume_partial_open_flags,
+        open_after_fingerprint, open_local_partial, pipelined_copy, pipelined_remote_open_flags,
+        read_exact_at, remote_partial_open_flags, resume_partial_from, resume_partial_open_flags,
         revalidate_local_fingerprint, truncate_local_partial, truncate_remote_partial_with_io,
         upload_to_partial_with_io,
     };
@@ -1443,5 +1514,113 @@ mod tests {
         revalidate_local_fingerprint(&path, &live)
             .await
             .expect("matching fingerprint passes");
+    }
+
+    /// A source shaped like `RawRemoteChunkFile`: every `read_at` goes through
+    /// the same [`read_exact_at`] loop the real remote endpoint uses, over a
+    /// scripted "server" that answers some mid-file reads with fewer bytes
+    /// than were asked for — which the SFTP protocol permits and OpenSSH-style
+    /// servers do under load.
+    struct ShortReadingRemote {
+        data: Vec<u8>,
+        shortened: Mutex<std::collections::HashSet<u64>>,
+        wire_reads: Mutex<usize>,
+    }
+
+    impl ShortReadingRemote {
+        fn new(data: Vec<u8>, short_at: impl IntoIterator<Item = u64>) -> Self {
+            Self {
+                data,
+                shortened: Mutex::new(short_at.into_iter().collect()),
+                wire_reads: Mutex::new(0),
+            }
+        }
+
+        fn wire_reads(&self) -> usize {
+            *self.wire_reads.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChunkSource for ShortReadingRemote {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+            read_exact_at(offset, len, |at, remaining| async move {
+                *self.wire_reads.lock().unwrap() += 1;
+                let start = at as usize;
+                if start >= self.data.len() {
+                    return Ok(Vec::new()); // EOF
+                }
+                let mut serve = (start + remaining).min(self.data.len()) - start;
+                // Answer the first read at a scripted offset with one byte;
+                // the follow-up read for the remainder is answered in full.
+                if self.shortened.lock().unwrap().remove(&at) && serve > 1 {
+                    serve = 1;
+                }
+                Ok(self.data[start..start + serve].to_vec())
+            })
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legal_mid_file_short_read_is_reissued_and_the_copy_completes() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("short-read.bin");
+        let data: Vec<u8> = (0..1000u32).map(|index| (index % 251) as u8).collect();
+        // 100, 300 and 700 are chunk starts, so each short answer lands
+        // mid-file rather than at the tail — exactly the case the engine
+        // would otherwise report as `UnexpectedEof`.
+        let source = ShortReadingRemote::new(data.clone(), [100, 300, 700]);
+        let sink = PositionalFile::open_write(&path, true).expect("open sink");
+
+        let outcome = pipelined_copy(
+            &source,
+            &sink,
+            0,
+            data.len() as u64,
+            PipelineTuning { depth: 4, chunk_bytes: 100 },
+            || ControlDecision::Continue,
+            |_, _| {},
+        )
+        .await
+        .expect("a legal short read must not fail the transfer");
+        sink.sync().await.expect("sync");
+
+        assert_eq!(outcome, CopyOutcome::Completed { bytes: 1000 });
+        assert_eq!(std::fs::read(&path).expect("read back"), data,
+            "re-issued reads must land at offset + already-received, so the bytes stay in order");
+        assert_eq!(source.wire_reads(), 13,
+            "10 chunks plus one follow-up read for each of the 3 short answers");
+    }
+
+    #[tokio::test]
+    async fn read_exact_at_stops_at_eof_and_propagates_real_errors() {
+        let partial = read_exact_at(0, 100, |at, remaining| async move {
+            // Four bytes, then a genuine end of file.
+            if at >= 4 {
+                return Ok(Vec::new());
+            }
+            Ok(vec![7u8; remaining.min(4)])
+        })
+        .await
+        .expect("EOF is not an error");
+        assert_eq!(partial.len(), 4,
+            "an empty answer ends the loop so the engine's tail logic can judge the length");
+
+        let error = read_exact_at(0, 100, |_at, _remaining| async move {
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+        })
+        .await
+        .expect_err("transport errors are not swallowed");
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+
+    #[tokio::test]
+    async fn read_exact_at_never_returns_more_than_was_requested() {
+        let data = read_exact_at(0, 4, |_at, _remaining| async move { Ok(vec![1u8; 16]) })
+            .await
+            .expect("over-answering server");
+        assert_eq!(data.len(), 4,
+            "an over-long server answer must not push overlapping bytes past the chunk");
     }
 }

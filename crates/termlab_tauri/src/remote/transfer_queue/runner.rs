@@ -423,6 +423,9 @@ fn copy_stage_cause(message: &str) -> Option<(CopyStage, &str)> {
 /// it is raised with `ErrorKind::UnexpectedEof` and a fixed message shape (see
 /// `pipelined::transfer_chunk`) — so a short remote read keeps the sequential
 /// engine's transient classification instead of degrading to text matching.
+///
+/// The endpoints absorb a server's legal mid-file short answer by re-issuing
+/// the read, so this shape only ever means a genuinely truncated source.
 fn pipelined_cause_kind(cause: &str) -> std::io::ErrorKind {
     if cause.starts_with("short read of ") {
         std::io::ErrorKind::UnexpectedEof
@@ -3360,6 +3363,28 @@ mod tests {
     async fn a_truncated_remote_read_is_transient_like_the_sequential_unexpected_eof() {
         // `pipelined::transfer_chunk` raises this with `UnexpectedEof`, which
         // flattening to `RemoteError::Transfer` erases.
+        //
+        // What this test pins is the *classification*, and only that. The two
+        // engines genuinely diverge in what they do with a source that ends
+        // before its fingerprint said it would:
+        //
+        //   - Sequential (`copy_with_checkpoint_typed`) treats a zero-length
+        //     read as `Completed { bytes }` short of `total`, and the runner
+        //     then fails the job permanently on the size mismatch ("opened
+        //     source ended at N bytes but its fingerprint declared M").
+        //   - Pipelined surfaces `UnexpectedEof`, classified transient here,
+        //     so the job burns its retry budget before landing in the same
+        //     permanent failure on the next attempt.
+        //
+        // Same end state, different retry cost — acceptable because a
+        // genuinely shrinking remote file is rare and a mid-transfer
+        // truncation is often transient (a writer still flushing).
+        //
+        // Note the case is now narrower than it looks: the endpoints
+        // (`RawRemoteChunkFile::read_at`, `PositionalFile::read_at`) re-issue
+        // reads for a legal mid-file short answer, so `UnexpectedEof` can only
+        // mean genuine EOF short of `total` — a truncated or shrinking source
+        // — never a server that merely answered with fewer bytes than asked.
         let pipelined = classify_pipelined_failure(
             &TransferDirection::Download,
             RemoteError::Transfer("read source failed: short read of 3 bytes at offset 12".into()),

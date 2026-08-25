@@ -291,7 +291,10 @@
         hostInput = limitField(bodyEl, 'Per host', 'per-host-limit', current.perHostLimit || 1, 1, 32);
         depthInput = limitField(bodyEl, 'Pipeline depth', 'pipeline-depth',
           current.pipelineDepth || 16, 1, 64);
-        chunkInput = limitField(bodyEl, 'Chunk size (KiB)', 'pipeline-chunk-kib',
+        // The engine clamps chunks to the raw SFTP cap (255 KiB) unless the
+        // server advertises a higher limit, so the field says so rather than
+        // silently accepting a value it will not use.
+        chunkInput = limitField(bodyEl, 'Chunk size (KiB, servers may cap at 255)', 'pipeline-chunk-kib',
           Math.round((current.pipelineChunkBytes || 262144) / 1024), 32, 1024);
         errorEl = append(bodyEl, 'div', 'tl-field__error', "Enter whole numbers within each field's range.");
         errorEl.setAttribute('data-transfer-error', 'concurrency');

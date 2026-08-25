@@ -764,6 +764,15 @@ function dialogButton(dialog, label) {
   const depthInput = concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-depth"]');
   const chunkInput = concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-chunk-kib"]');
   const settingsError = concurrency.bodyEl.querySelector('[data-transfer-error="concurrency"]');
+  // The pipelined engine clamps chunks to the raw SFTP cap unless the server
+  // advertises a higher limit, so the field says so rather than silently
+  // accepting a size it will not use. Copy only — the range is unchanged.
+  assert.strictEqual(
+    chunkInput.parentNode.querySelector('.tl-field__label').textContent,
+    'Chunk size (KiB, servers may cap at 255)',
+    'the chunk field must warn that servers may cap the configured size');
+  assert.strictEqual(chunkInput.getAttribute('max'), '1024',
+    'the cap warning must not change what the field accepts');
   globalInput.value = '0';
   hostInput.value = '2.5';
   await dialogButton(concurrency, 'Save').onSelect();

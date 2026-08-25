@@ -15,7 +15,13 @@ pub struct PipelineTuning {
 
 #[async_trait::async_trait]
 pub trait ChunkSource: Send + Sync {
-    /// Read up to `len` bytes at `offset`. Short reads are only legal at EOF.
+    /// Read `len` bytes at `offset`.
+    ///
+    /// Returning fewer than `len` bytes means EOF and nothing else — the
+    /// engine treats a non-tail short read as a truncated source. Transports
+    /// whose underlying primitive may legally short-return mid-file (SFTP
+    /// `read`, `pread`) MUST absorb that themselves by re-issuing reads for
+    /// the remainder before returning.
     async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error>;
 }
 
@@ -346,8 +352,13 @@ mod tests {
         assert_eq!(reassemble(&dst, 1000)[600..], src.data[600..]);
     }
 
-    #[tokio::test]
-    async fn pause_drains_and_reports_the_frontier() {
+    /// Copy 10,000 bytes but have the control callback return `stop` after the
+    /// first ten completions, then assert the frontier-honesty contract both
+    /// stop decisions share: the copy really stopped short of the whole file,
+    /// every byte the outcome reports is contiguous and durable in the sink,
+    /// and no new work was issued beyond the in-flight window after the stop.
+    /// Returns the outcome so each caller asserts its own variant.
+    async fn stop_after_ten_completions(stop: ControlDecision) -> CopyOutcome {
         let src = source(10_000);
         let dst = sink();
         let depth = 4;
@@ -358,29 +369,47 @@ mod tests {
             PipelineTuning { depth, chunk_bytes: 100 },
             move || {
                 let n = calls_for_control.fetch_add(1, Ordering::SeqCst) + 1;
-                if n > 10 { ControlDecision::Pause } else { ControlDecision::Continue }
+                if n > 10 { stop } else { ControlDecision::Continue }
             },
             |_, _| {},
-        ).await.expect("pause is a success outcome");
-        let CopyOutcome::Paused { bytes } = outcome else {
-            panic!("expected paused outcome, got {outcome:?}");
+        ).await.expect("a control stop is a success outcome");
+        let (CopyOutcome::Paused { bytes } | CopyOutcome::Cancelled { bytes }) = outcome else {
+            panic!("expected a stopped outcome, got {outcome:?}");
         };
-        // A scheduler that ignored Pause and kept copying to completion would
-        // still pass every assertion below unless we also confirm it
+        // A scheduler that ignored the decision and kept copying to completion
+        // would still pass every assertion below unless we also confirm it
         // actually stopped short of the whole file, and that it did not
-        // issue far more reads than the point at which Pause was decided.
+        // issue far more reads than the point at which the stop was decided.
         assert!(bytes < 10_000,
-            "pause must stop issuing before the whole 10,000-byte file copies, got {bytes} bytes");
+            "{stop:?} must stop issuing before the whole 10,000-byte file copies, \
+             got {bytes} bytes");
         // Every byte up to the reported frontier must actually be in the sink.
         let written = reassemble(&dst, 10_000);
         assert_eq!(written[..bytes as usize], src.data[..bytes as usize],
-            "paused frontier only counts contiguous durable bytes");
+            "a stopped frontier only counts contiguous durable bytes");
         let control_calls = calls.load(Ordering::SeqCst);
         let issued_reads = src.issued.lock().unwrap().len();
         assert!(issued_reads <= control_calls + depth,
             "expected at most {} issued reads (control calls {control_calls} + depth {depth}), \
-             got {issued_reads}; scheduler kept issuing new work after Pause",
+             got {issued_reads}; scheduler kept issuing new work after {stop:?}",
             control_calls + depth);
+        outcome
+    }
+
+    #[tokio::test]
+    async fn pause_drains_and_reports_the_frontier() {
+        let outcome = stop_after_ten_completions(ControlDecision::Pause).await;
+        assert!(matches!(outcome, CopyOutcome::Paused { .. }),
+            "Pause must map to Paused, not Cancelled, so the runner resumes from the \
+             checkpoint instead of discarding it; got {outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_drains_and_reports_the_frontier() {
+        let outcome = stop_after_ten_completions(ControlDecision::Cancel).await;
+        assert!(matches!(outcome, CopyOutcome::Cancelled { .. }),
+            "Cancel must map to Cancelled, not Paused, so the runner tears the job down \
+             instead of leaving it resumable; got {outcome:?}");
     }
 
     #[tokio::test]
