@@ -1,12 +1,30 @@
 # Pipelined SFTP Transfers — Design
 
-**Status:** Approved
+**Status:** Implemented
 **Date:** 2026-08-25
 **Scope:** Make single-file SFTP uploads and downloads approach link capacity on
 latent connections by keeping a bounded window of chunk requests in flight,
 without changing the durable transfer queue's persistence, recovery, or UI
 contracts. This is the first sub-project of the "fast transfers" track; bulk /
 small-file throughput and delta re-transfers are separate follow-on projects.
+
+**Implementation:** branch `feat/sftp-pipelined-transfers`; commits `044febc`
+through `e87c458`, plus the Task 8 verification commit that reconciled this
+status.
+Manual and live-evidence tracking is in the
+[SFTP transfer queue manual checklist](../notes/sftp-transfer-queue-manual-checklist.md)'s
+"Pipelined transfers" section.
+
+Automated frontier, scheduler, engine-substitution, runner-parity, and
+settings-UI coverage was green before this status changed. The two live
+throughput/resume tests added in Task 8
+(`live_pipelined_upload_matches_content_and_beats_sequential`,
+`live_pipelined_download_resumes_after_interruption`) were invoked but skipped
+before connecting because disposable-server credentials were not present in
+this environment; the checklist rows for their evidence remain
+pending-live-evidence. The repository-wide formatter and frontend boundary
+checks retain their verified clean-base exceptions: unrelated Rust formatting
+drift and `frontend/app/ui/tl-dialog.js:334`, respectively.
 
 ## Problem
 

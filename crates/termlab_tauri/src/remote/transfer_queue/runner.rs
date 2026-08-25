@@ -2134,7 +2134,7 @@ mod tests {
         pin::Pin,
         sync::{
             Arc, Mutex as StdMutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
         task::{Context, Poll},
     };
@@ -2149,8 +2149,9 @@ mod tests {
         transfer::{
             ControlDecision, CopyOutcome, SourceFingerprint, clamp_pipelined_chunk_bytes,
             copy::{CopyError, CopyStage, copy_with_checkpoint_typed},
-            fingerprint_open_local, open_sftp_session,
+            download_to_partial_pipelined, fingerprint_open_local, open_sftp_session,
             pipelined::PipelineTuning,
+            upload_to_partial_pipelined,
         },
     };
     use tokio::{
@@ -4404,6 +4405,331 @@ mod tests {
         let cleanup = cleanup_live_remote_directory(&session, &remote_directory).await;
         if let Err(error) = verification {
             panic!("live SFTP queue verification failed: {error}; cleanup result: {cleanup:?}");
+        }
+        cleanup.expect("clean only the exact UUID-named disposable remote directory");
+    }
+
+    /// Explicit env configuration required by the pipelined-transfer live
+    /// tests below, resolved once so each test's skip message names itself.
+    struct LiveSftpEnv {
+        host: String,
+        port: u16,
+        user: String,
+        key: String,
+    }
+
+    /// Mirrors `live_sftp_queue_roundtrip`'s gating exactly: read the same
+    /// four `TERMLAB_TEST_SFTP_*` variables and print the same clean SKIP
+    /// message (naming this test) when they are not all set, rather than
+    /// standing up a server.
+    fn live_sftp_env(test_name: &str) -> Option<LiveSftpEnv> {
+        let host = std::env::var("TERMLAB_TEST_SFTP_HOST").ok();
+        let port = std::env::var("TERMLAB_TEST_SFTP_PORT").ok();
+        let user = std::env::var("TERMLAB_TEST_SFTP_USER").ok();
+        let key = std::env::var("TERMLAB_TEST_SFTP_KEY").ok();
+        let (Some(host), Some(port), Some(user), Some(key)) = (host, port, user, key) else {
+            eprintln!(
+                "SKIP {test_name}: set TERMLAB_TEST_SFTP_HOST, TERMLAB_TEST_SFTP_PORT, \
+                 TERMLAB_TEST_SFTP_USER, and TERMLAB_TEST_SFTP_KEY for an explicitly disposable \
+                 OpenSSH server"
+            );
+            return None;
+        };
+        let port = port
+            .parse::<u16>()
+            .expect("TERMLAB_TEST_SFTP_PORT must be a valid u16");
+        Some(LiveSftpEnv {
+            host,
+            port,
+            user,
+            key,
+        })
+    }
+
+    /// Connects and opens a disposable, UUID-named remote directory, the same
+    /// way `live_sftp_queue_roundtrip` does inline. Factored out here because
+    /// both pipelined live tests below need it and neither needs the queue
+    /// roundtrip test's job/runner machinery.
+    async fn connect_live_sftp(
+        env: &LiveSftpEnv,
+        local: &std::path::Path,
+    ) -> (
+        Arc<termlab_remote::russh::client::Handle<termlab_remote::handler::TermLabSshHandler>>,
+        Arc<termlab_remote::transfer::SftpSessionHandle>,
+        String,
+    ) {
+        let live_id = Uuid::new_v4();
+        let server = ServerEntry {
+            id: format!("live-sftp-{live_id}"),
+            label: "Disposable OpenSSH".into(),
+            host: env.host.clone(),
+            port: env.port,
+            user: Some(env.user.clone()),
+            auth_method: Some("key".into()),
+            key_path: Some(env.key.clone()),
+            vault_account_id: None,
+            proxy_command: None,
+            proxy_jump: None,
+        };
+        let credentials = SshCredentials {
+            username: env.user.clone(),
+            auth_method: "key".into(),
+            password: None,
+            key_path: Some(env.key.clone()),
+            key_passphrase: None,
+        };
+        let paths = RemotePaths {
+            known_hosts_file: local.join("known_hosts"),
+            config_dir: local.join("remote-config"),
+            default_key_paths: vec![PathBuf::from(&env.key)],
+        };
+        let ssh_handle = Arc::new(
+            connect_and_auth(
+                &server,
+                &credentials,
+                Arc::new(NoPromptLiveCallbacks),
+                &paths,
+            )
+            .await
+            .expect("connect to configured disposable OpenSSH server"),
+        );
+        let session = Arc::new(
+            open_sftp_session(ssh_handle.as_ref())
+                .await
+                .expect("open disposable SFTP session"),
+        );
+        let remote_directory = format!("/tmp/{live_id}");
+        session
+            .create_dir(remote_directory.clone())
+            .await
+            .expect("create UUID-named disposable remote directory");
+        (ssh_handle, session, remote_directory)
+    }
+
+    /// Deterministic, non-repeating fill so a 64 MiB fixture doesn't need the
+    /// `rand` crate: an xorshift64* stream seeded from `seed`.
+    fn pseudo_random_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+        let mut bytes = Vec::with_capacity(len + 8);
+        while bytes.len() < len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let word = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes.truncate(len);
+        bytes
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly configured disposable OpenSSH server"]
+    async fn live_pipelined_upload_matches_content_and_beats_sequential() {
+        let Some(env) = live_sftp_env("live_pipelined_upload_matches_content_and_beats_sequential")
+        else {
+            return;
+        };
+        let local = tempfile::tempdir().expect("create live pipelined upload test directory");
+        let (ssh_handle, session, remote_directory) = connect_live_sftp(&env, local.path()).await;
+
+        let verification = async {
+            const SIZE: usize = 64 * 1024 * 1024;
+            let source_bytes = pseudo_random_bytes(0x517C_ADE5, SIZE);
+            let source_path = local.path().join("pipelined-upload-source.bin");
+            tokio::fs::write(&source_path, &source_bytes)
+                .await
+                .map_err(|error| format!("write local pipelined upload source failed: {error}"))?;
+
+            let sequential_remote_path = format!("{remote_directory}/sequential-upload.bin");
+            let pipelined_remote_path = format!("{remote_directory}/pipelined-upload.bin");
+            let sequential_tuning = PipelineTuning {
+                depth: 1,
+                chunk_bytes: 262_144,
+            };
+            let pipelined_tuning = PipelineTuning {
+                depth: 16,
+                chunk_bytes: 262_144,
+            };
+
+            let sequential_started = std::time::Instant::now();
+            let sequential_outcome = upload_to_partial_pipelined(
+                &ssh_handle,
+                &source_path,
+                &sequential_remote_path,
+                0,
+                sequential_tuning,
+                |_fingerprint| async { Ok::<(), RemoteError>(()) },
+                || ControlDecision::Continue,
+                |_bytes, _total| {},
+            )
+            .await
+            .map_err(|error| format!("depth-1 pipelined upload failed: {error}"))?;
+            let sequential_elapsed = sequential_started.elapsed();
+            require_live(
+                matches!(sequential_outcome, CopyOutcome::Completed { bytes } if bytes == SIZE as u64),
+                format!("depth-1 upload did not complete all bytes: {sequential_outcome:?}"),
+            )?;
+
+            let pipelined_started = std::time::Instant::now();
+            let pipelined_outcome = upload_to_partial_pipelined(
+                &ssh_handle,
+                &source_path,
+                &pipelined_remote_path,
+                0,
+                pipelined_tuning,
+                |_fingerprint| async { Ok::<(), RemoteError>(()) },
+                || ControlDecision::Continue,
+                |_bytes, _total| {},
+            )
+            .await
+            .map_err(|error| format!("depth-16 pipelined upload failed: {error}"))?;
+            let pipelined_elapsed = pipelined_started.elapsed();
+            require_live(
+                matches!(pipelined_outcome, CopyOutcome::Completed { bytes } if bytes == SIZE as u64),
+                format!("depth-16 upload did not complete all bytes: {pipelined_outcome:?}"),
+            )?;
+
+            let sequential_uploaded = read_live_remote(&session, &sequential_remote_path).await?;
+            let pipelined_uploaded = read_live_remote(&session, &pipelined_remote_path).await?;
+            require_live(
+                sequential_uploaded.len() == source_bytes.len()
+                    && pipelined_uploaded.len() == source_bytes.len(),
+                "uploaded remote file sizes did not match the source",
+            )?;
+            require_live(
+                sequential_uploaded == source_bytes,
+                "depth-1 upload did not preserve source content",
+            )?;
+            require_live(
+                pipelined_uploaded == source_bytes,
+                "depth-16 upload did not preserve source content",
+            )?;
+
+            let mib = 1024.0 * 1024.0;
+            let sequential_mib_s = source_bytes.len() as f64 / sequential_elapsed.as_secs_f64() / mib;
+            let pipelined_mib_s = source_bytes.len() as f64 / pipelined_elapsed.as_secs_f64() / mib;
+            eprintln!(
+                "live_pipelined_upload_matches_content_and_beats_sequential: \
+                 depth=1 {sequential_elapsed:?} ({sequential_mib_s:.2} MiB/s), \
+                 depth=16 {pipelined_elapsed:?} ({pipelined_mib_s:.2} MiB/s)"
+            );
+
+            require_live(
+                pipelined_elapsed < sequential_elapsed,
+                format!(
+                    "depth-16 upload ({pipelined_elapsed:?}) was not faster than depth-1 \
+                     ({sequential_elapsed:?})"
+                ),
+            )?;
+
+            Ok::<(), String>(())
+        }
+        .await;
+
+        let cleanup = cleanup_live_remote_directory(&session, &remote_directory).await;
+        if let Err(error) = verification {
+            panic!(
+                "live pipelined upload verification failed: {error}; cleanup result: {cleanup:?}"
+            );
+        }
+        cleanup.expect("clean only the exact UUID-named disposable remote directory");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly configured disposable OpenSSH server"]
+    async fn live_pipelined_download_resumes_after_interruption() {
+        let Some(env) = live_sftp_env("live_pipelined_download_resumes_after_interruption") else {
+            return;
+        };
+        let local = tempfile::tempdir().expect("create live pipelined download test directory");
+        let (ssh_handle, session, remote_directory) = connect_live_sftp(&env, local.path()).await;
+
+        let verification = async {
+            const SIZE: usize = 16 * 1024 * 1024;
+            let source_bytes = pseudo_random_bytes(0xD0DE_10AD, SIZE);
+            let remote_source_path = format!("{remote_directory}/pipelined-download-source.bin");
+            write_live_remote(&session, &remote_source_path, &source_bytes).await?;
+
+            let local_partial_path = local.path().join("pipelined-download.termlab-part");
+            let tuning = PipelineTuning {
+                depth: 8,
+                chunk_bytes: 262_144,
+            };
+            let observed_frontier = Arc::new(AtomicU64::new(0));
+            let threshold = (SIZE as u64) / 4;
+            let progress_tracked = Arc::clone(&observed_frontier);
+            let control_tracked = Arc::clone(&observed_frontier);
+
+            let paused_outcome = download_to_partial_pipelined(
+                &ssh_handle,
+                &remote_source_path,
+                &local_partial_path,
+                0,
+                tuning,
+                |_fingerprint| async { Ok::<(), RemoteError>(()) },
+                move || {
+                    if control_tracked.load(Ordering::SeqCst) >= threshold {
+                        ControlDecision::Pause
+                    } else {
+                        ControlDecision::Continue
+                    }
+                },
+                move |bytes, _total| {
+                    progress_tracked.store(bytes, Ordering::SeqCst);
+                },
+            )
+            .await
+            .map_err(|error| format!("pipelined download pause attempt failed: {error}"))?;
+            let CopyOutcome::Paused { bytes: frontier } = paused_outcome else {
+                return Err(format!(
+                    "pipelined download did not pause: {paused_outcome:?}"
+                ));
+            };
+            require_live(
+                frontier > 0 && frontier < SIZE as u64,
+                format!("pipelined download pause frontier was not resumable: {frontier}"),
+            )?;
+
+            let resume_outcome = download_to_partial_pipelined(
+                &ssh_handle,
+                &remote_source_path,
+                &local_partial_path,
+                frontier,
+                tuning,
+                |_fingerprint| async { Ok::<(), RemoteError>(()) },
+                || ControlDecision::Continue,
+                |_bytes, _total| {},
+            )
+            .await
+            .map_err(|error| format!("pipelined download resume failed: {error}"))?;
+            require_live(
+                matches!(resume_outcome, CopyOutcome::Completed { bytes } if bytes == SIZE as u64),
+                format!("resumed pipelined download did not complete: {resume_outcome:?}"),
+            )?;
+
+            let downloaded = tokio::fs::read(&local_partial_path)
+                .await
+                .map_err(|error| {
+                    format!("read resumed local pipelined download failed: {error}")
+                })?;
+            require_live(
+                downloaded == source_bytes,
+                "resumed pipelined download did not byte-for-byte match the remote source",
+            )?;
+            eprintln!(
+                "live_pipelined_download_resumes_after_interruption: paused at {frontier} of \
+                 {SIZE} bytes, resumed and matched source byte-for-byte"
+            );
+
+            Ok::<(), String>(())
+        }
+        .await;
+
+        let cleanup = cleanup_live_remote_directory(&session, &remote_directory).await;
+        if let Err(error) = verification {
+            panic!(
+                "live pipelined download verification failed: {error}; cleanup result: {cleanup:?}"
+            );
         }
         cleanup.expect("clean only the exact UUID-named disposable remote directory");
     }

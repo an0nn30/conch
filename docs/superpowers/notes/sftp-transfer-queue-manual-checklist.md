@@ -169,6 +169,30 @@ status changed to Implemented:
 - Task 12 cancellation/recovery and lease suites remain in the full green gate;
   they were not mechanically duplicated.
 
+## Pipelined transfers
+
+Covers the [pipelined SFTP transfers design](../specs/2026-08-25-sftp-pipelined-transfers-design.md).
+The two live tests below (`crates/termlab_tauri/src/remote/transfer_queue/runner.rs`,
+`#[ignore]`, gated on `TERMLAB_TEST_SFTP_HOST`/`_PORT`/`_USER`/`_KEY`) were
+invoked in the Task 8 environment and skipped cleanly before connecting
+because no disposable OpenSSH server was configured; both rows remain
+pending-live-evidence until run against one.
+
+- [ ] `live_pipelined_upload_matches_content_and_beats_sequential`: upload a
+  64 MiB fixture once at `PipelineTuning { depth: 1, chunk_bytes: 262144 }` and
+  once at `{ depth: 16, chunk_bytes: 262144 }` to distinct remote paths.
+  Confirm both remote files match the source byte-for-byte and record the
+  measured depth-1 vs. depth-16 throughput (elapsed time and MiB/s, printed by
+  the test). Evidence: pending-live-evidence (skipped: no
+  `TERMLAB_TEST_SFTP_*` server configured in this environment).
+- [ ] `live_pipelined_download_resumes_after_interruption`: start a pipelined
+  download (`depth: 8`) with a control callback that pauses once the
+  contiguous frontier passes 25% of the source; confirm the outcome is
+  `Paused` with a frontier strictly between 0 and the total, resume with
+  `offset = frontier`, and confirm completion plus a byte-for-byte match
+  against the remote source. Evidence: pending-live-evidence (skipped: no
+  `TERMLAB_TEST_SFTP_*` server configured in this environment).
+
 ## Sign-off
 
 - Overall result: [ ] Pass [ ] Pass with accepted deviations [ ] Fail
