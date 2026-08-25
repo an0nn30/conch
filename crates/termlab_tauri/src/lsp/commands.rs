@@ -77,7 +77,7 @@ pub(crate) const LSP_COMMAND_CONTRACTS: &[CommandContract] = &[
     CommandContract {
         name: "editor_transfer_document",
         args: &["documentId", "targetReservationId", "windowLabel", "paneId"],
-        result: "void",
+        result: "OpenDocumentResponse",
     },
     CommandContract {
         name: "lsp_open_document",
@@ -191,6 +191,7 @@ impl LspState {
 struct DocumentOwnerFocusedPayload {
     document_id: Option<DocumentId>,
     pane_id: Option<String>,
+    canonical_path: Option<String>,
     reservation_failed: bool,
 }
 
@@ -216,6 +217,7 @@ pub(crate) fn spawn_event_forwarder<R: Runtime>(
                     window_label,
                     document_id,
                     pane_id,
+                    canonical_path,
                     reservation_failed,
                 } => {
                     if let Some(window) = app.get_webview_window(&window_label) {
@@ -224,6 +226,7 @@ pub(crate) fn spawn_event_forwarder<R: Runtime>(
                             DocumentOwnerFocusedPayload {
                                 document_id,
                                 pane_id,
+                                canonical_path,
                                 reservation_failed,
                             },
                         );
@@ -270,7 +273,7 @@ pub(crate) async fn editor_transfer_document(
     window_label: String,
     pane_id: String,
     state: tauri::State<'_, LspState>,
-) -> Result<(), String> {
+) -> Result<OpenDocumentResponse, String> {
     state
         .manager
         .transfer_document(document_id, target_reservation_id, window_label, pane_id)
@@ -562,6 +565,7 @@ mod tests {
         let value = serde_json::to_value(DocumentOwnerFocusedPayload {
             document_id: Some(document_id),
             pane_id: Some("pane-a".into()),
+            canonical_path: Some("/repo/a.ts".into()),
             reservation_failed: false,
         })
         .unwrap();
@@ -570,6 +574,7 @@ mod tests {
             serde_json::to_value(document_id).unwrap()
         );
         assert_eq!(value["paneId"], "pane-a");
+        assert_eq!(value["canonicalPath"], "/repo/a.ts");
         assert_eq!(value["reservationFailed"], false);
         assert!(value.get("document_id").is_none());
     }
@@ -591,7 +596,7 @@ mod tests {
             (
                 "editor_transfer_document",
                 &["documentId", "targetReservationId", "windowLabel", "paneId"][..],
-                "void",
+                "OpenDocumentResponse",
             ),
             (
                 "lsp_open_document",

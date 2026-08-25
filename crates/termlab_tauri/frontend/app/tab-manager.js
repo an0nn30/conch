@@ -448,7 +448,8 @@
           }
           if (global.termlabEditorService
               && typeof global.termlabEditorService.closeDocument === 'function') {
-            await global.termlabEditorService.closeDocument(pane);
+            const ownershipClosed = await global.termlabEditorService.closeDocument(pane);
+            if (ownershipClosed === false) return false;
           }
           if (global.termlabProjectContext
               && typeof global.termlabProjectContext.unmount === 'function') {

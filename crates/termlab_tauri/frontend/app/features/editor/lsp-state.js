@@ -16,7 +16,7 @@
   function selectedRoot(status, candidates) {
     if (status && status.projectRootUri) {
       const match = (candidates || []).find((candidate) => candidate.rootUri === status.projectRootUri);
-      return match ? match.canonicalPath : status.projectRootUri;
+      return match ? match.canonicalPath : null;
     }
     return null;
   }

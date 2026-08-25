@@ -145,13 +145,27 @@
     return store && typeof store.get === 'function' ? store.get(pane) : null;
   }
 
-  function bridgeCall(name, args) {
+  async function bridgeCall(name, args) {
     const bridge = global.termlabLspBridge;
-    if (!bridge || typeof bridge[name] !== 'function') return Promise.resolve(null);
-    return Promise.resolve(bridge[name](...args)).catch((error) => {
-      console.warn(`Project context: ${name} failed`, error);
-      return null;
-    });
+    if (!bridge || typeof bridge[name] !== 'function') {
+      const error = { message: 'Language features are unavailable; editing continues.' };
+      if (global.toast && typeof global.toast.error === 'function') {
+        global.toast.error('Language Features', error.message);
+      }
+      return { ok: false, error };
+    }
+    try {
+      return { ok: true, value: await bridge[name](...args) };
+    } catch (cause) {
+      console.warn(`Project context: ${name} failed`, cause);
+      const error = typeof bridge.normalizeError === 'function'
+        ? bridge.normalizeError(cause, name)
+        : { message: 'Language features are unavailable; editing continues.', detail: String(cause) };
+      if (global.toast && typeof global.toast.error === 'function') {
+        global.toast.error('Language Features', `${error.message} ${error.detail || ''}`.trim());
+      }
+      return { ok: false, error };
+    }
   }
 
   function chooseProject(pane, anchor) {
@@ -192,8 +206,8 @@
         {
           label: 'Trust and enable', primary: true,
           onSelect: async () => {
-            await bridgeCall('setProjectTrust', [disclosure.canonicalRoot, status.adapterId, 'trusted']);
-            handle.close('trusted');
+            const result = await bridgeCall('setProjectTrust', [disclosure.canonicalRoot, status.adapterId, 'trusted']);
+            if (result.ok) handle.close('trusted');
           },
         },
       ],
@@ -212,7 +226,9 @@
     else if (action.id === 'restart') bridgeCall('restartSession', [status.adapterId, root]);
     else if (action.id === 'revoke') bridgeCall('revokeProjectTrust', [root, status.adapterId]);
     else if (action.id === 'logs') {
-      bridgeCall('sessionLogs', [status.adapterId, root]).then((logs) => {
+      bridgeCall('sessionLogs', [status.adapterId, root]).then((result) => {
+        if (!result.ok) return;
+        const logs = result.value;
         const text = Array.isArray(logs) && logs.length
           ? logs.map((entry) => `${entry.kind}: ${entry.message}`).join('\n')
           : 'No language server logs are available.';
@@ -287,7 +303,15 @@
     const h = helpers || {};
     if (!container || typeof h.addSectionLabel !== 'function' || typeof h.addRow !== 'function') return;
     h.addSectionLabel(container, 'Trusted Projects');
-    const projects = await bridgeCall('trustedProjects', []);
+    const result = await bridgeCall('trustedProjects', []);
+    if (!result.ok) {
+      const unavailable = document.createElement('span');
+      unavailable.className = 'tl-settings__row-desc';
+      unavailable.textContent = 'Trusted projects unavailable';
+      h.addRow(container, 'Project trust', 'Could not load trusted projects; reopen Settings to retry', unavailable);
+      return;
+    }
+    const projects = result.value;
     if (!Array.isArray(projects) || !projects.length) {
       const empty = document.createElement('span');
       empty.className = 'tl-settings__row-desc';
@@ -302,8 +326,13 @@
       button.textContent = 'Revoke trust';
       button.addEventListener('click', async () => {
         button.disabled = true;
-        await bridgeCall('revokeProjectTrust', [project.root, project.adapterId]);
-        button.textContent = 'Revoked';
+        const revoked = await bridgeCall('revokeProjectTrust', [project.root, project.adapterId]);
+        if (revoked.ok) {
+          button.textContent = 'Revoked';
+        } else {
+          button.disabled = false;
+          button.textContent = 'Revoke trust';
+        }
       });
       const adapter = project.adapterId || 'All adapters';
       const context = project.root;

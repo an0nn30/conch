@@ -71,7 +71,10 @@ function makeCM6(sandbox) {
   const CM = {
     Compartment,
     EditorView,
-    EditorState: { create: (spec) => ({ spec, doc: { toString: () => spec.doc } }) },
+    EditorState: {
+      create: (spec) => ({ spec, doc: { toString: () => spec.doc } }),
+      readOnly: { of: (value) => ({ ext: 'readOnly', value }) },
+    },
     lineNumbers: tagged('lineNumbers'),
     highlightActiveLineGutter: tagged('highlightActiveLineGutter'),
     highlightSpecialChars: tagged('highlightSpecialChars'),
@@ -400,13 +403,24 @@ check('setVimMode on a view it does not know is a no-op', () => {
   assert.strictEqual(effects.length, 0);
 });
 
+check('setReadOnly gates a live editor through its own compartment during ownership close', () => {
+  const h = makePaneHarness({ doc: 'x' });
+  h.sandbox.termlabEditorPane.setReadOnly(h.view, true);
+  assert.strictEqual(h.view.effects.length, 1);
+  assert.strictEqual(h.view.effects[0].contents.ext, 'readOnly');
+  assert.strictEqual(h.view.effects[0].contents.value, true);
+  h.view.termlabSetReadOnly(false);
+  assert.strictEqual(h.view.effects[1].reconfigure, h.view.effects[0].reconfigure);
+  assert.strictEqual(h.view.effects[1].contents.value, false);
+});
+
 check('the font, theme and language compartments still work alongside it', () => {
   const h = makePaneHarness({ doc: 'x', vimMode: true });
   const ids = h.extensions.filter((e) => e && typeof e.compartment === 'number').map((e) => e.compartment);
   assert.strictEqual(
     new Set(ids).size,
-    4,
-    'vim, language, theme and font are four distinct compartments',
+    5,
+    'vim, language, read-only, theme and font are five distinct compartments',
   );
   h.sandbox.termlabEditorPane.setFontSize(h.view, 15);
   assert.strictEqual(h.view.effects.length, 1);

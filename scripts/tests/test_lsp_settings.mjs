@@ -145,4 +145,39 @@ function makeSandbox() {
   assert.deepEqual(dispatched.map((event) => event.type), ['termlab:editor-completion']);
 }
 
+// The standalone Settings bootstrap publishes the exact client it creates,
+// so trusted-project management reaches Tauri without a terminal window's
+// main-runtime having populated termlabServices first.
+{
+  const invoked = [];
+  const { sandbox } = makeSandbox();
+  sandbox.document.createElement = () => ({
+    className: '', textContent: '', disabled: false,
+    addEventListener() {},
+  });
+  sandbox.__TAURI__ = {
+    core: {
+      async invoke(command, args) {
+        invoked.push([command, args]);
+        if (command === 'lsp_trusted_projects') return [];
+        return null;
+      },
+    },
+    event: { listen: async () => () => {} },
+    window: { getCurrentWindow: () => ({ listen: async () => () => {} }) },
+  };
+  load('core/tauri-client.js', sandbox);
+  load('features/editor/lsp-state.js', sandbox);
+  load('features/editor/lsp-bridge.js', sandbox);
+  load('features/editor/project-context.js', sandbox);
+  const realClient = sandbox.termlabTauriClient.create({ tauri: sandbox.__TAURI__ });
+  sandbox.termlabTauriClient.publish(realClient);
+  await sandbox.termlabProjectContext.renderTrustedProjects({}, {
+    addSectionLabel() {},
+    addRow() {},
+  });
+  assert.equal(sandbox.termlabServices.tauriClient, realClient);
+  assert.deepEqual(invoked[0], ['lsp_trusted_projects', undefined]);
+}
+
 console.log('LSP settings contracts: all assertions passed');

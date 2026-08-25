@@ -31,6 +31,9 @@ const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/front
 const MODULES = [
   'app/ui/tl-dialog.js',
   'app/core/dialog-service.js',
+  'app/features/editor/tab-label.js',
+  'app/features/editor/lsp-state.js',
+  'app/features/editor/lsp-bridge.js',
   'app/features/editor/editor-service.js',
   'app/layout/split-tree.js',
   'app/tab-manager.js',
@@ -56,6 +59,11 @@ function makeElement(tag, doc) {
     isConnected: false,
     removed: false,
     appendChild(c) { this.children.push(c); c.parentNode = this; c.isConnected = this.isConnected; return c; },
+    insertBefore(c, before) {
+      const index = this.children.indexOf(before);
+      if (index < 0) return this.appendChild(c);
+      this.children.splice(index, 0, c); c.parentNode = this; c.isConnected = this.isConnected; return c;
+    },
     removeChild(c) {
       const i = this.children.indexOf(c);
       if (i >= 0) this.children.splice(i, 1);
@@ -179,18 +187,71 @@ function makeApp() {
   };
 
   const destroyedViews = [];
-  sandbox.termlabEditorPane = { destroyEditorView: (v) => destroyedViews.push(v) };
+  sandbox.termlabEditorPane = {
+    createEditorView(_host, options = {}) {
+      const doc = { value: options.doc || '', toString() { return this.value; } };
+      let paneView = null;
+      paneView = {
+        state: { doc },
+        focus() {},
+        termlabResetDirty() { if (options.onDirtyChange) options.onDirtyChange(false); },
+        termlabSetReadOnly(value) { paneView.readOnly = value; },
+        type(text) {
+          const from = doc.value.length;
+          doc.value += text;
+          if (options.onDirtyChange) options.onDirtyChange(true);
+          if (options.onDocumentTransaction) {
+            options.onDocumentTransaction({
+              docChanged: true,
+              changes: { iterChanges(fn) { fn(from, from, from, doc.value.length, { toString: () => text }); } },
+            });
+          }
+        },
+      };
+      return paneView;
+    },
+    destroyEditorView: (v) => destroyedViews.push(v),
+    setFontSize() {},
+    setLanguage() {},
+  };
 
   // The "file system": path -> contents, as the disk would look.
   const disk = new Map();
   const invocations = [];
   let denyWrites = false;
+  let denyDocumentClose = false;
+  let delayDocumentOpen = false;
+  let resolveDocumentOpen = null;
   const invoke = (command, args) => {
     invocations.push({ command, args });
     if (command === 'editor_write_file') {
       if (denyWrites) return Promise.reject(PERMISSION_DENIED(args.path));
       disk.set(args.path, args.contents);
       return Promise.resolve(null);
+    }
+    if (command === 'lsp_close_document' && denyDocumentClose) {
+      return Promise.reject(new Error('manager outbox overloaded'));
+    }
+    if (command === 'editor_reserve_document') {
+      return Promise.resolve({ kind: 'reserved', reservationId: 'reservation', canonicalPath: args.path });
+    }
+    if (command === 'editor_read_file') return Promise.resolve(disk.get(args.path) || '');
+    if (command === 'lsp_open_document') {
+      const opened = {
+        documentId: 'doc-real-tab', version: 1, projectCandidates: [],
+        status: {
+          revision: 1, documentId: 'doc-real-tab', sessionId: null, adapterId: 'typescript',
+          projectRootUri: null, state: 'choosingProject', message: null, capabilities: {},
+          errorCount: 0, warningCount: 0,
+        },
+      };
+      if (delayDocumentOpen) {
+        return new Promise((resolve) => { resolveDocumentOpen = () => resolve(opened); });
+      }
+      return Promise.resolve(opened);
+    }
+    if (command === 'lsp_resync_document') {
+      return Promise.resolve({ documentId: args.documentId, version: args.version, status: null });
     }
     return Promise.resolve(undefined);
   };
@@ -241,6 +302,9 @@ function makeApp() {
     getWorkspaceDir: async () => null,
     refreshSshSessions: () => {},
     getCurrentWindowLabel: () => 'main',
+    makeLeaf: (paneId) => sandbox.splitTree.makeLeaf(paneId),
+    setupDividerDrag: () => {},
+    normalizeTabTitle: (value) => value,
   });
 
   let focusedPaneId = null;
@@ -293,6 +357,12 @@ function makeApp() {
     setFocusedPane: () => {},
     activateTab: (id) => tabManager.activateTab(id),
   };
+  sandbox.__termlabCreateEditorTab = (options) => tabManager.createEditorTab(options);
+  sandbox.termlabLspBridge.configure({
+    windowLabel: 'main',
+    paneAccess: sandbox.__termlabPaneAccess,
+    onReservationFailed: (canonicalPath) => sandbox.termlabEditorService.openLocalFile(canonicalPath),
+  });
 
   // Open a titled file and type into it, as the user would.
   function openTitledFileAndType(fileName, text) {
@@ -358,6 +428,9 @@ function makeApp() {
     focusPane: (id) => paneManager.setFocusedPane(id),
     dialogCount: () => sandbox.tlDialog.count(),
     denyWrites: (on) => { denyWrites = on; },
+    denyDocumentClose: (on) => { denyDocumentClose = on; },
+    delayDocumentOpen: (on) => { delayDocumentOpen = on; },
+    resolveDocumentOpen: () => resolveDocumentOpen && resolveDocumentOpen(),
     destroyedWindowCount: () => destroyedWindow,
     appClosed: () => invocations.some((i) => i.command === 'quit_vote' && i.args.allow === true),
   };
@@ -564,6 +637,48 @@ check('5c. a window with nothing dirty closes without a prompt', async () => {
   assert.strictEqual(app.dialogCount(), 0);
   const answer = app.invocations.filter((i) => i.command === 'confirm_window_close');
   assert.strictEqual(answer[0].args.allow, true);
+});
+
+check('5d. a rejected manager close preserves the real tab, view, and ownership for retry', async () => {
+  const app = makeApp();
+  const { tabId, pane } = app.openTitledFileAndType('owned.ts', '');
+  app.sandbox.termlabLspState.attach(pane, {
+    documentId: 'doc-owned', version: 1, projectCandidates: [],
+    status: {
+      revision: 1, documentId: 'doc-owned', sessionId: 'session', adapterId: 'typescript',
+      projectRootUri: 'file:///repo', state: 'ready', message: null, capabilities: {},
+      errorCount: 0, warningCount: 0,
+    },
+  });
+  app.denyDocumentClose(true);
+  await app.tabManager.closeTab(tabId);
+  assert.strictEqual(app.tabs.has(tabId), true, 'uncertain ownership keeps the real tab alive');
+  assert.strictEqual(app.panes.has(pane.paneId), true);
+  assert.strictEqual(app.destroyedViews.length, 0);
+  assert.strictEqual(app.sandbox.termlabLspState.get(pane).documentId, 'doc-owned');
+
+  app.denyDocumentClose(false);
+  await app.tabManager.closeTab(tabId);
+  assert.strictEqual(app.tabs.has(tabId), false, 'a confirmed later close releases and destroys');
+  assert.strictEqual(app.destroyedViews.length, 1);
+  assert.strictEqual(app.sandbox.termlabLspState.get(pane), null);
+});
+
+check('5e. the real tab-manager open path preserves typing while manager attachment is in flight', async () => {
+  const app = makeApp();
+  const filePath = '/home/u/docs/in-flight.ts';
+  app.disk.set(filePath, 'const value = 1;');
+  app.delayDocumentOpen(true);
+  const opening = app.sandbox.termlabEditorService.openLocalFile(filePath);
+  await tick();
+  const pane = Array.from(app.panes.values()).find((entry) => entry.kind === 'editor');
+  assert.ok(pane, 'the real tab manager constructed the editor pane');
+  pane.view.type('\nconst light = "💡";');
+  app.resolveDocumentOpen();
+  await opening;
+  const resync = app.invocations.find((entry) => entry.command === 'lsp_resync_document');
+  assert.equal(resync.args.contents, 'const value = 1;\nconst light = "💡";');
+  assert.equal(app.sandbox.termlabLspState.get(pane).version, 2);
 });
 
 // === closePane: the split-pane route to the same destruction ==============

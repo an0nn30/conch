@@ -89,6 +89,7 @@
     if (!tauriClient) {
       throw new Error('Tauri client is unavailable in settings window');
     }
+    window.termlabTauriClient.publish(tauriClient);
     const invoke = tauriClient.invoke;
     const listen = tauriClient.listenOnCurrentWindow;
     const configService = window.termlabConfigService || {};

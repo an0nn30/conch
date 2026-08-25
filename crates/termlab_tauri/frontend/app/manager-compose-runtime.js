@@ -351,6 +351,13 @@
         global.termlabLspBridge.configure({
           windowLabel: currentWindowLabel,
           paneAccess: global.__termlabPaneAccess,
+          onReservationFailed: (canonicalPath) => {
+            const editor = global.termlabEditorService;
+            if (editor && typeof editor.openLocalFile === 'function') {
+              return editor.openLocalFile(canonicalPath);
+            }
+            return null;
+          },
         });
       }
     }

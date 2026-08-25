@@ -11,6 +11,7 @@
   const fontCompartments = new WeakMap();
   const themeCompartments = new WeakMap();
   const vimCompartments = new WeakMap();
+  const readOnlyCompartments = new WeakMap();
   // Save As renames a live pane, so the language can no longer be fixed at
   // creation: a scratch saved as `deploy.py` has to start highlighting as
   // Python without losing the document, the selection or the undo history.
@@ -52,6 +53,7 @@
     const themeComp = new CM.Compartment();
     const vimComp = new CM.Compartment();
     const languageComp = new CM.Compartment();
+    const readOnlyComp = new CM.Compartment();
     const themeExtensions = global.termlabEditorTheme
       ? global.termlabEditorTheme.buildTheme()
       : [];
@@ -97,6 +99,7 @@
             CM.indentWithTab,
           ]),
           languageComp.of(languageExtension(opts.filename || '')),
+          readOnlyComp.of(CM.EditorState.readOnly.of(false)),
           themeComp.of(themeExtensions),
           fontComp.of([]),
           dirtyWatcher,
@@ -109,11 +112,13 @@
     themeCompartments.set(view, themeComp);
     vimCompartments.set(view, vimComp);
     languageCompartments.set(view, languageComp);
+    readOnlyCompartments.set(view, readOnlyComp);
     // Callers clear dirty after a save; expose the reset without exposing state.
     view.termlabResetDirty = () => {
       dirty = false;
       onDirtyChange(false);
     };
+    view.termlabSetReadOnly = (readOnly) => setReadOnly(view, readOnly);
     return view;
   }
 
@@ -148,6 +153,13 @@
     view.dispatch({ effects: comp.reconfigure(vimExtensions(enabled === true)) });
   }
 
+  function setReadOnly(view, readOnly) {
+    const CM = global.CM6;
+    const comp = readOnlyCompartments.get(view);
+    if (!CM || !view || !comp || !CM.EditorState || !CM.EditorState.readOnly) return;
+    view.dispatch({ effects: comp.reconfigure(CM.EditorState.readOnly.of(readOnly === true)) });
+  }
+
   // Re-derive the highlighting from a new name on a view that is already
   // open. Save As is the only caller: the pane keeps its document, so this is
   // a compartment reconfigure rather than a fresh state (which would discard
@@ -167,6 +179,7 @@
     setFontSize,
     refreshTheme,
     setVimMode,
+    setReadOnly,
     setLanguage,
   };
 })(window);

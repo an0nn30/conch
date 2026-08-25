@@ -43,20 +43,32 @@ function state(status, candidates = []) {
   };
 }
 
-function makeSandbox() {
+function makeSandbox(options = {}) {
   const menuCalls = [];
   const dialogCalls = [];
   const bridgeCalls = [];
+  const toasts = { error: [], info: [] };
+  const closedDialogs = [];
   const sandbox = {
     console, setTimeout, clearTimeout,
     document: { createElement: (tag) => new Element(tag), body: new Element('body') },
     innerWidth: 1000,
     tlMenu: { open: (opts) => { menuCalls.push(opts); return new Element('div'); } },
-    tlDialog: { open: (opts) => { dialogCalls.push(opts); return { close() {} }; } },
+    toast: {
+      error: (title, body) => toasts.error.push([title, body]),
+      info: (title, body) => toasts.info.push([title, body]),
+    },
+    tlDialog: {
+      open: (opts) => {
+        dialogCalls.push(opts);
+        return { close(reason) { closedDialogs.push(reason); } };
+      },
+    },
     termlabServices: {
       tauriClient: {
         async invoke(command, args) {
           bridgeCalls.push([command, args]);
+          if (options.rejectCommand === command) throw new Error(`failed ${command}`);
           if (command === 'lsp_trusted_projects') return [{
             root: '/repo', rootUri: 'file:///repo', adapterId: 'typescript', decision: 'trusted',
             updatedAtMs: 1, lastUsedAtMs: 1700000000000,
@@ -78,7 +90,7 @@ function makeSandbox() {
   vm.runInContext(fs.readFileSync(filename, 'utf8'), sandbox, { filename });
   return {
     sandbox, api: sandbox.termlabProjectContext, store: sandbox.termlabLspState,
-    menuCalls, dialogCalls, bridgeCalls,
+    menuCalls, dialogCalls, bridgeCalls, toasts, closedDialogs,
   };
 }
 
@@ -203,6 +215,68 @@ await check('trusted-project management renders in Editor settings and revokes t
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(bridgeCalls[0], ['lsp_trusted_projects', undefined]);
   assert.deepEqual(bridgeCalls[1], ['lsp_revoke_project_trust', { root: '/repo', adapterId: 'typescript' }]);
+});
+
+await check('failed trust keeps the disclosure open and renders a normalized actionable error', async () => {
+  const { api, store, menuCalls, dialogCalls, closedDialogs, toasts } = makeSandbox({
+    rejectCommand: 'lsp_set_project_trust',
+  });
+  const pane = { paneId: 2, root: new Element('div') };
+  attachPane(store, pane, state({
+    state: 'untrusted', adapterId: 'typescript', projectRootUri: 'file:///repo', capabilities,
+  }, [clearCandidate]));
+  const control = api.mount(pane.root, pane);
+  control.click();
+  menuCalls.at(-1).items.find((item) => item.label === 'Trust and enable').onSelect();
+  const trustDialog = dialogCalls.at(-1);
+  await trustDialog.buttons.find((button) => button.label === 'Trust and enable').onSelect();
+  assert.deepEqual(closedDialogs, [], 'failed trust stays open for retry');
+  assert.equal(toasts.error.length, 1);
+  assert.match(toasts.error[0][1], /editing continues/i);
+});
+
+await check('failed revoke restores the settings action instead of claiming success', async () => {
+  const { api, toasts } = makeSandbox({ rejectCommand: 'lsp_revoke_project_trust' });
+  const rows = [];
+  await api.renderTrustedProjects(new Element('div'), {
+    addSectionLabel() {},
+    addRow(_parent, label, description, control) { rows.push({ label, description, control }); },
+  });
+  const button = rows[0].control;
+  button.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(button.textContent, 'Revoke trust');
+  assert.equal(button.disabled, false);
+  assert.equal(toasts.error.length, 1);
+});
+
+await check('failed log retrieval shows an error and never fabricates an empty-log success', async () => {
+  const { api, store, menuCalls, toasts } = makeSandbox({ rejectCommand: 'lsp_session_logs' });
+  const pane = { paneId: 3, root: new Element('div') };
+  attachPane(store, pane, state({
+    state: 'ready', adapterId: 'typescript', projectRootUri: 'file:///repo', capabilities,
+  }, [clearCandidate]));
+  const control = api.mount(pane.root, pane);
+  control.click();
+  menuCalls.at(-1).items.find((item) => item.label === 'View server logs').onSelect();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(toasts.error.length, 1);
+  assert.deepEqual(toasts.info, []);
+});
+
+await check('real restart action sends the candidate filesystem root, never a file URI', async () => {
+  const { api, store, menuCalls, bridgeCalls } = makeSandbox();
+  const pane = { paneId: 4, root: new Element('div') };
+  attachPane(store, pane, state({
+    state: 'ready', adapterId: 'typescript', projectRootUri: 'file:///repo', capabilities,
+  }, [clearCandidate]));
+  const control = api.mount(pane.root, pane);
+  control.click();
+  menuCalls.at(-1).items.find((item) => item.label === 'Restart language server').onSelect();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(bridgeCalls.at(-1), [
+    'lsp_restart_session', { adapterId: 'typescript', root: '/repo' },
+  ]);
 });
 
 console.log(`\n${ran - failures}/${ran} project context checks passed`);

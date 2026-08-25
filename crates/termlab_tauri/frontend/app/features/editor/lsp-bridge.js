@@ -4,6 +4,7 @@
 
   let windowLabel = null;
   let paneAccess = null;
+  let reservationFailureHandler = null;
   let listening = false;
   let listenerEpoch = 0;
   const unlisteners = [];
@@ -54,6 +55,18 @@
     return true;
   }
 
+  function handleOwnershipEvent(payload) {
+    if (payload && payload.reservationFailed) {
+      if (reservationFailureHandler && payload.canonicalPath) {
+        Promise.resolve(reservationFailureHandler(payload.canonicalPath)).catch(() => {});
+      } else {
+        console.warn('Document reservation failed before its waiting open could continue.');
+      }
+      return false;
+    }
+    return focusOwner(payload);
+  }
+
   function refreshPane(status) {
     const state = global.termlabLspState;
     if (state && typeof state.updateStatus === 'function') state.updateStatus(status);
@@ -86,13 +99,16 @@
         state.updateDiagnostics(event && event.payload);
       }
     }));
-    own(listen('editor-document-owner-focused', (event) => focusOwner(event && event.payload)));
+    own(listen('editor-document-owner-focused', (event) => handleOwnershipEvent(event && event.payload)));
   }
 
   function configure(options) {
     const opts = options || {};
     if (opts.windowLabel) windowLabel = String(opts.windowLabel);
     if (opts.paneAccess) paneAccess = opts.paneAccess;
+    if (typeof opts.onReservationFailed === 'function') {
+      reservationFailureHandler = opts.onReservationFailed;
+    }
     startListeners();
   }
 

@@ -241,6 +241,7 @@ pub(crate) enum ManagerEvent {
         window_label: String,
         document_id: Option<DocumentId>,
         pane_id: Option<String>,
+        canonical_path: Option<String>,
         reservation_failed: bool,
     },
 }
@@ -485,7 +486,7 @@ impl LspManagerHandle {
         target_reservation_id: ReservationId,
         window_label: String,
         pane_id: String,
-    ) -> Result<(), ManagerError> {
+    ) -> Result<OpenDocumentResponse, ManagerError> {
         let (reply, result) = oneshot::channel();
         self.send(ManagerCommand::TransferDocument {
             document_id,
@@ -779,7 +780,7 @@ enum ManagerCommand {
         target_reservation_id: ReservationId,
         window_label: String,
         pane_id: String,
-        reply: oneshot::Sender<Result<(), ManagerError>>,
+        reply: oneshot::Sender<Result<OpenDocumentResponse, ManagerError>>,
     },
     OpenDocument {
         reservation_id: ReservationId,
@@ -1073,7 +1074,7 @@ struct ReservationRecord {
     canonical_path: PathBuf,
     window_label: String,
     expires_at: tokio::time::Instant,
-    has_waiter: bool,
+    waiter_window_label: Option<String>,
 }
 
 struct ManagedDocument {
@@ -1720,7 +1721,7 @@ impl LspManager {
                         canonical_path: PathBuf::from(canonical_path),
                         window_label,
                         expires_at,
-                        has_waiter: false,
+                        waiter_window_label: None,
                     },
                 );
                 let input = self.input_tx.clone();
@@ -1732,17 +1733,19 @@ impl LspManager {
                         .await;
                 });
             }
-            ReserveResult::FocusPending { window_label } => {
+            ReserveResult::FocusPending {
+                window_label: owner_window_label,
+            } => {
                 let reservation_id = self
                     .state
                     .ownership
-                    .reservation_id(DocumentIdentifier::Local(path))?
+                    .reservation_id(DocumentIdentifier::Local(path.clone()))?
                     .ok_or(ManagerError::InvalidReservation)?;
                 self.reserve_focus_obligation(FocusKey::Reservation(reservation_id))?;
                 if let Some(reservation) = self.reservations.get_mut(&reservation_id) {
-                    reservation.has_waiter = true;
+                    reservation.waiter_window_label = Some(window_label);
                 }
-                let _ = window_label;
+                let _ = owner_window_label;
             }
             ReserveResult::FocusOwner {
                 document_id,
@@ -1755,6 +1758,11 @@ impl LspManager {
                         window_label: window_label.clone(),
                         document_id: Some(*document_id),
                         pane_id: Some(pane_id.clone()),
+                        canonical_path: self
+                            .state
+                            .ownership
+                            .canonical_path(*document_id)
+                            .map(|path| path.to_string_lossy().into_owned()),
                         reservation_failed: false,
                     },
                 )?;
@@ -1867,7 +1875,7 @@ impl LspManager {
             },
         );
         self.finalize_reservation(reservation_id, Some(document_id), Some(pane_id));
-        self.reevaluate_document(document_id)?;
+        self.reevaluate_document_or_degrade(document_id);
         let document = self
             .state
             .documents
@@ -1887,7 +1895,7 @@ impl LspManager {
         target_reservation_id: ReservationId,
         window_label: String,
         pane_id: String,
-    ) -> Result<(), ManagerError> {
+    ) -> Result<OpenDocumentResponse, ManagerError> {
         let reservation = self
             .reservations
             .get(&target_reservation_id)
@@ -1956,8 +1964,18 @@ impl LspManager {
             document.pull_generation = document.pull_generation.saturating_add(1);
         }
         self.finalize_reservation(target_reservation_id, Some(document_id), Some(pane_id));
-        self.reevaluate_document(document_id)?;
-        Ok(())
+        self.reevaluate_document_or_degrade(document_id);
+        let document = self
+            .state
+            .documents
+            .get(&document_id)
+            .ok_or(ManagerError::UnknownDocument)?;
+        Ok(OpenDocumentResponse {
+            document_id: document_id_text(document_id),
+            version: document.text.version(),
+            project_candidates: document.candidates.clone(),
+            status: document.status.clone(),
+        })
     }
 
     fn apply_changes(
@@ -2637,6 +2655,33 @@ impl LspManager {
             }
         }
         Ok(())
+    }
+
+    fn reevaluate_document_or_degrade(&mut self, document_id: DocumentId) {
+        if self.reevaluate_document(document_id).is_err() {
+            let attempted_session = self.state.documents.get(&document_id).and_then(|document| {
+                document
+                    .selected_root
+                    .clone()
+                    .zip(document.adapter_id.clone())
+                    .map(|(root, adapter_id)| SessionKey { adapter_id, root })
+            });
+            // Ownership and the editor buffer have already committed. LSP
+            // attachment is optional from this point onward, so detach it
+            // without requiring another outbox slot and expose degradation as
+            // status rather than making the ownership outcome ambiguous.
+            let _ = self.detach_document(document_id, false, false);
+            if let Some(document) = self.state.documents.get_mut(&document_id) {
+                document.synchronization_dirty = true;
+            }
+            self.set_document_status(
+                document_id,
+                LspSessionState::Failed,
+                attempted_session,
+                Some("Language features are unavailable; editing continues".into()),
+                None,
+            );
+        }
     }
 
     fn attach_document(
@@ -4111,13 +4156,19 @@ impl LspManager {
         let Some(record) = self.reservations.remove(&reservation_id) else {
             return;
         };
-        if record.has_waiter {
+        if let Some(waiter_window_label) = record.waiter_window_label {
+            let event_window_label = if document_id.is_some() {
+                record.window_label
+            } else {
+                waiter_window_label
+            };
             self.fulfill_focus_obligation(
                 FocusKey::Reservation(reservation_id),
                 ManagerEvent::DocumentOwnerFocused {
-                    window_label: record.window_label,
+                    window_label: event_window_label,
                     document_id,
                     pane_id,
+                    canonical_path: Some(record.canonical_path.to_string_lossy().into_owned()),
                     reservation_failed: document_id.is_none(),
                 },
             );
@@ -5564,7 +5615,7 @@ mod tests {
             serde_json::from_value(serde_json::Value::String(opened.document_id)).unwrap();
         assert!(matches!(
             harness.next_owner_event().await,
-            ManagerEvent::DocumentOwnerFocused { ref window_label, document_id: Some(id), ref pane_id, reservation_failed: false }
+            ManagerEvent::DocumentOwnerFocused { ref window_label, document_id: Some(id), ref pane_id, reservation_failed: false, .. }
                 if window_label == "main" && id == document_id && pane_id.as_deref() == Some("pane-a")
         ));
         assert!(matches!(
@@ -5755,6 +5806,45 @@ mod tests {
                 reservation_failed: false,
                 ..
             } if owner == document
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_focus_failure_returns_to_the_requesting_window_with_retry_path() {
+        let harness = ManagerHarness::new();
+        let path = harness.root.join("retry-after-owner-open-fails.ts");
+        let ReserveResult::Reserved {
+            reservation_id,
+            canonical_path: expected_path,
+        } = harness
+            .manager
+            .reserve_document(path.clone(), "owner".into())
+            .await
+            .unwrap()
+        else {
+            panic!("first request must reserve")
+        };
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(path, "requester".into())
+                .await
+                .unwrap(),
+            ReserveResult::FocusPending { .. }
+        ));
+        harness
+            .manager
+            .release_document(reservation_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            harness.next_owner_event().await,
+            ManagerEvent::DocumentOwnerFocused {
+                ref window_label,
+                canonical_path: Some(ref retry_path),
+                reservation_failed: true,
+                ..
+            } if window_label == "requester" && retry_path == &expected_path
         ));
     }
 
@@ -6350,6 +6440,149 @@ mod tests {
                 .state,
             LspSessionState::Ready
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committed_open_degrades_when_lsp_reevaluation_is_overloaded_and_later_close_releases()
+    {
+        let harness = ManagerHarness::new();
+        let root = harness.root.clone();
+        let first_path = harness.file("pressure-owner.ts", "let first = 1;");
+        let first = harness.open(&first_path, "main", "first").await;
+        harness.choose_and_trust(first, &root, "typescript").await;
+        let _ = saturate_session_outbox(&harness, first).await;
+
+        let second_path = harness.file("committed-open.ts", "let second = 2;");
+        let ReserveResult::Reserved { reservation_id, .. } = harness
+            .manager
+            .reserve_document(second_path.clone(), "main".into())
+            .await
+            .unwrap()
+        else {
+            panic!("new document must reserve")
+        };
+        let opened = harness
+            .manager
+            .open_document(
+                reservation_id,
+                "second".into(),
+                "let second = 2;".into(),
+                "typescript".into(),
+            )
+            .await
+            .expect("ownership commit must not be reported as an open failure");
+        let document: DocumentId =
+            serde_json::from_value(serde_json::Value::String(opened.document_id)).unwrap();
+        assert_eq!(opened.status.state, LspSessionState::Failed);
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(second_path.clone(), "popup".into())
+                .await
+                .unwrap(),
+            ReserveResult::FocusOwner { document_id, .. } if document_id == document
+        ));
+
+        harness.factory.release_changes();
+        for _ in 0..400 {
+            spin().await;
+        }
+        harness.manager.close_document(document).await.unwrap();
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(second_path, "popup".into())
+                .await
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committed_transfer_returns_new_project_metadata_when_reevaluation_is_overloaded() {
+        let harness = ManagerHarness::new();
+        let target_root = harness.root.join("project-b");
+        std::fs::create_dir_all(&target_root).unwrap();
+        std::fs::write(target_root.join("tsconfig.json"), "{}").unwrap();
+        let pressure_path = harness.file("project-b/pressure.ts", "let pressure = 1;");
+        let pressure = harness.open(&pressure_path, "main", "pressure").await;
+        harness
+            .choose_and_trust(pressure, &target_root, "typescript")
+            .await;
+        let _ = saturate_session_outbox(&harness, pressure).await;
+
+        let source_path = harness.file("source.txt", "plain");
+        let source = harness.open(&source_path, "main", "source").await;
+        let target_path = harness.file("project-b/transferred.ts", "plain");
+        let ReserveResult::Reserved { reservation_id, .. } = harness
+            .manager
+            .reserve_document(target_path.clone(), "main".into())
+            .await
+            .unwrap()
+        else {
+            panic!("target must reserve")
+        };
+        let transferred = harness
+            .manager
+            .transfer_document(source, reservation_id, "main".into(), "source".into())
+            .await
+            .expect("committed transfer must return metadata, not an LSP error");
+        assert_eq!(transferred.document_id, super::document_id_text(source));
+        assert_eq!(transferred.status.state, LspSessionState::Failed);
+        assert!(
+            transferred
+                .project_candidates
+                .iter()
+                .any(|candidate| candidate.canonical_path
+                    == target_root.canonicalize().unwrap().to_string_lossy())
+        );
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(target_path, "popup".into())
+                .await
+                .unwrap(),
+            ReserveResult::FocusOwner { document_id, .. } if document_id == source
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overloaded_close_keeps_the_single_owner_until_a_confirmed_retry_releases_it() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("retry-close.ts", "let value = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        let _ = saturate_session_outbox(&harness, document).await;
+
+        assert_eq!(
+            harness.manager.close_document(document).await,
+            Err(ManagerError::Overloaded)
+        );
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(path.clone(), "popup".into())
+                .await
+                .unwrap(),
+            ReserveResult::FocusOwner { document_id, .. } if document_id == document
+        ));
+
+        harness.factory.release_changes();
+        for _ in 0..400 {
+            spin().await;
+        }
+        harness.manager.close_document(document).await.unwrap();
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(path, "popup".into())
+                .await
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
     }
 
     #[tokio::test(start_paused = true)]
@@ -8013,7 +8246,7 @@ mod tests {
                 ref window_label,
                 reservation_failed: true,
                 ..
-            } if window_label == "main"
+            } if window_label == "popup"
         ));
     }
 

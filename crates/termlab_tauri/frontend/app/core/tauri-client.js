@@ -211,8 +211,19 @@
     };
   }
 
+  function publish(client) {
+    if (!client || typeof client.invoke !== 'function') {
+      throw new Error('Cannot publish an invalid Tauri client');
+    }
+    global.termlabServices = Object.assign({}, global.termlabServices || {}, {
+      tauriClient: client,
+    });
+    return client;
+  }
+
   global.termlabTauriClient = {
     create,
+    publish,
     COMMANDS,
     EVENTS,
   };
