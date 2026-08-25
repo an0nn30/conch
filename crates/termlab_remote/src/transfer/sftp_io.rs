@@ -894,12 +894,22 @@ where
         })?;
     let source = RawRemoteChunkFile { session: raw, handle: opened.handle };
 
-    let sink = PositionalFile::open_write(local_partial_path, offset == 0).map_err(|error| {
-        RemoteError::Transfer(format!(
-            "open local partial {} for pipelined download failed: {error}",
-            local_partial_path.display()
-        ))
-    })?;
+    let sink = match PositionalFile::open_write(local_partial_path, offset == 0) {
+        Ok(sink) => sink,
+        Err(error) => {
+            let primary = RemoteError::Transfer(format!(
+                "open local partial {} for pipelined download failed: {error}",
+                local_partial_path.display()
+            ));
+            // Mirrors the fingerprint-rejection close above and the
+            // sequential twin's `open_after_fingerprint` error branch: the
+            // remote read handle was already opened, so it must be closed
+            // (best-effort) rather than dropped, even though the primary
+            // error here is the local open failure.
+            let _ = source.session.close(source.handle.as_str()).await;
+            return Err(primary);
+        }
+    };
 
     let tuning = clamp_pipelined_chunk_bytes(tuning);
     let copy_result = pipelined_copy(&source, &sink, offset, total, tuning, control, progress)
