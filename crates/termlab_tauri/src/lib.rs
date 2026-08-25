@@ -265,6 +265,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
 
     let config_dir = config::config_dir();
     let vault_path = config_dir.join("vault.enc");
+    let lsp_enablement = lsp::manager::Enablement::from_config(&config.editor.lsp);
+    let lsp_project_config_dir = config_dir.clone();
+    let lsp_cache_root = config_dir.join("lsp-cache");
+    let _ = std::fs::create_dir_all(&lsp_cache_root);
     let vault_state: vault_commands::VaultState =
         Arc::new(Mutex::new(termlab_vault::VaultManager::new(vault_path)));
 
@@ -302,7 +306,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
 
     log::info!("startup: window state loaded, building app");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -323,6 +327,28 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
+
+            let architecture = if cfg!(target_arch = "aarch64") {
+                "arm64"
+            } else {
+                "x86_64"
+            };
+            let packaged_lsp_root = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|root| root.join("lsp").join(architecture))
+                .filter(|root| root.is_dir());
+            let factory = Arc::new(lsp::manager::RealSessionFactory::new(packaged_lsp_root));
+            let (lsp_manager, lsp_actor, lsp_events) = lsp::manager::LspManager::new(
+                factory,
+                lsp_project_config_dir.clone(),
+                lsp_cache_root.clone(),
+                lsp_enablement.clone(),
+            );
+            tauri::async_runtime::spawn(lsp_actor.run());
+            lsp::commands::spawn_event_forwarder(app.handle().clone(), lsp_events);
+            app.manage(lsp::commands::LspState::new(lsp_manager));
 
             // Inject the packaged bundled-themes dir (if this is a packaged
             // build) before anything else runs, so no command can resolve a
@@ -930,6 +956,27 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             editor_fs::editor_write_file,
             editor_fs::editor_temp_path,
             editor_fs::editor_temp_cleanup,
+            lsp::commands::editor_reserve_document,
+            lsp::commands::editor_release_document,
+            lsp::commands::editor_transfer_document,
+            lsp::commands::lsp_open_document,
+            lsp::commands::lsp_apply_changes,
+            lsp::commands::lsp_resync_document,
+            lsp::commands::lsp_did_save,
+            lsp::commands::lsp_close_document,
+            lsp::commands::lsp_project_candidates,
+            lsp::commands::lsp_set_project_context,
+            lsp::commands::lsp_set_project_trust,
+            lsp::commands::lsp_completion,
+            lsp::commands::lsp_hover,
+            lsp::commands::lsp_signature_help,
+            lsp::commands::lsp_definition,
+            lsp::commands::lsp_problems_snapshot,
+            lsp::commands::lsp_status_snapshot,
+            lsp::commands::lsp_restart_session,
+            lsp::commands::lsp_session_logs,
+            lsp::commands::lsp_trusted_projects,
+            lsp::commands::lsp_revoke_project_trust,
             // editor_temp_sweep is deliberately absent, and is no longer a
             // #[tauri::command] at all: it deletes the entire remote-edit temp
             // root, which would destroy the backing file of every open remote
@@ -939,8 +986,22 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             close_guard::confirm_window_close,
             close_guard::quit_vote,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let manager = app_handle
+                .try_state::<lsp::commands::LspState>()
+                .map(|state| state.manager().clone());
+            if let Some(manager) = manager {
+                let _ = tauri::async_runtime::block_on(async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(4), manager.shutdown())
+                        .await
+                });
+            }
+        }
+    });
 
     Ok(())
 }

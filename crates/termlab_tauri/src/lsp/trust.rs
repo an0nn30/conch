@@ -10,6 +10,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 const STORE_FILE: &str = "lsp-projects.toml";
 const SCHEMA_VERSION: u32 = 1;
@@ -22,8 +23,9 @@ pub(crate) enum RootBinding {
 }
 
 /// Consent for launching an adapter in a project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
 pub(crate) enum TrustDecision {
     Trusted,
     Denied,
@@ -235,6 +237,10 @@ impl ProjectTrustStore {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn records(&self) -> &[TrustRecord] {
+        &self.trust
     }
 
     pub(crate) fn save(&self) -> io::Result<()> {
