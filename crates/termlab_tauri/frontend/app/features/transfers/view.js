@@ -212,6 +212,9 @@
       append(destinationCell, 'span', 'tl-transfer-center__path-arrow', '→');
       const destinationEl = append(destinationCell, 'span', 'tl-transfer-center__path', paths.destination || '—');
       destinationEl.setAttribute('title', paths.destination || '');
+      // The narrow card layout hides this cell entirely, so the row itself
+      // carries the full route as a hover tooltip.
+      rowRecord.element.setAttribute('title', `${paths.source || '—'} → ${paths.destination || '—'}`);
     }
 
     function patchProgress(rowRecord, job) {

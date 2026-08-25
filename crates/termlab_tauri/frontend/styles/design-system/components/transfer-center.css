@@ -2,6 +2,10 @@
 .tl-transfer-center {
   --tl-transfer-center-table-min-width: 840px;
 
+  /* Size container: the narrow card layout and scrollable toolbar key off
+     the panel's own width. On the ROOT (not the table viewport) because the
+     toolbar is the viewport's sibling and must respond too. */
+  container: tl-transfer-center / inline-size;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -103,9 +107,6 @@
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  /* Size container so the narrow (sidebar) card layout below keys off the
-     panel's own width, not the window's. */
-  container: tl-transfer-center / inline-size;
 }
 
 .tl-transfer-center__table {
@@ -258,12 +259,26 @@
   .tl-transfer-center__row:focus-within .tl-transfer-center__cell--actions { display: block; }
   .tl-transfer-center__cell--status { order: 4; flex: 1 1 100%; }
   .tl-transfer-center__cell--host { order: 5; flex: 0 0 auto; }
-  .tl-transfer-center__cell--destination { order: 6; flex: 1 1 0; min-width: 0; }
+  /* The full route lives in the row's hover tooltip (see patchIdentity);
+     showing both paths inline made every card three dense lines. */
+  .tl-transfer-center__cell--destination { display: none; }
   .tl-transfer-center__cell--host,
-  .tl-transfer-center__cell--destination,
   .tl-transfer-center__cell--speed {
     font-size: 10px;
     color: var(--tl-fg-muted);
+  }
+  /* The toolbar never ellipsizes in cards mode — when the tabs, summary, and
+     icon buttons outgrow the panel it pans horizontally instead (scrollbar
+     hidden; trackpad/shift-wheel scrolls). */
+  .tl-transfer-center__toolbar {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tl-transfer-center__toolbar::-webkit-scrollbar { display: none; }
+  .tl-transfer-center__summary {
+    flex: 0 0 auto;
+    overflow: visible;
+    text-overflow: clip;
   }
   .tl-transfer-center__progress { width: 100%; display: block; margin-top: 2px; margin-left: 0; }
 }

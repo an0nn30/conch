@@ -1306,4 +1306,19 @@ async function loadMountLifecycleHarness() {
   assert.strictEqual(resumeButton.getAttribute('title'), 'Resume all eligible transfers');
 }
 
+// --- Row tooltip carries the transfer paths --------------------------------
+// The narrow card layout hides the destination cell, so the full
+// source -> destination route must be reachable as a hover tooltip on the row
+// itself (harmless in the wide table, essential in cards).
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([job('tip', 'running')]));
+  const row = harness.panelEl.querySelector('tr[data-job-id="tip"]');
+  const tooltip = row.getAttribute('title') || '';
+  assert.ok(tooltip.includes('/local/tip.bin'), 'row tooltip must include the source path');
+  assert.ok(tooltip.includes('/remote/tip.bin'), 'row tooltip must include the destination path');
+  assert.ok(tooltip.indexOf('/local/tip.bin') < tooltip.indexOf('/remote/tip.bin'),
+    'tooltip reads source before destination for an upload');
+}
+
 console.log('transfer center: all assertions passed');
