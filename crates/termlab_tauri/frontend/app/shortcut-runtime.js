@@ -71,6 +71,18 @@
       if (adj != null) setFocusedPane(adj);
     }
 
+    // Config files and the shipped defaults spell arrows "left"/"up"/…, while
+    // KeyboardEvent.key (and configs written by the settings recorder) spell
+    // them "arrowleft"/"arrowup"/…. Both normalizers fold to the short
+    // spelling; without a shared canonical form the two sides never match and
+    // an arrow binding is dead.
+    const KEY_NAME_ALIASES = {
+      arrowleft: 'left', arrowright: 'right', arrowup: 'up', arrowdown: 'down',
+    };
+    function canonicalKeyName(key) {
+      return KEY_NAME_ALIASES[key] || key;
+    }
+
     function codeToKey(code) {
       if (!code) return '';
       if (/^Digit([0-9])$/.test(code)) return code[5];
@@ -90,7 +102,7 @@
       if (event.ctrlKey) parts.push('ctrl');
       if (event.altKey) parts.push('alt');
       if (event.shiftKey) parts.push('shift');
-      const key = codeToKey(event.code) || String(event.key || '').toLowerCase();
+      const key = canonicalKeyName(codeToKey(event.code) || String(event.key || '').toLowerCase());
       if (!key || ['meta', 'control', 'alt', 'shift'].includes(key)) return null;
       parts.push(key);
       return parts.join('+');
@@ -120,7 +132,7 @@
       if (mods.has('ctrl')) ordered.push('ctrl');
       if (mods.has('alt')) ordered.push('alt');
       if (mods.has('shift')) ordered.push('shift');
-      ordered.push(key);
+      ordered.push(canonicalKeyName(key));
       return ordered.join('+');
     }
 
