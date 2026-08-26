@@ -1,11 +1,11 @@
 // Tool Window Manager — IntelliJ-style zone-based panel system.
-// Manages tool windows (built-in panels + plugin panels) across 5 zones:
-//   left-top, left-bottom, right-top, right-bottom, bottom
+// Manages tool windows (built-in panels + plugin panels) across 6 zones:
+//   left-top, left-bottom, right-top, right-bottom, bottom-left, bottom-right
 
 (function (exports) {
   'use strict';
 
-  const ZONE_IDS = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom'];
+  const ZONE_IDS = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right'];
 
   // id → { id, title, icon, type, zone, renderFn, renderDisposer, el, active }
   const toolWindows = new Map();
@@ -26,17 +26,18 @@
   };
 
   const strips = { left: null, right: null, bottom: null };
-  const DRAGGABLE_ZONES = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom'];
+  const DRAGGABLE_ZONES = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right'];
   const ZONE_LABELS = {
     'left-top': 'Left Top',
     'left-bottom': 'Left Bottom',
     'right-top': 'Right Top',
     'right-bottom': 'Right Bottom',
-    bottom: 'Bottom',
+    'bottom-left': 'Bottom Left',
+    'bottom-right': 'Bottom Right',
   };
 
   // Last user-set split ratios per side (preserved across toggle cycles)
-  const lastSplitRatios = { left: 0.5, right: 0.5 };
+  const lastSplitRatios = { left: 0.5, right: 0.5, bottom: 0.5 };
 
   // ---- View mode ------------------------------------------------------------
   // Every tool window — built-in or plugin, no special cases — carries a view
@@ -155,14 +156,48 @@
     ensureStripDragOverlay();
   }
 
-  // Provide persisted zone map so register() can honour user overrides.
+  // 'bottom' predates the bottom-left/right pair and stays accepted forever:
+  // old state.toml zone values, plugin location strings, and defaultZone
+  // registrations all still say it. Unknown names return null so callers
+  // keep their existing fallback behaviour.
+  function normalizeZoneName(name) {
+    if (name === 'bottom') return 'bottom-left';
+    return ZONE_IDS.includes(name) ? name : null;
+  }
+
+  // Provide persisted zone map so register() can honour user overrides. Values
+  // are normalized on the way in — a legacy 'bottom' value becomes
+  // 'bottom-left' — so every reader downstream only ever sees current zone
+  // names. A value that normalizes to nothing (junk) is dropped rather than
+  // kept as null, so the lookup in register() misses and falls back to
+  // defaultZone exactly as it does for an id with no saved entry at all.
   function setPersistedZones(map) {
-    savedZoneAssignments = map || {};
+    const next = {};
+    for (const [id, zone] of Object.entries(map || {})) {
+      const normalized = normalizeZoneName(zone);
+      if (normalized) next[id] = normalized;
+    }
+    savedZoneAssignments = next;
   }
 
   // Provide persisted active window map so register() can restore active window per zone.
+  // Keys are normalized the same way values are above. A saved layout can
+  // carry both the legacy 'bottom' key and a current 'bottom-left' key at once
+  // (an old file touched by a newer build, say) — the current-name key always
+  // wins that collision, so the alias is applied first and the canonical keys
+  // are layered on top of it rather than the other way around.
   function setPersistedActiveZoneWindows(map) {
-    savedActiveZoneWindows = map || {};
+    const src = map || {};
+    const next = {};
+    for (const [key, value] of Object.entries(src)) {
+      if (key === 'bottom') next['bottom-left'] = value;
+    }
+    for (const [key, value] of Object.entries(src)) {
+      if (key === 'bottom') continue;
+      const normalized = normalizeZoneName(key);
+      if (normalized) next[normalized] = value;
+    }
+    savedActiveZoneWindows = next;
   }
 
   // Provide persisted view modes so register() knows which windows are popped
@@ -184,12 +219,15 @@
   // value means "configured, nothing active", and only a wholly absent key means
   // "never configured", where auto-activating a default is still right.
   //
-  // The bottom zone is a single zone rather than a top/bottom pair, so it has no
-  // '<side>-top'/'<side>-bottom' keys to look up — its own name is the key.
+  // The bottom zone is a left/right pair like the sides, but keyed by
+  // 'bottom-left'/'bottom-right' rather than '<side>-top'/'<side>-bottom'.
+  // Keys are already normalized by setPersistedActiveZoneWindows by the time
+  // this runs, so a legacy 'bottom' key never reaches here — it has already
+  // become 'bottom-left'.
   function hasPersistedActiveForSide(side) {
     const active = savedActiveZoneWindows || {};
     const has = (key) => Object.prototype.hasOwnProperty.call(active, key);
-    if (side === 'bottom') return has('bottom');
+    if (side === 'bottom') return has('bottom-left') || has('bottom-right');
     if (side !== 'left' && side !== 'right') return false;
     return has(side + '-top') || has(side + '-bottom');
   }
@@ -197,7 +235,7 @@
   // ---- Registration ---------------------------------------------------------
 
   function register(id, opts) {
-    const defaultZone = opts.defaultZone || 'right-bottom';
+    const defaultZone = normalizeZoneName(opts.defaultZone) || 'right-bottom';
     const zone = (savedZoneAssignments && savedZoneAssignments[id]) || defaultZone;
 
     const tw = {
@@ -723,6 +761,8 @@
   // ---- Moving ---------------------------------------------------------------
 
   function moveTo(id, targetZone) {
+    targetZone = normalizeZoneName(targetZone);
+    if (!targetZone) return;
     const tw = toolWindows.get(id);
     if (!tw || tw.zone === targetZone) return;
     if (!zones[targetZone] || !zones[targetZone].contentEl) return;
@@ -928,11 +968,15 @@
     }
   }
 
+  // Interim shim: zones.bottom no longer exists now that the bottom zone is a
+  // left/right pair. This just widens the visibility check to either half
+  // until Task 2 replaces this function wholesale with real pair layout
+  // (divider, flex split — mirroring updateSidebar).
   function updateBottomZone() {
     if (!bottomZoneWrapEl) return;
     const appRoot = document.getElementById('app');
     const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
-    const shouldShow = !zenActive && !!(panelState.bottom.visible && zones.bottom.activeId);
+    const shouldShow = !zenActive && !!(panelState.bottom.visible && (zones['bottom-left'].activeId || zones['bottom-right'].activeId));
     bottomZoneWrapEl.classList.toggle('hidden', !shouldShow);
     if (fitActiveTabFn) fitActiveTabFn();
   }
@@ -992,7 +1036,8 @@
       'left-bottom': { left: leftX, top: bottomY, width: zoneW, height: zoneH },
       'right-top': { left: rightX, top: topY, width: zoneW, height: zoneH },
       'right-bottom': { left: rightX, top: bottomY, width: zoneW, height: zoneH },
-      bottom: { left: pad, top: bottomBarY, width: vw - pad * 2, height: Math.min(bottomBarH, Math.max(40, vh - bottomBarY - pad)) },
+      'bottom-left':  { left: pad, top: bottomBarY, width: Math.round((vw - pad * 2 - gap) / 2), height: Math.min(bottomBarH, Math.max(40, vh - bottomBarY - pad)) },
+      'bottom-right': { left: pad + Math.round((vw - pad * 2 - gap) / 2) + gap, top: bottomBarY, width: Math.round((vw - pad * 2 - gap) / 2), height: Math.min(bottomBarH, Math.max(40, vh - bottomBarY - pad)) },
     };
   }
 
@@ -1237,7 +1282,9 @@
     const bottomStripEl = strips.bottom;
     if (bottomStripEl) {
       bottomStripEl.innerHTML = '';
-      const bottomZone = zones.bottom;
+      // Interim shim: only bottom-left's windows show up in the strip until
+      // Task 4 replaces this block with a real two-section layout.
+      const bottomZone = zones['bottom-left'];
       const hasWindows = bottomZone.windows.length > 0;
       bottomStripEl.classList.toggle('hidden', !hasWindows);
       for (const wid of bottomZone.windows) {
@@ -1308,7 +1355,8 @@
       { zone: 'left-bottom',  label: 'Left (Bottom)' },
       { zone: 'right-top',    label: 'Right (Top)' },
       { zone: 'right-bottom', label: 'Right (Bottom)' },
-      { zone: 'bottom',       label: 'Bottom' },
+      { zone: 'bottom-left',  label: 'Bottom (Left)' },
+      { zone: 'bottom-right', label: 'Bottom (Right)' },
     ];
 
     const items = targets.map((t) => {
@@ -1523,11 +1571,18 @@
     panelState[side].visible = !!visible;
 
     if (side === 'bottom') {
-      if (panelState.bottom.visible && zones.bottom.activeId === null) {
-        const candidate = firstDockableIn(zones.bottom.windows);
+      // Same pattern as the left/right branch below, generalized to a pair:
+      // reveal-with-nothing-active tries the left half before the right half.
+      const leftZone = zones['bottom-left'];
+      const rightZone = zones['bottom-right'];
+      if (panelState.bottom.visible && leftZone.activeId === null && rightZone.activeId === null) {
+        const candidate = firstDockableIn(leftZone.windows) || firstDockableIn(rightZone.windows);
         if (candidate) activate(candidate);
       }
-      updateZone('bottom');
+      if (panelState.bottom.visible) {
+        updateZone('bottom-left');
+        updateZone('bottom-right');
+      }
       updateBottomZone();
       updateStrips();
       if (!opts || opts.save !== false) triggerSave();
@@ -1663,6 +1718,7 @@
 
   exports.toolWindowManager = {
     init,
+    normalizeZoneName,
     setPersistedZones,
     setPersistedActiveZoneWindows,
     setPersistedPanelVisibility,

@@ -865,7 +865,7 @@ async function loadMountLifecycleHarness() {
   const appEl = makeElement('div');
   appEl.id = 'app';
   body.appendChild(appEl);
-  for (const zoneName of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom']) {
+  for (const zoneName of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
     const zoneEl = makeElement('div');
     zoneEl.setAttribute('data-zone', zoneName);
     const tabsEl = makeElement('div');
