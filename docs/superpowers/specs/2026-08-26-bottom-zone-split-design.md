@@ -1,7 +1,7 @@
 # Bottom Zone Split — Design
 
 **Date:** 2026-08-26
-**Status:** Approved (design reviewed in chat; spec pending user review)
+**Status:** Implemented (manual verification pending)
 **Owner request:** IntelliJ-style bottom panel with left and right sections:
 tools mount to bottom-left or bottom-right, and two tools can be open side by
 side in the bottom bar.
@@ -170,3 +170,13 @@ already takes the zone).
 - **Manual:** drag a tool between bottom sections; divider drag; height
   resize; restart restores layout; zen mode hides the bar; popped-out window
   in a bottom section survives restart.
+
+## Manual verification
+
+- [ ] Move a tool bottom-left ↔ bottom-right via the context menu.
+- [ ] Move a tool bottom-left ↔ bottom-right via drag.
+- [ ] Divider drag persists across restart.
+- [ ] Legacy layout migration (rename `~/.config/termlab/state.toml` aside is
+      the rollback if anything looks wrong).
+- [ ] Zen mode hides the bar.
+- [ ] Popped-out bottom window restarts correctly.
