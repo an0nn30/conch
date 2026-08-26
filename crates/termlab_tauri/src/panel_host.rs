@@ -56,6 +56,8 @@ pub(crate) struct PanelHostRequest {
     pub tool_window_id: String,
     pub parent_label: String,
     pub title: String,
+    #[serde(default)]
+    pub companion_ids: Vec<String>,
 }
 
 /// Event payload for every panel-host event that names a single tool window:
@@ -149,6 +151,10 @@ pub(crate) struct PanelHostEntry {
     /// Whether the host window is currently shown. Unlike the chooser, this
     /// entry survives a hide — `visible` is the only thing that changes.
     pub visible: bool,
+    /// Tool-window ids of companion panels bundled into this host (e.g. the
+    /// transfer center riding along with a popped-out SFTP explorer). Empty
+    /// for an ordinary single-panel host.
+    pub companion_ids: Vec<String>,
 }
 
 /// Registry of live panel hosts, keyed by `(parent_label, tool_window_id)` —
@@ -175,6 +181,7 @@ impl PanelHostRegistry {
         parent_label: String,
         tool_window_id: String,
         title: String,
+        companion_ids: Vec<String>,
     ) -> (Option<PanelHostEntry>, PanelHostEntry) {
         let req_id = NEXT_PANEL_HOST_REQ.fetch_add(1, Ordering::Relaxed);
         let window_label = format!("panelhost-{parent_label}-{req_id}");
@@ -187,6 +194,7 @@ impl PanelHostRegistry {
             parent_label,
             title,
             visible: false,
+            companion_ids,
         };
         self.hosts.insert(key, entry.clone());
         (displaced, entry)
@@ -290,17 +298,50 @@ mod tests {
     #[test]
     fn open_registers_and_returns_ids() {
         let mut r = PanelHostRegistry::default();
-        let (displaced_a, a) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
-        let (displaced_b, b) = r.open("window-2".into(), "ssh-sessions".into(), "SSH".into());
+        let (displaced_a, a) = r.open(
+            "window-1".into(),
+            "ssh-sessions".into(),
+            "SSH".into(),
+            vec![],
+        );
+        let (displaced_b, b) = r.open(
+            "window-2".into(),
+            "ssh-sessions".into(),
+            "SSH".into(),
+            vec![],
+        );
         assert!(displaced_a.is_none());
         assert!(displaced_b.is_none());
         assert_ne!(a.req_id, b.req_id);
     }
 
     #[test]
+    fn registry_open_stores_companion_ids() {
+        let mut reg = PanelHostRegistry::default();
+        let (_, entry) = reg.open(
+            "main".into(),
+            "file-explorer".into(),
+            "SFTP".into(),
+            vec!["transfer-center".into()],
+        );
+        assert_eq!(entry.companion_ids, vec!["transfer-center".to_string()]);
+        let stored = reg.get("main", "file-explorer").expect("entry stored");
+        assert_eq!(stored.companion_ids, vec!["transfer-center".to_string()]);
+    }
+
+    #[test]
+    fn panel_host_request_companion_ids_default_empty() {
+        // Old serialized requests carry no companion_ids: deserialization must
+        // default to empty, not fail.
+        let json = r#"{"reqId":1,"toolWindowId":"a","parentLabel":"main","title":"A"}"#;
+        let req: PanelHostRequest = serde_json::from_str(json).expect("deserializes");
+        assert!(req.companion_ids.is_empty());
+    }
+
+    #[test]
     fn window_labels_are_unique_per_request_and_prefixed() {
         let mut r = PanelHostRegistry::default();
-        let (_, a) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, a) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
         assert_eq!(a.window_label, format!("panelhost-window-1-{}", a.req_id));
         assert!(
             a.window_label.starts_with("panelhost-"),
@@ -311,10 +352,10 @@ mod tests {
     #[test]
     fn a_second_open_for_the_same_key_displaces_the_first_and_mints_a_new_req_id() {
         let mut r = PanelHostRegistry::default();
-        let (_, first) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, first) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         let (displaced, second) =
-            r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into());
+            r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into(), vec![]);
         assert_eq!(
             displaced.map(|d| d.req_id),
             Some(first.req_id),
@@ -344,10 +385,15 @@ mod tests {
     fn displacement_only_affects_the_matching_key_not_a_different_tool_window_on_the_same_parent()
     {
         let mut r = PanelHostRegistry::default();
-        let (_, ssh) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
-        let (_, files) = r.open("window-1".into(), "file-explorer".into(), "Files".into());
+        let (_, ssh) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
+        let (_, files) = r.open("window-1".into(), "file-explorer".into(), "Files".into(), vec![]);
 
-        let (displaced, _) = r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into());
+        let (displaced, _) = r.open(
+            "window-1".into(),
+            "ssh-sessions".into(),
+            "SSH v2".into(),
+            vec![],
+        );
         assert_eq!(displaced.map(|d| d.req_id), Some(ssh.req_id));
         assert_eq!(
             r.get("window-1", "file-explorer").unwrap().req_id,
@@ -359,8 +405,8 @@ mod tests {
     #[test]
     fn lookup_by_window_label_finds_the_live_entry_and_misses_a_stale_one() {
         let mut r = PanelHostRegistry::default();
-        let (_, first) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
-        let (_, other) = r.open("window-2".into(), "file-explorer".into(), "Files".into());
+        let (_, first) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
+        let (_, other) = r.open("window-2".into(), "file-explorer".into(), "Files".into(), vec![]);
 
         assert_eq!(
             r.get_by_window_label(&first.window_label).unwrap().req_id,
@@ -371,7 +417,7 @@ mod tests {
             other.req_id
         );
 
-        let (_, second) = r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into());
+        let (_, second) = r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into(), vec![]);
         assert!(
             r.get_by_window_label(&first.window_label).is_none(),
             "a displaced host's stale label names NOTHING"
@@ -385,9 +431,9 @@ mod tests {
     #[test]
     fn hosts_of_parent_returns_only_that_parents_live_hosts() {
         let mut r = PanelHostRegistry::default();
-        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
-        r.open("window-1".into(), "file-explorer".into(), "Files".into());
-        r.open("window-2".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
+        r.open("window-1".into(), "file-explorer".into(), "Files".into(), vec![]);
+        r.open("window-2".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         let mut ids: Vec<String> = r
             .hosts_of_parent("window-1")
@@ -401,7 +447,7 @@ mod tests {
     #[test]
     fn remove_is_exactly_once() {
         let mut r = PanelHostRegistry::default();
-        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
         assert!(r.remove("window-1", "ssh-sessions").is_some());
         assert!(
             r.remove("window-1", "ssh-sessions").is_none(),
@@ -424,13 +470,18 @@ mod tests {
     #[test]
     fn a_racing_open_between_a_dock_resolve_and_its_remove_would_orphan_the_fresh_entry() {
         let mut r = PanelHostRegistry::default();
-        let (_, dock_target) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, dock_target) = r.open(
+            "window-1".into(),
+            "ssh-sessions".into(),
+            "SSH".into(),
+            vec![],
+        );
 
         // The gap dock_panel_host's OLD shape left open: a concurrent open()
         // for the SAME key lands before the dock's remove, displacing the
         // entry dock resolved and installing a fresh one in its place.
         let (displaced, fresh) =
-            r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into());
+            r.open("window-1".into(), "ssh-sessions".into(), "SSH v2".into(), vec![]);
         assert_eq!(
             displaced.map(|d| d.req_id),
             Some(dock_target.req_id),
@@ -459,9 +510,9 @@ mod tests {
     #[test]
     fn drain_parent_leaves_other_parents_entries_alone() {
         let mut r = PanelHostRegistry::default();
-        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
-        r.open("window-1".into(), "file-explorer".into(), "Files".into());
-        let (_, keep) = r.open("window-2".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
+        r.open("window-1".into(), "file-explorer".into(), "Files".into(), vec![]);
+        let (_, keep) = r.open("window-2".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         let drained = r.drain_parent("window-1");
         assert_eq!(drained.len(), 2);
@@ -476,7 +527,7 @@ mod tests {
     #[test]
     fn set_visible_transitions_the_flag_and_reports_whether_the_entry_existed() {
         let mut r = PanelHostRegistry::default();
-        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
         assert!(!r.get("window-1", "ssh-sessions").unwrap().visible);
 
         assert!(r.set_visible("window-1", "ssh-sessions", true));
@@ -496,7 +547,7 @@ mod tests {
         // The one deliberate divergence from the chooser: hiding a panel host
         // does NOT remove its registry entry (`set_visible`, not `remove`).
         let mut r = PanelHostRegistry::default();
-        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
         r.set_visible("window-1", "ssh-sessions", false);
         assert!(
             r.get("window-1", "ssh-sessions").is_some(),
@@ -512,7 +563,7 @@ mod tests {
         // remove by that key. A second call with the same window_label must
         // find nothing — the entry is gone, not just its window.
         let mut r = PanelHostRegistry::default();
-        let (_, p) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, p) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         let key = r
             .get_by_window_label(&p.window_label)
@@ -543,7 +594,7 @@ mod tests {
         // (entry removed) also maps to itself rather than borrowing whatever
         // now lives at that key.
         let mut r = PanelHostRegistry::default();
-        let (_, live) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, live) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
         assert_eq!(r.session_label_for_caller(&live.window_label), "window-1");
         assert_eq!(r.session_label_for_caller("window-1"), "window-1");
         assert_eq!(r.session_label_for_caller("window-2"), "window-2");
@@ -558,7 +609,7 @@ mod tests {
         // handed it, so the field must be there and must be the entry's own
         // — see PanelHostDockedEvent's doc comment for the race it closes.
         let mut r = PanelHostRegistry::default();
-        let (_, first) = r.open("window-1".into(), "tunnels".into(), "Tunnels".into());
+        let (_, first) = r.open("window-1".into(), "tunnels".into(), "Tunnels".into(), vec![]);
         let payload = PanelHostDockedEvent {
             tool_window_id: first.tool_window_id.clone(),
             req_id: first.req_id,
@@ -573,7 +624,7 @@ mod tests {
         // A re-open for the same key mints a new generation, so the two
         // events a dock-then-re-pop produces are distinguishable — which is
         // the whole point of the field.
-        let (_, second) = r.open("window-1".into(), "tunnels".into(), "Tunnels".into());
+        let (_, second) = r.open("window-1".into(), "tunnels".into(), "Tunnels".into(), vec![]);
         assert_ne!(second.req_id, first.req_id);
     }
 
@@ -674,7 +725,7 @@ mod dock_target_tests {
     #[test]
     fn a_host_docks_itself_by_its_own_window_label() {
         let mut r = PanelHostRegistry::default();
-        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         let target = resolve_dock_target(&r, &host.window_label, "ssh-sessions")
             .expect("the host's own label resolves its entry");
@@ -688,7 +739,7 @@ mod dock_target_tests {
     #[test]
     fn a_host_may_not_dock_under_a_different_id_or_while_unregistered() {
         let mut r = PanelHostRegistry::default();
-        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         assert!(
             resolve_dock_target(&r, &host.window_label, "file-explorer").is_err(),
@@ -707,7 +758,7 @@ mod dock_target_tests {
     #[test]
     fn a_parent_docks_its_own_host_by_tool_window_id() {
         let mut r = PanelHostRegistry::default();
-        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, host) = r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         let target = resolve_dock_target(&r, "window-1", "ssh-sessions")
             .expect("the parent resolves through the (parent, id) key");
@@ -722,7 +773,7 @@ mod dock_target_tests {
     #[test]
     fn a_parent_may_not_dock_another_parents_host() {
         let mut r = PanelHostRegistry::default();
-        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("window-1".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         assert!(
             resolve_dock_target(&r, "window-2", "ssh-sessions").is_err(),
@@ -737,8 +788,8 @@ mod dock_target_tests {
     #[test]
     fn choosers_and_the_settings_window_are_rejected_outright() {
         let mut r = PanelHostRegistry::default();
-        r.open("chooser-window-1-2".into(), "ssh-sessions".into(), "SSH".into());
-        r.open("settings".into(), "ssh-sessions".into(), "SSH".into());
+        r.open("chooser-window-1-2".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
+        r.open("settings".into(), "ssh-sessions".into(), "SSH".into(), vec![]);
 
         // Even with an entry keyed to them, these callers never get past
         // validate_panel_host_caller — the same windows that may not OPEN a
@@ -777,7 +828,7 @@ mod action_target_tests {
     #[test]
     fn a_registered_host_resolves_to_its_own_entry() {
         let mut r = PanelHostRegistry::default();
-        let (_, host) = r.open("window-1".into(), "file-explorer".into(), "Files".into());
+        let (_, host) = r.open("window-1".into(), "file-explorer".into(), "Files".into(), vec![]);
 
         let entry = resolve_action_caller(&r, &host.window_label)
             .expect("a registered host's own label resolves");
@@ -788,7 +839,7 @@ mod action_target_tests {
     #[test]
     fn non_host_and_stale_callers_are_rejected() {
         let mut r = PanelHostRegistry::default();
-        let (_, host) = r.open("window-1".into(), "file-explorer".into(), "Files".into());
+        let (_, host) = r.open("window-1".into(), "file-explorer".into(), "Files".into(), vec![]);
 
         assert!(
             resolve_action_caller(&r, "window-1").is_err(),
@@ -964,6 +1015,7 @@ fn create_panel_host_window<R: tauri::Runtime>(
     panel_host_label: &str,
     tool_window_id: &str,
     title: &str,
+    has_companions: bool,
 ) -> Result<(), String> {
     let parent = app
         .get_webview_window(parent_label)
@@ -989,6 +1041,14 @@ fn create_panel_host_window<R: tauri::Runtime>(
         Some(b) => (
             clamp_dimension(b.width, PANEL_HOST_MIN_WIDTH, work_area.map(|(_, _, w, _)| w)),
             clamp_dimension(b.height, PANEL_HOST_MIN_HEIGHT, work_area.map(|(_, _, _, h)| h)),
+        ),
+        None if has_companions => (
+            PANEL_HOST_DEFAULT_WIDTH,
+            clamp_dimension(
+                PANEL_HOST_DEFAULT_HEIGHT * 1.4,
+                PANEL_HOST_MIN_HEIGHT,
+                work_area.map(|(_, _, _, h)| h),
+            ),
         ),
         None => (PANEL_HOST_DEFAULT_WIDTH, PANEL_HOST_DEFAULT_HEIGHT),
     };
@@ -1161,17 +1221,22 @@ pub(crate) async fn open_panel_host(
     window: tauri::WebviewWindow,
     tool_window_id: String,
     title: String,
+    companion_ids: Option<Vec<String>>,
 ) -> Result<u64, String> {
     let parent_label = window.label().to_string();
     validate_panel_host_caller(&parent_label)?;
 
+    let companion_ids = companion_ids.unwrap_or_default();
     let app = window.app_handle().clone();
 
     let (displaced, pending) = {
         let registry = app.state::<Mutex<PanelHostRegistry>>();
-        registry
-            .lock()
-            .open(parent_label.clone(), tool_window_id.clone(), title.clone())
+        registry.lock().open(
+            parent_label.clone(),
+            tool_window_id.clone(),
+            title.clone(),
+            companion_ids.clone(),
+        )
     };
 
     // Window creation must happen on the main thread — same deadlock rule as
@@ -1185,6 +1250,7 @@ pub(crate) async fn open_panel_host(
     let build_label = pending.window_label.clone();
     let build_tool_window_id = tool_window_id.clone();
     let build_title = title.clone();
+    let build_has_companions = !companion_ids.is_empty();
     let displaced_label = displaced.as_ref().map(|d| d.window_label.clone());
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     handle
@@ -1199,6 +1265,7 @@ pub(crate) async fn open_panel_host(
                 &build_label,
                 &build_tool_window_id,
                 &build_title,
+                build_has_companions,
             );
             let _ = tx.send(result);
         })
@@ -1234,6 +1301,7 @@ pub(crate) fn get_panel_host_request(
             tool_window_id: e.tool_window_id.clone(),
             parent_label: e.parent_label.clone(),
             title: e.title.clone(),
+            companion_ids: e.companion_ids.clone(),
         })
         .ok_or_else(|| "no pending panel host request".to_string())
 }

@@ -615,7 +615,7 @@ mod tests {
             let registry = app.state::<Mutex<PanelHostRegistry>>();
             registry
                 .lock()
-                .open("window-2".into(), "files".into(), "Files".into())
+                .open("window-2".into(), "files".into(), "Files".into(), vec![])
                 .1
                 .window_label
                 .clone()
