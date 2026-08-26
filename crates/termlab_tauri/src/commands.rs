@@ -246,6 +246,7 @@ pub(crate) struct WindowLayout {
 pub(crate) struct SplitRatios {
     left: Option<f64>,
     right: Option<f64>,
+    bottom: Option<f64>,
 }
 
 /// Layout state sent to the frontend on load.
@@ -270,6 +271,7 @@ pub(crate) struct SavedLayout {
     tool_window_view_modes: std::collections::HashMap<String, String>,
     left_split_ratio: f64,
     right_split_ratio: f64,
+    bottom_split_ratio: f64,
 }
 
 #[tauri::command]
@@ -311,6 +313,7 @@ fn saved_layout_from_state(layout: &config::LayoutConfig) -> SavedLayout {
         tool_window_view_modes: layout.tool_window_view_modes.clone(),
         left_split_ratio: layout.left_split_ratio as f64,
         right_split_ratio: layout.right_split_ratio as f64,
+        bottom_split_ratio: layout.bottom_split_ratio as f64,
     }
 }
 
@@ -363,6 +366,9 @@ fn merge_window_layout(state: &mut config::LayoutConfig, layout: WindowLayout) {
         }
         if let Some(r) = ratios.right {
             state.right_split_ratio = r as f32;
+        }
+        if let Some(b) = ratios.bottom {
+            state.bottom_split_ratio = b as f32;
         }
     }
 }
@@ -531,6 +537,36 @@ mod window_layout_merge_tests {
             tool_window_view_modes: None,
             split_ratios: None,
         }
+    }
+
+    /// A `bottom` ratio the frontend sends with `left`/`right` absent (the
+    /// bottom-zone divider drag path never touches the sidebar splits) must
+    /// merge into state on its own, and read back out of
+    /// `saved_layout_from_state` unchanged — the same save/load pairing the
+    /// view-modes tests above check for `tool_window_view_modes`.
+    #[test]
+    fn bottom_split_ratio_merges_and_reads_back_independently_of_left_and_right() {
+        let mut state = config::LayoutConfig::default();
+
+        let layout = WindowLayout {
+            split_ratios: Some(SplitRatios {
+                left: None,
+                right: None,
+                bottom: Some(0.25),
+            }),
+            ..empty_layout()
+        };
+        merge_window_layout(&mut state, layout);
+
+        assert_eq!(state.bottom_split_ratio, 0.25);
+        assert_eq!(
+            state.left_split_ratio, 0.5,
+            "an absent left ratio must not be disturbed by a bottom-only payload"
+        );
+        assert_eq!(state.right_split_ratio, 0.5);
+
+        let saved = saved_layout_from_state(&state);
+        assert_eq!(saved.bottom_split_ratio, 0.25);
     }
 
     #[test]

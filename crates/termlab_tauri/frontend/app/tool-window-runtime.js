@@ -580,6 +580,9 @@
           if (initialLayoutData.right_split_ratio > 0 && initialLayoutData.right_split_ratio < 1) {
             global.toolWindowManager.setSplitRatio('right', initialLayoutData.right_split_ratio);
           }
+          if (initialLayoutData.bottom_split_ratio > 0 && initialLayoutData.bottom_split_ratio < 1) {
+            global.toolWindowManager.setSplitRatio('bottom', initialLayoutData.bottom_split_ratio);
+          }
         } catch (_) {}
 
         if (initialLayoutData) {

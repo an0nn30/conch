@@ -142,6 +142,8 @@ pub struct LayoutConfig {
     pub left_split_ratio: f32,
     /// Right sidebar top/bottom split ratio (0.0–1.0, top portion).
     pub right_split_ratio: f32,
+    /// Bottom zone left/right split ratio (0.0–1.0, left portion).
+    pub bottom_split_ratio: f32,
     /// Popped-out tool windows' last known bounds, keyed by tool-window id
     /// ALONE — deliberately not `(parent_label, tool_window_id)`. Parent
     /// labels (`window-2`, `window-3`, ...) are assigned by launch order and
@@ -180,6 +182,7 @@ impl Default for LayoutConfig {
             tool_window_view_modes: HashMap::new(),
             left_split_ratio: 0.5,
             right_split_ratio: 0.5,
+            bottom_split_ratio: 0.5,
             tool_window_bounds: HashMap::new(),
         }
     }
@@ -245,6 +248,7 @@ mod tests {
                 tool_window_view_modes: HashMap::new(),
                 left_split_ratio: 0.6,
                 right_split_ratio: 0.4,
+                bottom_split_ratio: 0.25,
                 tool_window_bounds: HashMap::new(),
             },
             loaded_plugins: vec!["ssh-manager".into(), "git-status".into()],
@@ -289,6 +293,7 @@ mod tests {
         );
         assert_eq!(restored.layout.left_split_ratio, 0.6);
         assert_eq!(restored.layout.right_split_ratio, 0.4);
+        assert_eq!(restored.layout.bottom_split_ratio, 0.25);
     }
 
     #[test]
@@ -302,6 +307,21 @@ mod tests {
         assert!(ps.layout.active_tool_windows.is_empty());
         assert_eq!(ps.layout.left_split_ratio, 0.5);
         assert_eq!(ps.layout.right_split_ratio, 0.5);
+        assert_eq!(ps.layout.bottom_split_ratio, 0.5);
+    }
+
+    #[test]
+    fn bottom_split_ratio_defaults_to_half_when_key_absent() {
+        // Backward compat: every state.toml written before this field existed
+        // has no [layout] bottom_split_ratio key at all.
+        let toml_str = r#"
+loaded_plugins = ["my-plugin"]
+
+[layout]
+zoom_factor = 1.5
+"#;
+        let ps: PersistentState = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(ps.layout.bottom_split_ratio, 0.5);
     }
 
     #[test]
