@@ -1310,13 +1310,25 @@
     const bottomStripEl = strips.bottom;
     if (bottomStripEl) {
       bottomStripEl.innerHTML = '';
-      // Interim shim: only bottom-left's windows show up in the strip until
-      // Task 4 replaces this block with a real two-section layout.
-      const bottomZone = zones['bottom-left'];
-      const hasWindows = bottomZone.windows.length > 0;
-      bottomStripEl.classList.toggle('hidden', !hasWindows);
-      for (const wid of bottomZone.windows) {
-        bottomStripEl.appendChild(makeStripBtn(wid, bottomZone, true, 'bottom'));
+      const leftZone = zones['bottom-left'];
+      const rightZone = zones['bottom-right'];
+      const totalWindows = leftZone.windows.length + rightZone.windows.length;
+      bottomStripEl.classList.toggle('hidden', totalWindows === 0);
+      if (totalWindows > 0) {
+        // IntelliJ split ends: bottom-left windows at the strip's left end,
+        // bottom-right windows at the right end (space-between in CSS).
+        const leftSection = document.createElement('div');
+        leftSection.className = 'strip-section strip-section--row';
+        for (const wid of leftZone.windows) {
+          leftSection.appendChild(makeStripBtn(wid, leftZone, true, 'bottom'));
+        }
+        const rightSection = document.createElement('div');
+        rightSection.className = 'strip-section strip-section--row strip-section--end';
+        for (const wid of rightZone.windows) {
+          rightSection.appendChild(makeStripBtn(wid, rightZone, true, 'bottom'));
+        }
+        bottomStripEl.appendChild(leftSection);
+        bottomStripEl.appendChild(rightSection);
       }
     }
   }

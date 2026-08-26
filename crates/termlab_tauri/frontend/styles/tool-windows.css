@@ -155,6 +155,8 @@
     }
     .strip-section { display: flex; flex-direction: column; }
     .strip-section-bottom { margin-top: auto; }
+    .strip-section--row { flex-direction: row; }
+    .strip-section--end { margin-left: auto; }
     /* .strip-btn base/hover/active/left-strip-transform rules owned by
        design-system/components/strips.css */
     .strip-btn.twm-strip-dragging { opacity: 0.65; }

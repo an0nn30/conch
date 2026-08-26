@@ -55,6 +55,12 @@ function makeElement(tag) {
     setAttribute(n, v) { attrs.set(n, String(v)); },
     getAttribute(n) { return attrs.has(n) ? attrs.get(n) : null; },
   };
+  // The bottom-strip renderer clears the strip with `stripEl.innerHTML = ''`
+  // before rebuilding it; mirror that against the stubbed children array.
+  Object.defineProperty(el, 'innerHTML', {
+    set(v) { if (v === '') this.children.length = 0; },
+    get() { return ''; },
+  });
   return el;
 }
 
@@ -204,9 +210,11 @@ function loadManagerWithBottomDom() {
   }
   const wrapEl = makeElement('div');
   const dividerEl = makeElement('div');
+  const stripEl = makeElement('div');
   const idEls = {
     'bottom-zone-wrap': wrapEl,
     'bottom-zone-divider': dividerEl,
+    'bottom-strip': stripEl,
   };
   const sandbox = {
     console,
@@ -231,7 +239,7 @@ function loadManagerWithBottomDom() {
   const twm = sandbox.toolWindowManager;
   assert.ok(twm, 'tool-window-manager.js must expose window.toolWindowManager');
   twm.init({ fitActiveTab: () => {}, saveLayout: () => {} });
-  return { twm, zoneEls, dividerEl, wrapEl };
+  return { twm, zoneEls, dividerEl, wrapEl, stripEl };
 }
 
 // --- 5. moveTo accepts both new names -----------------------------------------
@@ -285,3 +293,18 @@ console.log('test_bottom_zone_split: zone aliasing assertions passed');
 }
 
 console.log('test_bottom_zone_split: pair layout assertions passed');
+
+// --- 8. strip splits into left/right ends -------------------------------------
+{
+  const { twm, stripEl } = loadManagerWithBottomDom(); // extend the loader to expose bottom-strip
+  twm.setPanelVisibility('bottom', true, { save: false });
+  twm.register('a', { title: 'A', type: 'builtin', defaultZone: 'bottom-left', renderFn: () => null });
+  twm.register('b', { title: 'B', type: 'builtin', defaultZone: 'bottom-right', renderFn: () => null });
+  const sections = stripEl.children.filter((c) => String(c.className).includes('strip-section'));
+  assert.strictEqual(sections.length, 2, 'two strip sections');
+  assert.ok(String(sections[1].className).includes('strip-section--end'), 'second section is the right end');
+  assert.strictEqual(sections[0].children.length, 1, 'left end holds the bottom-left window');
+  assert.strictEqual(sections[1].children.length, 1, 'right end holds the bottom-right window');
+}
+
+console.log('test_bottom_zone_split: strip assertions passed');
