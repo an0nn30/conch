@@ -967,6 +967,8 @@
       },
       onOpenColumnMenu: (event) => showColumnMenu(event, pane, el),
       onOpenRowMenu: (event, entry) => showRowContextMenu(event, pane, entry),
+      joinPath,
+      onDropEntries: (payload) => onDropEntries(payload),
       onTransferAttention: (transferId, invoker) => {
         const handled = transferController
           && typeof transferController.handleTransferAttention === 'function'
@@ -1158,6 +1160,64 @@
       window.toast.info('Folder transfer started', entry.name);
     } catch (e) {
       window.toast.error('Download Failed', String(e));
+    }
+  }
+
+  function basenameOfPath(p) {
+    const trimmed = String(p || '').replace(/\/+$/, '');
+    const idx = trimmed.lastIndexOf('/');
+    return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+  }
+
+  // Drag-and-drop between panes (Task 7) — the drop side of pane-view.js's
+  // dragstart/dragover/drop wiring. `source` is the parsed payload
+  // ({ paneKind, paneId, path, isDir }); `targetPaneKind`/`targetPath`
+  // describe the pane the drop landed on. Routing mirrors the row-menu
+  // transfer actions above exactly (doUpload/doDownload/doUploadFolder/
+  // doDownloadFolder) — same guard, same call shapes, same destination-join
+  // rule (recursive gets the container as-is; single-file pre-joins the
+  // name) — just reached from a drop instead of a menu click. Same-kind
+  // drops never reach here: pane-view.js's drop handler only calls
+  // onDropEntries when the payload's paneKind differs from the target pane.
+  async function onDropEntries({ source, targetPaneKind, targetPath } = {}) {
+    if (!source) return;
+    const direction = targetPaneKind === 'remote' ? 'upload' : 'download';
+    if (!activeRemotePaneId) {
+      window.toast.warn('Not Connected', direction === 'upload'
+        ? 'Connect to an SSH session to upload files.'
+        : 'Connect to an SSH session to download files.');
+      return;
+    }
+
+    const name = basenameOfPath(source.path);
+    try {
+      if (source.isDir) {
+        if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
+          throw new Error('Files data service unavailable: transferRecursive');
+        }
+        await filesDataService.transferRecursive(invoke, activeRemotePaneId, direction, source.path, targetPath);
+        window.toast.info('Folder transfer started', name);
+        return;
+      }
+
+      const destPath = joinPath(targetPath, name);
+      if (direction === 'upload') {
+        if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
+          throw new Error('Files data service unavailable: transferUpload');
+        }
+        await submitTransfer(remotePane, name, 'upload', () => (
+          filesDataService.transferUpload(invoke, activeRemotePaneId, source.path, destPath, FILES_TRANSFER_OPTIONS)
+        ));
+      } else {
+        if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
+          throw new Error('Files data service unavailable: transferDownload');
+        }
+        await submitTransfer(localPane, name, 'download', () => (
+          filesDataService.transferDownload(invoke, activeRemotePaneId, source.path, destPath, FILES_TRANSFER_OPTIONS)
+        ));
+      }
+    } catch (e) {
+      window.toast.error(direction === 'upload' ? 'Upload Failed' : 'Download Failed', String(e));
     }
   }
 

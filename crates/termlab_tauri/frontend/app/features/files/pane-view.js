@@ -1,6 +1,48 @@
 (function initTermLabFilesPaneView(global) {
   'use strict';
 
+  // Drag-and-drop between panes (Task 7). One MIME type carries the whole
+  // payload as JSON — paneKind lets the opposite pane's drop target decide
+  // whether to accept the drag; paneId/path/isDir are what files-panel.js's
+  // onDropEntries needs to route the transfer.
+  const DND_ENTRY_MIME = 'application/x-termlab-entry';
+
+  function defaultJoinPath(base, name) {
+    const trimmed = String(base || '').replace(/\/+$/, '');
+    return `${trimmed || ''}/${name}`;
+  }
+
+  // `dataTransfer.types` is readable during `dragover` even where `getData`
+  // is restricted (browser-dependent); checking it first means a foreign
+  // drag (an OS file drop, or anything without our MIME) is recognized —
+  // and left alone — without ever attempting to read its data.
+  function dndHasEntryMime(dataTransfer) {
+    if (!dataTransfer || !dataTransfer.types) return false;
+    const types = Array.isArray(dataTransfer.types) ? dataTransfer.types : Array.from(dataTransfer.types);
+    return types.indexOf(DND_ENTRY_MIME) !== -1;
+  }
+
+  // Parses the JSON payload a row's dragstart wrote, or null if it is
+  // missing/malformed. Never throws — a drag this module doesn't recognize
+  // must fall through untouched, not crash the handler.
+  function dndReadEntryPayload(dataTransfer) {
+    if (!dndHasEntryMime(dataTransfer) || typeof dataTransfer.getData !== 'function') return null;
+    let raw;
+    try {
+      raw = dataTransfer.getData(DND_ENTRY_MIME);
+    } catch (err) {
+      return null;
+    }
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || (parsed.paneKind !== 'local' && parsed.paneKind !== 'remote')) return null;
+      return parsed;
+    } catch (err) {
+      return null;
+    }
+  }
+
   function transferDirection(status) {
     return status && status.direction === 'download' ? 'download' : 'upload';
   }
@@ -176,11 +218,14 @@
       </div>
     `;
 
+    const joinPathFn = typeof d.joinPath === 'function' ? d.joinPath : defaultJoinPath;
+
     const tbody = el.querySelector('tbody');
     for (const entry of visibleEntries) {
       const tr = document.createElement('tr');
       tr.className = 'fp-row';
       tr.tabIndex = 0;
+      tr.draggable = true;
       tr.setAttribute('aria-label', entry.is_dir ? `Folder ${entry.name}` : `File ${entry.name}`);
       const ts = pane.transferStatus && pane.transferStatus[entry.name];
       if (ts) {
@@ -211,6 +256,20 @@
         });
       }
 
+      tr.addEventListener('dragstart', (event) => {
+        const dataTransfer = event && event.dataTransfer;
+        if (!dataTransfer || typeof dataTransfer.setData !== 'function') return;
+        const payload = {
+          paneKind: isRemote ? 'remote' : 'local',
+          // Local browsing has no per-session pane id in this dual-pane
+          // model (there is exactly one local pane); the remote side's id
+          // is the pinned/active SSH session pane the row belongs to.
+          paneId: isRemote ? (d.activeRemotePaneId != null ? d.activeRemotePaneId : null) : null,
+          path: joinPathFn(pane.currentPath, entry.name),
+          isDir: !!entry.is_dir,
+        };
+        dataTransfer.setData(DND_ENTRY_MIME, JSON.stringify(payload));
+      });
       tr.addEventListener('dblclick', () => {
         if (typeof d.onActivateEntry === 'function') d.onActivateEntry(entry);
       });
@@ -336,6 +395,39 @@
         }
       });
     });
+
+    // Drop target (Task 7) — listens on .fp-table-wrap, a fresh element
+    // every render (rebuilt by the innerHTML template above), so binding
+    // here every call never accumulates duplicate listeners the way binding
+    // directly on `el` (which persists across renders) would. The
+    // is-drop-target class still lands on `el` itself — the .fp-pane root
+    // styles/panels.css targets — not on the listening element.
+    // Same-kind drags (local-on-local, remote-on-remote) and foreign drags
+    // (no entry MIME — OS file drops are Task 8's territory) fall through
+    // untouched: no preventDefault, so the browser's/Tauri's own handling
+    // still applies.
+    const tableWrap = el.querySelector('.fp-table-wrap');
+    if (tableWrap) {
+      const targetPaneKind = isRemote ? 'remote' : 'local';
+      tableWrap.addEventListener('dragover', (event) => {
+        const source = dndReadEntryPayload(event.dataTransfer);
+        if (!source || source.paneKind === targetPaneKind) return;
+        event.preventDefault();
+        el.classList.add('is-drop-target');
+      });
+      tableWrap.addEventListener('dragleave', () => {
+        el.classList.remove('is-drop-target');
+      });
+      tableWrap.addEventListener('drop', (event) => {
+        el.classList.remove('is-drop-target');
+        const source = dndReadEntryPayload(event.dataTransfer);
+        if (!source || source.paneKind === targetPaneKind) return;
+        event.preventDefault();
+        if (typeof d.onDropEntries === 'function') {
+          d.onDropEntries({ source, targetPaneKind, targetPath: pane.currentPath });
+        }
+      });
+    }
 
     // Host combo (remote pane only) — built with the DOM API rather than
     // interpolated into the innerHTML template above, because the

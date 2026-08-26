@@ -6,6 +6,14 @@
     /* Each pane is a size container so the toolbar can restack on the pane's
        own width — narrow sidebar docks and skinny splits alike. */
     .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; container: fp-pane / inline-size; }
+    /* Drag-and-drop between panes (Task 7): a drag from the opposite-kind
+       pane marks this pane as the drop target — accent border + tint over
+       the whole pane, echoing the row menu's own upload/download actions. */
+    .fp-pane.is-drop-target {
+      outline: 2px solid var(--tl-accent);
+      outline-offset: -2px;
+      background: color-mix(in srgb, var(--tl-accent) 8%, transparent);
+    }
     /* The divider between the panes is both the visual border and the drag
        handle for the resizable split (app/features/files/split.js). */
     .fp-pane-divider {
