@@ -77,9 +77,21 @@
         }
       }, true);
 
+      // TEMPORARY dnd-debug: log the reference subscription's registration.
+      if (window.termlabNativeDrop) {
+        window.termlabNativeDrop.dndDebug('dragdrop-runtime init:',
+          'currentWindow =', !!currentWindow,
+          'onDragDropEvent =', !!(currentWindow && typeof currentWindow.onDragDropEvent === 'function'));
+      }
       if (currentWindow && typeof currentWindow.onDragDropEvent === 'function') {
         currentWindow.onDragDropEvent((event) => {
           if (!event || !event.payload) return;
+          // TEMPORARY dnd-debug
+          if (window.termlabNativeDrop) {
+            window.termlabNativeDrop.dndDebug('terminal-runtime native event:',
+              'type =', event.payload.type, 'pos =', event.payload.position,
+              'hitsTerminal =', hitsTerminalHost(event.payload.position));
+          }
           if (event.payload.type === 'over') {
             if (hitsTerminalHost(event.payload.position)) {
               terminalHostEl.classList.add('drag-over');

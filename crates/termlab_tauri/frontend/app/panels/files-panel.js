@@ -520,8 +520,42 @@
       // subscription fans out to the hover/leave/drop handlers via the
       // dispatcher; `enter`/`over` share the hover-highlight handling,
       // `leave` always clears, `drop` hit-tests and routes.
+      // TEMPORARY dnd-debug instrumentation around this block — remove with fix.
+      if (window.termlabNativeDrop) {
+        window.termlabNativeDrop.dndDebugSetInvoke(invoke);
+        window.termlabNativeDrop.dndDebug(
+          'files-panel init:',
+          'onDragDropEvent capability =', typeof opts.onDragDropEvent === 'function',
+          'nativeDrop module =', true,
+          'devicePixelRatio =', window.devicePixelRatio,
+        );
+        // Do ANY DOM drag events reach the webview at all? (Distinguishes
+        // wry-native interception from listener bugs for both gestures.)
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('dragstart', (e) => {
+          window.termlabNativeDrop.dndDebug('document dragstart target =', e.target && e.target.tagName);
+        }, true);
+        let lastDocOver = 0;
+        document.addEventListener('dragover', () => {
+          const now = Date.now();
+          if (now - lastDocOver > 500) {
+            lastDocOver = now;
+            window.termlabNativeDrop.dndDebug('document dragover (throttled)');
+          }
+        }, true);
+        document.addEventListener('drop', (e) => {
+          window.termlabNativeDrop.dndDebug('document drop target =', e.target && e.target.tagName);
+        }, true);
+        }
+      }
       if (typeof opts.onDragDropEvent === 'function' && window.termlabNativeDrop) {
         opts.onDragDropEvent((event) => {
+          const p = event && event.payload;
+          window.termlabNativeDrop.dndDebug(
+            'native event type =', p && p.type,
+            'pos =', p && p.position,
+            'paths =', p && p.paths ? p.paths.length : null,
+          );
           window.termlabNativeDrop.dispatchNativeDragDropEvent(event, {
             hover: handleNativeDragHover,
             leave: handleNativeDragLeave,
@@ -1327,6 +1361,12 @@
     const result = nativeDrop && typeof nativeDrop.resolveNativeDrop === 'function'
       ? nativeDrop.resolveNativeDrop(position, rect, !!activeRemotePaneId)
       : 'ignore';
+    // TEMPORARY dnd-debug
+    if (nativeDrop) {
+      nativeDrop.dndDebug('hover: raw =', payload && payload.position, 'scaled =', position,
+        'rect =', { l: Math.round(rect.left), t: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
+        'session =', !!activeRemotePaneId, 'verdict =', result);
+    }
     if (result === 'accept') {
       remoteRoot.classList.add('is-drop-target');
     } else {
@@ -1351,6 +1391,13 @@
     const result = nativeDrop && typeof nativeDrop.resolveNativeDrop === 'function'
       ? nativeDrop.resolveNativeDrop(position, rect, !!activeRemotePaneId)
       : 'ignore';
+    // TEMPORARY dnd-debug
+    if (nativeDrop) {
+      nativeDrop.dndDebug('drop: raw =', payload && payload.position, 'scaled =', position,
+        'rect =', { l: Math.round(rect.left), t: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
+        'session =', !!activeRemotePaneId, 'verdict =', result,
+        'paths =', payload && payload.paths);
+    }
 
     if (result === 'ignore') return; // drop missed the remote pane — silent, per spec
     if (result === 'no-session') {

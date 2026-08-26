@@ -517,6 +517,9 @@ async function setupLogicHarness() {
   const localStatByPath = new Map();
 
   const invoke = (cmd, args) => {
+    // TEMPORARY dnd-debug: the diagnostic log command is not a behavior under
+    // test — keep it out of the recorded call list so no-call assertions hold.
+    if (cmd === 'dnd_debug_log') return Promise.resolve();
     invokeCalls.push({ cmd, args });
     if (cmd === 'get_home_dir') return Promise.resolve('/home/demo');
     if (cmd === 'get_all_settings') return Promise.resolve({});
@@ -1199,6 +1202,9 @@ function setupDragDropHarness(rectOverride) {
   );
   const invokeCalls = [];
   const invoke = (cmd, args) => {
+    // TEMPORARY dnd-debug: the diagnostic log command is not a behavior under
+    // test — keep it out of the recorded call list so no-call assertions hold.
+    if (cmd === 'dnd_debug_log') return Promise.resolve();
     invokeCalls.push({ cmd, args });
     return Promise.resolve();
   };

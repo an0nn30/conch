@@ -166,7 +166,29 @@
     return undefined;
   }
 
+  // TEMPORARY dnd-debug: mirrors every diagnostic line to the console AND to
+  // the launching terminal via the dnd_debug_log command. Remove with the
+  // instrumentation call sites.
+  let dndDebugInvoke = null;
+  function dndDebugSetInvoke(invoke) {
+    dndDebugInvoke = typeof invoke === 'function' ? invoke : null;
+  }
+  function dndDebug() {
+    const parts = [];
+    for (let i = 0; i < arguments.length; i += 1) {
+      const value = arguments[i];
+      parts.push(typeof value === 'string' ? value : JSON.stringify(value));
+    }
+    const message = parts.join(' ');
+    try { console.log('[dnd-debug]', message); } catch (err) { /* ignore */ }
+    if (dndDebugInvoke) {
+      try { dndDebugInvoke('dnd_debug_log', { message }).catch(() => {}); } catch (err) { /* ignore */ }
+    }
+  }
+
   global.termlabNativeDrop = {
+    dndDebug,
+    dndDebugSetInvoke,
     scaleNativeDropPosition,
     pointInRect,
     resolveNativeDrop,

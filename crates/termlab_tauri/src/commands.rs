@@ -277,6 +277,14 @@ pub(crate) fn app_ready(window: tauri::WebviewWindow) {
     let _ = window.show();
 }
 
+/// TEMPORARY dnd-debug: prints frontend drag-and-drop diagnostics to the
+/// launching terminal so live-app DnD failures can be traced layer by layer.
+/// Remove together with the frontend `[dnd-debug]` instrumentation.
+#[tauri::command]
+pub(crate) fn dnd_debug_log(message: String) {
+    eprintln!("[dnd-debug] {message}");
+}
+
 #[tauri::command]
 pub(crate) fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(debug_assertions)]
