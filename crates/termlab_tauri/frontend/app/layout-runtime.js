@@ -76,11 +76,24 @@
     function rebuildTreeDOM(tab) {
       const panes = getPanes();
       const containerEl = tab.containerEl;
+      // WebKit never fires `blur` on an element detached while focused, so
+      // detaching a focused xterm textarea leaves the terminal's internal
+      // focus flag stuck true — its cursor keeps rendering (and blinking) as
+      // focused forever. Blur while still attached so the event really fires,
+      // and refocus after the reattach so a rebuild is focus-neutral.
+      const doc = containerEl.ownerDocument;
+      const active = doc ? doc.activeElement : null;
+      const activeWasInside = !!(active && containerEl.contains(active)
+        && typeof active.blur === 'function');
+      if (activeWasInside) active.blur();
       while (containerEl.firstChild) {
         containerEl.removeChild(containerEl.firstChild);
       }
       const rendered = renderTree(tab.treeRoot, (id) => panes.get(id).root);
       containerEl.appendChild(rendered);
+      if (activeWasInside && active.isConnected && typeof active.focus === 'function') {
+        active.focus();
+      }
     }
 
     return {
