@@ -424,6 +424,10 @@
         invoke,
         listen,
         listenOnCurrentWindow,
+        // The files panel derives its native drag-drop subscription
+        // (onDragDropEvent) from this window; without it, Finder-to-pane and
+        // pane-to-pane drops are silently dead in every popped-out host.
+        currentWindow,
         // A host owns no sidebars and no zones, so it has nothing truthful to
         // say about the saved layout — and a write from here would clobber
         // the widths and visibility flags the PARENT is keeping. Reads answer

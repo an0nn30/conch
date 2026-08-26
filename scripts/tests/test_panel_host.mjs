@@ -2657,4 +2657,26 @@ async function loadRuntimeWithEditor(editorSpies) {
   ], 'the rejected publishAction call must never reach invoke a second time');
 }
 
+// --- 41. Host boot threads currentWindow into the tool-window runtime -------
+// tool-window-runtime.js derives the files panel's native drag-drop channel
+// (onDragDropEvent) from deps.currentWindow. A host boot that omits it makes
+// Finder-to-pane and pane-to-pane drops silently dead in every popped-out
+// window — the regression this scenario pins.
+{
+  const host = makeHostSandbox();
+  const realCreate = host.sandbox.termlabToolWindowRuntime.create;
+  let recordedDeps = null;
+  host.sandbox.termlabToolWindowRuntime.create = (deps) => {
+    recordedDeps = deps;
+    return realCreate(deps);
+  };
+  await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+  assert.ok(recordedDeps, 'boot created the tool-window runtime');
+  assert.strictEqual(
+    recordedDeps.currentWindow,
+    host.bootDeps.currentWindow,
+    'the host window itself must reach the runtime, or native drag-drop never subscribes',
+  );
+}
+
 console.log('panel host: all assertions passed');
