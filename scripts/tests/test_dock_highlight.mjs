@@ -80,4 +80,20 @@ assert.deepStrictEqual(
 // --- junk zone → null ---------------------------------------------------------
 assert.strictEqual(computeDockHighlightRect('attic', M), null);
 
+// --- the consumer must not reach for `global` --------------------------------
+// tool-window-manager.js's IIFE binds `exports`, not `global`, and browsers
+// define no `global` at all — a bare `global.` reference there throws
+// ReferenceError at drag time in the real webview while passing every VM
+// harness that helpfully defines sandbox.global. Guard the source directly.
+{
+  const managerSrc = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend/app/layout/tool-window-manager.js'),
+    'utf8',
+  );
+  assert.ok(
+    !/\bglobal\s*\./.test(managerSrc),
+    'tool-window-manager.js must use window.*, it has no `global` binding',
+  );
+}
+
 console.log('test_dock_highlight: all assertions passed');

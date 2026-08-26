@@ -1152,7 +1152,7 @@
     ensureStripDragOverlay();
     const highlight = stripDrag.highlightEl;
     if (!highlight) return;
-    const dockHighlight = global.termlabDockHighlight;
+    const dockHighlight = window.termlabDockHighlight;
     const rect = activeZone && dockHighlight
       ? dockHighlight.computeDockHighlightRect(activeZone, dockHighlightMetrics())
       : null;
