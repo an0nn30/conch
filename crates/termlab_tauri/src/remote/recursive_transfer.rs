@@ -90,6 +90,16 @@ pub(super) struct SftpTreeLister {
     ssh: SshHandle,
 }
 
+impl SftpTreeLister {
+    /// Exposed beyond this module only for the live recursive round-trip
+    /// test in `transfer_queue::runner`, which drives `run_expansion` with
+    /// the real listers directly rather than through `start_recursive_transfer`.
+    #[cfg(test)]
+    pub(super) fn new(ssh: SshHandle) -> Self {
+        Self { ssh }
+    }
+}
+
 #[async_trait]
 impl TreeLister for SftpTreeLister {
     async fn list(&self, path: &str) -> Result<Vec<WalkEntry>, String> {
@@ -140,6 +150,14 @@ impl DirectoryCreator for LocalDirCreator {
 /// an existing directory is detected by stat rather than by error matching.
 pub(super) struct SftpDirCreator {
     ssh: SshHandle,
+}
+
+impl SftpDirCreator {
+    /// See `SftpTreeLister::new` — same live-test rationale.
+    #[cfg(test)]
+    pub(super) fn new(ssh: SshHandle) -> Self {
+        Self { ssh }
+    }
 }
 
 #[async_trait]

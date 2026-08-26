@@ -127,11 +127,14 @@ Implemented in this project:
 - [ ] Bounded automatic retry with explicit reconnect/retry
 - [ ] Conflict handling (`Overwrite`, `Rename`, `Skip`, compatible `Resume`)
 - [ ] Transfer Center Active/History desktop surface
+- [ ] Recursive directory transfer (upload and download, batch progress,
+  `Interrupted` restart honesty) — see the "Recursive transfers &
+  drag-and-drop" section above
+- [ ] Drag-and-drop transfer workflows (Finder-into-remote-pane and
+  pane-to-pane, both directions) — see the same section
 
 Later projects, not claims of this implementation:
 
-- [ ] Recursive directory transfer
-- [ ] Drag-and-drop transfer workflows
 - [ ] Directory synchronization/comparison
 - [ ] Advanced remote browsing features
 - [ ] Broader resilience work beyond the documented crash/retry model
@@ -200,6 +203,39 @@ pending-live-evidence until run against one.
   against the remote source. Evidence: run 2026-08-25 on the same host —
   paused at 6,266,880 of 16,777,216 bytes, resumed from the frontier, final
   content matched the source byte-for-byte.
+
+## Recursive transfers & drag-and-drop
+
+Covers the [recursive SFTP transfers, batch progress, and drag-and-drop design](../specs/2026-08-25-sftp-recursive-transfers-design.md).
+An automated live tree round-trip
+(`live_recursive_roundtrip_preserves_tree` in
+`crates/termlab_tauri/src/remote/transfer_queue/runner.rs`, `#[ignore]`,
+gated on `TERMLAB_TEST_SFTP_HOST`/`_PORT`/`_USER`/`_KEY`) covers backend
+expansion correctness against a real server — nested directories, an empty
+directory, a unicode filename, a hidden dotfile, and remote listing not
+silently skipping files. It does not exercise the desktop drag-and-drop
+surface below, which needs a human and a pointing device.
+
+- [ ] Drop a folder from Finder onto the remote pane. Confirm the folder
+  uploads (a batch row appears in the Transfer Center, files stream in) and
+  that the drop does **not** also paste the dropped path(s) into the
+  terminal (the fix in `dragdrop-runtime.js`). Evidence:
+- [ ] Drag a folder from the local pane to the remote pane, and a folder from
+  the remote pane to the local pane. Confirm both directions start a batch
+  transfer that recreates the folder at the destination. Evidence:
+- [ ] Start a batch large enough to still be expanding or transferring after a
+  few seconds, then cancel it mid-flight. Confirm expansion stops, in-flight
+  members are cancelled through the ordinary per-job path, and no further
+  members are enqueued. Evidence:
+- [ ] Kill the app while a batch is still expanding (before expansion
+  completes), then relaunch. Confirm the batch restores as `Interrupted`
+  with its already-discovered members intact (not lost, not silently
+  resumed as if expansion had finished). Evidence:
+- [ ] On a retina/HiDPI display (`devicePixelRatio` > 1), repeat the Finder
+  and pane-to-pane drops above. Confirm the drop-target highlight and drop
+  hit-test land on the correct pane/row — `files-panel.js`'s native-drop
+  hit-test divides by `devicePixelRatio` specifically because a raw
+  `clientX`/`clientY` mismatch here would misroute the drop. Evidence:
 
 ## Sign-off
 

@@ -1,12 +1,43 @@
 # Recursive SFTP Transfers, Batch Progress, and Drag-and-Drop — Design
 
-**Status:** Approved
+**Status:** Implemented
 **Date:** 2026-08-25
 **Scope:** Transfer whole folders through the durable SFTP queue (upload and
 download), report roll-up progress per batch (files, bytes, aggregate speed,
 ETA), and start transfers by drag-and-drop — between the two panes and from
 the OS file manager into the remote pane. This is cluster 2 of the transfer
 roadmap in the durable-queue design, minus multi-select, which is deferred.
+
+**Implementation:** branch `feat/sftp-recursive-transfers`; commits `cae0dea`
+through `266c54f`, plus the Task 9 verification commit that reconciled this
+status.
+Manual and live-evidence tracking is in the
+[SFTP transfer queue manual checklist](../notes/sftp-transfer-queue-manual-checklist.md)'s
+"Recursive transfers & drag-and-drop" section.
+
+Automated coverage — tree walking, destination mapping, expansion against the
+real queue actor (enqueue, cancellation races, directory-creation failure,
+trailing-slash tolerance), batch aggregation/derivation, batch UI, DnD payload
+producer/consumer, and the frontend paste-suppression fix — was green before
+this status changed. Task 9 added a live recursive round-trip test,
+`live_recursive_roundtrip_preserves_tree`, that drives `run_expansion` with
+the real local/SFTP listers and directory creators against a disposable
+OpenSSH server: it uploads a fixture tree (three levels of nesting, an empty
+directory, a unicode filename, a hidden dotfile), recursively downloads it to
+a fresh directory, and asserts identical relative paths and bytes, plus that
+the remote listing discovers every fixture file (guarding against a server
+whose `readdir` response omits `PERMISSIONS` attrs and silently misclassifies
+children as `Other`). In this environment the test was compiled and invoked
+with `--ignored` and skipped cleanly before connecting, because no
+`TERMLAB_TEST_SFTP_*` disposable server was configured; it remains
+pending-live-evidence in the checklist until run against one, the same
+disclosure the pipelined-transfers live tests carried before the repo owner
+ran them. The desktop drag-and-drop surface (Finder drop, pane-to-pane drag,
+mid-flight cancel, kill-mid-expansion restart, retina hit-testing) is
+pending-evidence manual verification, tracked in the same checklist section.
+The repository-wide formatter and frontend boundary checks retain their
+verified clean-base exceptions: unrelated Rust formatting drift and
+`frontend/app/ui/tl-dialog.js:334`, respectively.
 
 ## Product rules
 

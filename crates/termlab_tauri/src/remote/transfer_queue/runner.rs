@@ -2132,6 +2132,8 @@ pub(crate) type SharedTransferJobRunner = Arc<dyn TransferJobRunner>;
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
+        future::Future,
         io::{Cursor, Error, ErrorKind, SeekFrom},
         path::PathBuf,
         pin::Pin,
@@ -2171,9 +2173,14 @@ mod tests {
         recover_commit, remove_local_artifact, select_live_connection_key, sequential_copy_ranges,
         sequential_fallback_warning,
     };
+    use crate::remote::recursive_transfer::{
+        LocalDirCreator, LocalTreeLister, SftpDirCreator, SftpTreeLister,
+    };
     use crate::remote::transfer_queue::{
         artifacts::ArtifactInventory,
+        batch::{BatchCancellation, BatchExpansion},
         events::RunnerEvent,
+        expansion::{DiscoveredFile, ExpansionPlan, ExpansionSink, ExpansionTotals, run_expansion},
         model::{
             AttentionReason, CommitPhase, CompletionResult, ConflictPolicy, ConflictResolution,
             ManagedArtifacts, TransferDirection, TransferEndpoint, TransferJob, TransferJobState,
@@ -4809,6 +4816,290 @@ mod tests {
             );
         }
         cleanup.expect("clean only the exact UUID-named disposable remote directory");
+    }
+
+    /// Copies each file `run_expansion` discovers directly over the already-
+    /// open live SFTP session, instead of enqueueing a queue member job. This
+    /// live test is about the recursive expansion seams themselves — listing,
+    /// destination mapping, and directory recreation against a real server —
+    /// not single-file transfer correctness, which `live_sftp_queue_roundtrip`
+    /// and the pipelined live tests above already cover. It also records the
+    /// final `ExpansionTotals` so the caller can check discovery counts.
+    struct DirectCopySink {
+        session: Arc<termlab_remote::transfer::SftpSessionHandle>,
+        /// `true` copies local source bytes to a remote destination (upload);
+        /// `false` copies remote source bytes to a local destination
+        /// (download).
+        upload: bool,
+        totals: StdMutex<ExpansionTotals>,
+    }
+
+    impl DirectCopySink {
+        fn new(session: Arc<termlab_remote::transfer::SftpSessionHandle>, upload: bool) -> Self {
+            Self {
+                session,
+                upload,
+                totals: StdMutex::new(ExpansionTotals::default()),
+            }
+        }
+
+        fn totals(&self) -> ExpansionTotals {
+            self.totals.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ExpansionSink for DirectCopySink {
+        async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String> {
+            if self.upload {
+                let bytes = tokio::fs::read(&file.source_path)
+                    .await
+                    .map_err(|error| format!("read fixture file {}: {error}", file.source_path))?;
+                write_live_remote(&self.session, &file.dest_path, &bytes).await?;
+            } else {
+                let bytes = read_live_remote(&self.session, &file.source_path).await?;
+                if let Some(parent) = std::path::Path::new(&file.dest_path).parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|error| format!("{parent:?}: {error}"))?;
+                }
+                tokio::fs::write(&file.dest_path, &bytes)
+                    .await
+                    .map_err(|error| {
+                        format!("write downloaded file {}: {error}", file.dest_path)
+                    })?;
+            }
+            Ok(())
+        }
+
+        async fn record_batch(
+            &self,
+            _expansion: BatchExpansion,
+            totals: &ExpansionTotals,
+        ) -> Result<(), String> {
+            *self.totals.lock().unwrap() = totals.clone();
+            Ok(())
+        }
+    }
+
+    /// Builds the round-trip fixture: directories nested three levels deep
+    /// (`level1/level2/level3`), one empty directory, a unicode filename, and
+    /// a hidden dotfile. Returns each file's POSIX-relative path mapped to its
+    /// content, for comparison against what comes back from the download.
+    async fn build_recursive_fixture(
+        root: &std::path::Path,
+    ) -> Result<BTreeMap<String, Vec<u8>>, String> {
+        async fn write_fixture_file(
+            root: &std::path::Path,
+            relative: &str,
+            bytes: &[u8],
+        ) -> Result<(), String> {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|error| format!("create fixture directory {parent:?}: {error}"))?;
+            }
+            tokio::fs::write(&path, bytes)
+                .await
+                .map_err(|error| format!("write fixture file {relative}: {error}"))
+        }
+
+        tokio::fs::create_dir_all(root.join("empty"))
+            .await
+            .map_err(|error| format!("create fixture empty directory: {error}"))?;
+
+        let mut files = BTreeMap::new();
+        let entries: &[(&str, u64)] = &[
+            ("top.txt", 0x5EED_0001),
+            (".hidden", 0x5EED_0002),
+            ("level1/level2/level3/deep.txt", 0x5EED_0003),
+            ("level1/level2/café-☕.txt", 0x5EED_0004),
+        ];
+        for (relative, seed) in entries {
+            let bytes = pseudo_random_bytes(*seed, 200 + relative.len());
+            write_fixture_file(root, relative, &bytes).await?;
+            files.insert((*relative).to_string(), bytes);
+        }
+        Ok(files)
+    }
+
+    /// Walks a local directory tree and returns every file's POSIX-relative
+    /// path mapped to its content, for comparing the downloaded tree back
+    /// against `build_recursive_fixture`'s map.
+    fn collect_local_files(root: &std::path::Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
+        fn walk(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            out: &mut BTreeMap<String, Vec<u8>>,
+        ) -> Result<(), String> {
+            for entry in std::fs::read_dir(dir).map_err(|error| format!("{dir:?}: {error}"))? {
+                let entry = entry.map_err(|error| format!("{dir:?}: {error}"))?;
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, out)?;
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .map_err(|error| format!("{path:?}: {error}"))?
+                        .components()
+                        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    let bytes =
+                        std::fs::read(&path).map_err(|error| format!("{path:?}: {error}"))?;
+                    out.insert(relative, bytes);
+                }
+            }
+            Ok(())
+        }
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out)?;
+        Ok(out)
+    }
+
+    /// Recursively removes everything under `remote_directory`, then the
+    /// directory itself. The recursive-tree fixture below deliberately
+    /// creates real remote subdirectories, which `cleanup_live_remote_directory`'s
+    /// one-level guard refuses to touch by design — this is that test's own
+    /// cleanup, kept separate so the flat-fixture tests above keep their
+    /// stricter guard.
+    fn cleanup_live_remote_tree<'a>(
+        session: &'a termlab_remote::transfer::SftpSessionHandle,
+        remote_directory: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Ok(entries) = session.read_dir(remote_directory).await {
+                for entry in entries {
+                    let child = format!("{remote_directory}/{}", entry.file_name());
+                    if entry.metadata().is_dir() {
+                        cleanup_live_remote_tree(session, &child).await?;
+                    } else {
+                        session.remove_file(child.clone()).await.map_err(|error| {
+                            format!("remove remote test artifact {child} failed: {error}")
+                        })?;
+                    }
+                }
+            }
+            session.remove_dir(remote_directory).await.map_err(|error| {
+                format!("remove disposable remote directory {remote_directory} failed: {error}")
+            })
+        })
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly configured disposable OpenSSH server"]
+    async fn live_recursive_roundtrip_preserves_tree() {
+        let Some(env) = live_sftp_env("live_recursive_roundtrip_preserves_tree") else {
+            return;
+        };
+        let local = tempfile::tempdir().expect("create live recursive roundtrip test directory");
+        let (ssh_handle, session, remote_directory) = connect_live_sftp(&env, local.path()).await;
+
+        let verification = async {
+            let fixture_root = local.path().join("fixture");
+            let fixture_files = build_recursive_fixture(&fixture_root).await?;
+
+            let remote_tree_root = format!("{remote_directory}/uploaded-tree");
+            let upload_plan = ExpansionPlan {
+                source_root: fixture_root.to_string_lossy().into_owned(),
+                dest_root: remote_tree_root.clone(),
+                remote_dest: true,
+            };
+            let upload_lister = LocalTreeLister;
+            let upload_creator = SftpDirCreator::new(ssh_handle.clone());
+            let upload_sink = DirectCopySink::new(Arc::clone(&session), true);
+            let upload_cancellation = BatchCancellation::new();
+            let upload_outcome = run_expansion(
+                &upload_lister,
+                &upload_creator,
+                &upload_sink,
+                &upload_plan,
+                &upload_cancellation,
+            )
+            .await;
+            require_live(
+                matches!(upload_outcome, BatchExpansion::Complete),
+                format!("recursive upload expansion did not complete: {upload_outcome:?}"),
+            )?;
+            let upload_totals = upload_sink.totals();
+            require_live(
+                upload_totals.discovered_files == fixture_files.len() as u64,
+                format!(
+                    "recursive upload discovered {} files but the fixture has {}",
+                    upload_totals.discovered_files,
+                    fixture_files.len()
+                ),
+            )?;
+
+            let download_root = tempfile::tempdir()
+                .map_err(|error| format!("create download destination failed: {error}"))?;
+            let download_plan = ExpansionPlan {
+                source_root: remote_tree_root.clone(),
+                dest_root: download_root.path().to_string_lossy().into_owned(),
+                remote_dest: false,
+            };
+            let download_lister = SftpTreeLister::new(ssh_handle.clone());
+            let download_creator = LocalDirCreator;
+            let download_sink = DirectCopySink::new(Arc::clone(&session), false);
+            let download_cancellation = BatchCancellation::new();
+            let download_outcome = run_expansion(
+                &download_lister,
+                &download_creator,
+                &download_sink,
+                &download_plan,
+                &download_cancellation,
+            )
+            .await;
+            require_live(
+                matches!(download_outcome, BatchExpansion::Complete),
+                format!("recursive download expansion did not complete: {download_outcome:?}"),
+            )?;
+
+            // The ledgered risk: a server whose readdir response omits
+            // PERMISSIONS attrs would make every child resolve as
+            // `DirEntryKind::Other` and get silently skipped instead of
+            // descended into or transferred. If that happened here, the
+            // remote listing during download would discover fewer files than
+            // the fixture actually has.
+            let download_totals = download_sink.totals();
+            require_live(
+                download_totals.discovered_files == fixture_files.len() as u64,
+                format!(
+                    "remote listing during download discovered {} files but the fixture has {} \
+                     (a server omitting PERMISSIONS attrs would misclassify children as Other \
+                     and silently skip them)",
+                    download_totals.discovered_files,
+                    fixture_files.len()
+                ),
+            )?;
+
+            let downloaded_files = collect_local_files(download_root.path())?;
+            require_live(
+                downloaded_files == fixture_files,
+                "downloaded tree did not match the uploaded fixture tree's relative paths and \
+                 bytes",
+            )?;
+
+            require_live(
+                tokio::fs::metadata(download_root.path().join("empty"))
+                    .await
+                    .map(|metadata| metadata.is_dir())
+                    .unwrap_or(false),
+                "the empty fixture directory did not round-trip as a directory",
+            )?;
+
+            Ok::<(), String>(())
+        }
+        .await;
+
+        let cleanup = cleanup_live_remote_tree(&session, &remote_directory).await;
+        if let Err(error) = verification {
+            panic!(
+                "live recursive roundtrip verification failed: {error}; cleanup result: {cleanup:?}"
+            );
+        }
+        cleanup.expect("clean only the exact UUID-named disposable remote directory tree");
     }
 
     #[tokio::test]
