@@ -1,0 +1,6 @@
+product-name = "TermLab"
+identifier = "com.github.an0nn30.TermLab"
+version = "3.0.0-rc.1"
+out-dir = "../../dist"
+
+before-packaging-command = "cargo build --release"

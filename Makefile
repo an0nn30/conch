@@ -16,6 +16,7 @@ help:
 	@echo "  app            Build TermLab.app for current macOS architecture"
 	@echo "  dmg-native     Build DMG + .app for current macOS architecture"
 	@echo "  dmg-universal  Build universal DMG (ARM64 + x86_64, macOS only)"
+	@echo "  package-macos  Build .app and .dmg automatically (shortcut)"
 	@echo "  deb            Build .deb package (run on Linux)"
 	@echo "  rpm            Build .rpm package (run on Linux)"
 	@echo "  msi            Build .msi installer (run on Windows)"
@@ -273,3 +274,10 @@ clean:
 	rm -rf "$(APP)" "$(DIST)"
 	$(MAKE) -C java-sdk clean
 	cargo clean
+
+# ---------------------------------------------------------------------------
+# Convenience package target — builds .app and .dmg automatically
+# ---------------------------------------------------------------------------
+.PHONY: package-macos
+package-macos: dmg-native
+	@echo "Package complete: $(DIST)/TermLab.app and $(DIST)/*.dmg"
