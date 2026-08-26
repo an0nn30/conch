@@ -737,4 +737,113 @@ assert.equal(localPane.transferStatus['offline.txt'], undefined);
   }
 }
 
+// An empty folder produces a batch with zero member jobs. Every other
+// completion notice — the runtime's batched toast, the pane badges — is
+// aggregated from member-job transitions, so without this the transfer ends
+// in total silence even though the destination directory was created.
+{
+  function emptyBatchHarness(snapshotForWatch) {
+    const toasts = [];
+    const controller = sandbox.window.termlabFilesTransfers.createController({
+      localPane: { isLocal: true, transferStatus: {} },
+      remotePane: { isLocal: false, transferStatus: {} },
+      toast: { info: (...args) => toasts.push(args) },
+      transferRuntime: { getSnapshot: () => snapshotForWatch || { jobs: [], batches: [] } },
+    });
+    return { controller, toasts };
+  }
+
+  function batchSnapshot(overrides) {
+    return {
+      jobs: [],
+      batches: [{
+        info: {
+          id: 'batch-empty',
+          name: 'empty-folder',
+          direction: 'upload',
+          expansion: { kind: 'complete' },
+          discoveredFiles: 0,
+          discoveredBytes: 0,
+          skipped: [],
+          completedFiles: 0,
+          completedBytes: 0,
+          createdAtMs: 1,
+        },
+        filesDone: 0,
+        bytesDone: 0,
+        speedBytesPerSecond: null,
+        etaSeconds: null,
+        ...overrides,
+      }],
+    };
+  }
+
+  // Expansion still running: nothing is said yet.
+  {
+    const { controller, toasts } = emptyBatchHarness();
+    controller.watchFolderBatch('batch-empty');
+    controller.handleTransferSnapshot(batchSnapshot({
+      info: {
+        id: 'batch-empty', name: 'empty-folder', direction: 'upload',
+        expansion: { kind: 'running' }, discoveredFiles: 0, discoveredBytes: 0,
+        skipped: [], completedFiles: 0, completedBytes: 0, createdAtMs: 1,
+      },
+    }));
+    assert.deepEqual(toasts, [], 'a walk still in progress says nothing');
+
+    controller.handleTransferSnapshot(batchSnapshot());
+    assert.equal(toasts.length, 1, 'a completed zero-file batch is announced exactly once');
+    assert.equal(toasts[0][0], 'Folder created');
+    assert.match(toasts[0][1], /empty-folder/);
+
+    controller.handleTransferSnapshot(batchSnapshot());
+    assert.equal(toasts.length, 1, 'later snapshots must not repeat the notice');
+  }
+
+  // The expansion can finish before the command that created the batch has
+  // even resolved, so registering the watch evaluates what is already known.
+  {
+    const { controller, toasts } = emptyBatchHarness(batchSnapshot());
+    controller.watchFolderBatch('batch-empty');
+    assert.equal(toasts.length, 1, 'an already-finished empty batch is announced on registration');
+  }
+
+  // A folder that actually contained files is announced by the ordinary
+  // member-job pathway; this notice must stay out of its way.
+  {
+    const { controller, toasts } = emptyBatchHarness();
+    controller.watchFolderBatch('batch-empty');
+    controller.handleTransferSnapshot(batchSnapshot({
+      info: {
+        id: 'batch-empty', name: 'photos', direction: 'upload',
+        expansion: { kind: 'complete' }, discoveredFiles: 4, discoveredBytes: 400,
+        skipped: [], completedFiles: 4, completedBytes: 400, createdAtMs: 1,
+      },
+    }));
+    assert.deepEqual(toasts, [], 'a non-empty batch is never announced this way');
+  }
+
+  // An interrupted walk is reported by its own header marker.
+  {
+    const { controller, toasts } = emptyBatchHarness();
+    controller.watchFolderBatch('batch-empty');
+    controller.handleTransferSnapshot(batchSnapshot({
+      info: {
+        id: 'batch-empty', name: 'empty-folder', direction: 'upload',
+        expansion: { kind: 'interrupted', reason: 'batch cancelled' },
+        discoveredFiles: 0, discoveredBytes: 0,
+        skipped: [], completedFiles: 0, completedBytes: 0, createdAtMs: 1,
+      },
+    }));
+    assert.deepEqual(toasts, [], 'an interrupted walk is not a successful empty folder');
+  }
+
+  // Batches this panel never started are none of its business.
+  {
+    const { controller, toasts } = emptyBatchHarness();
+    controller.handleTransferSnapshot(batchSnapshot());
+    assert.deepEqual(toasts, [], 'an unwatched batch is ignored');
+  }
+}
+
 console.log('files transfer completion tests passed');

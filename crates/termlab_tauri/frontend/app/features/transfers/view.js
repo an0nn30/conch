@@ -95,43 +95,51 @@
   }
 
   // Partition the currently visible jobs (already filtered to the active or
-  // history view) into batch groups and batchless rows. A job's batchId only
-  // groups it when the referenced batch aggregate is actually present in this
-  // snapshot — an unknown/stale batchId falls back to a plain batchless row
-  // rather than silently dropping the job.
+  // history view) by batch, recording the order in which each batch and each
+  // batchless job is FIRST encountered. A job's batchId only groups it when
+  // the referenced batch aggregate is actually present in this snapshot — an
+  // unknown/stale batchId falls back to a plain batchless row rather than
+  // silently dropping the job.
   function groupJobs(jobs, batchAggregates) {
     const aggById = new Map();
     for (const agg of batchAggregates) {
       if (agg && agg.info && agg.info.id) aggById.set(agg.info.id, agg);
     }
     const membersByBatch = new Map();
-    const batchless = [];
+    const order = [];
     for (const job of jobs) {
       if (job.batchId && aggById.has(job.batchId)) {
-        if (!membersByBatch.has(job.batchId)) membersByBatch.set(job.batchId, []);
+        if (!membersByBatch.has(job.batchId)) {
+          membersByBatch.set(job.batchId, []);
+          order.push({ type: 'batch', id: job.batchId });
+        }
         membersByBatch.get(job.batchId).push(job);
       } else {
-        batchless.push(job);
+        order.push({ type: 'job', job });
       }
     }
-    const groups = [];
-    for (const agg of batchAggregates) {
-      const members = membersByBatch.get(agg.info.id);
-      if (members && members.length > 0) groups.push({ agg, members });
-    }
-    return { groups, batchless };
+    return { order, aggById, membersByBatch };
   }
 
-  // Flatten batch groups (in delivered order) followed by batchless rows
-  // (stable) into the row sequence the table actually renders.
+  // Flatten into the row sequence the table renders, interleaving by first
+  // appearance: a batch's header (followed by ALL of its members, so a group
+  // stays contiguous) lands where its first member sits in the queue, and a
+  // batchless job keeps its own natural position. Emitting every group ahead
+  // of every batchless row — the previous behaviour — reordered rows against
+  // the queue the user is actually watching, e.g. a single file queued before
+  // a folder transfer would render below it.
   function renderItems(jobs, batchAggregates) {
-    const { groups, batchless } = groupJobs(jobs, batchAggregates);
+    const { order, aggById, membersByBatch } = groupJobs(jobs, batchAggregates);
     const items = [];
-    for (const group of groups) {
-      items.push({ type: 'header', id: group.agg.info.id, agg: group.agg });
-      for (const job of group.members) items.push({ type: 'job', id: job.id, job });
+    for (const entry of order) {
+      if (entry.type === 'job') {
+        items.push({ type: 'job', id: entry.job.id, job: entry.job });
+        continue;
+      }
+      const agg = aggById.get(entry.id);
+      items.push({ type: 'header', id: entry.id, agg });
+      for (const job of membersByBatch.get(entry.id)) items.push({ type: 'job', id: job.id, job });
     }
-    for (const job of batchless) items.push({ type: 'job', id: job.id, job });
     return items;
   }
 

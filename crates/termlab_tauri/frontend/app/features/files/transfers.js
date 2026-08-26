@@ -6,6 +6,9 @@
     const terminalKinds = new Set(['completed', 'failed', 'cancelled']);
     const attentionKinds = new Set(['needsAttention', 'needsConnection']);
     let previousJobs = new Map();
+    // Folder batches this panel started, still waiting for their expansion to
+    // finish. See reportFinishedEmptyBatches below.
+    const watchedBatches = new Set();
 
     function paneForDirection(direction) {
       return direction === 'download' ? d.localPane : d.remotePane;
@@ -150,7 +153,49 @@
       renderTransferStatus(pane);
     }
 
+    // A folder whose tree holds no files produces a batch with no member
+    // jobs at all. Every other completion notice — the runtime's batched
+    // "Transfers complete" toast, the pane badges above — is aggregated from
+    // member-job transitions, so zero members means the whole transfer ends
+    // in silence even though the destination directory was created. This is
+    // the one-shot notice for that case, driven off the batches projection
+    // rather than the job list.
+    function watchFolderBatch(batchId) {
+      if (!batchId) return;
+      watchedBatches.add(String(batchId));
+      const runtime = d.transferRuntime;
+      if (runtime && typeof runtime.getSnapshot === 'function') {
+        // The expansion may already have finished by the time the command
+        // that created the batch resolved, in which case no further snapshot
+        // is coming — evaluate what is already known.
+        reportFinishedEmptyBatches(runtime.getSnapshot());
+      }
+    }
+
+    function reportFinishedEmptyBatches(snapshot) {
+      if (watchedBatches.size === 0) return;
+      const batches = Array.isArray(snapshot && snapshot.batches) ? snapshot.batches : [];
+      for (const aggregate of batches) {
+        const info = aggregate && aggregate.info;
+        const id = info && info.id ? String(info.id) : '';
+        if (!id || !watchedBatches.has(id)) continue;
+        const expansion = info.expansion && info.expansion.kind;
+        if (expansion !== 'complete' && expansion !== 'interrupted') continue;
+        // Terminal either way: an interrupted walk is reported through its
+        // own header marker, so it just stops being watched.
+        watchedBatches.delete(id);
+        if (expansion !== 'complete' || Number(info.discoveredFiles) !== 0) continue;
+        if (d.toast && typeof d.toast.info === 'function') {
+          d.toast.info(
+            'Folder created',
+            `${info.name || 'The folder'} contained no files to transfer.`,
+          );
+        }
+      }
+    }
+
     function handleTransferSnapshot(snapshot) {
+      reportFinishedEmptyBatches(snapshot);
       const jobs = Array.isArray(snapshot && snapshot.jobs) ? snapshot.jobs : [];
       const currentJobs = new Map();
       const panesToRender = new Set();
@@ -215,6 +260,7 @@
       handleTransferProgress,
       handleTransferSnapshot,
       handleTransferAttention,
+      watchFolderBatch,
     };
   }
 

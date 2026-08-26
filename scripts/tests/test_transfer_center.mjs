@@ -1493,6 +1493,57 @@ async function loadMountLifecycleHarness() {
   assert.strictEqual(prevented, 1);
 }
 
+// --- Grouping interleaves by first appearance: a batchless job queued
+// BEFORE a folder transfer renders above it, and the batch's members stay
+// contiguous under their header wherever that header lands. ---
+{
+  const harness = loadHarness();
+  const early = job('early', 'running', { fileName: 'early.bin', queueOrder: 1 });
+  const memberA = job('m1', 'queued', { batchId: 'batch-9', fileName: 'a.jpg', queueOrder: 2 });
+  const late = job('late', 'queued', { fileName: 'late.bin', queueOrder: 3 });
+  const memberB = job('m2', 'queued', { batchId: 'batch-9', fileName: 'b.jpg', queueOrder: 4 });
+  harness.emit(snapshot([early, memberA, late, memberB], {
+    batches: [batchAgg('batch-9', { info: { name: 'photos', createdAtMs: 9 } })],
+    summary: summary({ active: 4, running: 1, queued: 3 }),
+  }));
+
+  const rows = harness.panelEl.querySelector('tbody').children;
+  assert.strictEqual(rows[0].dataset.jobId, 'early',
+    'a batchless job queued before the folder transfer must render above its header');
+  assert.strictEqual(rows[1].dataset.batchId, 'batch-9',
+    'the header lands where the batch first appears in the queue');
+  assert.strictEqual(rows[2].dataset.jobId, 'm1');
+  assert.strictEqual(rows[3].dataset.jobId, 'm2',
+    'every member of a batch stays contiguous under its header');
+  assert.strictEqual(rows[4].dataset.jobId, 'late');
+  assert.deepStrictEqual(rowIds(harness.panelEl), ['early', 'm1', 'm2', 'late']);
+}
+
+// --- Two batches each keep their own header at their own first appearance,
+// with a batchless row between them. ---
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([
+    job('p1', 'running', { batchId: 'batch-a', queueOrder: 1 }),
+    job('mid', 'queued', { queueOrder: 2 }),
+    job('q1', 'queued', { batchId: 'batch-b', queueOrder: 3 }),
+  ], {
+    // Delivered aggregate order is deliberately the reverse of the job
+    // order: rendering follows the jobs, not the projection's ordering.
+    batches: [
+      batchAgg('batch-b', { info: { name: 'second', createdAtMs: 2 } }),
+      batchAgg('batch-a', { info: { name: 'first', createdAtMs: 1 } }),
+    ],
+    summary: summary({ active: 3, running: 1, queued: 2 }),
+  }));
+
+  const rows = harness.panelEl.querySelector('tbody').children;
+  assert.deepStrictEqual(
+    rows.map((row) => row.dataset.batchId || row.dataset.jobId),
+    ['batch-a', 'p1', 'mid', 'batch-b', 'q1'],
+  );
+}
+
 // Grouping is patch-friendly: a progress-only update to a batch member keeps
 // the same header and row DOM nodes; a true membership change (a batch
 // clearing entirely, e.g. from history clearing) drops its header exactly

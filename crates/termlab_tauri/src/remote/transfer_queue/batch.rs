@@ -61,6 +61,19 @@ pub struct BatchInfo {
     /// Symlinks (and other skipped entries) recorded during expansion.
     #[serde(default)]
     pub skipped: Vec<String>,
+    /// Monotonic count of members that have entered `Completed`, accrued once
+    /// per member at the engine's serialization point. Member jobs age out of
+    /// history (the 500-row cap) and can be cleared by hand, so a roll-up
+    /// derived from surviving jobs alone would plateau and then count DOWN
+    /// while the batch was still progressing. This is the small persisted
+    /// record that keeps `files_done` honest once members are gone.
+    #[serde(default)]
+    #[ts(as = "f64")]
+    pub completed_files: u64,
+    /// Bytes attributed to those completed members, on the same terms.
+    #[serde(default)]
+    #[ts(as = "f64")]
+    pub completed_bytes: u64,
     #[ts(as = "f64")]
     pub created_at_ms: u64,
 }
@@ -113,6 +126,16 @@ pub fn derive_batch_aggregates(
                 }
             }
 
+            // Members leave the job list — the history cap trims them, and
+            // Clear-completed removes them outright — while the totals come
+            // from the persisted `discovered_*`. Reconciling against the
+            // monotonic per-batch record is what stops the roll-up from
+            // plateauing and then counting DOWN mid-batch. The live sums
+            // still win while they lead, because only they can see the
+            // partial bytes of a member that is still running.
+            files_done = files_done.max(info.completed_files);
+            bytes_done = bytes_done.max(info.completed_bytes);
+
             let speed = (speed_sum > 0).then_some(speed_sum);
             let eta = speed.map(|speed| info.discovered_bytes.saturating_sub(bytes_done) / speed);
 
@@ -136,6 +159,47 @@ pub fn derive_batch_aggregates(
     aggregates
 }
 
+/// Accrue the monotonic completion counters for every member that entered
+/// `Completed` between `previous_jobs` and `next_jobs`. Called once per
+/// commit, from the engine's single serialization point, so each member is
+/// counted exactly once: `Completed` is a terminal state the reducer never
+/// leaves (only `Failed`/`NeedsConnection` accept `ManualRetry`), so a member
+/// can never re-enter it and double-count.
+///
+/// Bytes are attributed from the member's own total, falling back to what it
+/// actually moved when the total is the "unknown" zero sentinel — never an
+/// invented figure.
+pub fn accrue_completed_members(
+    batches: &mut BTreeMap<Uuid, BatchInfo>,
+    previous_jobs: &[TransferJob],
+    next_jobs: &[TransferJob],
+) {
+    for job in next_jobs {
+        let Some(batch_id) = job.batch_id else {
+            continue;
+        };
+        if !matches!(job.state, TransferJobState::Completed { .. }) {
+            continue;
+        }
+        let was_completed = previous_jobs.iter().any(|previous| {
+            previous.id == job.id && matches!(previous.state, TransferJobState::Completed { .. })
+        });
+        if was_completed {
+            continue;
+        }
+        let Some(batch) = batches.get_mut(&batch_id) else {
+            continue;
+        };
+        let bytes = if job.total_bytes > 0 {
+            job.total_bytes
+        } else {
+            job.bytes_transferred
+        };
+        batch.completed_files = batch.completed_files.saturating_add(1);
+        batch.completed_bytes = batch.completed_bytes.saturating_add(bytes);
+    }
+}
+
 /// Drop batches with no remaining member jobs (active or history) so the
 /// batch map does not grow without bound as jobs age out of history. A batch
 /// whose expansion is still `Running` is never memberless-by-attrition — it
@@ -156,7 +220,10 @@ mod tests {
         TransferJob, TransferJobState, TransferOrigin, TransferPriority, TransferProtocol,
         TransferQueueDocument,
     };
-    use super::{BatchExpansion, BatchInfo, compact_batches, derive_batch_aggregates};
+    use super::{
+        BatchExpansion, BatchInfo, accrue_completed_members, compact_batches,
+        derive_batch_aggregates,
+    };
     use std::collections::BTreeMap;
 
     fn job(
@@ -217,6 +284,8 @@ mod tests {
             discovered_files,
             discovered_bytes,
             skipped: Vec::new(),
+            completed_files: 0,
+            completed_bytes: 0,
             created_at_ms,
         }
     }
@@ -249,6 +318,165 @@ mod tests {
         assert_eq!(aggregate.bytes_done, 140);
         assert_eq!(aggregate.speed_bytes_per_second, Some(50));
         assert_eq!(aggregate.eta_seconds, Some(5));
+    }
+
+    #[test]
+    fn derive_prefers_persisted_completion_when_members_left_history() {
+        let batch_id = Uuid::from_u128(1);
+        let mut info = batch_info(batch_id, 2_000, 200_000, 10);
+        info.completed_files = 900;
+        info.completed_bytes = 90_000;
+        let mut batches = BTreeMap::new();
+        batches.insert(batch_id, info);
+
+        // Only one member survived the history cap; the other 899 completed
+        // members were compacted away.
+        let jobs = vec![job(
+            Some(batch_id),
+            TransferJobState::Completed {
+                result: CompletionResult::Transferred,
+            },
+            100,
+            100,
+            0,
+        )];
+
+        let aggregates = derive_batch_aggregates(&batches, &jobs);
+
+        assert_eq!(
+            aggregates[0].files_done, 900,
+            "a roll-up must never count DOWN when completed members age out of history"
+        );
+        assert_eq!(
+            aggregates[0].bytes_done, 90_000,
+            "persisted completed bytes outrank what the surviving members can still show"
+        );
+    }
+
+    #[test]
+    fn derive_prefers_live_jobs_when_they_lead_the_persisted_record() {
+        let batch_id = Uuid::from_u128(1);
+        let mut info = batch_info(batch_id, 2, 200, 10);
+        info.completed_files = 1;
+        info.completed_bytes = 100;
+        let mut batches = BTreeMap::new();
+        batches.insert(batch_id, info);
+
+        let jobs = vec![
+            job(
+                Some(batch_id),
+                TransferJobState::Completed {
+                    result: CompletionResult::Transferred,
+                },
+                100,
+                100,
+                0,
+            ),
+            // In-flight bytes are only visible on the live job, never in the
+            // persisted per-member record.
+            job(Some(batch_id), TransferJobState::Running, 40, 100, 50),
+        ];
+
+        let aggregates = derive_batch_aggregates(&batches, &jobs);
+
+        assert_eq!(aggregates[0].files_done, 1);
+        assert_eq!(
+            aggregates[0].bytes_done, 140,
+            "partial progress of a running member must still be reflected"
+        );
+        assert_eq!(
+            aggregates[0].eta_seconds,
+            Some(1),
+            "eta is computed from the reconciled bytes_done, not the raw job sum"
+        );
+    }
+
+    #[test]
+    fn accrue_counts_each_member_completion_exactly_once() {
+        let batch_id = Uuid::from_u128(1);
+        let mut batches = BTreeMap::new();
+        batches.insert(batch_id, batch_info(batch_id, 2, 300, 10));
+
+        let running = job(Some(batch_id), TransferJobState::Running, 40, 100, 50);
+        let mut finished = running.clone();
+        finished.state = TransferJobState::Completed {
+            result: CompletionResult::Transferred,
+        };
+        finished.bytes_transferred = 100;
+
+        accrue_completed_members(
+            &mut batches,
+            std::slice::from_ref(&running),
+            std::slice::from_ref(&finished),
+        );
+        assert_eq!(batches[&batch_id].completed_files, 1);
+        assert_eq!(batches[&batch_id].completed_bytes, 100);
+
+        // A later commit that merely re-serializes the same terminal job must
+        // not accrue it a second time.
+        accrue_completed_members(
+            &mut batches,
+            std::slice::from_ref(&finished),
+            std::slice::from_ref(&finished),
+        );
+        assert_eq!(batches[&batch_id].completed_files, 1);
+        assert_eq!(batches[&batch_id].completed_bytes, 100);
+    }
+
+    #[test]
+    fn accrue_ignores_batchless_and_unknown_batch_members() {
+        let batch_id = Uuid::from_u128(1);
+        let unknown_batch_id = Uuid::from_u128(2);
+        let mut batches = BTreeMap::new();
+        batches.insert(batch_id, batch_info(batch_id, 1, 100, 10));
+
+        let completed = TransferJobState::Completed {
+            result: CompletionResult::Transferred,
+        };
+        let batchless = job(None, completed.clone(), 100, 100, 0);
+        let stranger = job(Some(unknown_batch_id), completed, 100, 100, 0);
+
+        accrue_completed_members(&mut batches, &[], &[batchless, stranger]);
+
+        assert_eq!(batches[&batch_id].completed_files, 0);
+        assert_eq!(batches[&batch_id].completed_bytes, 0);
+    }
+
+    #[test]
+    fn accrue_uses_the_member_total_when_a_skip_cleared_its_byte_counters() {
+        let batch_id = Uuid::from_u128(1);
+        let mut batches = BTreeMap::new();
+        batches.insert(batch_id, batch_info(batch_id, 1, 100, 10));
+
+        // A skipped member reports zero bytes on both counters, so it accrues
+        // a file but no bytes rather than an invented total.
+        let queued = job(Some(batch_id), TransferJobState::Queued, 0, 0, 0);
+        let mut skipped = queued.clone();
+        skipped.state = TransferJobState::Completed {
+            result: CompletionResult::Skipped,
+        };
+
+        accrue_completed_members(&mut batches, &[queued], &[skipped]);
+
+        assert_eq!(batches[&batch_id].completed_files, 1);
+        assert_eq!(batches[&batch_id].completed_bytes, 0);
+    }
+
+    #[test]
+    fn batch_info_without_completion_counters_deserializes_to_zero() {
+        let batch_id = Uuid::from_u128(1);
+        let mut value = serde_json::to_value(batch_info(batch_id, 3, 300, 10)).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("completedFiles");
+        object.remove("completedBytes");
+
+        let info: BatchInfo = serde_json::from_value(value).unwrap();
+
+        assert_eq!(
+            info.completed_files, 0,
+            "schema v1 records predate the field"
+        );
+        assert_eq!(info.completed_bytes, 0);
     }
 
     #[test]

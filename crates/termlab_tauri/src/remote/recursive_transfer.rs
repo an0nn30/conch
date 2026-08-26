@@ -320,6 +320,8 @@ pub(super) async fn start_recursive_transfer(
             discovered_files: 0,
             discovered_bytes: 0,
             skipped: Vec::new(),
+            completed_files: 0,
+            completed_bytes: 0,
             created_at_ms: now_ms(),
         })
         .await?;

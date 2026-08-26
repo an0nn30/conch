@@ -6,4 +6,17 @@ export type BatchInfo = { id: string, name: string, direction: TransferDirection
 /**
  * Symlinks (and other skipped entries) recorded during expansion.
  */
-skipped: Array<string>, createdAtMs: number, };
+skipped: Array<string>, 
+/**
+ * Monotonic count of members that have entered `Completed`, accrued once
+ * per member at the engine's serialization point. Member jobs age out of
+ * history (the 500-row cap) and can be cleared by hand, so a roll-up
+ * derived from surviving jobs alone would plateau and then count DOWN
+ * while the batch was still progressing. This is the small persisted
+ * record that keeps `files_done` honest once members are gone.
+ */
+completedFiles: number, 
+/**
+ * Bytes attributed to those completed members, on the same terms.
+ */
+completedBytes: number, createdAtMs: number, };

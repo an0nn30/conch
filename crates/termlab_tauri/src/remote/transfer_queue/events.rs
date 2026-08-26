@@ -239,6 +239,8 @@ mod tests {
                 discovered_files: 2,
                 discovered_bytes: 8192,
                 skipped: Vec::new(),
+                completed_files: 0,
+                completed_bytes: 0,
                 created_at_ms: 5,
             },
         );
@@ -277,6 +279,8 @@ mod tests {
                         "discoveredFiles": 2,
                         "discoveredBytes": 8192,
                         "skipped": [],
+                        "completedFiles": 0,
+                        "completedBytes": 0,
                         "createdAtMs": 5
                     },
                     "filesDone": 0,

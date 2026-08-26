@@ -1144,15 +1144,29 @@
   // `destPath` is the opposite pane's current directory as-is — never
   // joined with the folder's own name — because the backend appends that
   // basename itself (see features/files/data-service.js's transferRecursive).
+  // Every folder transfer this panel starts goes through here so the batch
+  // it creates is registered with the transfer controller. A folder with no
+  // files in it produces a batch with no member jobs, and every other
+  // completion notice is aggregated from member jobs — without this
+  // registration that transfer would finish in total silence (see
+  // features/files/transfers.js's watchFolderBatch).
+  async function startFolderTransfer(paneId, direction, sourcePath, destPath) {
+    if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
+      throw new Error('Files data service unavailable: transferRecursive');
+    }
+    const batchId = await filesDataService.transferRecursive(invoke, paneId, direction, sourcePath, destPath);
+    if (transferController && typeof transferController.watchFolderBatch === 'function') {
+      transferController.watchFolderBatch(batchId);
+    }
+    return batchId;
+  }
+
   async function doUploadFolder(entry) {
     if (!entry || !activeRemotePaneId) return;
     const sourcePath = joinPath(localPane.currentPath, entry.name);
     const destPath = remotePane.currentPath;
     try {
-      if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
-        throw new Error('Files data service unavailable: transferRecursive');
-      }
-      await filesDataService.transferRecursive(invoke, activeRemotePaneId, 'upload', sourcePath, destPath);
+      await startFolderTransfer(activeRemotePaneId, 'upload', sourcePath, destPath);
       window.toast.info('Folder transfer started', entry.name);
     } catch (e) {
       window.toast.error('Upload Failed', String(e));
@@ -1164,10 +1178,7 @@
     const sourcePath = joinPath(remotePane.currentPath, entry.name);
     const destPath = localPane.currentPath;
     try {
-      if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
-        throw new Error('Files data service unavailable: transferRecursive');
-      }
-      await filesDataService.transferRecursive(invoke, activeRemotePaneId, 'download', sourcePath, destPath);
+      await startFolderTransfer(activeRemotePaneId, 'download', sourcePath, destPath);
       window.toast.info('Folder transfer started', entry.name);
     } catch (e) {
       window.toast.error('Download Failed', String(e));
@@ -1217,10 +1228,7 @@
     const name = basenameOfPath(source.path);
     try {
       if (source.isDir) {
-        if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
-          throw new Error('Files data service unavailable: transferRecursive');
-        }
-        await filesDataService.transferRecursive(invoke, activeRemotePaneId, direction, source.path, targetPath);
+        await startFolderTransfer(activeRemotePaneId, direction, source.path, targetPath);
         window.toast.info('Folder transfer started', name);
         return;
       }
@@ -1280,12 +1288,9 @@
         const entry = await filesDataService.statLocal(invoke, path);
         return { isDir: !!(entry && entry.is_dir) };
       },
-      transferRecursive: async (paneId, sourcePath, destPath) => {
-        if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
-          throw new Error('Files data service unavailable: transferRecursive');
-        }
-        return filesDataService.transferRecursive(invoke, paneId, 'upload', sourcePath, destPath);
-      },
+      transferRecursive: async (paneId, sourcePath, destPath) => (
+        startFolderTransfer(paneId, 'upload', sourcePath, destPath)
+      ),
       // Mirrors doUpload/onDropEntries exactly: routed through submitTransfer
       // so the remote pane shows the same "preparing" transfer-status row a
       // menu-driven or intra-app-dragged upload would.

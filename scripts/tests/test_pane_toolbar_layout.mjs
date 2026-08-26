@@ -33,12 +33,17 @@ function loadPaneView() {
 }
 
 // renderPane guards every post-render query, so a recording element captures
-// the markup without needing a DOM.
+// the markup without needing a DOM. The pane root itself is a real Element in
+// the app — renderPane binds the pane's drop-target listeners straight to it
+// — so the double carries inert classList/addEventListener members too.
 function recordingElement() {
   return {
     innerHTML: '',
     querySelector: () => null,
     querySelectorAll: () => [],
+    classList: { add() {}, remove() {}, contains: () => false },
+    addEventListener() {},
+    removeEventListener() {},
   };
 }
 

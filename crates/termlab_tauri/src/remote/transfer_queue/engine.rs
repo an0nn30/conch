@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use super::{
     batch::{
-        BATCH_CANCELLED_REASON, BatchCancellation, BatchExpansion, BatchInfo, compact_batches,
-        derive_batch_aggregates,
+        BATCH_CANCELLED_REASON, BatchCancellation, BatchExpansion, BatchInfo,
+        accrue_completed_members, compact_batches, derive_batch_aggregates,
     },
     events::{
         QueueEventPayload, QueueSummaryPayload, RunnerEvent, TransferEventSink, legacy_progress_for,
@@ -1866,6 +1866,10 @@ impl QueueActor {
     }
 
     async fn commit(&mut self, mut next: TransferQueueDocument) -> Result<(), String> {
+        // Every member completion passes through here exactly once, before
+        // the history trim below can take that member's row away, so this is
+        // the one place the monotonic per-batch counters can be kept honest.
+        accrue_completed_members(&mut next.batches, &self.document.jobs, &next.jobs);
         compact_history(&mut next);
         validate_document_semantics(&next)?;
         next.revision = self
@@ -2047,7 +2051,10 @@ mod tests {
     use tokio::sync::{Notify, mpsc, oneshot, watch};
     use uuid::Uuid;
 
-    use super::{QueueActor, QueueClock, QueueStore, TransferQueueHandle};
+    use super::{
+        QueueActor, QueueClock, QueueStore, TRANSFER_HISTORY_LIMIT, TransferQueueHandle,
+        compact_history,
+    };
     use crate::remote::transfer_queue::{
         batch::{BATCH_CANCELLED_REASON, BatchExpansion, BatchInfo, derive_batch_aggregates},
         events::{QueueEventPayload, QueueSummaryPayload, TransferEventSink},
@@ -3589,6 +3596,8 @@ mod tests {
                 discovered_files: 1,
                 discovered_bytes: 100,
                 skipped: Vec::new(),
+                completed_files: 0,
+                completed_bytes: 0,
                 created_at_ms: 10,
             },
         );
@@ -3624,6 +3633,8 @@ mod tests {
                 discovered_files: 1,
                 discovered_bytes: 500,
                 skipped: Vec::new(),
+                completed_files: 0,
+                completed_bytes: 0,
                 created_at_ms: 10,
             },
         );
@@ -4115,6 +4126,8 @@ mod tests {
                 discovered_files: 1,
                 discovered_bytes: 100,
                 skipped: Vec::new(),
+                completed_files: 0,
+                completed_bytes: 0,
                 created_at_ms: 10,
             },
         );
@@ -4127,6 +4140,163 @@ mod tests {
         assert!(harness.handle.snapshot().batches.is_empty());
     }
 
+    /// Finding 1: the roll-up used to be derived from surviving member jobs
+    /// alone, so removing terminal members made a batch count DOWN while it
+    /// was still progressing. Clear-completed is the deterministic form of
+    /// that removal (the 500-row history cap is a const, exercised by
+    /// `history_compaction_keeps_the_batch_roll_up_monotonic` below).
+    #[tokio::test]
+    async fn clearing_completed_members_does_not_walk_back_the_batch_roll_up() {
+        let batch_id = Uuid::from_u128(0x9_900);
+        let first = Uuid::from_u128(0x9_901);
+        let second = Uuid::from_u128(0x9_902);
+
+        let stranded = Uuid::from_u128(0x9_903);
+
+        let mut members: Vec<TransferJob> = [first, second]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut job = stored_job(id, TransferJobState::Queued, index as u64 + 1);
+                job.batch_id = Some(batch_id);
+                job
+            })
+            .collect();
+        // A third member that Clear-completed leaves behind — a failed row is
+        // what keeps the batch record itself alive past the clear, so the
+        // assertions below are about the roll-up and not about compaction.
+        let mut failed = stored_job(
+            stranded,
+            TransferJobState::Failed {
+                error: "retry me".into(),
+            },
+            3,
+        );
+        failed.batch_id = Some(batch_id);
+        members.push(failed);
+
+        let mut document = document_with(members);
+        document.batches.insert(batch_id, {
+            let mut info = new_batch(batch_id);
+            info.expansion = BatchExpansion::Complete;
+            info.discovered_files = 3;
+            info.discovered_bytes = 300;
+            info
+        });
+
+        let runner = Arc::new(GatedRunner::default());
+        let releases = [runner.gate(first), runner.gate(second)];
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 2).await;
+        for (id, release) in [first, second].into_iter().zip(releases) {
+            let reporter = runner.reporter(id);
+            reporter.checking().await.unwrap();
+            reporter
+                .fingerprinted(
+                    SourceFingerprint {
+                        size: 100,
+                        modified_token: Some("source-v1".into()),
+                    },
+                    100,
+                    ManagedArtifacts {
+                        partial_path: format!("/tmp/{id}.partial"),
+                        backup_path: format!("/tmp/{id}.backup"),
+                    },
+                )
+                .await
+                .unwrap();
+            release
+                .send(RunnerResult::Completed(CompletionResult::Transferred))
+                .unwrap();
+            wait_for_job(&harness.handle, id, |job| {
+                matches!(job.state, TransferJobState::Completed { .. })
+            })
+            .await;
+        }
+
+        let before = harness.handle.snapshot().batches[0].clone();
+        assert_eq!(before.files_done, 2);
+        assert_eq!(before.bytes_done, 200);
+
+        assert_eq!(harness.handle.clear_completed().await.unwrap(), 2);
+
+        let snapshot = harness.handle.snapshot();
+        assert_eq!(
+            snapshot.jobs.len(),
+            1,
+            "both completed members were cleared; only the failed one remains"
+        );
+        assert_eq!(
+            snapshot.batches[0].files_done, 2,
+            "clearing completed members must not snap the roll-up back to 0/3"
+        );
+        assert_eq!(snapshot.batches[0].bytes_done, 200);
+
+        // The counters are part of the persisted record, so a restart from
+        // this store reports the same progress.
+        let on_disk = harness.store.load().unwrap().into_document();
+        assert_eq!(on_disk.batches[&batch_id].completed_files, 2);
+        assert_eq!(on_disk.batches[&batch_id].completed_bytes, 200);
+        let restarted = ActorHarness::with_document(on_disk);
+        let restored = restarted.handle.snapshot().batches[0].clone();
+        assert_eq!(restored.files_done, 2, "roll-up survives a restart");
+        assert_eq!(restored.bytes_done, 200);
+    }
+
+    /// The same regression reached through the automatic history cap rather
+    /// than an explicit clear: `TRANSFER_HISTORY_LIMIT` is a const, so this
+    /// drives `compact_history` directly with one member over the cap.
+    #[test]
+    fn history_compaction_keeps_the_batch_roll_up_monotonic() {
+        let batch_id = Uuid::from_u128(0x9_910);
+        let member_count = TRANSFER_HISTORY_LIMIT + 1;
+        let jobs = (0..member_count)
+            .map(|index| {
+                let mut job = stored_job(
+                    Uuid::from_u128(0xA_000 + index as u128),
+                    TransferJobState::Completed {
+                        result: CompletionResult::Transferred,
+                    },
+                    index as u64 + 1,
+                );
+                job.batch_id = Some(batch_id);
+                job.total_bytes = 100;
+                job.bytes_transferred = 100;
+                job.finished_at_ms = Some(index as u64 + 1);
+                job
+            })
+            .collect();
+        let mut document = document_with(jobs);
+        document.batches.insert(batch_id, {
+            let mut info = new_batch(batch_id);
+            info.expansion = BatchExpansion::Complete;
+            info.discovered_files = member_count as u64;
+            info.discovered_bytes = member_count as u64 * 100;
+            info.completed_files = member_count as u64;
+            info.completed_bytes = member_count as u64 * 100;
+            info
+        });
+
+        compact_history(&mut document);
+
+        assert_eq!(
+            document.jobs.len(),
+            TRANSFER_HISTORY_LIMIT,
+            "the oldest terminal member was trimmed"
+        );
+        let aggregate = derive_batch_aggregates(&document.batches, &document.jobs)
+            .into_iter()
+            .next()
+            .expect("the batch still has members");
+        assert_eq!(
+            aggregate.files_done, member_count as u64,
+            "a member aging out of history must not decrement the roll-up"
+        );
+        assert_eq!(aggregate.bytes_done, member_count as u64 * 100);
+    }
+
     fn new_batch(id: Uuid) -> BatchInfo {
         BatchInfo {
             id,
@@ -4136,6 +4306,8 @@ mod tests {
             discovered_files: 0,
             discovered_bytes: 0,
             skipped: Vec::new(),
+            completed_files: 0,
+            completed_bytes: 0,
             created_at_ms: 10,
         }
     }
@@ -4422,6 +4594,8 @@ mod tests {
                     discovered_files: 1,
                     discovered_bytes: 100,
                     skipped: Vec::new(),
+                    completed_files: 0,
+                    completed_bytes: 0,
                     created_at_ms: 10,
                 },
             );

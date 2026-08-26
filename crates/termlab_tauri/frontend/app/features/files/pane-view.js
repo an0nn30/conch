@@ -433,38 +433,52 @@
       });
     });
 
-    // Drop target (Task 7) — listens on .fp-table-wrap, a fresh element
-    // every render (rebuilt by the innerHTML template above), so binding
-    // here every call never accumulates duplicate listeners the way binding
-    // directly on `el` (which persists across renders) would. The
-    // is-drop-target class still lands on `el` itself — the .fp-pane root
-    // styles/panels.css targets — not on the listening element.
+    // Drop target (Task 7) — bound on the .fp-pane ROOT (`el`): the element
+    // that carries the is-drop-target highlight styles/panels.css lights up
+    // edge to edge, and the same element the native (OS) drop path in
+    // files-panel.js hit-tests. Listening on the inner .fp-table-wrap
+    // instead left a highlighted pane ignoring releases over its own
+    // toolbar or footer.
+    //
+    // `el` persists across renders (only its innerHTML is rebuilt), so the
+    // listeners are attached exactly once and read their live inputs — the
+    // pane's current path, this render's onDropEntries — from a context
+    // object refreshed on every call. Re-binding per render would stack
+    // duplicate listeners; capturing this render's values would go stale.
+    //
     // Same-kind drags (local-on-local, remote-on-remote) and foreign drags
     // (no entry MIME — OS file drops are Task 8's territory) fall through
     // untouched: no preventDefault, so the browser's/Tauri's own handling
     // still applies.
-    const tableWrap = el.querySelector('.fp-table-wrap');
-    if (tableWrap) {
-      const targetPaneKind = isRemote ? 'remote' : 'local';
-      tableWrap.addEventListener('dragover', (event) => {
+    const dropContext = el.__termlabPaneDropContext || {};
+    dropContext.targetPaneKind = isRemote ? 'remote' : 'local';
+    dropContext.currentPath = pane.currentPath;
+    dropContext.onDropEntries = d.onDropEntries;
+    if (!el.__termlabPaneDropContext) {
+      el.__termlabPaneDropContext = dropContext;
+      el.addEventListener('dragover', (event) => {
         // Deliberately types-only — never getData — so the accept decision
         // works on engines that restrict getData during dragover. See
         // dndSourceKindFromTypes's comment above.
         const sourceKind = dndSourceKindFromTypes(event.dataTransfer);
-        if (!sourceKind || sourceKind === targetPaneKind) return;
+        if (!sourceKind || sourceKind === dropContext.targetPaneKind) return;
         event.preventDefault();
         el.classList.add('is-drop-target');
       });
-      tableWrap.addEventListener('dragleave', () => {
+      el.addEventListener('dragleave', () => {
         el.classList.remove('is-drop-target');
       });
-      tableWrap.addEventListener('drop', (event) => {
+      el.addEventListener('drop', (event) => {
         el.classList.remove('is-drop-target');
         const source = dndReadEntryPayload(event.dataTransfer);
-        if (!source || source.paneKind === targetPaneKind) return;
+        if (!source || source.paneKind === dropContext.targetPaneKind) return;
         event.preventDefault();
-        if (typeof d.onDropEntries === 'function') {
-          d.onDropEntries({ source, targetPaneKind, targetPath: pane.currentPath });
+        if (typeof dropContext.onDropEntries === 'function') {
+          dropContext.onDropEntries({
+            source,
+            targetPaneKind: dropContext.targetPaneKind,
+            targetPath: dropContext.currentPath,
+          });
         }
       });
     }

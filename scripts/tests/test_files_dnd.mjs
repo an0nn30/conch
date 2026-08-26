@@ -238,14 +238,14 @@ function renderWithDnd(view, p, deps) {
 {
   const view = loadPaneView();
   const localPane = pane({ isLocal: true, currentPath: '/home/user' });
-  const { paneRoot, tableWrap } = renderWithDnd(view, localPane, {});
+  const { paneRoot } = renderWithDnd(view, localPane, {});
   // A real dragstart would also carry the JSON payload under ENTRY_MIME,
   // but dragover must not need it — only the marker type is set here, to
   // prove the accept decision doesn't depend on it.
   const dt = fakeDataTransfer([ENTRY_MIME, KIND_MIME_REMOTE]);
 
   const evt = dragEvent('dragover', dt);
-  tableWrap.dispatchEvent(evt);
+  paneRoot.dispatchEvent(evt);
   assert.equal(evt.defaultPrevented, true, 'opposite-kind dragover must preventDefault');
   assert.equal(paneRoot.classList.contains('is-drop-target'), true, 'opposite-kind dragover marks the pane root');
   assert.equal(dt.getDataCallCount, 0, 'dragover must decide accept/reject from types alone, never call getData');
@@ -256,11 +256,11 @@ function renderWithDnd(view, p, deps) {
 {
   const view = loadPaneView();
   const localPane = pane({ isLocal: true, currentPath: '/home/user' });
-  const { paneRoot, tableWrap } = renderWithDnd(view, localPane, {});
+  const { paneRoot } = renderWithDnd(view, localPane, {});
   const dt = fakeDataTransfer([ENTRY_MIME, KIND_MIME_LOCAL]);
 
   const evt = dragEvent('dragover', dt);
-  tableWrap.dispatchEvent(evt);
+  paneRoot.dispatchEvent(evt);
   assert.equal(evt.defaultPrevented, false, 'same-kind dragover must not preventDefault (no intra-pane move in v1)');
   assert.equal(paneRoot.classList.contains('is-drop-target'), false, 'same-kind dragover must not mark the pane root');
   assert.equal(dt.getDataCallCount, 0, 'same-kind rejection must also be decided from types alone');
@@ -271,11 +271,11 @@ function renderWithDnd(view, p, deps) {
 {
   const view = loadPaneView();
   const remotePaneObj = pane({ isLocal: false, currentPath: '/srv' });
-  const { paneRoot, tableWrap } = renderWithDnd(view, remotePaneObj, { activeRemotePaneId: 1 });
+  const { paneRoot } = renderWithDnd(view, remotePaneObj, { activeRemotePaneId: 1 });
   const dt = fakeDataTransfer(['Files']);
 
   const evt = dragEvent('dragover', dt);
-  tableWrap.dispatchEvent(evt);
+  paneRoot.dispatchEvent(evt);
   assert.equal(evt.defaultPrevented, false, 'a drag without either kind marker must fall through untouched');
   assert.equal(paneRoot.classList.contains('is-drop-target'), false);
   assert.equal(dt.getDataCallCount, 0);
@@ -287,7 +287,7 @@ function renderWithDnd(view, p, deps) {
   const view = loadPaneView();
   const remotePaneObj = pane({ isLocal: false, currentPath: '/srv/uploads' });
   const dropCalls = [];
-  const { paneRoot, tableWrap } = renderWithDnd(view, remotePaneObj, {
+  const { paneRoot } = renderWithDnd(view, remotePaneObj, {
     activeRemotePaneId: 9,
     onDropEntries: (payload) => dropCalls.push(payload),
   });
@@ -298,7 +298,7 @@ function renderWithDnd(view, p, deps) {
   dt.setData(ENTRY_MIME, JSON.stringify(source));
 
   const evt = dragEvent('drop', dt);
-  tableWrap.dispatchEvent(evt);
+  paneRoot.dispatchEvent(evt);
 
   assert.equal(dropCalls.length, 1, 'an opposite-kind drop must call onDropEntries exactly once');
   assert.deepEqual(j(dropCalls[0]), {
@@ -315,14 +315,14 @@ function renderWithDnd(view, p, deps) {
   const view = loadPaneView();
   const localPaneObj = pane({ isLocal: true, currentPath: '/home/user' });
   const dropCalls = [];
-  const { paneRoot, tableWrap } = renderWithDnd(view, localPaneObj, {
+  const { paneRoot } = renderWithDnd(view, localPaneObj, {
     onDropEntries: (payload) => dropCalls.push(payload),
   });
   paneRoot.classList.add('is-drop-target');
 
   const dt = fakeDataTransfer([ENTRY_MIME]);
   dt.setData(ENTRY_MIME, JSON.stringify({ paneKind: 'local', paneId: null, path: '/home/user/x', isDir: false }));
-  tableWrap.dispatchEvent(dragEvent('drop', dt));
+  paneRoot.dispatchEvent(dragEvent('drop', dt));
 
   assert.equal(dropCalls.length, 0, 'a same-kind drop must not call onDropEntries');
   assert.equal(paneRoot.classList.contains('is-drop-target'), false, 'drop always clears the class, even as a no-op');
@@ -332,10 +332,78 @@ function renderWithDnd(view, p, deps) {
 {
   const view = loadPaneView();
   const localPaneObj = pane({ isLocal: true, currentPath: '/home/user' });
-  const { paneRoot, tableWrap } = renderWithDnd(view, localPaneObj, {});
+  const { paneRoot } = renderWithDnd(view, localPaneObj, {});
   paneRoot.classList.add('is-drop-target');
-  tableWrap.dispatchEvent(dragEvent('dragleave'));
+  paneRoot.dispatchEvent(dragEvent('dragleave'));
   assert.equal(paneRoot.classList.contains('is-drop-target'), false);
+}
+
+// -- the drop target is the pane ROOT, not the inner table wrap: a release
+// over the pane's toolbar or footer — anywhere inside the edge-to-edge
+// is-drop-target highlight, and anywhere the native drop path hit-tests —
+// still routes, and the table wrap carries no listeners of its own. -------
+{
+  const view = loadPaneView();
+  const remotePaneObj = pane({ isLocal: false, currentPath: '/srv/uploads' });
+  const dropCalls = [];
+  const { paneRoot, tableWrap } = renderWithDnd(view, remotePaneObj, {
+    activeRemotePaneId: 9,
+    onDropEntries: (payload) => dropCalls.push(payload),
+  });
+
+  const source = { paneKind: 'local', paneId: null, path: '/home/user/report.pdf', isDir: false };
+  const dt = fakeDataTransfer([ENTRY_MIME, KIND_MIME_LOCAL]);
+  dt.setData(ENTRY_MIME, JSON.stringify(source));
+
+  // The inner table wrap is inert now — the pane root owns the whole area.
+  const wrapOver = dragEvent('dragover', dt);
+  tableWrap.dispatchEvent(wrapOver);
+  tableWrap.dispatchEvent(dragEvent('drop', dt));
+  assert.equal(wrapOver.defaultPrevented, false, 'the table wrap must no longer bind dragover itself');
+  assert.equal(dropCalls.length, 0, 'the table wrap must no longer bind drop itself');
+
+  // A drop on the pane root (outside the table wrap: toolbar, footer, the
+  // gap below the last row) routes exactly like one on a row.
+  const rootOver = dragEvent('dragover', dt);
+  paneRoot.dispatchEvent(rootOver);
+  assert.equal(rootOver.defaultPrevented, true, 'dragover anywhere on the pane root accepts');
+  assert.equal(paneRoot.classList.contains('is-drop-target'), true);
+
+  paneRoot.dispatchEvent(dragEvent('drop', dt));
+  assert.equal(dropCalls.length, 1, 'a drop on the pane root outside the table wrap must route');
+  assert.deepEqual(j(dropCalls[0]), {
+    source,
+    targetPaneKind: 'remote',
+    targetPath: '/srv/uploads',
+  });
+}
+
+// -- re-rendering the same pane root neither stacks duplicate listeners nor
+// keeps the previous render's stale path/handler. --------------------------
+{
+  const view = loadPaneView();
+  const paneObj = pane({ isLocal: false, currentPath: '/srv/first' });
+  const firstCalls = [];
+  const { paneRoot } = renderWithDnd(view, paneObj, {
+    activeRemotePaneId: 9,
+    onDropEntries: (payload) => firstCalls.push(payload),
+  });
+
+  // Second render of the SAME root element, with a new path and handler.
+  const secondCalls = [];
+  paneObj.currentPath = '/srv/second';
+  view.renderPane(paneObj, paneRoot, {
+    activeRemotePaneId: 9,
+    onDropEntries: (payload) => secondCalls.push(payload),
+  });
+
+  const dt = fakeDataTransfer([ENTRY_MIME, KIND_MIME_LOCAL]);
+  dt.setData(ENTRY_MIME, JSON.stringify({ paneKind: 'local', paneId: null, path: '/home/user/a', isDir: false }));
+  paneRoot.dispatchEvent(dragEvent('drop', dt));
+
+  assert.equal(firstCalls.length, 0, 'the previous render\'s handler must not fire');
+  assert.equal(secondCalls.length, 1, 'a re-render must route through the latest handler exactly once');
+  assert.equal(secondCalls[0].targetPath, '/srv/second', 'the drop uses the pane\'s current path');
 }
 
 // -- dragend on the SOURCE row (review finding 1): a drag cancelled mid-
@@ -369,7 +437,7 @@ function renderWithDnd(view, p, deps) {
 
   // dragover on the opposite (remote) pane accepts and lights its root.
   const overEvt = dragEvent('dragover', dt);
-  remoteRendered.tableWrap.dispatchEvent(overEvt);
+  remoteRendered.paneRoot.dispatchEvent(overEvt);
   assert.equal(overEvt.defaultPrevented, true);
   assert.equal(remoteRoot.classList.contains('is-drop-target'), true, 'setup: dragover must have lit the target pane');
 
@@ -497,7 +565,14 @@ async function setupLogicHarness() {
     showColumnMenu: () => {},
     showRowContextMenu: () => {},
   };
-  sandbox.termlabFilesTransfers = {};
+  // A minimal transfer controller so the folder-transfer path can be shown
+  // to register the batch it started (finding 3).
+  const watchedBatches = [];
+  sandbox.termlabFilesTransfers = {
+    createController: () => ({
+      watchFolderBatch: (batchId) => { watchedBatches.push(batchId); },
+    }),
+  };
 
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
@@ -537,7 +612,7 @@ async function setupLogicHarness() {
 
   return {
     sandbox, invoke, invokeCalls, toastCalls, renderCalls, listeners,
-    initialLocalRender, initialRemoteRender, localStatByPath,
+    initialLocalRender, initialRemoteRender, localStatByPath, watchedBatches,
   };
 }
 
@@ -644,6 +719,11 @@ function lastCall(renderCalls, prefix) {
     destPath: '/srv/pinned',
   }, 'folder drop must hand destPath AS-IS — the backend appends the basename');
   assert.equal(h.toastCalls.some((c) => c.kind === 'info'), true, 'a folder drop announces the started transfer');
+  // Finding 3: the batch this drop created is registered with the transfer
+  // controller, which is the only thing that can speak up when the folder
+  // turns out to hold no files at all (zero member jobs = no other notice).
+  assert.deepEqual(h.watchedBatches, ['batch-id'],
+    'a folder drop registers the batch it started');
   console.log('B4. connected folder drop (local -> remote, recursive upload): ok');
 }
 
@@ -945,6 +1025,8 @@ console.log('files dnd (native-drop pure): all assertions passed');
     destPath: '/srv/pinned',
   });
   assert.equal(h.toastCalls.some((c) => c.kind === 'info'), true, 'a folder drop announces the started transfer');
+  assert.deepEqual(h.watchedBatches, ['batch-id'],
+    'an OS folder drop registers its batch too (finding 3)');
   console.log('D2. native drop, connected, directory: stats then recurses: ok');
 }
 
