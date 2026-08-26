@@ -1126,6 +1126,41 @@
     });
   }
 
+  // Whole-folder transfers hand the tree to the backend's recursive-expansion
+  // command (`transfer_enqueue_recursive`) instead of walking it client-side.
+  // `destPath` is the opposite pane's current directory as-is — never
+  // joined with the folder's own name — because the backend appends that
+  // basename itself (see features/files/data-service.js's transferRecursive).
+  async function doUploadFolder(entry) {
+    if (!entry || !activeRemotePaneId) return;
+    const sourcePath = joinPath(localPane.currentPath, entry.name);
+    const destPath = remotePane.currentPath;
+    try {
+      if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
+        throw new Error('Files data service unavailable: transferRecursive');
+      }
+      await filesDataService.transferRecursive(invoke, activeRemotePaneId, 'upload', sourcePath, destPath);
+      window.toast.info('Folder transfer started', entry.name);
+    } catch (e) {
+      window.toast.error('Upload Failed', String(e));
+    }
+  }
+
+  async function doDownloadFolder(entry) {
+    if (!entry || !activeRemotePaneId) return;
+    const sourcePath = joinPath(remotePane.currentPath, entry.name);
+    const destPath = localPane.currentPath;
+    try {
+      if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
+        throw new Error('Files data service unavailable: transferRecursive');
+      }
+      await filesDataService.transferRecursive(invoke, activeRemotePaneId, 'download', sourcePath, destPath);
+      window.toast.info('Folder transfer started', entry.name);
+    } catch (e) {
+      window.toast.error('Download Failed', String(e));
+    }
+  }
+
   async function doDownloadToPath(entry) {
     if (!entry || !activeRemotePaneId) return;
     if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
@@ -1272,6 +1307,14 @@
         title: noSession ? sessionTitle : undefined,
         action: () => doUploadToPath(entry),
       });
+      if (entry && entry.is_dir) {
+        items.push({
+          label: 'Upload Folder',
+          disabled: noSession,
+          title: noSession ? sessionTitle : undefined,
+          action: () => doUploadFolder(entry),
+        });
+      }
     } else {
       items.push({
         label: 'Download to local host',
@@ -1285,6 +1328,14 @@
         title: noSession ? sessionTitle : undefined,
         action: () => doDownloadToPath(entry),
       });
+      if (entry && entry.is_dir) {
+        items.push({
+          label: 'Download Folder',
+          disabled: noSession,
+          title: noSession ? sessionTitle : undefined,
+          action: () => doDownloadFolder(entry),
+        });
+      }
     }
 
     items.push({ type: 'separator' });

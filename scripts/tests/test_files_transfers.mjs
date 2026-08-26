@@ -87,6 +87,39 @@ vm.runInContext(source, sandbox, { filename: 'transfers.js' });
   ]);
 }
 
+// Folder transfers hand the whole tree to the backend's recursive-expansion
+// command rather than walking it from the frontend. `destPath` must stay the
+// opposite pane's current directory as-is — the backend joins the source
+// folder's own basename onto it — so this call shape is the contract the
+// context-menu wiring in files-panel.js depends on.
+{
+  const dataSandbox = {};
+  dataSandbox.window = dataSandbox;
+  vm.createContext(dataSandbox);
+  vm.runInContext(dataServiceSource, dataSandbox, { filename: 'data-service.js' });
+  const calls = [];
+  const invoke = (command, args) => {
+    calls.push({ command, args });
+    return Promise.resolve('batch-id');
+  };
+
+  await dataSandbox.termlabFilesFeatureDataService.transferRecursive(
+    invoke, 4, 'upload', '/tmp/folder', '/srv/uploads',
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    {
+      command: 'transfer_enqueue_recursive',
+      args: {
+        paneId: 4,
+        direction: 'upload',
+        sourcePath: '/tmp/folder',
+        destPath: '/srv/uploads',
+      },
+    },
+  ]);
+}
+
 // An attention state with a transfer id is an actionable control. Regressing
 // this to passive text strands the job in another tool window with no
 // discoverable recovery path from the Files workflow that created it.
