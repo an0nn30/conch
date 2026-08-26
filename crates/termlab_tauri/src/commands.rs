@@ -277,26 +277,6 @@ pub(crate) fn app_ready(window: tauri::WebviewWindow) {
     let _ = window.show();
 }
 
-/// TEMPORARY dnd-debug: appends frontend drag-and-drop diagnostics to
-/// /tmp/termlab-dnd-debug.log so live-app DnD failures can be traced layer by
-/// layer without flooding the terminal. Remove together with the frontend
-/// `[dnd-debug]` instrumentation.
-#[tauri::command]
-pub(crate) fn dnd_debug_log(message: String) {
-    use std::io::Write;
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/termlab-dnd-debug.log")
-    {
-        let _ = writeln!(file, "{timestamp} {message}");
-    }
-}
-
 #[tauri::command]
 pub(crate) fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(debug_assertions)]

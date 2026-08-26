@@ -36,11 +36,6 @@
     return (trimmed || '') + '/' + name;
   }
 
-  // Tauri v2 reports drag-drop positions in PHYSICAL pixels, while
-  // getBoundingClientRect() (what every hit-test here compares against) is
-  // in LOGICAL/CSS pixels — on a retina display (devicePixelRatio 2) a raw
-  // physical position would land roughly twice as far right/down as it
-  // should. Every consumer must scale through this before hit-testing.
   // Returns null when `position` isn't a well-formed {x, y} pair.
   // Position units differ by platform: macOS delivers drag positions in
   // LOGICAL px (proven live — the largest coordinate ever observed on a 2x
@@ -195,29 +190,7 @@
     return undefined;
   }
 
-  // TEMPORARY dnd-debug: mirrors every diagnostic line to the console AND to
-  // the launching terminal via the dnd_debug_log command. Remove with the
-  // instrumentation call sites.
-  let dndDebugInvoke = null;
-  function dndDebugSetInvoke(invoke) {
-    dndDebugInvoke = typeof invoke === 'function' ? invoke : null;
-  }
-  function dndDebug() {
-    const parts = [];
-    for (let i = 0; i < arguments.length; i += 1) {
-      const value = arguments[i];
-      parts.push(typeof value === 'string' ? value : JSON.stringify(value));
-    }
-    const message = parts.join(' ');
-    try { console.log('[dnd-debug]', message); } catch (err) { /* ignore */ }
-    if (dndDebugInvoke) {
-      try { dndDebugInvoke('dnd_debug_log', { message }).catch(() => {}); } catch (err) { /* ignore */ }
-    }
-  }
-
   global.termlabNativeDrop = {
-    dndDebug,
-    dndDebugSetInvoke,
     scaleNativeDropPosition,
     pointInRect,
     resolveNativeDrop,

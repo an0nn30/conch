@@ -300,11 +300,6 @@
         // native drag interception swallows DOM dragover/drop (macOS), the
         // drop completes over the native channel and needs this record.
         if (typeof d.onDragStart === 'function') d.onDragStart(payload);
-        // TEMPORARY dnd-debug
-        if (global.termlabNativeDrop) {
-          global.termlabNativeDrop.dndDebug('dom dragstart:', entry.name, 'kind =', kind,
-            'types now =', Array.from(dataTransfer.types || []));
-        }
       });
       // Source-side safety net: an engine that cancels a drag mid-flight
       // (Escape, dropping outside any target) fires `dragend` on the
@@ -465,20 +460,11 @@
     dropContext.onDropEntries = d.onDropEntries;
     if (!el.__termlabPaneDropContext) {
       el.__termlabPaneDropContext = dropContext;
-      // TEMPORARY dnd-debug: throttled per-pane dragover trace.
-      let dndDebugLastOver = 0;
       el.addEventListener('dragover', (event) => {
         // Deliberately types-only — never getData — so the accept decision
         // works on engines that restrict getData during dragover. See
         // dndSourceKindFromTypes's comment above.
         const sourceKind = dndSourceKindFromTypes(event.dataTransfer);
-        // TEMPORARY dnd-debug
-        if (global.termlabNativeDrop && Date.now() - dndDebugLastOver > 500) {
-          dndDebugLastOver = Date.now();
-          global.termlabNativeDrop.dndDebug('dom pane dragover:', 'target =', dropContext.targetPaneKind,
-            'sourceKind =', sourceKind,
-            'types =', event.dataTransfer ? Array.from(event.dataTransfer.types || []) : null);
-        }
         if (!sourceKind || sourceKind === dropContext.targetPaneKind) return;
         event.preventDefault();
         el.classList.add('is-drop-target');
@@ -489,11 +475,6 @@
       el.addEventListener('drop', (event) => {
         el.classList.remove('is-drop-target');
         const source = dndReadEntryPayload(event.dataTransfer);
-        // TEMPORARY dnd-debug
-        if (global.termlabNativeDrop) {
-          global.termlabNativeDrop.dndDebug('dom pane drop:', 'target =', dropContext.targetPaneKind,
-            'parsed source =', source);
-        }
         if (!source || source.paneKind === dropContext.targetPaneKind) return;
         event.preventDefault();
         if (typeof dropContext.onDropEntries === 'function') {

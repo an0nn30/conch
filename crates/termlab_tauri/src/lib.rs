@@ -794,7 +794,6 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![
             commands::app_ready,
             commands::open_devtools,
-            commands::dnd_debug_log,
             commands::set_zoom_level,
             commands::save_window_metrics,
             commands::get_zoom_level,
