@@ -143,10 +143,34 @@
     }
   }
 
+  // Fan one `onDragDropEvent` stream out to the hover/leave/drop handlers.
+  // Tauri v2 delivers OS drag events ONLY through onDragDropEvent — a plain
+  // window `listen('tauri://drag-*')` registers against a different event
+  // target and never fires (the live-app bug that motivated this seam). The
+  // event object passes through untouched so handlers keep reading
+  // `payload.position` / `payload.paths`.
+  function dispatchNativeDragDropEvent(event, handlers) {
+    const type = event && event.payload ? event.payload.type : null;
+    if (!handlers || !type) return undefined;
+    // The handler's return value passes through so async drop routing stays
+    // awaitable by callers (the test harness awaits it; production ignores it).
+    if ((type === 'enter' || type === 'over') && typeof handlers.hover === 'function') {
+      return handlers.hover(event);
+    }
+    if (type === 'leave' && typeof handlers.leave === 'function') {
+      return handlers.leave(event);
+    }
+    if (type === 'drop' && typeof handlers.drop === 'function') {
+      return handlers.drop(event);
+    }
+    return undefined;
+  }
+
   global.termlabNativeDrop = {
     scaleNativeDropPosition,
     pointInRect,
     resolveNativeDrop,
     routeNativeDropPaths,
+    dispatchNativeDragDropEvent,
   };
 })(window);

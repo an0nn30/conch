@@ -111,6 +111,7 @@
           invoke,
           listen,
           listenOnCurrentWindow,
+          currentWindow,
           layoutService,
           debouncedFitAndResize: () => debouncedFitAndResize(),
           getCurrentTab: () => currentTab(),

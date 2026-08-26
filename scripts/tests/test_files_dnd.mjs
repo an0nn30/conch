@@ -602,6 +602,17 @@ async function setupLogicHarness() {
     fitActiveTab: () => {},
     getActiveTab: () => null,
     listen: (name, handler) => { listeners[name] = handler; },
+    // Production subscribes through onDragDropEvent (plain tauri://drag-*
+    // listens never fire — the live-app bug). The harness routes the old
+    // per-event driving hooks through the ONE captured handler with typed
+    // payloads, so every Part D case exercises the real dispatcher path.
+    onDragDropEvent: (handler) => {
+      const via = (type) => (e) => handler({ payload: { ...((e && e.payload) || {}), type } });
+      listeners['tauri://drag-enter'] = via('enter');
+      listeners['tauri://drag-over'] = via('over');
+      listeners['tauri://drag-leave'] = via('leave');
+      listeners['tauri://drag-drop'] = via('drop');
+    },
   });
   await settle();
   const initialLocalRender = lastCall(renderCalls, 'local');
@@ -1278,6 +1289,42 @@ function setupDragDropHarness(rectOverride) {
   assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['write_to_pty'],
     'at devicePixelRatio 2, the same physical (150,150) scales to logical (75,75) and hits');
   console.log('E6. terminal drop: devicePixelRatio scales physical position before hit-testing: ok');
+}
+
+
+// --- Part F: native drag-drop event dispatch (the subscription-shape fix) ---
+// Tauri v2 delivers OS drag events ONLY through onDragDropEvent (window-level
+// listen('tauri://drag-*') never fires — the live-app bug this fixed). The
+// dispatcher fans one onDragDropEvent stream out to the existing handlers,
+// passing the event through untouched so payload.position/paths reach them.
+{
+  const calls = [];
+  const handlers = {
+    hover: (e) => calls.push(['hover', e]),
+    leave: (e) => calls.push(['leave', e]),
+    drop: (e) => calls.push(['drop', e]),
+  };
+  const dispatch = loadNativeDrop().dispatchNativeDragDropEvent;
+  assert.equal(typeof dispatch, 'function', 'native-drop must export dispatchNativeDragDropEvent');
+
+  const enter = { payload: { type: 'enter', position: { x: 1, y: 2 } } };
+  const over = { payload: { type: 'over', position: { x: 3, y: 4 } } };
+  const leave = { payload: { type: 'leave' } };
+  const drop = { payload: { type: 'drop', position: { x: 5, y: 6 }, paths: ['/a'] } };
+  dispatch(enter, handlers);
+  dispatch(over, handlers);
+  dispatch(leave, handlers);
+  dispatch(drop, handlers);
+  assert.deepEqual(calls.map(([kind]) => kind), ['hover', 'hover', 'leave', 'drop'],
+    'enter and over both hover; leave and drop route to their handlers');
+  assert.equal(calls[0][1], enter, 'the event object passes through untouched');
+  assert.equal(calls[3][1], drop, 'drop event passes through untouched');
+
+  calls.length = 0;
+  dispatch(null, handlers);
+  dispatch({}, handlers);
+  dispatch({ payload: { type: 'mystery' } }, handlers);
+  assert.deepEqual(calls, [], 'null, payloadless, and unknown-type events are ignored');
 }
 
 console.log('files dnd (terminal drop collision fix): all assertions passed');

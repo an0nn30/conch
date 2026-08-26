@@ -514,15 +514,21 @@
         refreshHostCombo();
       });
       // OS file drops onto the remote pane (Task 8). Tauri v2 delivers these
-      // as window-level events carrying real filesystem paths — not the DOM
-      // drag events pane-view.js's intra-app drag/drop uses (Task 7), which
-      // never see real paths for an OS drop. `tauri://drag-enter`/`-over`
-      // share the same hover-highlight handling; `-leave` always clears;
-      // `-drop` hit-tests and routes. See handleNativeDragHover/-Leave/-Drop.
-      opts.listen('tauri://drag-enter', handleNativeDragHover);
-      opts.listen('tauri://drag-over', handleNativeDragHover);
-      opts.listen('tauri://drag-leave', handleNativeDragLeave);
-      opts.listen('tauri://drag-drop', handleNativeDrop);
+      // ONLY through the window's onDragDropEvent API — a plain
+      // `listen('tauri://drag-*')` registers against a different event target
+      // and never fires (verified live: drops were silently ignored). One
+      // subscription fans out to the hover/leave/drop handlers via the
+      // dispatcher; `enter`/`over` share the hover-highlight handling,
+      // `leave` always clears, `drop` hit-tests and routes.
+      if (typeof opts.onDragDropEvent === 'function' && window.termlabNativeDrop) {
+        opts.onDragDropEvent((event) => {
+          window.termlabNativeDrop.dispatchNativeDragDropEvent(event, {
+            hover: handleNativeDragHover,
+            leave: handleNativeDragLeave,
+            drop: handleNativeDrop,
+          });
+        });
+      }
     }
 
     loadFollowPathSetting();

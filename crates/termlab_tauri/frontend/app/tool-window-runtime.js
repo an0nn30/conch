@@ -3,6 +3,13 @@
     const invoke = deps.invoke;
     const listen = deps.listen;
     const listenOnCurrentWindow = deps.listenOnCurrentWindow;
+    // Tauri v2 drag-drop events only arrive through onDragDropEvent — plain
+    // window listens never fire for them; passed to the files panel for OS
+    // file drops (see app/features/files/native-drop.js's dispatcher).
+    const onDragDropEvent = deps.currentWindow
+      && typeof deps.currentWindow.onDragDropEvent === 'function'
+      ? (handler) => deps.currentWindow.onDragDropEvent(handler)
+      : null;
     const layoutService = deps.layoutService
       || (global.termlabLayoutService && typeof global.termlabLayoutService.create === 'function'
         ? global.termlabLayoutService.create({ invoke })
@@ -113,6 +120,7 @@
             global.filesPanel.init({
               invoke,
               listen: listenOnCurrentWindow,
+              onDragDropEvent,
               panelEl,
               panelWrapEl: document.getElementById('left-sidebar'),
               resizeHandleEl: null,
