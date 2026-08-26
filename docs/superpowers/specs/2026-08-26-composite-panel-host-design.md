@@ -229,6 +229,9 @@ No event payload changes — dock/hide/abort still name only the host tool id.
   the host.
 - [ ] Drag the divider between SFTP and Transfers in the host.
 - [ ] Start a transfer: progress is visible in the host.
-- [ ] Dock: both return, prior active/closed state preserved.
+- [ ] Dock: both return, prior active/closed state preserved. In the default
+  layout SFTP and Transfers share bottom-left (one active slot), so after
+  dock-back Transfers correctly ends up closed there — the host takes the
+  slot; this is not a bug.
 - [ ] Restart while popped out: composite is restored.
 - [ ] Hide the host, then summon it from the rail.

@@ -128,7 +128,10 @@ function makeZoneEl(zoneName) {
 // Rust — as { cmd, args }, resolving each with a fake, distinct reqId so the
 // generation-token bookkeeping (markHostRequested/markHostOpened) never
 // stalls waiting on a real Tauri round trip.
-function loadManager() {
+// `opts.invoke`, when given, REPLACES the default resolve-everything stub —
+// used by the I3 regression (scenario 12) to make `focus_panel_host` and
+// `open_panel_host` reject so summonWindowHost's terminal failure path runs.
+function loadManager(opts) {
   const body = makeElement('body');
   const zoneEls = new Map();
   for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
@@ -137,10 +140,12 @@ function loadManager() {
 
   const calls = { invokes: [] };
   let nextReqId = 1;
-  const invoke = (cmd, args) => {
-    calls.invokes.push({ cmd, args });
-    return Promise.resolve(nextReqId++);
-  };
+  const invoke = (opts && typeof opts.invoke === 'function')
+    ? (cmd, args) => { calls.invokes.push({ cmd, args }); return Promise.resolve().then(() => opts.invoke(cmd, args)); }
+    : (cmd, args) => {
+      calls.invokes.push({ cmd, args });
+      return Promise.resolve(nextReqId++);
+    };
 
   const sandbox = {
     console,
@@ -366,6 +371,93 @@ const COMPANION = { title: 'Transfers', type: 'builtin', defaultZone: 'bottom-ri
   const actionable = items.filter((i) => !i.separator);
   assert.ok(actionable.every((i) => i.disabled === true),
     'every actionable entry disabled while suppressed');
+}
+
+// --- 10. I1: away-button drag must not resurrect a suppressed companion ------
+// beginStripDrag/endStripDrag(true) funnels into moveTo() for ANY strip
+// button, including an "away" one (see makeStripBtn's `away` branch, which
+// only intercepts the ordinary click — pointerdown->drag is wired
+// unconditionally). moveTo()'s docked branch has no suppression guard, so a
+// drag of the companion's own away button would re-dock and reactivate it
+// while the host still owns it.
+{
+  const { twm } = loadManager();
+  twm.register('file-explorer', HOST);
+  twm.register('transfer-center', COMPANION);
+  twm.setViewMode('file-explorer', 'window');
+  assert.strictEqual(twm.isCompanionSuppressed('transfer-center'), true, 'sanity: companion suppressed');
+  const zoneBefore = twm.getZoneForWindow('transfer-center');
+
+  twm.moveTo('transfer-center', 'left-top');
+
+  assert.strictEqual(twm.getZoneForWindow('transfer-center'), zoneBefore,
+    'suppressed companion must not change zone via moveTo/drag');
+  assert.strictEqual(twm.isVisible('transfer-center'), false,
+    'suppressed companion must not become visible via moveTo/drag');
+  assert.strictEqual(twm.isCompanionSuppressed('transfer-center'), true,
+    'suppression must remain intact after the no-op moveTo');
+}
+
+// --- 11. I2: firstDockableIn must skip a suppressed companion too ------------
+// unregister()/moveTo() fall back to firstDockableIn(zone.windows) to pick a
+// new zone.activeId. It already skips window-mode ids (F1 fix) but not
+// SUPPRESSED companions, so removing a THIRD tool sharing the companion's
+// zone can promote the companion into zone.activeId — re-rendering a panel
+// the host still owns and leaking "suppressed" into the persisted active map.
+const THIRD = { title: 'Third Tool', type: 'builtin', defaultZone: 'bottom-right', renderFn: () => null };
+{
+  const { twm } = loadManager();
+  twm.register('file-explorer', HOST);
+  twm.register('transfer-center', COMPANION);
+  twm.register('third-tool', THIRD);
+  twm.activate('third-tool'); // third-tool is bottom-right's active occupant
+  twm.setViewMode('file-explorer', 'window'); // suppresses transfer-center only
+  assert.strictEqual(twm.isCompanionSuppressed('transfer-center'), true, 'sanity: companion suppressed');
+  assert.strictEqual(twm.isVisible('third-tool'), true, 'sanity: third tool active before unregister');
+
+  twm.unregister('third-tool');
+
+  assert.strictEqual(twm.isVisible('transfer-center'), false,
+    'suppressed companion must not be promoted/rendered when its zone-mate is unregistered');
+  assert.strictEqual(twm.isCompanionSuppressed('transfer-center'), true,
+    'suppression must remain intact after unregister');
+  assert.notStrictEqual(twm.getActiveZoneAssignments()['bottom-right'], 'transfer-center',
+    'suppressed companion must not leak into the persisted active-zone map');
+}
+
+// --- 12. I3: terminal summonWindowHost failure must lift companions ----------
+// summonWindowHost's fallback chain is focus_panel_host -> (on reject)
+// open_panel_host -> (on reject) resetToDock. When BOTH invokes reject the
+// host is left permanently in a broken state; without lifting companions the
+// suppressed companion has no escape hatch left (its own host is gone, but
+// it never finds out).
+{
+  const invoke = (cmd) => {
+    if (cmd === 'focus_panel_host' || cmd === 'open_panel_host') {
+      return Promise.reject(new Error('no host available'));
+    }
+    return Promise.resolve(1);
+  };
+  const { twm } = loadManager({ invoke });
+  twm.setPersistedViewModes({ 'file-explorer': 'window' });
+  twm.setPersistedZones({ 'file-explorer': 'bottom-left', 'transfer-center': 'bottom-right' });
+  twm.setPersistedActiveZoneWindows({ 'bottom-left': 'file-explorer' });
+  twm.register('file-explorer', HOST);
+  twm.register('transfer-center', COMPANION);
+  assert.strictEqual(twm.isCompanionSuppressed('transfer-center'), true,
+    'sanity: companion suppressed from persisted window-mode host');
+
+  // Registration queued the host in pendingWindowSummons (summonImmediately is
+  // false at register time); draining it drives summonWindowHost() for real,
+  // exercising both invoke rejections in sequence.
+  twm.summonPendingWindowHosts();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.strictEqual(twm.isCompanionSuppressed('transfer-center'), false,
+    'suppression must lift once the host summon terminally fails');
+  twm.activate('transfer-center');
+  assert.strictEqual(twm.isVisible('transfer-center'), true,
+    'companion must be activatable again after the lift');
 }
 
 console.log('test_composite_host: all assertions passed');

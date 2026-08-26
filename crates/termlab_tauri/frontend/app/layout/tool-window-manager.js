@@ -774,7 +774,13 @@
           .then((reqId) => markHostOpened(id, issue, reqId));
       })
       .catch(() => {
+        // Both focus and open failed: no host is coming for this id, popped-out
+        // or not. Lift companions here too, not just in notifyHostAborted/
+        // dockFromWindowMode/unregister — otherwise this is a dead end with
+        // every other escape hatch inert and the companion suppressed forever
+        // (I3, branch review).
         resetToDock(id);
+        liftCompanionsFor(id);
         refreshZoneChrome(tw.zone);
       });
   }
@@ -875,6 +881,12 @@
     const tw = toolWindows.get(id);
     if (!tw || tw.zone === targetZone) return;
     if (!zones[targetZone] || !zones[targetZone].contentEl) return;
+    // A suppressed companion has no docked presence to move — its host still
+    // owns it. Reachable via the away strip button's pointerdown->drag path
+    // (makeStripBtn wires beginStripDrag on every button, away ones included;
+    // only the plain click is intercepted), which would otherwise re-dock and
+    // reactivate it out from under the host (see I1, branch review).
+    if (companionSuppressions.has(id)) return;
 
     const oldZoneName = tw.zone;
     const oldZone = zones[oldZoneName];
@@ -1735,11 +1747,14 @@
 
   // A zone's fallback pick when a panel is revealed with nothing active in it.
   // Popped-out windows are skipped: revealing a sidebar must never yank an OS
-  // window onto the screen.
+  // window onto the screen. A suppressed companion is skipped too — it has no
+  // docked presence either, its host is rendering it elsewhere, and promoting
+  // it here would re-render a panel the host still owns and leak "suppressed"
+  // into the persisted active-zone map (I2, branch review).
   function firstDockableIn(list) {
     if (!list) return null;
     for (const wid of list) {
-      if (getViewMode(wid) === VIEW_MODE_DOCK) return wid;
+      if (getViewMode(wid) === VIEW_MODE_DOCK && !companionSuppressions.has(wid)) return wid;
     }
     return null;
   }
