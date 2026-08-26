@@ -242,8 +242,9 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
 
   assert.deepStrictEqual(
     plain(invokeCalls),
-    [{ cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts' } }],
-    'selecting Window must invoke open_panel_host with the id AND the title',
+    [{ cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts', companionIds: [] } }],
+    'selecting Window must invoke open_panel_host with the id AND the title, and companionIds '
+    + '(empty here — this registration carries no companions)',
   );
   assert.strictEqual(twm.getViewModes()['ssh-sessions'], 'window');
   assert.strictEqual(content.children.length, 0, 'the panel element must be DETACHED from its zone');
@@ -327,7 +328,7 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
   twm.toggle('ssh-sessions');
   await tick();
   assert.deepStrictEqual(invokeCalls.map((c) => c.cmd), ['focus_panel_host', 'open_panel_host']);
-  assert.deepStrictEqual(plain(invokeCalls[1].args), { toolWindowId: 'ssh-sessions', title: 'Hosts' });
+  assert.deepStrictEqual(plain(invokeCalls[1].args), { toolWindowId: 'ssh-sessions', title: 'Hosts', companionIds: [] });
   assert.strictEqual(twm.getViewModes()['ssh-sessions'], 'window');
 }
 
@@ -528,7 +529,7 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
 
   assert.deepStrictEqual(plain(invokeCalls), [
     { cmd: 'focus_panel_host', args: { toolWindowId: 'ssh-sessions' } },
-    { cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts' } },
+    { cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts', companionIds: [] } },
   ], 'only the previously-open window-mode id is summoned, via focus then the '
     + 'open fallback (no host exists after a relaunch)');
   assert.strictEqual(twm.getViewModes().tunnels, 'window',

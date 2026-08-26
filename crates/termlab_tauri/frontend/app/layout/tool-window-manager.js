@@ -47,6 +47,13 @@
   const VIEW_MODE_DOCK = 'dock';
   const VIEW_MODE_WINDOW = 'window';
   const viewModes = new Map();   // id → 'dock' | 'window'
+  // companionId → { hostId, wasActive } while the companion rides inside a
+  // live composite host; nothing here persists — dock/abort/unregister of
+  // the host lifts it, restart re-derives it from the host's own summon.
+  const companionSuppressions = new Map();
+  // Registration order on boot: the host tool can enter window mode before
+  // its companion's register() call arrives.
+  const pendingCompanionSuppressions = new Map(); // companionId → hostId
   // Last known panel-host visibility per popped-out id. Drives the rail
   // button's lit state and the toggle routing; kept in sync by the
   // panel-host-shown/hidden events the parent receives from Rust.
@@ -243,6 +250,10 @@
       el:       null,
       renderRootEl: null,
       active:   false,
+      // Companion tool windows this one carries when it pops into its own
+      // window (a "composite host") — e.g. SFTP carries the transfer center.
+      // { id, position }[]; consumed by companionIdsFor()/suppressCompanionsFor().
+      companions: Array.isArray(opts.companions) ? opts.companions.filter((c) => c && c.id) : [],
     };
     toolWindows.set(id, tw);
     zones[zone].windows.push(id);
@@ -275,7 +286,31 @@
         tw.active = true;
         if (summonImmediately) summonWindowHost(id);
         else pendingWindowSummons.add(id);
+        // The host is visible/popped as of the saved layout, so its
+        // companions are riding along whether or not they have registered
+        // yet — a registered one is suppressed on the spot, an unregistered
+        // one is queued for the moment its own register() call arrives.
+        for (const c of tw.companions) {
+          const cid = c && c.id;
+          if (!cid || cid === id) continue;
+          if (toolWindows.has(cid)) suppressCompanion(cid, id);
+          else pendingCompanionSuppressions.set(cid, id);
+        }
       }
+      updateZone(zone);
+      updateSidebar(side);
+      updateBottomZone();
+      updateStrips();
+      return;
+    }
+
+    // This id was queued as a companion by a composite host that registered
+    // (and was already popped out) before this arrived. Absorb it straight
+    // into suppression rather than letting it activate/restore normally.
+    if (pendingCompanionSuppressions.has(id)) {
+      const hostId = pendingCompanionSuppressions.get(id);
+      pendingCompanionSuppressions.delete(id);
+      suppressCompanion(id, hostId);
       updateZone(zone);
       updateSidebar(side);
       updateBottomZone();
@@ -352,6 +387,11 @@
     hostReqIds.delete(id);
     pendingWindowSummons.delete(id);
     toolWindows.delete(id);
+    // A removed composite host must not leave its companions suppressed
+    // forever, and a removed companion must not linger in either map.
+    liftCompanionsFor(id);
+    companionSuppressions.delete(id);
+    pendingCompanionSuppressions.delete(id);
 
     updateZone(tw.zone);
     updateSidebar(sideForZone(tw.zone));
@@ -406,6 +446,11 @@
   // ---- Activation / Deactivation --------------------------------------------
 
   function activate(id) {
+    // A companion currently riding inside its host's composite window has no
+    // docked presence to activate — auto-open (register's shouldAutoActivate
+    // path won't hit a suppressed id, but the palette/rail/plugin callers can
+    // still ask) must be a no-op until the host lifts the suppression.
+    if (companionSuppressions.has(id)) return;
     const tw = toolWindows.get(id);
     if (!tw) return;
     // A popped-out window has no docked presence to activate. Callers that
@@ -575,13 +620,14 @@
   function enterWindowMode(tw) {
     const id = tw.id;
     detachFromZone(tw);
+    suppressCompanionsFor(id);
     viewModes.set(id, VIEW_MODE_WINDOW);
     hostVisible.set(id, true);
     tw.active = true;
     const issue = markHostRequested(id);
     refreshZoneChrome(tw.zone);
     triggerSave();
-    panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
+    panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title, companionIds: companionIdsFor(id) })
       .then((reqId) => markHostOpened(id, issue, reqId))
       .catch(() => {
         // The pop-out never happened, so put back what the user was looking
@@ -613,6 +659,7 @@
     if (!tw) return;
     const teardownHost = !opts || opts.teardownHost !== false;
     resetToDock(id);
+    liftCompanionsFor(id);
     if (teardownHost) panelHostInvoke('dock_panel_host', { toolWindowId: id }).catch(() => {});
     activate(id);
   }
@@ -627,6 +674,72 @@
     hostReqIds.delete(id);
     pendingWindowSummons.delete(id);
     if (tw) tw.active = false;
+  }
+
+  // ---- Companion suppression (composite hosts) -------------------------------
+  // A composite host (e.g. SFTP) can carry companion tool windows (e.g. the
+  // transfer center) into its own OS window when it pops out, rather than
+  // leaving them docked behind. While that ride is live the companion has no
+  // docked presence — the host renders it — so it must vanish from its zone,
+  // and reappear exactly as it left (active or not) the moment the host
+  // returns to dock, aborts, or is unregistered. Hiding the host does NOT
+  // lift the suppression: the companion is still riding along, just not on
+  // screen right now, same as the host itself.
+
+  function companionIdsFor(id) {
+    const tw = toolWindows.get(id);
+    if (!tw || !Array.isArray(tw.companions)) return [];
+    return tw.companions
+      .map((c) => c.id)
+      .filter((cid) => cid && cid !== id && toolWindows.has(cid));
+  }
+
+  function suppressCompanion(companionId, hostId) {
+    if (companionSuppressions.has(companionId)) return;
+    const tw = toolWindows.get(companionId);
+    if (!tw) return;
+    // A companion living in its own host window folds back first — the
+    // composite absorbs it, two hosts for one pair would fight over it.
+    if (getViewMode(companionId) === VIEW_MODE_WINDOW) {
+      dockFromWindowMode(companionId);
+    }
+    companionSuppressions.set(companionId, { hostId, wasActive: !!tw.active });
+    tw.active = false;
+    if (tw.el) tw.el.style.display = 'none';
+    const zone = zones[tw.zone];
+    if (zone && zone.activeId === companionId) zone.activeId = null;
+    updateZone(tw.zone);
+    updateSidebar(sideForZone(tw.zone));
+    updateBottomZone();
+    updateStrips();
+  }
+
+  function suppressCompanionsFor(hostId) {
+    for (const cid of companionIdsFor(hostId)) suppressCompanion(cid, hostId);
+  }
+
+  function liftCompanionsFor(hostId) {
+    for (const [cid, info] of Array.from(companionSuppressions)) {
+      if (info.hostId !== hostId) continue;
+      companionSuppressions.delete(cid);
+      const tw = toolWindows.get(cid);
+      if (!tw) continue;
+      if (info.wasActive && zones[tw.zone] && zones[tw.zone].activeId === null) {
+        activate(cid);
+      } else {
+        updateZone(tw.zone);
+        updateSidebar(sideForZone(tw.zone));
+        updateBottomZone();
+        updateStrips();
+      }
+    }
+    for (const [cid, hid] of Array.from(pendingCompanionSuppressions)) {
+      if (hid === hostId) pendingCompanionSuppressions.delete(cid);
+    }
+  }
+
+  function isCompanionSuppressed(id) {
+    return companionSuppressions.has(id);
   }
 
   function hideWindowHost(id) {
@@ -656,7 +769,8 @@
         // No host in this session (a mode restored from the saved layout, say):
         // building one mints a NEW generation, so claim the slot before asking.
         const issue = markHostRequested(id);
-        return panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
+        suppressCompanionsFor(id);
+        return panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title, companionIds: companionIdsFor(id) })
           .then((reqId) => markHostOpened(id, issue, reqId));
       })
       .catch(() => {
@@ -748,6 +862,7 @@
     const tw = toolWindows.get(id);
     if (!tw || getViewMode(id) !== VIEW_MODE_WINDOW) return;
     resetToDock(id);
+    liftCompanionsFor(id);
     refreshZoneChrome(tw.zone);
     triggerSave();
   }
@@ -1813,6 +1928,8 @@
     notifyHostHidden,
     notifyHostDocked,
     notifyHostAborted,
+    // Composite host companion suppression (Task 2)
+    isCompanionSuppressed,
     // Exposed for scripts/tests/test_panel_host.mjs: showContextMenu's pure
     // item list, so the "every registered id carries the trait" check needs no
     // popup DOM.
