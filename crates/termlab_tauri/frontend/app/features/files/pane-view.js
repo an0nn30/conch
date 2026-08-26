@@ -296,6 +296,10 @@
         // Empty-valued marker type, checked (never read) by dragover — see
         // dndSourceKindFromTypes above.
         dataTransfer.setData(dndKindMime(kind), '');
+        // Record the in-flight payload with files-panel: on platforms where
+        // native drag interception swallows DOM dragover/drop (macOS), the
+        // drop completes over the native channel and needs this record.
+        if (typeof d.onDragStart === 'function') d.onDragStart(payload);
         // TEMPORARY dnd-debug
         if (global.termlabNativeDrop) {
           global.termlabNativeDrop.dndDebug('dom dragstart:', entry.name, 'kind =', kind,

@@ -1019,7 +1019,12 @@
       onOpenRowMenu: (event, entry) => showRowContextMenu(event, pane, entry),
       joinPath,
       onDropEntries: (payload) => onDropEntries(payload),
-      onDragEnd: () => clearDropTargets(),
+      // Pane-to-pane drags complete over the NATIVE channel on platforms
+      // where Tauri's drag-drop interception swallows DOM dragover/drop
+      // (macOS does; proven live). dragstart records the in-flight payload;
+      // the native drop with empty paths consumes it (see handleNativeDrop).
+      onDragStart: (payload) => { inFlightInternalDrag = payload || null; },
+      onDragEnd: () => { inFlightInternalDrag = null; clearDropTargets(); },
       onTransferAttention: (transferId, invoker) => {
         const handled = transferController
           && typeof transferController.handleTransferAttention === 'function'
@@ -1232,6 +1237,25 @@
   // highlight is lit, and pane-view.js has no handle to the SIBLING pane's
   // root to clear it itself. Clearing both unconditionally is simplest and
   // idempotent — at most one is ever actually lit.
+  // The row payload a DOM dragstart recorded, consumed by the native-channel
+  // drop when the platform intercepts DOM drag events (macOS). Cleared on
+  // dragend, on any native drop, and on native drag-leave.
+  let inFlightInternalDrag = null;
+
+  // Both panes' logical rects + current paths, for internal-drop hit-testing.
+  function internalDropPanes() {
+    const localRoot = getPaneRoot('#fp-local');
+    const remoteRoot = getPaneRoot('#fp-remote');
+    return {
+      local: localRoot && typeof localRoot.getBoundingClientRect === 'function'
+        ? { rect: localRoot.getBoundingClientRect(), currentPath: localPane.currentPath, root: localRoot }
+        : null,
+      remote: remoteRoot && typeof remoteRoot.getBoundingClientRect === 'function'
+        ? { rect: remoteRoot.getBoundingClientRect(), currentPath: remotePane.currentPath, root: remoteRoot }
+        : null,
+    };
+  }
+
   function clearDropTargets() {
     const localEl = getPaneRoot('#fp-local');
     if (localEl && localEl.classList) localEl.classList.remove('is-drop-target');
@@ -1352,6 +1376,26 @@
   // Shared by drag-enter and drag-over: both just update the hover highlight,
   // never route anything (only an actual drop does).
   function handleNativeDragHover(event) {
+    // Internal (pane-to-pane) drag in flight: highlight the OPPOSITE pane
+    // when the native position hits it; external logic below never runs.
+    if (inFlightInternalDrag) {
+      const nativeDropApi = window.termlabNativeDrop;
+      const scaled = scaleNativeDropPosition(event && event.payload && event.payload.position);
+      const panes = internalDropPanes();
+      const verdict = nativeDropApi && typeof nativeDropApi.resolveInternalNativeDrop === 'function'
+        ? nativeDropApi.resolveInternalNativeDrop(scaled, panes, inFlightInternalDrag)
+        : null;
+      // TEMPORARY dnd-debug
+      if (nativeDropApi) {
+        nativeDropApi.dndDebug('internal hover:', 'scaled =', scaled,
+          'source =', inFlightInternalDrag.paneKind, 'verdict =', verdict);
+      }
+      clearDropTargets();
+      if (verdict && panes[verdict.targetPaneKind] && panes[verdict.targetPaneKind].root.classList) {
+        panes[verdict.targetPaneKind].root.classList.add('is-drop-target');
+      }
+      return;
+    }
     const remoteRoot = getPaneRoot('#fp-remote');
     if (!remoteRoot || !remoteRoot.classList) return;
     const payload = event && event.payload;
@@ -1375,11 +1419,48 @@
   }
 
   function handleNativeDragLeave() {
-    const remoteRoot = getPaneRoot('#fp-remote');
-    if (remoteRoot && remoteRoot.classList) remoteRoot.classList.remove('is-drop-target');
+    // A native leave during an internal drag means the cursor left the
+    // window; the highlight clears but the in-flight record survives (the
+    // drag may re-enter) — dragend is the authoritative cleanup.
+    clearDropTargets();
   }
 
   async function handleNativeDrop(event) {
+    // Internal (pane-to-pane) drop: the native channel delivers it with
+    // EMPTY paths while a DOM dragstart's payload is in flight. Route it to
+    // the opposite pane through the same onDropEntries path the (macOS-
+    // intercepted) DOM drop would have used.
+    if (inFlightInternalDrag) {
+      const internalSource = inFlightInternalDrag;
+      inFlightInternalDrag = null;
+      const externalPaths = event && event.payload && Array.isArray(event.payload.paths)
+        ? event.payload.paths
+        : [];
+      if (externalPaths.length === 0) {
+        const nativeDropApi = window.termlabNativeDrop;
+        const scaled = scaleNativeDropPosition(event && event.payload && event.payload.position);
+        const panes = internalDropPanes();
+        const verdict = nativeDropApi && typeof nativeDropApi.resolveInternalNativeDrop === 'function'
+          ? nativeDropApi.resolveInternalNativeDrop(scaled, panes, internalSource)
+          : null;
+        // TEMPORARY dnd-debug
+        if (nativeDropApi) {
+          nativeDropApi.dndDebug('internal drop:', 'scaled =', scaled,
+            'source =', internalSource, 'verdict =', verdict);
+        }
+        clearDropTargets();
+        if (verdict) {
+          await onDropEntries({
+            source: internalSource,
+            targetPaneKind: verdict.targetPaneKind,
+            targetPath: verdict.targetPath,
+          });
+        }
+        return;
+      }
+      // Paths present while an internal drag was recorded: stale record —
+      // fall through to the external routing below.
+    }
     const remoteRoot = getPaneRoot('#fp-remote');
     if (!remoteRoot) return;
     if (remoteRoot.classList) remoteRoot.classList.remove('is-drop-target');

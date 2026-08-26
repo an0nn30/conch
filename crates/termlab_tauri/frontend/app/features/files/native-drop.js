@@ -42,10 +42,39 @@
   // physical position would land roughly twice as far right/down as it
   // should. Every consumer must scale through this before hit-testing.
   // Returns null when `position` isn't a well-formed {x, y} pair.
+  // Position units differ by platform: macOS delivers drag positions in
+  // LOGICAL px (proven live — the largest coordinate ever observed on a 2x
+  // display fit the logical window), other platforms may deliver PHYSICAL
+  // px. The robust rule: a position inside the window's logical bounds is
+  // logical and passes through; a position outside them can only be
+  // physical, so it scales down by devicePixelRatio. Without window bounds
+  // (headless harness), positions are treated as logical.
   function scaleNativeDropPosition(position) {
     if (!position || typeof position.x !== 'number' || typeof position.y !== 'number') return null;
     const ratio = (typeof global !== 'undefined' && global.devicePixelRatio) || 1;
+    const width = typeof global !== 'undefined' && typeof global.innerWidth === 'number' ? global.innerWidth : null;
+    const height = typeof global !== 'undefined' && typeof global.innerHeight === 'number' ? global.innerHeight : null;
+    const outOfBounds = width != null && height != null
+      && (position.x > width || position.y > height);
+    if (!outOfBounds || ratio === 1) return { x: position.x, y: position.y };
     return { x: position.x / ratio, y: position.y / ratio };
+  }
+
+  // Pane-to-pane drops arrive on the NATIVE channel too: with Tauri's
+  // drag-drop interception enabled, macOS swallows DOM dragover/drop
+  // entirely (proven live — dragstart fired, dragover/drop never did), and
+  // the internal drop surfaces as a native drop with EMPTY paths. Given the
+  // recorded in-flight source payload and both panes' logical rects, decide
+  // the internal drop's target: the OPPOSITE-kind pane the (already-scaled)
+  // position hits, or null (same pane, neither pane, or nothing in flight).
+  function resolveInternalNativeDrop(position, panes, source) {
+    if (!position || !panes || !source) return null;
+    const targetKind = source.paneKind === 'local' ? 'remote'
+      : source.paneKind === 'remote' ? 'local' : null;
+    if (!targetKind) return null;
+    const target = panes[targetKind];
+    if (!target || !target.rect || !pointInRect(position, target.rect)) return null;
+    return { targetPaneKind: targetKind, targetPath: target.currentPath };
   }
 
   // The raw rectangle hit-test, shared by resolveNativeDrop below and by
@@ -192,6 +221,7 @@
     scaleNativeDropPosition,
     pointInRect,
     resolveNativeDrop,
+    resolveInternalNativeDrop,
     routeNativeDropPaths,
     dispatchNativeDragDropEvent,
   };

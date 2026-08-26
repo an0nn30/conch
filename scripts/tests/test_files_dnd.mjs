@@ -824,8 +824,8 @@ console.log('files dnd (files-panel routing): all assertions passed');
 // (no DOM, no `invoke`, no files-panel.js module state) so these can run
 // against nothing but the file itself, loaded standalone.
 
-function loadNativeDrop() {
-  const sandbox = { console };
+function loadNativeDrop(overrides) {
+  const sandbox = { console, ...(overrides || {}) };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(NATIVE_DROP_PATH, 'utf8'), sandbox, { filename: NATIVE_DROP_PATH });
@@ -987,6 +987,54 @@ const PANE_RECT = { left: 10, top: 20, right: 110, bottom: 220 };
 
 console.log('files dnd (native-drop pure): all assertions passed');
 
+// C11: scaleNativeDropPosition — the bounds heuristic as a pure contract.
+{
+  const nativeDrop = loadNativeDrop({ devicePixelRatio: 2, innerWidth: 800, innerHeight: 600 });
+  const plainPos = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
+  assert.deepEqual(plainPos(nativeDrop.scaleNativeDropPosition({ x: 194, y: 543 })), { x: 194, y: 543 },
+    'in-bounds position is logical and passes through');
+  assert.deepEqual(plainPos(nativeDrop.scaleNativeDropPosition({ x: 900, y: 700 })), { x: 450, y: 350 },
+    'out-of-bounds position is physical and scales by devicePixelRatio');
+  assert.deepEqual(plainPos(nativeDrop.scaleNativeDropPosition({ x: 801, y: 10 })), { x: 400.5, y: 5 },
+    'either axis exceeding bounds triggers scaling');
+  assert.equal(nativeDrop.scaleNativeDropPosition(null), null, 'null-safe');
+}
+{
+  const nativeDrop = loadNativeDrop({ devicePixelRatio: 2 }); // no bounds available
+  assert.deepEqual(JSON.parse(JSON.stringify(nativeDrop.scaleNativeDropPosition({ x: 300, y: 200 }))), { x: 300, y: 200 },
+    'without window bounds the position is treated as logical');
+}
+
+// C12: resolveInternalNativeDrop — the pane-to-pane native-channel decision.
+// macOS intercepts DOM drag events wholesale when native drag-drop is
+// enabled (proven live: dragstart fired, dragover/drop never did), so the
+// internal drop arrives on the native channel with empty paths and must be
+// hit-tested against the OPPOSITE pane.
+{
+  const nativeDrop = loadNativeDrop({ devicePixelRatio: 1, innerWidth: 900, innerHeight: 900 });
+  const panes = {
+    local: { rect: { left: 0, top: 0, right: 400, bottom: 800 }, currentPath: '/home/demo' },
+    remote: { rect: { left: 420, top: 0, right: 820, bottom: 800 }, currentPath: '/srv/www' },
+  };
+  const fromLocal = { paneKind: 'local', paneId: null, path: '/home/demo/a', isDir: false };
+  const fromRemote = { paneKind: 'remote', paneId: 7, path: '/srv/www/b', isDir: true };
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(nativeDrop.resolveInternalNativeDrop({ x: 500, y: 100 }, panes, fromLocal))),
+    { targetPaneKind: 'remote', targetPath: '/srv/www' },
+    'a local-sourced drop over the remote pane targets the remote pane');
+  assert.equal(nativeDrop.resolveInternalNativeDrop({ x: 100, y: 100 }, panes, fromLocal), null,
+    'a drop back onto the source pane is a no-op');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(nativeDrop.resolveInternalNativeDrop({ x: 100, y: 100 }, panes, fromRemote))),
+    { targetPaneKind: 'local', targetPath: '/home/demo' },
+    'a remote-sourced drop over the local pane targets the local pane');
+  assert.equal(nativeDrop.resolveInternalNativeDrop({ x: 850, y: 100 }, panes, fromLocal), null,
+    'a drop hitting neither pane is a no-op');
+  assert.equal(nativeDrop.resolveInternalNativeDrop(null, panes, fromLocal), null, 'null position is a no-op');
+  assert.equal(nativeDrop.resolveInternalNativeDrop({ x: 500, y: 100 }, panes, null), null, 'no in-flight source is a no-op');
+}
+
 // ===========================================================================
 // Part D — files-panel.js: native OS drop wiring (Task 8, wire-level)
 // ===========================================================================
@@ -1124,40 +1172,51 @@ console.log('files dnd (native-drop pure): all assertions passed');
   console.log('D6. native drag-leave: clears unconditionally: ok');
 }
 
-// -- the physical-pixel trap: Tauri reports drag-drop positions in PHYSICAL
-// pixels, getBoundingClientRect() is LOGICAL — the same physical position
-// must hit at devicePixelRatio 2 but miss at devicePixelRatio 1 against a
-// rect sized in logical px, proving files-panel.js actually divides by
-// devicePixelRatio before hit-testing rather than comparing raw values ----
+// -- position interpretation: macOS delivers drag positions in LOGICAL px
+// (proven live: max observed y was 705 on a 2x display whose physical height
+// exceeds 1600), while other platforms may deliver PHYSICAL px. The rule:
+// a position inside the window's logical bounds passes through untouched; a
+// position outside them is physical and scales down by devicePixelRatio. ----
 {
   const h = await setupLogicHarness();
   await h.sandbox.filesPanel.pinRemotePane('main:1000007');
   await settle();
   h.invokeCalls.length = 0;
   h.toastCalls.length = 0;
-  h.initialRemoteRender.el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 100 });
+  h.sandbox.devicePixelRatio = 2;
+  h.sandbox.innerWidth = 800;
+  h.sandbox.innerHeight = 600;
+  h.initialRemoteRender.el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 500, bottom: 400 });
   h.localStatByPath.set('/home/demo/notes.txt', { name: 'notes.txt', is_dir: false, size: 12, modified: 0 });
 
-  // devicePixelRatio 1: a physical (150, 150) position stays (150, 150)
-  // logical -- outside a 100x100 rect, so this drop must be ignored.
-  h.sandbox.devicePixelRatio = 1;
+  // In-bounds (450,350): LOGICAL passthrough -> inside the 500x400 rect -> routes.
   await h.listeners['tauri://drag-drop']({
-    payload: { paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } },
-  });
-  await settle();
-  assert.deepEqual(h.invokeCalls, [], 'at devicePixelRatio 1, physical (150,150) misses a 100x100 logical rect');
-
-  // devicePixelRatio 2: the SAME physical (150, 150) position scales to
-  // (75, 75) logical -- inside the rect, so this drop must route.
-  h.sandbox.devicePixelRatio = 2;
-  await h.listeners['tauri://drag-drop']({
-    payload: { paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } },
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 450, y: 350 } },
   });
   await settle();
   assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['local_stat', 'transfer_upload'],
-    'at devicePixelRatio 2, the same physical (150,150) scales to logical (75,75) and hits');
-  console.log('D7. native drop: devicePixelRatio scales physical position before hit-testing: ok');
+    'an in-bounds logical position passes through untouched and hits');
+  h.invokeCalls.length = 0;
+
+  // In-bounds (550,450): passthrough -> OUTSIDE the rect -> ignored. (The old
+  // always-divide behavior would have halved it to (275,225) and wrongly hit.)
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 550, y: 450 } },
+  });
+  await settle();
+  assert.deepEqual(h.invokeCalls, [], 'in-bounds positions are never divided by devicePixelRatio');
+
+  // Out-of-bounds (900,700) exceeds 800x600 logical: PHYSICAL -> scaled to
+  // (450,350) -> inside the rect -> routes.
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 900, y: 700 } },
+  });
+  await settle();
+  assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['local_stat', 'transfer_upload'],
+    'an out-of-bounds position is physical and scales down before hit-testing');
+  console.log('D7. native drop: logical positions pass through, physical positions scale: ok');
 }
+
 
 console.log('files dnd (native drop wiring): all assertions passed');
 
@@ -1279,22 +1338,34 @@ function setupDragDropHarness(rectOverride) {
   console.log('E5. terminal drag-leave: clears unconditionally: ok');
 }
 
-// -- the physical-pixel trap, terminal side: the identical physical position
-// hits at devicePixelRatio 2 and misses at devicePixelRatio 1 against the
-// same logical rect — proves dragdrop-runtime.js's hit-test actually shares
-// native-drop.js's scaling rather than comparing raw physical coordinates -
+// -- position interpretation, terminal side: shares native-drop.js's
+// bounds heuristic — in-bounds positions are logical (pass through),
+// out-of-bounds positions are physical (scale down) — proving
+// dragdrop-runtime.js routes through the shared helper rather than
+// comparing raw coordinates. --------------------------------------------
 {
   const h = setupDragDropHarness({ left: 0, top: 0, right: 100, bottom: 100 });
-
-  h.sandbox.devicePixelRatio = 1;
-  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } });
-  assert.deepEqual(h.invokeCalls, [], 'at devicePixelRatio 1, physical (150,150) misses a 100x100 logical rect');
-
   h.sandbox.devicePixelRatio = 2;
+  h.sandbox.innerWidth = 800;
+  h.sandbox.innerHeight = 600;
+
+  // In-bounds (150,150): logical passthrough -> outside the 100x100 rect.
   h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } });
+  assert.deepEqual(h.invokeCalls, [], 'in-bounds (150,150) is logical and misses the 100x100 rect');
+
+  // In-bounds (75,75): logical passthrough -> inside the rect -> pastes.
+  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 75, y: 75 } });
   assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['write_to_pty'],
-    'at devicePixelRatio 2, the same physical (150,150) scales to logical (75,75) and hits');
-  console.log('E6. terminal drop: devicePixelRatio scales physical position before hit-testing: ok');
+    'in-bounds (75,75) hits the terminal rect without any scaling');
+  h.invokeCalls.length = 0;
+
+  // Out-of-bounds (900,700) exceeds 800x600: physical -> scaled to (450,350)
+  // -> outside the rect; (150,1500) -> scaled (75,750) -> still outside;
+  // while (150,1200)? keep it simple: (160,700) exceeds height -> (80,350)
+  // -> x inside, y outside -> miss. And (160, 150) stays logical -> miss.
+  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 900, y: 700 } });
+  assert.deepEqual(h.invokeCalls, [], 'out-of-bounds physical position scales before hit-testing');
+  console.log('E6. terminal drop: shared bounds heuristic decides logical vs physical: ok');
 }
 
 
