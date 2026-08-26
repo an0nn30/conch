@@ -95,6 +95,13 @@
       listEl.className = 'tl-tabswitcher__list tl-scroll';
       previewEl = document.createElement('div');
       previewEl.className = 'tl-tabswitcher__preview';
+      // Match the preview box to the terminal host's shape so the scaled
+      // clone fills it edge to edge; the panel has no fixed height and
+      // wraps whatever this resolves to.
+      const stage = typeof getStageSize === 'function' ? getStageSize() : null;
+      if (stage && stage.width > 0 && stage.height > 0) {
+        previewEl.style.aspectRatio = `${stage.width} / ${stage.height}`;
+      }
       panel.appendChild(listEl);
       panel.appendChild(previewEl);
       overlayEl.appendChild(panel);

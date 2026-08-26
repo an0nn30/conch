@@ -17,8 +17,11 @@
 
 .tl-tabswitcher {
   display: flex;
-  width: min(760px, 84vw);
-  height: min(380px, 60vh);
+  width: min(920px, 88vw);
+  /* No fixed height: the preview column carries the terminal host's
+     aspect-ratio (set inline by view.js), so the panel wraps a preview
+     that fills its box edge to edge instead of floating in dead space. */
+  max-height: 76vh;
   background: var(--tl-panel-bg);
   border: 1px solid var(--tl-border);
   border-radius: var(--tl-radius);
@@ -27,7 +30,7 @@
 }
 
 .tl-tabswitcher__list {
-  flex: 0 0 46%;
+  flex: 0 0 250px;
   min-width: 0;
   overflow-y: auto;
   padding: var(--tl-space-2) 0;
@@ -46,6 +49,13 @@
 }
 .tl-tabswitcher__item.is-active .tl-tabswitcher__title {
   color: var(--tl-List-selectionForeground, var(--tl-fg));
+}
+/* Muted gray drowns in the selection color: keep the subtitle and badge on
+   the selection foreground too, dimmed by opacity so hierarchy survives. */
+.tl-tabswitcher__item.is-active .tl-tabswitcher__subtitle,
+.tl-tabswitcher__item.is-active .tl-tabswitcher__badge {
+  color: var(--tl-List-selectionForeground, var(--tl-fg));
+  opacity: 0.75;
 }
 
 .tl-tabswitcher__badge {
@@ -77,7 +87,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--tl-space-3);
+  padding: var(--tl-space-1);
   background: var(--tl-terminal-bg, var(--tl-panel-bg));
   overflow: hidden;
 }
