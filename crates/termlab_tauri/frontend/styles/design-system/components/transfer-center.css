@@ -229,6 +229,76 @@
   margin-left: var(--tl-space-1);
 }
 
+/* Batch grouping row: a full-width banner (single spanning <td>) above its
+   member rows. Visually distinct from a member row (row-hover tint, a top
+   rule) but never a keyboard stop of its own — only its cancel button is. */
+.tl-transfer-center__batch {
+  background: var(--tl-row-hover);
+}
+
+.tl-transfer-center__batch-cell {
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  overflow: hidden;
+  border-bottom: 1px solid var(--tl-border);
+  border-top: 1px solid var(--tl-border);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.tl-transfer-center__batch-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tl-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__batch-direction,
+.tl-transfer-center__batch-progress,
+.tl-transfer-center__batch-bytes,
+.tl-transfer-center__batch-speed,
+.tl-transfer-center__batch-eta {
+  flex: 0 0 auto;
+  color: var(--tl-fg-muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__batch-marker {
+  flex: 0 0 auto;
+  color: var(--tl-danger);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__batch-cancel {
+  flex: 0 0 auto;
+  margin-left: auto;
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg-muted);
+  background: transparent;
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  font: 500 var(--tl-font-size-ui) var(--tl-font-ui);
+  cursor: default;
+}
+
+.tl-transfer-center__batch-cancel:hover {
+  color: var(--tl-fg);
+  background: var(--tl-panel-bg);
+}
+
+.tl-transfer-center__batch-cancel:focus-visible {
+  outline: 1px solid var(--tl-accent);
+  outline-offset: -1px;
+}
+
 /* Narrow docks (left/right sidebars, skinny splits): the six-column table
    reflows into two-line cards — same DOM, CSS-only. Line 1: file + speed +
    actions; line 2: status + full-width progress; line 3: host and paths,
@@ -281,4 +351,31 @@
     text-overflow: clip;
   }
   .tl-transfer-center__progress { width: 100%; display: block; margin-top: 2px; margin-left: 0; }
+
+  /* The batch header becomes its own card, stacked directly above its member
+     cards: same wrap-and-stack treatment as a row, but the name always keeps
+     its own line and the cancel button anchors last instead of hiding behind
+     hover/selection (a grouping row has no selection state to reveal it). */
+  .tl-transfer-center__batch-cell {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 6px var(--tl-space-2);
+    row-gap: 3px;
+    white-space: normal;
+  }
+  .tl-transfer-center__batch-name {
+    flex: 1 1 100%;
+  }
+  .tl-transfer-center__batch-direction,
+  .tl-transfer-center__batch-progress,
+  .tl-transfer-center__batch-bytes,
+  .tl-transfer-center__batch-speed,
+  .tl-transfer-center__batch-eta,
+  .tl-transfer-center__batch-marker {
+    font-size: 10px;
+  }
+  .tl-transfer-center__batch-cancel {
+    order: 1;
+    margin-left: 0;
+  }
 }

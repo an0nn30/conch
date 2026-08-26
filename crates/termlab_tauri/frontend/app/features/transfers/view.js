@@ -90,6 +90,58 @@
     return remainder ? `${minutes}m ${remainder}s remaining` : `${minutes}m remaining`;
   }
 
+  function batchAggregatesFor(snapshot) {
+    return snapshot && Array.isArray(snapshot.batches) ? snapshot.batches : [];
+  }
+
+  // Partition the currently visible jobs (already filtered to the active or
+  // history view) into batch groups and batchless rows. A job's batchId only
+  // groups it when the referenced batch aggregate is actually present in this
+  // snapshot — an unknown/stale batchId falls back to a plain batchless row
+  // rather than silently dropping the job.
+  function groupJobs(jobs, batchAggregates) {
+    const aggById = new Map();
+    for (const agg of batchAggregates) {
+      if (agg && agg.info && agg.info.id) aggById.set(agg.info.id, agg);
+    }
+    const membersByBatch = new Map();
+    const batchless = [];
+    for (const job of jobs) {
+      if (job.batchId && aggById.has(job.batchId)) {
+        if (!membersByBatch.has(job.batchId)) membersByBatch.set(job.batchId, []);
+        membersByBatch.get(job.batchId).push(job);
+      } else {
+        batchless.push(job);
+      }
+    }
+    const groups = [];
+    for (const agg of batchAggregates) {
+      const members = membersByBatch.get(agg.info.id);
+      if (members && members.length > 0) groups.push({ agg, members });
+    }
+    return { groups, batchless };
+  }
+
+  // Flatten batch groups (in delivered order) followed by batchless rows
+  // (stable) into the row sequence the table actually renders.
+  function renderItems(jobs, batchAggregates) {
+    const { groups, batchless } = groupJobs(jobs, batchAggregates);
+    const items = [];
+    for (const group of groups) {
+      items.push({ type: 'header', id: group.agg.info.id, agg: group.agg });
+      for (const job of group.members) items.push({ type: 'job', id: job.id, job });
+    }
+    for (const job of batchless) items.push({ type: 'job', id: job.id, job });
+    return items;
+  }
+
+  function batchProgressText(agg) {
+    const total = Number(agg.info.discoveredFiles) || 0;
+    const done = Number(agg.filesDone) || 0;
+    const suffix = agg.info.expansion && agg.info.expansion.kind === 'running' ? '+' : '';
+    return `${done}/${total}${suffix}`;
+  }
+
   function actionsFor(job) {
     const kind = job && job.state ? job.state.kind : '';
     switch (kind) {
@@ -192,7 +244,9 @@
     const tbodyEl = append(tableEl, 'tbody');
 
     let currentIds = [];
+    let currentTokens = [];
     let rowsById = new Map();
+    let headerRowsById = new Map();
     let latestSnapshot = null;
     let latestState = { viewMode: 'active', selectedId: null };
     let lastSummaryText = null;
@@ -304,6 +358,63 @@
       return record;
     }
 
+    function batchSignature(agg) {
+      return JSON.stringify([
+        agg.info.name,
+        agg.info.direction,
+        agg.info.expansion,
+        agg.filesDone,
+        agg.info.discoveredFiles,
+        agg.bytesDone,
+        agg.info.discoveredBytes,
+        agg.speedBytesPerSecond,
+        agg.etaSeconds,
+      ]);
+    }
+
+    function patchHeaderRow(rowRecord, agg) {
+      const next = batchSignature(agg);
+      if (rowRecord.signature === next) return;
+      rowRecord.signature = next;
+
+      const cellEl = rowRecord.cellEl;
+      cellEl.replaceChildren();
+      append(cellEl, 'span', 'tl-transfer-center__batch-name', agg.info.name || 'Unnamed batch');
+      append(cellEl, 'span', 'tl-transfer-center__batch-direction', titleCase(agg.info.direction));
+      append(cellEl, 'span', 'tl-transfer-center__batch-progress', batchProgressText(agg));
+      if (agg.info.expansion && agg.info.expansion.kind === 'interrupted') {
+        const marker = append(cellEl, 'span', 'tl-transfer-center__batch-marker', '⚠ expansion interrupted');
+        marker.setAttribute('title', agg.info.expansion.reason || '');
+      }
+      append(
+        cellEl,
+        'span',
+        'tl-transfer-center__batch-bytes',
+        `${formatSize(agg.bytesDone)} of ${formatSize(agg.info.discoveredBytes)}`,
+      );
+      const speed = Number(agg.speedBytesPerSecond) || 0;
+      append(cellEl, 'span', 'tl-transfer-center__batch-speed', speed > 0 ? `${formatSize(speed)}/s` : '—');
+      if (agg.etaSeconds !== null && agg.etaSeconds !== undefined) {
+        append(cellEl, 'span', 'tl-transfer-center__batch-eta', formatEta(agg.etaSeconds));
+      }
+      const cancelButton = append(cellEl, 'button', 'tl-transfer-center__batch-cancel', 'Cancel');
+      cancelButton.setAttribute('type', 'button');
+      cancelButton.setAttribute('aria-label', `Cancel ${agg.info.name || 'folder transfer'}`);
+      setData(cancelButton, 'transfer-action', 'cancel-batch');
+      setData(cancelButton, 'batch-id', agg.info.id);
+    }
+
+    function createHeaderRow(agg) {
+      const rowEl = document.createElement('tr');
+      rowEl.className = 'tl-transfer-center__batch';
+      setData(rowEl, 'batch-id', agg.info.id);
+      const cellEl = append(rowEl, 'td', 'tl-transfer-center__batch-cell');
+      cellEl.setAttribute('colspan', String(COLUMNS.length));
+      const record = { element: rowEl, cellEl, signature: null };
+      patchHeaderRow(record, agg);
+      return record;
+    }
+
     function updateSummary(snapshot, state) {
       const summary = snapshot && snapshot.summary ? snapshot.summary : {};
       const active = Number(summary.active) || 0;
@@ -359,25 +470,39 @@
       recoveryEl.textContent = snapshot.recoveryError ? `Transfer recovery error: ${snapshot.recoveryError}` : '';
 
       const jobs = jobsFor(snapshot, latestState.viewMode);
-      const nextIds = jobs.map((job) => job.id);
-      const membershipChanged = nextIds.length !== currentIds.length
-        || nextIds.some((id, index) => id !== currentIds[index]);
+      const items = renderItems(jobs, batchAggregatesFor(snapshot));
+      const nextTokens = items.map((item) => `${item.type}:${item.id}`);
+      const structureChanged = nextTokens.length !== currentTokens.length
+        || nextTokens.some((token, index) => token !== currentTokens[index]);
 
-      if (membershipChanged) {
+      if (structureChanged) {
         tbodyEl.replaceChildren();
         rowsById = new Map();
-        for (const job of jobs) {
-          const record = createRow(job, latestState.selectedId === job.id);
-          rowsById.set(job.id, record);
-          tbodyEl.appendChild(record.element);
+        headerRowsById = new Map();
+        for (const item of items) {
+          if (item.type === 'header') {
+            const record = createHeaderRow(item.agg);
+            headerRowsById.set(item.id, record);
+            tbodyEl.appendChild(record.element);
+          } else {
+            const record = createRow(item.job, latestState.selectedId === item.job.id);
+            rowsById.set(item.id, record);
+            tbodyEl.appendChild(record.element);
+          }
         }
-        currentIds = nextIds;
       } else {
-        for (const job of jobs) {
-          const record = rowsById.get(job.id);
-          if (record) patchRow(record, job, latestState.selectedId === job.id);
+        for (const item of items) {
+          if (item.type === 'header') {
+            const record = headerRowsById.get(item.id);
+            if (record) patchHeaderRow(record, item.agg);
+          } else {
+            const record = rowsById.get(item.id);
+            if (record) patchRow(record, item.job, latestState.selectedId === item.job.id);
+          }
         }
       }
+      currentTokens = nextTokens;
+      currentIds = items.filter((item) => item.type === 'job').map((item) => item.id);
 
       const empty = jobs.length === 0;
       tableViewportEl.hidden = empty;
@@ -409,8 +534,9 @@
       const actionButton = target.closest('[data-transfer-action]');
       if (actionButton) {
         const jobId = actionButton.getAttribute('data-job-id');
+        const batchId = actionButton.getAttribute('data-batch-id');
         if (jobId) onSelect(jobId);
-        onAction({ action: actionButton.getAttribute('data-transfer-action'), jobId, invoker: actionButton });
+        onAction({ action: actionButton.getAttribute('data-transfer-action'), jobId, batchId, invoker: actionButton });
         return;
       }
 

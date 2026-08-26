@@ -17,13 +17,16 @@
     const transferRow = invoker && typeof invoker.closest === 'function'
       ? invoker.closest('tr[data-job-id]')
       : null;
-    const fileRow = !transferRow && invoker && typeof invoker.closest === 'function'
+    const batchRow = !transferRow && invoker && typeof invoker.closest === 'function'
+      ? invoker.closest('tr[data-batch-id]')
+      : null;
+    const fileRow = !transferRow && !batchRow && invoker && typeof invoker.closest === 'function'
       ? invoker.closest('tr[data-name]')
       : null;
-    const row = transferRow || fileRow;
-    const rowSelector = transferRow ? 'tr[data-job-id]' : 'tr[data-name]';
-    const keyAttribute = transferRow ? 'data-job-id' : 'data-name';
-    const panelSelector = transferRow ? '.tl-transfer-center' : '.fp-pane';
+    const row = transferRow || batchRow || fileRow;
+    const rowSelector = transferRow ? 'tr[data-job-id]' : batchRow ? 'tr[data-batch-id]' : 'tr[data-name]';
+    const keyAttribute = transferRow ? 'data-job-id' : batchRow ? 'data-batch-id' : 'data-name';
+    const panelSelector = transferRow || batchRow ? '.tl-transfer-center' : '.fp-pane';
     const panel = row && typeof row.closest === 'function' ? row.closest(panelSelector) : null;
     const rowKey = row ? row.getAttribute(keyAttribute) : null;
     const rowsAtOpen = panel ? Array.from(panel.querySelectorAll(rowSelector)) : [];
@@ -93,6 +96,26 @@
       body(bodyEl) {
         append(bodyEl, 'p', '', 'This stops the transfer and may remove its managed partial file.');
         append(bodyEl, 'p', 'tl-transfer-dialog__filename', job && job.fileName ? job.fileName : 'Unnamed transfer');
+      },
+      buttons: [
+        { label: 'Keep transfer', onSelect: () => handleRef.current && handleRef.current.close('cancel') },
+        { label: 'Cancel transfer', danger: true, onSelect: () => closeAfter(handleRef, onConfirm) },
+      ],
+    }, invoker);
+    return handleRef.current;
+  }
+
+  function showCancelBatch(batch, invoker, onConfirm) {
+    const handleRef = { current: null };
+    const info = (batch && batch.info) || {};
+    const total = Number(info.discoveredFiles) || 0;
+    handleRef.current = openDialog({
+      title: 'Cancel folder transfer?',
+      ariaLabel: 'Confirm cancel folder transfer',
+      size: 'sm',
+      body(bodyEl) {
+        append(bodyEl, 'p', '', 'This stops the folder transfer, cancelling its remaining files. Files already transferred stay in place.');
+        append(bodyEl, 'p', 'tl-transfer-dialog__filename', `${info.name || 'Unnamed batch'} — ${total} ${total === 1 ? 'file' : 'files'}`);
       },
       buttons: [
         { label: 'Keep transfer', onSelect: () => handleRef.current && handleRef.current.close('cancel') },
@@ -369,6 +392,7 @@
 
   global.termlabTransferDialogs = {
     showCancel,
+    showCancelBatch,
     showDetails,
     showConflict,
     showConcurrency,

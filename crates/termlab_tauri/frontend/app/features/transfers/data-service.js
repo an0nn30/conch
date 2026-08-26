@@ -17,6 +17,10 @@
     return invoke('transfer_cancel', { transferId });
   }
 
+  function cancelBatch(invoke, batchId) {
+    return invoke('transfer_cancel_batch', { batchId });
+  }
+
   function retry(invoke, transferId) {
     return invoke('transfer_retry', { transferId });
   }
@@ -54,6 +58,7 @@
     pause,
     resume,
     cancel,
+    cancelBatch,
     retry,
     resolve,
     pauseAll,

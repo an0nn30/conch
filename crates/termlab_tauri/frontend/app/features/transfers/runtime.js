@@ -264,6 +264,7 @@
     pause: (id) => command('pause', [id]),
     resume: (id) => command('resume', [id]),
     cancel: (id) => command('cancel', [id]),
+    cancelBatch: (id) => command('cancelBatch', [id]),
     retry: (id) => command('retry', [id]),
     resolve: resolveConflict,
     pauseAll: () => command('pauseAll', []),

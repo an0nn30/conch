@@ -246,9 +246,34 @@ function snapshot(jobs, values = {}) {
     queuePaused: false,
     settings: { globalLimit: 3, perHostLimit: 2 },
     jobs,
+    batches: [],
     summary: summary(),
     recoveryError: null,
     ...values,
+  };
+}
+
+function batchAgg(id, overrides = {}) {
+  const infoOverrides = overrides.info || {};
+  const rest = { ...overrides };
+  delete rest.info;
+  return {
+    info: {
+      id,
+      name: `${id}-batch`,
+      direction: 'upload',
+      expansion: { kind: 'running' },
+      discoveredFiles: 5,
+      discoveredBytes: 500,
+      skipped: [],
+      createdAtMs: 1,
+      ...infoOverrides,
+    },
+    filesDone: 3,
+    bytesDone: 300,
+    speedBytesPerSecond: 1024,
+    etaSeconds: 5,
+    ...rest,
   };
 }
 
@@ -273,7 +298,7 @@ function loadHarness(options = {}) {
     },
   };
   for (const method of [
-    'pause', 'resume', 'cancel', 'retry', 'resolve', 'pauseAll', 'resumeAll',
+    'pause', 'resume', 'cancel', 'cancelBatch', 'retry', 'resolve', 'pauseAll', 'resumeAll',
     'clearCompleted', 'reorder', 'setPriority', 'updateSettings', 'reconnect',
   ]) {
     runtime[method] = (...args) => {
@@ -1347,6 +1372,152 @@ async function loadMountLifecycleHarness() {
   assert.ok(tooltip.includes('/remote/tip.bin'), 'row tooltip must include the destination path');
   assert.ok(tooltip.indexOf('/local/tip.bin') < tooltip.indexOf('/remote/tip.bin'),
     'tooltip reads source before destination for an upload');
+}
+
+// --- Batch grouping: header row aggregates, groups members, leaves
+// batchless rows untouched, and routes its own cancel through a dedicated
+// confirm dialog naming the batch. ---
+{
+  const harness = loadHarness();
+  const runningBatch = batchAgg('batch-1', {
+    info: {
+      name: 'photos', direction: 'upload', expansion: { kind: 'running' },
+      discoveredFiles: 5, discoveredBytes: 500, createdAtMs: 1,
+    },
+    filesDone: 3, bytesDone: 300, speedBytesPerSecond: 2048, etaSeconds: 9,
+  });
+  const memberA = job('m1', 'running', { batchId: 'batch-1', fileName: 'a.jpg' });
+  const memberB = job('m2', 'queued', { batchId: 'batch-1', fileName: 'b.jpg', queueOrder: 2 });
+  const loner = job('solo', 'running', { fileName: 'solo.bin' });
+  harness.emit(snapshot([memberA, memberB, loner], {
+    batches: [runningBatch],
+    summary: summary({ active: 3, running: 2, queued: 1 }),
+  }));
+
+  const headerRow = harness.panelEl.querySelector('tr.tl-transfer-center__batch[data-batch-id="batch-1"]');
+  assert.ok(headerRow, 'batch header row renders with data-batch-id');
+  assert.ok(headerRow.textContent.includes('photos'));
+  assert.ok(headerRow.textContent.includes('Upload'));
+  assert.ok(headerRow.textContent.includes('3/5+'), 'running expansion appends + to the files-done ratio');
+  assert.ok(headerRow.textContent.includes('300 B of 500 B'));
+  assert.ok(headerRow.textContent.includes('2048 B/s'));
+  assert.ok(headerRow.textContent.includes('9s remaining'));
+  assert.strictEqual(
+    headerRow.querySelector('[data-transfer-action="cancel-batch"]').dataset.batchId,
+    'batch-1',
+  );
+
+  assert.deepStrictEqual(rowIds(harness.panelEl), ['m1', 'm2', 'solo'],
+    'member rows render beneath their header; batchless rows are unaffected');
+  const rowsInOrder = harness.panelEl.querySelector('tbody').children;
+  assert.strictEqual(rowsInOrder[0], headerRow, 'the header renders before its member rows');
+  assert.strictEqual(rowsInOrder[1].dataset.jobId, 'm1');
+  assert.strictEqual(rowsInOrder[2].dataset.jobId, 'm2');
+  assert.strictEqual(rowsInOrder[3].dataset.jobId, 'solo');
+
+  // Interrupted expansion shows the warning marker with the reason as title,
+  // and drops the running "+" suffix.
+  harness.emit(snapshot([memberA, memberB, loner], {
+    revision: 2,
+    batches: [batchAgg('batch-1', {
+      info: {
+        name: 'photos', direction: 'upload',
+        expansion: { kind: 'interrupted', reason: 'permission denied' },
+        discoveredFiles: 5, discoveredBytes: 500, createdAtMs: 1,
+      },
+      filesDone: 3, bytesDone: 300, speedBytesPerSecond: null, etaSeconds: null,
+    })],
+    summary: summary({ active: 3, running: 1, queued: 1 }),
+  }));
+  const interruptedHeader = harness.panelEl.querySelector('tr.tl-transfer-center__batch[data-batch-id="batch-1"]');
+  const marker = interruptedHeader.querySelector('.tl-transfer-center__batch-marker');
+  assert.ok(marker, 'interrupted expansion shows a marker');
+  assert.strictEqual(marker.textContent, '⚠ expansion interrupted');
+  assert.strictEqual(marker.getAttribute('title'), 'permission denied');
+  assert.ok(!interruptedHeader.textContent.includes('3/5+'), 'interrupted expansion drops the running + suffix');
+  assert.ok(interruptedHeader.textContent.includes('3/5'));
+  assert.ok(interruptedHeader.textContent.includes('—'), 'null speed renders the em dash placeholder');
+
+  // Cancel-batch routes through its own confirm dialog naming the batch and
+  // its member count, and only calls the runtime after confirmation.
+  const cancelButton = interruptedHeader.querySelector('[data-transfer-action="cancel-batch"]');
+  click(harness.panelEl, cancelButton);
+  assert.deepStrictEqual(harness.runtimeCalls, [], 'cancel-batch waits for confirmation');
+  const batchDialog = harness.dialogs.at(-1);
+  assert.strictEqual(batchDialog.options.title, 'Cancel folder transfer?');
+  assert.ok(batchDialog.bodyEl.textContent.includes('photos'));
+  assert.ok(batchDialog.bodyEl.textContent.includes('5'), 'dialog names the member count');
+  await dialogButton(batchDialog, 'Cancel transfer').onSelect();
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'cancelBatch', args: ['batch-1'] }]);
+
+  // Selecting/keying through the table walks member rows only; the header is
+  // never a keyboard stop.
+  assert.deepStrictEqual(harness.selectionEvents, []);
+  const memberRow = harness.panelEl.querySelector('tr[data-job-id="m1"]');
+  let prevented = 0;
+  harness.panelEl._fire('keydown', {
+    target: memberRow, key: 'ArrowUp', preventDefault: () => { prevented += 1; },
+  });
+  assert.deepStrictEqual(harness.selectionEvents, ['m1'],
+    'ArrowUp from the first member clamps to itself, never the header');
+  assert.strictEqual(prevented, 1);
+}
+
+// Grouping is patch-friendly: a progress-only update to a batch member keeps
+// the same header and row DOM nodes; a true membership change (a batch
+// clearing entirely, e.g. from history clearing) drops its header exactly
+// like a batchless row's membership change.
+{
+  const harness = loadHarness();
+  const staticBatch = batchAgg('batch-2', {
+    info: {
+      name: 'backup', direction: 'download', expansion: { kind: 'running' },
+      discoveredFiles: 2, discoveredBytes: 200, createdAtMs: 5,
+    },
+    filesDone: 0, bytesDone: 0, speedBytesPerSecond: 512, etaSeconds: 10,
+  });
+  const memberB = job('x2', 'running', { batchId: 'batch-2', direction: 'download', queueOrder: 2 });
+  harness.emit(snapshot([
+    job('x1', 'running', { batchId: 'batch-2', direction: 'download' }),
+    memberB,
+  ], { batches: [staticBatch], summary: summary({ active: 2, running: 2 }) }));
+
+  const tbody = harness.panelEl.querySelector('tbody');
+  const headerBefore = harness.panelEl.querySelector('tr.tl-transfer-center__batch[data-batch-id="batch-2"]');
+  const rowBefore = harness.panelEl.querySelector('tr[data-job-id="x1"]');
+
+  // Progress-only tick: same member set, same batch id -> patch in place.
+  harness.emit(snapshot([
+    job('x1', 'running', { batchId: 'batch-2', direction: 'download', bytesTransferred: 50 }),
+    memberB,
+  ], {
+    revision: 2,
+    batches: [batchAgg('batch-2', {
+      info: {
+        name: 'backup', direction: 'download', expansion: { kind: 'running' },
+        discoveredFiles: 2, discoveredBytes: 200, createdAtMs: 5,
+      },
+      filesDone: 0, bytesDone: 50, speedBytesPerSecond: 1024, etaSeconds: 5,
+    })],
+    summary: summary({ active: 2, running: 2 }),
+  }));
+  assert.strictEqual(harness.panelEl.querySelector('tbody'), tbody);
+  assert.strictEqual(
+    harness.panelEl.querySelector('tr.tl-transfer-center__batch[data-batch-id="batch-2"]'), headerBefore,
+    'a progress-only tick patches the existing header row instead of replacing it',
+  );
+  assert.strictEqual(harness.panelEl.querySelector('tr[data-job-id="x1"]'), rowBefore,
+    'member rows keep their identity across progress-only ticks');
+  assert.ok(headerBefore.textContent.includes('50 B of 200 B'));
+
+  // The batch clears entirely once every member leaves this view (history
+  // clearing or batch completion) — its header disappears with them.
+  harness.emit(snapshot([], { revision: 3, batches: [], summary: summary() }));
+  assert.strictEqual(
+    harness.panelEl.querySelector('tr.tl-transfer-center__batch[data-batch-id="batch-2"]'), null,
+    'a batch with no remaining members in view renders no header',
+  );
+  assert.strictEqual(harness.panelEl.querySelector('tr[data-job-id="x1"]'), null);
 }
 
 console.log('transfer center: all assertions passed');

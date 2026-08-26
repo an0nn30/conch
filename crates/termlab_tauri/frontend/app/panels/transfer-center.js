@@ -40,6 +40,11 @@
       return latestSnapshot && latestSnapshot.jobs.find((job) => job.id === jobId);
     }
 
+    function batchById(batchId) {
+      if (!latestSnapshot || !Array.isArray(latestSnapshot.batches) || !batchId) return undefined;
+      return latestSnapshot.batches.find((batch) => batch && batch.info && batch.info.id === batchId);
+    }
+
     function reportCommandError(error) {
       const toast = opts.toast || global.toast;
       if (toast && typeof toast.error === 'function') {
@@ -69,6 +74,14 @@
           dialogs.showConcurrency(latestSnapshot && latestSnapshot.settings, event.invoker, (settings) => (
             acknowledge(runtime.updateSettings(settings))
           ));
+        }
+        return undefined;
+      }
+      if (action === 'cancel-batch') {
+        const batch = batchById(event && event.batchId);
+        if (!batch) return undefined;
+        if (dialogs && typeof dialogs.showCancelBatch === 'function') {
+          dialogs.showCancelBatch(batch, event.invoker, () => acknowledge(runtime.cancelBatch(batch.info.id)));
         }
         return undefined;
       }
