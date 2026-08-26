@@ -34,3 +34,39 @@ for (const tag of zoneTags) {
 }
 
 console.log(`tool zone markup: all ${zoneTags.length} zones boot empty`);
+
+// The bottom zone was split into a left/right pair (bottom-left,
+// bottom-right) so it can host two tool windows side by side, mirroring the
+// left/right sidebars' top/bottom pairs. The old single `data-zone="bottom"`
+// zone must be fully retired from the markup — normalizeZoneName() in
+// tool-window-manager.js still *aliases* the legacy name for persisted
+// state, but the DOM itself must never contain it again.
+assert.ok(
+  !html.includes('data-zone="bottom"'),
+  'index.html must not contain a lone data-zone="bottom" zone; it was split into bottom-left/bottom-right',
+);
+
+for (const zoneName of ['bottom-left', 'bottom-right']) {
+  const matches = html.match(new RegExp(`data-zone="${zoneName}"`, 'g')) || [];
+  assert.equal(
+    matches.length,
+    1,
+    `expected exactly one data-zone="${zoneName}" in index.html, found ${matches.length}`,
+  );
+
+  const zoneStart = html.indexOf(`data-zone="${zoneName}"`);
+  const zoneBlock = html.slice(zoneStart, html.indexOf('</div>', zoneStart) + '</div>'.length + 200);
+  assert.ok(
+    /zone-tab-strip/.test(zoneBlock),
+    `data-zone="${zoneName}" must be immediately followed by a .zone-tab-strip child`,
+  );
+}
+
+const dividerMatches = html.match(/id="bottom-zone-divider"/g) || [];
+assert.equal(
+  dividerMatches.length,
+  1,
+  `expected exactly one id="bottom-zone-divider" in index.html, found ${dividerMatches.length}`,
+);
+
+console.log('tool zone markup: bottom-left/bottom-right pair and divider present');

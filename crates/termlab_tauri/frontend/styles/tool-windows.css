@@ -128,7 +128,19 @@
     }
     .bottom-zone-wrap.hidden { display: none; }
     .bottom-zone-resize { height: 4px; cursor: row-resize; flex-shrink: 0; }
+    .bottom-zone-row {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+    }
+    /* Same affordance as the horizontal .zone-divider, rotated: drags the
+       bottom-left/right split. */
+    .zone-divider--vertical {
+      width: 4px; height: auto; cursor: col-resize;
+    }
     #bottom-strip { border-top: 1px solid var(--tl-border); flex-direction: row; }
+    #bottom-strip { justify-content: space-between; }
     .side-strip--horizontal.hidden { height: 0; width: auto; }
     #app.zen-mode #left-strip,
     #app.zen-mode #right-strip {
