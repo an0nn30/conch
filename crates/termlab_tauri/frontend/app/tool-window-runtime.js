@@ -536,10 +536,10 @@
 
             const savedZones = initialLayoutData.tool_window_zones;
             const knowsBottomZone = Object.keys(savedZones)
-              .some((id) => savedZones[id] === 'bottom');
+              .some((id) => String(savedZones[id]).startsWith('bottom'));
             if (!sftpBottomMigrationAlreadyRan && !knowsBottomZone && savedZones['file-explorer']) {
               const previousZone = savedZones['file-explorer'];
-              savedZones['file-explorer'] = 'bottom';
+              savedZones['file-explorer'] = 'bottom-left';
               global.toolWindowManager.setPersistedZones(savedZones);
               if (!initialLayoutData.active_tool_windows || typeof initialLayoutData.active_tool_windows !== 'object') {
                 initialLayoutData.active_tool_windows = {};
@@ -547,7 +547,7 @@
               if (initialLayoutData.active_tool_windows[previousZone] === 'file-explorer') {
                 delete initialLayoutData.active_tool_windows[previousZone];
               }
-              initialLayoutData.active_tool_windows['bottom'] = 'file-explorer';
+              initialLayoutData.active_tool_windows['bottom-left'] = 'file-explorer';
               // bottom_panel_visible used to describe the notifications bar,
               // which most layouts recorded as hidden. Honouring that here
               // would silently swallow the panel we just moved, so reveal the

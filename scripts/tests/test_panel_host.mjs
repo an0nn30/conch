@@ -136,7 +136,7 @@ function loadManager(opts) {
   const options = opts || {};
   const body = makeElement('body');
   const zoneEls = new Map();
-  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom']) {
+  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
     zoneEls.set(z, makeZoneEl(z));
   }
 
@@ -909,7 +909,8 @@ function makeFakeManager() {
   };
 }
 
-async function loadRuntime(savedLayout) {
+async function loadRuntime(savedLayout, opts) {
+  const options = opts || {};
   const twm = makeFakeManager();
   const invokeCalls = [];
   const listeners = new Map();
@@ -949,6 +950,13 @@ async function loadRuntime(savedLayout) {
   sandbox.transferCenterPanel = {
     init(options) { transferPanelInits.push(options); },
   };
+  // Only wired up when a scenario cares about the localStorage-backed
+  // migration flag (see the SFTP-bottom-zone migration regression below);
+  // every other caller keeps the prior behaviour of global.localStorage
+  // being undefined, which the migration's try/catch already tolerates.
+  if (options.localStorage) {
+    sandbox.localStorage = options.localStorage;
+  }
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(RUNTIME_PATH, 'utf8'), sandbox, { filename: RUNTIME_PATH });
 
@@ -1070,6 +1078,45 @@ async function loadRuntime(savedLayout) {
   const call = twm.calls.find((c) => c.name === 'notifyHostDocked');
   assert.deepStrictEqual(plain(call.args), ['tunnels', 12],
     'reqId must reach the manager, or the stale-echo guard has nothing to compare');
+}
+
+// --- 17c. Regression: a post-split bottom-right layout must not be re-migrated
+//
+// The one-time "SFTP moved into the bottom zone" migration (init(), just
+// above the setPersistedZones/setPersistedActiveZoneWindows calls exercised
+// here) used to detect "this layout already knows about the bottom zone" by
+// checking for the exact legacy value 'bottom'. getZoneAssignments() (and
+// therefore every layout saved by a build with the bottom-left/bottom-right
+// split) never emits that legacy value again, so a user whose SFTP already
+// lived in 'bottom-right' — with the migration's localStorage flag unset,
+// e.g. a fresh profile or one where the flag was cleared — would get the
+// migration re-fired on next boot: rewritten to 'bottom-left' and the
+// bottom-right active entry deleted, silently undoing their arrangement.
+{
+  const store = new Map();
+  const fakeLocalStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)); },
+  };
+  const { twm } = await loadRuntime({
+    tool_window_zones: { 'file-explorer': 'bottom-right' },
+    active_tool_windows: { 'bottom-right': 'file-explorer' },
+  }, { localStorage: fakeLocalStorage });
+
+  const zonesCall = twm.calls.find((c) => c.name === 'setPersistedZones');
+  assert.ok(zonesCall, 'tool_window_zones must still be handed to the manager');
+  assert.strictEqual(zonesCall.args[0]['file-explorer'], 'bottom-right',
+    'a layout that already knows about a bottom-* zone must not be force-migrated to bottom-left');
+
+  const activeCall = twm.calls.find((c) => c.name === 'setPersistedActiveZoneWindows');
+  assert.ok(activeCall, 'active_tool_windows must still be handed to the manager');
+  assert.strictEqual(activeCall.args[0]['bottom-right'], 'file-explorer',
+    'the bottom-right active-window entry must survive untouched');
+  assert.ok(!('bottom-left' in activeCall.args[0]),
+    'no bottom-left key should appear when the migration correctly does not fire');
+
+  assert.strictEqual(store.has('termlab.migration.sftpBottomZone'), false,
+    'the one-time migration flag must stay unset when the migration does not fire');
 }
 
 // ===========================================================================
@@ -1246,7 +1293,7 @@ function makeHostSandbox(config) {
   const body = makeElement('body');
   const appEl = makeElement('div');
   const zoneEls = new Map();
-  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom']) {
+  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
     zoneEls.set(z, makeZoneEl(z));
   }
   const byId = new Map([
@@ -1258,6 +1305,7 @@ function makeHostSandbox(config) {
     ['right-sidebar', makeElement('div')],
     ['bottom-zone-wrap', makeElement('div')],
     ['bottom-zone-resize', makeElement('div')],
+    ['bottom-zone-divider', makeElement('div')],
   ]);
 
   const warnCalls = [];
