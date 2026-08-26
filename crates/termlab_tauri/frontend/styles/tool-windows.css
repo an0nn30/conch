@@ -160,6 +160,9 @@
     /* .strip-btn base/hover/active/left-strip-transform rules owned by
        design-system/components/strips.css */
     .strip-btn.twm-strip-dragging { opacity: 0.65; }
+    /* A companion riding inside a composite pop-out: present on the rail,
+       but "away" — clicking focuses the host window instead of docking. */
+    .strip-btn--away { opacity: 0.55; }
     .twm-dnd-overlay {
       position: fixed; inset: 0; display: none; pointer-events: none; z-index: 9997;
     }

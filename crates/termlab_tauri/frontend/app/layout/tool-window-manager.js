@@ -1467,11 +1467,19 @@
 
     // A popped-out window's rail button reflects its HOST window's visibility,
     // which is independent of whether this window's docked panel is showing.
-    const isActive = getViewMode(windowId) === VIEW_MODE_WINDOW
-      ? hostVisible.get(windowId) === true
-      : (tw.active && isPanelVisible(side));
+    //
+    // A companion riding inside a composite host's own window is "away": it
+    // has no docked presence to toggle, so it never lights up as active no
+    // matter what its own (frozen) active flag says.
+    const away = companionSuppressions.get(windowId) || null;
+    const isActive = away
+      ? false
+      : (getViewMode(windowId) === VIEW_MODE_WINDOW
+          ? hostVisible.get(windowId) === true
+          : (tw.active && isPanelVisible(side)));
     const btn = document.createElement('button');
-    btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '') + (isActive ? ' active' : '');
+    btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '')
+      + (away ? ' strip-btn--away' : '') + (isActive ? ' active' : '');
     if (tw.icon && window.tlIcon) {
       btn.appendChild(window.tlIcon.create(tw.icon, { size: 16, alt: '' }));
     }
@@ -1485,6 +1493,14 @@
         delete btn.dataset.suppressClick;
         e.preventDefault();
         e.stopPropagation();
+        return;
+      }
+      if (away) {
+        // The tool lives in the host's window, not here — bring that window
+        // forward rather than trying to dock/undock a panel that has no DOM
+        // of its own to show.
+        panelHostInvoke('focus_panel_host', { toolWindowId: away.hostId })
+          .catch(() => summonWindowHost(away.hostId));
         return;
       }
       toggle(windowId);
@@ -1514,6 +1530,12 @@
     const tw = toolWindows.get(windowId);
     if (!tw) return null;
 
+    // A suppressed companion is riding inside its host's window right now —
+    // it has no docked presence and no window of its own to move, dock, pop
+    // out, or hide, so every actionable entry disables until the host lets
+    // it go (dock-back or abort; see liftCompanionsFor()).
+    const suppressed = companionSuppressions.has(windowId);
+
     const targets = [
       { zone: 'left-top',     label: 'Left (Top)' },
       { zone: 'left-bottom',  label: 'Left (Bottom)' },
@@ -1528,7 +1550,7 @@
       return {
         label: 'Move to ' + t.label,
         checked: isCurrent,
-        disabled: isCurrent,
+        disabled: isCurrent || suppressed,
         onSelect: () => moveTo(windowId, t.zone),
       };
     });
@@ -1538,18 +1560,18 @@
     items.push({
       label: 'View Mode: Dock',
       checked: mode === VIEW_MODE_DOCK,
-      disabled: mode === VIEW_MODE_DOCK,
+      disabled: mode === VIEW_MODE_DOCK || suppressed,
       onSelect: () => setViewMode(windowId, VIEW_MODE_DOCK),
     });
     items.push({
       label: 'View Mode: Window',
       checked: mode === VIEW_MODE_WINDOW,
-      disabled: mode === VIEW_MODE_WINDOW,
+      disabled: mode === VIEW_MODE_WINDOW || suppressed,
       onSelect: () => setViewMode(windowId, VIEW_MODE_WINDOW),
     });
 
     items.push({ separator: true });
-    items.push({ label: 'Hide', onSelect: () => deactivate(windowId) });
+    items.push({ label: 'Hide', disabled: suppressed, onSelect: () => deactivate(windowId) });
 
     return items;
   }

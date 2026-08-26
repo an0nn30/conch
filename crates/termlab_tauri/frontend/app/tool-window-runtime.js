@@ -112,6 +112,7 @@
         icon: 'sftp',
         type: 'built-in',
         defaultZone: 'bottom',
+        companions: [{ id: 'transfer-center', position: 'bottom' }],
         renderFn: (container) => {
           const panelEl = document.createElement('div');
           panelEl.id = 'files-panel';

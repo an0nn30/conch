@@ -82,10 +82,26 @@ function makeElement(tag) {
       listeners.get(name).push(fn);
     },
     removeEventListener() {},
+    // Test-only: invoke every listener stored for `name` (scenario 8 needs to
+    // simulate a real click on a strip button without a real DOM/event loop).
+    fire(name, evt) {
+      const fns = listeners.get(name) || [];
+      const e = evt || { preventDefault() {}, stopPropagation() {} };
+      fns.slice().forEach((fn) => fn(e));
+    },
+    click() { this.fire('click'); },
     setAttribute(n, v) { attrs.set(n, String(v)); },
     getAttribute(n) { return attrs.has(n) ? attrs.get(n) : null; },
     getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
   };
+  // updateStrips() clears each strip with `stripEl.innerHTML = ''` before
+  // rebuilding it (same idiom test_bottom_zone_split.mjs's makeElement
+  // mirrors) — without this, repeated updateStrips() calls (register,
+  // activate, setViewMode, ...) would just keep appending duplicate sections.
+  Object.defineProperty(el, 'innerHTML', {
+    set(v) { if (v === '') this.children.length = 0; },
+    get() { return ''; },
+  });
   return el;
 }
 
@@ -155,6 +171,79 @@ function loadManager() {
   assert.ok(twm, 'tool-window-manager.js must expose window.toolWindowManager');
   twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
   return { twm, calls, zoneEls };
+}
+
+// loadManager() plus real (stubbed) strip elements, the way
+// test_bottom_zone_split.mjs's loadManagerWithBottomDom() adds a real
+// 'bottom-strip' element to its base loader — needed here so updateStrips()
+// actually populates strip-section children instead of bailing on a null
+// stripEl, giving scenario 8 real button elements to click.
+function loadManagerWithStrips() {
+  const body = makeElement('body');
+  const zoneEls = new Map();
+  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
+    zoneEls.set(z, makeZoneEl(z));
+  }
+  const stripEls = {
+    left: makeElement('div'),
+    right: makeElement('div'),
+    bottom: makeElement('div'),
+  };
+  const idEls = {
+    'left-strip': stripEls.left,
+    'right-strip': stripEls.right,
+    'bottom-strip': stripEls.bottom,
+  };
+
+  const calls = { invokes: [] };
+  let nextReqId = 1;
+  const invoke = (cmd, args) => {
+    calls.invokes.push({ cmd, args });
+    return Promise.resolve(nextReqId++);
+  };
+
+  const sandbox = {
+    console,
+    setTimeout,
+    clearTimeout,
+    Promise,
+    Math,
+    document: {
+      body,
+      createElement: (t) => makeElement(t),
+      getElementById: (id) => idEls[id] || null,
+      querySelector: (sel) => {
+        const m = /^\[data-zone="([^"]+)"\]$/.exec(sel);
+        if (m) return zoneEls.get(m[1]) || null;
+        return null;
+      },
+      querySelectorAll: () => [],
+      addEventListener() {},
+    },
+    tlMenu: { open: () => {} },
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(MODULE_PATH, 'utf8'), sandbox, { filename: MODULE_PATH });
+
+  const twm = sandbox.toolWindowManager;
+  assert.ok(twm, 'tool-window-manager.js must expose window.toolWindowManager');
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {}, invoke });
+  return { twm, calls, stripEls };
+}
+
+// Strip DOM is section elements (strip-section[--row/--end]) each holding
+// button children with dataset.toolWindow set by makeStripBtn(); walk every
+// strip's sections looking for the one carrying `windowId`.
+function findStripBtn(stripEls, windowId) {
+  for (const stripEl of Object.values(stripEls)) {
+    for (const section of stripEl.children) {
+      for (const child of section.children) {
+        if (child && child.dataset && child.dataset.toolWindow === windowId) return child;
+      }
+    }
+  }
+  return null;
 }
 
 const HOST = {
@@ -248,6 +337,35 @@ const COMPANION = { title: 'Transfers', type: 'builtin', defaultZone: 'bottom-ri
   twm.register('transfer-center', COMPANION);
   assert.strictEqual(twm.isCompanionSuppressed('transfer-center'), true,
     'companion registering after the popped-out host is suppressed on arrival');
+}
+
+// --- 8. suppressed companion strip button: away class, click focuses host ----
+{
+  const { twm, calls, stripEls } = loadManagerWithStrips();
+  twm.register('file-explorer', HOST);
+  twm.register('transfer-center', COMPANION);
+  twm.setViewMode('file-explorer', 'window');
+  const btn = findStripBtn(stripEls, 'transfer-center');
+  assert.ok(btn, 'suppressed companion still gets a strip button');
+  assert.ok(String(btn.className).includes('strip-btn--away'), 'away styling');
+  assert.ok(!String(btn.className).includes('active'), 'never lit while away');
+  btn.click();
+  const focus = calls.invokes.find((c) => c.cmd === 'focus_panel_host');
+  assert.ok(focus, 'click issues focus_panel_host');
+  assert.strictEqual(focus.args.toolWindowId, 'file-explorer', 'click targets the HOST id, not the companion');
+}
+
+// --- 9. context menu: move/view/hide disabled while suppressed ----------------
+{
+  const { twm } = loadManager();
+  twm.register('file-explorer', HOST);
+  twm.register('transfer-center', COMPANION);
+  twm.setViewMode('file-explorer', 'window');
+  const items = twm.buildContextMenuItems('transfer-center');
+  assert.ok(items, 'buildContextMenuItems returns entries for a suppressed companion');
+  const actionable = items.filter((i) => !i.separator);
+  assert.ok(actionable.every((i) => i.disabled === true),
+    'every actionable entry disabled while suppressed');
 }
 
 console.log('test_composite_host: all assertions passed');
