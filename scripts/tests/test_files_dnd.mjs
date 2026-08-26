@@ -36,6 +36,7 @@ const FILES_DATA_SERVICE_PATH = path.join(FRONTEND, 'features/files/data-service
 const FILES_PANE_STORE_PATH = path.join(FRONTEND, 'features/files/pane-store.js');
 const FILES_ACTIONS_PATH = path.join(FRONTEND, 'features/files/actions.js');
 const NATIVE_DROP_PATH = path.join(FRONTEND, 'features/files/native-drop.js');
+const DRAGDROP_RUNTIME_PATH = path.join(FRONTEND, 'dragdrop-runtime.js');
 
 const ENTRY_MIME = 'application/x-termlab-entry';
 
@@ -1063,3 +1064,138 @@ console.log('files dnd (native-drop pure): all assertions passed');
 }
 
 console.log('files dnd (native drop wiring): all assertions passed');
+
+// ===========================================================================
+// Part E — core/dragdrop-runtime.js: terminal drop must not fire for an OS
+// drop elsewhere in the window (Task 8 fix round)
+// ===========================================================================
+//
+// Before this fix, dragdrop-runtime.js's `currentWindow.onDragDropEvent`
+// listener reacted to EVERY window-level Tauri drag/drop event regardless of
+// where it landed — so a Finder drop onto the SFTP remote pane (Part D
+// above) also pasted the dropped paths into whatever terminal pane was
+// focused. This section loads the real dragdrop-runtime.js (plus
+// native-drop.js, which it now shares scaleNativeDropPosition/pointInRect
+// with — same load-order requirement index.html encodes) in a VM, captures
+// the callback it registers via a fake `currentWindow.onDragDropEvent`, and
+// drives that callback directly with 'over'/'drop'/'leave' payloads — full
+// wire-level coverage of the fix, not just the shared pure hit-test helpers
+// (already covered standalone in Part C).
+
+function loadDragDropRuntime() {
+  const sandbox = { console };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(NATIVE_DROP_PATH, 'utf8'), sandbox, { filename: NATIVE_DROP_PATH });
+  vm.runInContext(fs.readFileSync(DRAGDROP_RUNTIME_PATH, 'utf8'), sandbox, { filename: DRAGDROP_RUNTIME_PATH });
+  assert.ok(sandbox.termlabDragDropRuntime, 'dragdrop-runtime IIFE must expose window.termlabDragDropRuntime');
+  return sandbox;
+}
+
+// Wires a fresh dragdrop-runtime instance against a fake terminal host
+// (rect defaults to a 200x200 box at the origin) and a fake `currentWindow`
+// that just captures the onDragDropEvent callback instead of registering it
+// with anything real. Returns everything a test needs: the element (so its
+// rect/class can be inspected or overridden), the captured callback, and the
+// invoke-call log writePathsToTerminal feeds.
+function setupDragDropHarness(rectOverride) {
+  const sandbox = loadDragDropRuntime();
+  const terminalHostEl = makeElement('div');
+  terminalHostEl.getBoundingClientRect = () => (
+    rectOverride || { left: 0, top: 0, right: 200, bottom: 200 }
+  );
+  const invokeCalls = [];
+  const invoke = (cmd, args) => {
+    invokeCalls.push({ cmd, args });
+    return Promise.resolve();
+  };
+  let onDragDropEventCallback = null;
+  const currentWindow = {
+    onDragDropEvent: (cb) => { onDragDropEventCallback = cb; },
+  };
+  const pane = { paneId: 42, spawned: true, type: 'local' };
+  const runtime = sandbox.termlabDragDropRuntime.create({
+    terminalHostEl,
+    currentWindow,
+    getCurrentPane: () => pane,
+    invoke,
+  });
+  runtime.init();
+  assert.ok(onDragDropEventCallback, 'init must register a currentWindow.onDragDropEvent callback');
+  return {
+    sandbox, terminalHostEl, invokeCalls,
+    fire: (payload) => onDragDropEventCallback({ payload }),
+  };
+}
+
+// -- drop with a position INSIDE the terminal host's rect: pastes, exactly
+// like before the fix -------------------------------------------------------
+{
+  const h = setupDragDropHarness();
+  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 50, y: 50 } });
+  assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['write_to_pty']);
+  assert.deepEqual(j(h.invokeCalls[0].args), { paneId: 42, data: '/home/demo/notes.txt' });
+  console.log('E1. terminal drop, position hits terminal host: pastes (unchanged behavior): ok');
+}
+
+// -- drop with a position OUTSIDE the terminal host's rect (e.g. it landed
+// on the SFTP remote pane instead): must NOT paste into the terminal — this
+// is the collision the fix closes -------------------------------------------
+{
+  const h = setupDragDropHarness();
+  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 999, y: 999 } });
+  assert.deepEqual(h.invokeCalls, [], 'a drop that misses the terminal host must not write anything to it');
+  assert.equal(h.terminalHostEl.classList.contains('drag-over'), false);
+  console.log('E2. terminal drop, position misses terminal host: does not paste: ok');
+}
+
+// -- drop with NO position in the payload: today's unconditional paste
+// behavior is preserved (some event shapes may omit position) -------------
+{
+  const h = setupDragDropHarness();
+  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'] });
+  assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['write_to_pty'],
+    'a drop event with no position payload must keep the pre-fix unconditional paste');
+  console.log('E3. terminal drop, no position in payload: keeps unconditional paste: ok');
+}
+
+// -- over: marks drag-over only while the position is inside the terminal
+// host; moving off it (still 'over', new position) must clear the mark ----
+{
+  const h = setupDragDropHarness();
+  h.fire({ type: 'over', position: { x: 50, y: 50 } });
+  assert.equal(h.terminalHostEl.classList.contains('drag-over'), true, 'a hit must mark the terminal host');
+  h.fire({ type: 'over', position: { x: 999, y: 999 } });
+  assert.equal(h.terminalHostEl.classList.contains('drag-over'), false, 'moving off the terminal host must clear the mark');
+  console.log('E4. terminal drag-over: marks on hit, clears when it moves off: ok');
+}
+
+// -- leave: always clears drag-over, unaffected by the hit-test -----------
+{
+  const h = setupDragDropHarness();
+  h.fire({ type: 'over', position: { x: 50, y: 50 } });
+  assert.equal(h.terminalHostEl.classList.contains('drag-over'), true);
+  h.fire({ type: 'leave' });
+  assert.equal(h.terminalHostEl.classList.contains('drag-over'), false);
+  console.log('E5. terminal drag-leave: clears unconditionally: ok');
+}
+
+// -- the physical-pixel trap, terminal side: the identical physical position
+// hits at devicePixelRatio 2 and misses at devicePixelRatio 1 against the
+// same logical rect — proves dragdrop-runtime.js's hit-test actually shares
+// native-drop.js's scaling rather than comparing raw physical coordinates -
+{
+  const h = setupDragDropHarness({ left: 0, top: 0, right: 100, bottom: 100 });
+
+  h.sandbox.devicePixelRatio = 1;
+  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } });
+  assert.deepEqual(h.invokeCalls, [], 'at devicePixelRatio 1, physical (150,150) misses a 100x100 logical rect');
+
+  h.sandbox.devicePixelRatio = 2;
+  h.fire({ type: 'drop', paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } });
+  assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['write_to_pty'],
+    'at devicePixelRatio 2, the same physical (150,150) scales to logical (75,75) and hits');
+  console.log('E6. terminal drop: devicePixelRatio scales physical position before hit-testing: ok');
+}
+
+console.log('files dnd (terminal drop collision fix): all assertions passed');

@@ -1259,11 +1259,16 @@
   // LOGICAL/CSS pixels — on a retina display (devicePixelRatio 2) a raw
   // physical position would land roughly twice as far right/down as it
   // should, so every position is divided by devicePixelRatio before it ever
-  // reaches resolveNativeDrop.
+  // reaches resolveNativeDrop. The scaling itself lives in
+  // features/files/native-drop.js (loaded before this file — see
+  // index.html) so core/dragdrop-runtime.js's terminal-drop hit-test (the
+  // Task 8 fix-round collision fix) shares the exact same math rather than
+  // keeping its own copy.
   function scaleNativeDropPosition(position) {
-    if (!position || typeof position.x !== 'number' || typeof position.y !== 'number') return null;
-    const ratio = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-    return { x: position.x / ratio, y: position.y / ratio };
+    const nativeDrop = window.termlabNativeDrop;
+    return nativeDrop && typeof nativeDrop.scaleNativeDropPosition === 'function'
+      ? nativeDrop.scaleNativeDropPosition(position)
+      : null;
   }
 
   function nativeDropDeps() {

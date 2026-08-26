@@ -1,4 +1,4 @@
-// OS file drops onto the remote pane (Task 8).
+// OS file drops (Task 8, plus the Task 8 fix-round terminal-collision fix).
 //
 // Tauri v2 delivers native (Finder/Explorer) file drops as window-level
 // events carrying real filesystem paths — `tauri://drag-drop` (paths +
@@ -6,12 +6,22 @@
 // hover feedback. The DOM's own drag events never see real paths for an OS
 // drop (that's what Task 7's pane-view.js intra-app drag/drop, with its
 // synthetic `application/x-termlab-entry` payload, is for) — this module is
-// the OS-drop counterpart, consumed by files-panel.js's init.
+// the OS-drop counterpart.
 //
-// Both helpers here are pure functions of their arguments (no DOM, no
-// `invoke`, no module-level state) so they can be exercised in a bare VM
-// context — see scripts/tests/test_files_dnd.mjs's native-drop section,
-// which loads only this file.
+// Two consumers share this module's position/hit-test helpers:
+// files-panel.js (the remote pane's own drop target) and
+// core/dragdrop-runtime.js's window-level `onDragDropEvent` terminal
+// handler (which must hit-test against the terminal host so an OS drop
+// elsewhere in the window — e.g. onto the SFTP remote pane — doesn't ALSO
+// paste the dropped paths into a live shell prompt). Both load this script
+// first (see index.html's script order), so both reuse the SAME
+// scaleNativeDropPosition/pointInRect rather than keeping their own copies.
+//
+// Every export here is a pure function of its arguments (no DOM beyond the
+// rect-shaped object passed in, no `invoke`, no module-level state) so all
+// of it can be exercised in a bare VM context — see
+// scripts/tests/test_files_dnd.mjs's native-drop section, which loads only
+// this file.
 (function initTermLabNativeDrop(global) {
   'use strict';
 
@@ -26,16 +36,39 @@
     return (trimmed || '') + '/' + name;
   }
 
-  // Decide what a native drag/drop event at `position` (already scaled to
-  // LOGICAL px — see files-panel.js's devicePixelRatio note) should do
-  // against the remote pane root's `paneRect` (a getBoundingClientRect()-
-  // shaped object: left/top/right/bottom).
+  // Tauri v2 reports drag-drop positions in PHYSICAL pixels, while
+  // getBoundingClientRect() (what every hit-test here compares against) is
+  // in LOGICAL/CSS pixels — on a retina display (devicePixelRatio 2) a raw
+  // physical position would land roughly twice as far right/down as it
+  // should. Every consumer must scale through this before hit-testing.
+  // Returns null when `position` isn't a well-formed {x, y} pair.
+  function scaleNativeDropPosition(position) {
+    if (!position || typeof position.x !== 'number' || typeof position.y !== 'number') return null;
+    const ratio = (typeof global !== 'undefined' && global.devicePixelRatio) || 1;
+    return { x: position.x / ratio, y: position.y / ratio };
+  }
+
+  // The raw rectangle hit-test, shared by resolveNativeDrop below and by
+  // any other caller (dragdrop-runtime.js) that just needs "is this
+  // (already-scaled, logical-px) point inside this
+  // getBoundingClientRect()-shaped rect", without the SFTP-specific
+  // accept/no-session/ignore vocabulary resolveNativeDrop layers on top.
   //
-  // Hit test is left/top-inclusive, right/bottom-exclusive — the same
-  // half-open convention getBoundingClientRect()'s own box implies (a point
-  // exactly on the right or bottom edge belongs to whatever sits just past
-  // it, not this box). Pinned here as the one rule both this function and
-  // its tests use.
+  // Left/top-inclusive, right/bottom-exclusive — the same half-open
+  // convention getBoundingClientRect()'s own box implies (a point exactly on
+  // the right or bottom edge belongs to whatever sits just past it, not this
+  // box). Pinned here as the one rule every hit-test in this module, and
+  // every caller's tests, uses.
+  function pointInRect(position, rect) {
+    if (!position || !rect) return false;
+    const { x, y } = position;
+    if (typeof x !== 'number' || typeof y !== 'number') return false;
+    return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+  }
+
+  // Decide what a native drag/drop event at `position` (already scaled to
+  // LOGICAL px via scaleNativeDropPosition above) should do against the
+  // remote pane root's `paneRect` (a getBoundingClientRect()-shaped object).
   //
   // Returns 'ignore' (position missing, or outside the rect — drops
   // elsewhere in the window are silently ignored per spec), 'no-session'
@@ -43,12 +76,7 @@
   // shows the existing "not connected" toast), or 'accept' (inside the rect,
   // session active — caller routes the drop).
   function resolveNativeDrop(position, paneRect, sessionActive) {
-    if (!position || !paneRect) return 'ignore';
-    const { x, y } = position;
-    if (typeof x !== 'number' || typeof y !== 'number') return 'ignore';
-    const hit = x >= paneRect.left && x < paneRect.right
-      && y >= paneRect.top && y < paneRect.bottom;
-    if (!hit) return 'ignore';
+    if (!pointInRect(position, paneRect)) return 'ignore';
     return sessionActive ? 'accept' : 'no-session';
   }
 
@@ -116,6 +144,8 @@
   }
 
   global.termlabNativeDrop = {
+    scaleNativeDropPosition,
+    pointInRect,
     resolveNativeDrop,
     routeNativeDropPaths,
   };
