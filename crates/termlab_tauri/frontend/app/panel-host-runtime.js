@@ -337,6 +337,30 @@
     return null;
   }
 
+  // Bottom-section resize: same pointer idiom as the zone dividers, clamped
+  // 120px .. 70% of the window. Session-only — nothing persists.
+  function initHostBottomDivider(dividerEl, bottomEl, rootEl) {
+    let dragging = false;
+    let startY = 0;
+    let startHeight = 0;
+    dividerEl.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      dividerEl.setPointerCapture(e.pointerId);
+      dragging = true;
+      startY = e.clientY;
+      startHeight = bottomEl.offsetHeight;
+    });
+    dividerEl.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const max = Math.round((rootEl.offsetHeight || window.innerHeight) * 0.7);
+      const next = Math.max(120, Math.min(max, startHeight + (startY - e.clientY)));
+      bottomEl.style.height = next + 'px';
+    });
+    const stop = () => { dragging = false; };
+    dividerEl.addEventListener('pointerup', stop);
+    dividerEl.addEventListener('pointercancel', stop);
+  }
+
   function mountRegistration(contentRootEl, registration) {
     const panelEl = document.createElement('div');
     panelEl.className = 'tool-window-content';
@@ -442,10 +466,38 @@
     document.body.appendChild(chrome.rootEl);
 
     const mounted = mountRegistration(chrome.contentRootEl, registration);
+
+    // Companions ride along in a bottom section — SFTP + Transfers reads as
+    // one small app. Unresolvable ids degrade to today's solo host.
+    const companionIds = Array.isArray(request.companionIds) ? request.companionIds : [];
+    const companionMounts = [];
+    const companionRegs = companionIds
+      .filter((cid) => cid && cid !== request.toolWindowId)
+      .map((cid) => manager.getRegistration(cid))
+      .filter((reg) => reg && typeof reg.renderFn === 'function');
+    if (companionRegs.length > 0) {
+      const bottom = document.createElement('div');
+      bottom.className = 'panel-host-bottom';
+      const divider = document.createElement('div');
+      divider.className = 'panel-host-divider';
+      const bottomContent = document.createElement('div');
+      bottomContent.className = 'panel-host-bottom-content';
+      bottom.appendChild(divider);
+      bottom.appendChild(bottomContent);
+      chrome.rootEl.appendChild(bottom);
+      for (const reg of companionRegs) {
+        companionMounts.push(mountRegistration(bottomContent, reg));
+      }
+      initHostBottomDivider(divider, bottom, chrome.rootEl);
+    }
+
     const disposeMountedPanel = () => {
       if (typeof global.removeEventListener === 'function') {
         global.removeEventListener('beforeunload', disposeMountedPanel);
       }
+      // Teardown mirrors mount order reversed: companions rode in after the
+      // main mount, so they come apart first.
+      for (const companionMount of companionMounts) companionMount.destroy();
       mounted.destroy();
     };
     if (typeof global.addEventListener === 'function') {

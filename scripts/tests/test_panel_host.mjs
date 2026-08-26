@@ -1514,6 +1514,26 @@ function makeHostSandbox(config) {
     fireWindowLifecycle: (name) => {
       for (const fn of windowLifecycleListeners.get(name) || []) fn({ type: name });
     },
+    // DFS over the stub DOM tree rooted at <body> for the first element
+    // carrying `cls` — the composite layout's only observable shape (Part 4,
+    // scenario 26c/26d) is the class names buildChrome/boot hang off the
+    // elements they create, so this is the minimal query surface those
+    // scenarios need. Accepts either 'panel-host-bottom' or '.panel-host-
+    // bottom'.
+    query: (sel) => {
+      const cls = String(sel || '').replace(/^\./, '');
+      const visit = (el) => {
+        if (!el) return null;
+        const classes = String(el.className || '').split(/\s+/).filter(Boolean);
+        if (classes.includes(cls)) return el;
+        for (const child of el.children || []) {
+          const found = visit(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return visit(body);
+    },
   };
 }
 
@@ -1867,6 +1887,88 @@ function makeHostSandbox(config) {
 
   host.emitWindow('panel-host-event', { event: 'queued-three', payload: {} });
   assert.strictEqual(seen.length, 3, 'and later events go straight through');
+}
+
+// --- 26c. Composite: request.companionIds mounts main + companion behind --
+// a divider, and BOTH disposers run on teardown. Registered as fresh,
+// harness-owned tool windows (rather than reusing the real 'file-explorer'/
+// 'transfer-center' registrations) so the disposer assertion is meaningful:
+// the real file-explorer renderFn (tool-window-runtime.js) never returns a
+// disposer at all — that is a pre-existing property of that registration,
+// unrelated to what this scenario is pinning, which is boot()'s OWN
+// mount/dispose wiring for a companion pair.
+{
+  const host = makeHostSandbox({
+    answers: {
+      get_panel_host_request: () => Promise.resolve({
+        reqId: 9,
+        toolWindowId: 'composite-main',
+        parentLabel: 'window-1',
+        title: 'SFTP',
+        companionIds: ['composite-companion'],
+      }),
+    },
+  });
+  const renderCalls = {};
+  const disposeCalls = {};
+  const bump = (table, key) => { table[key] = (table[key] || 0) + 1; };
+  host.sandbox.toolWindowManager.register('composite-main', {
+    title: 'Main',
+    renderFn: () => {
+      bump(renderCalls, 'composite-main');
+      return () => bump(disposeCalls, 'composite-main');
+    },
+  });
+  host.sandbox.toolWindowManager.register('composite-companion', {
+    title: 'Companion',
+    renderFn: () => {
+      bump(renderCalls, 'composite-companion');
+      return () => bump(disposeCalls, 'composite-companion');
+    },
+  });
+
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.status, 'mounted');
+  assert.strictEqual(renderCalls['composite-main'], 1, 'main tool rendered');
+  assert.strictEqual(renderCalls['composite-companion'], 1, 'companion rendered');
+  assert.ok(host.query('panel-host-bottom'), 'bottom section exists');
+  assert.ok(host.query('panel-host-divider'), 'divider exists');
+
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(disposeCalls['composite-main'], 1, 'main disposer ran');
+  assert.strictEqual(disposeCalls['composite-companion'], 1, 'companion disposer ran');
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(disposeCalls['composite-main'], 1, 'main disposal is exactly once');
+  assert.strictEqual(disposeCalls['composite-companion'], 1, 'companion disposal is exactly once');
+}
+
+// --- 26d. Degrade: an unresolvable companion id falls back to the solo -----
+// layout — the main tool still mounts, but no bottom section is built.
+{
+  const host = makeHostSandbox({
+    answers: {
+      get_panel_host_request: () => Promise.resolve({
+        reqId: 10,
+        toolWindowId: 'solo-main',
+        parentLabel: 'window-1',
+        title: 'SFTP',
+        companionIds: ['ghost-tool'],
+      }),
+    },
+  });
+  const renderCalls = {};
+  host.sandbox.toolWindowManager.register('solo-main', {
+    title: 'Solo',
+    renderFn: () => { renderCalls['solo-main'] = (renderCalls['solo-main'] || 0) + 1; },
+  });
+
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.status, 'mounted');
+  assert.strictEqual(renderCalls['solo-main'], 1, 'main tool still mounts');
+  assert.ok(!host.query('panel-host-bottom'), 'no bottom section for an unresolvable companion');
+  assert.ok(!host.query('panel-host-divider'), 'no divider either');
 }
 
 // ===========================================================================

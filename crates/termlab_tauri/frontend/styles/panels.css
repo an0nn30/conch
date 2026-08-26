@@ -434,3 +434,30 @@
       white-space: pre-wrap; word-break: break-all;
     }
     .ssh-auth-question { font-size: var(--ui-font-normal); color: var(--dim-fg); }
+    /* Panel host composite layout (Task 4): a companion tool window mounted
+       behind a draggable divider under the host's main tool. Sibling of
+       .tl-panelhost__content inside .tl-panelhost (styles/design-system/
+       components/toolwindow.css) — that root is already a flex column, and
+       .tl-panelhost__content already carries min-height: 0, so this section
+       can claim space without any change there. */
+    .panel-host-bottom {
+      flex-shrink: 0;
+      height: 35%;
+      min-height: 120px;
+      display: flex;
+      flex-direction: column;
+      border-top: 1px solid var(--tl-border);
+    }
+    .panel-host-divider {
+      height: 4px;
+      flex-shrink: 0;
+      cursor: row-resize;
+    }
+    .panel-host-divider:hover { background: var(--dim-fg); }
+    .panel-host-bottom-content {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
