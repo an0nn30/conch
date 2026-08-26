@@ -27,14 +27,6 @@
 
   const strips = { left: null, right: null, bottom: null };
   const DRAGGABLE_ZONES = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right'];
-  const ZONE_LABELS = {
-    'left-top': 'Left Top',
-    'left-bottom': 'Left Bottom',
-    'right-top': 'Right Top',
-    'right-bottom': 'Right Bottom',
-    'bottom-left': 'Bottom Left',
-    'bottom-right': 'Bottom Right',
-  };
 
   // Last user-set split ratios per side (preserved across toggle cycles)
   const lastSplitRatios = { left: 0.5, right: 0.5, bottom: 0.5 };
@@ -98,9 +90,8 @@
   const stripDrag = {
     active: null,
     overlayEl: null,
-    labelEl: null,
+    highlightEl: null,
     previewEl: null,
-    zoneEls: new Map(),
   };
   let resizeDragDepth = 0;
 
@@ -1018,21 +1009,13 @@
     const overlay = document.createElement('div');
     overlay.className = 'twm-dnd-overlay';
 
-    for (const zone of DRAGGABLE_ZONES) {
-      const z = document.createElement('div');
-      z.className = 'twm-dnd-zone';
-      z.dataset.zone = zone;
-      const title = document.createElement('div');
-      title.className = 'twm-dnd-zone-title';
-      title.textContent = ZONE_LABELS[zone] || zone;
-      z.appendChild(title);
-      overlay.appendChild(z);
-      stripDrag.zoneEls.set(zone, z);
-    }
-
-    const label = document.createElement('div');
-    label.className = 'twm-dnd-label';
-    overlay.appendChild(label);
+    // IntelliJ shows nothing while dragging except the ghost of the dragged
+    // button — until the pointer is over a drop target, when one flat region
+    // appears over the real dock area. One highlight element, no zone boxes,
+    // no labels.
+    const highlight = document.createElement('div');
+    highlight.className = 'twm-dnd-highlight';
+    overlay.appendChild(highlight);
 
     const preview = document.createElement('div');
     preview.className = 'twm-drag-preview';
@@ -1040,8 +1023,35 @@
 
     document.body.appendChild(overlay);
     stripDrag.overlayEl = overlay;
-    stripDrag.labelEl = label;
+    stripDrag.highlightEl = highlight;
     stripDrag.previewEl = preview;
+  }
+
+  // Live layout measurements for computeDockHighlightRect: real rects where
+  // a panel is open, remembered/default sizes where it is closed — the same
+  // way IntelliJ previews a hidden tool area at the size it would open at.
+  function dockHighlightMetrics() {
+    const mainEl = document.getElementById('main-area');
+    const main = mainEl
+      ? mainEl.getBoundingClientRect()
+      : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    const visibleWidth = (el) => (el && !el.classList.contains('hidden') ? el.offsetWidth : 0);
+    const panelWidth = (side) => {
+      const sb = sidebars[side];
+      const w = sb && sb.panelEl ? sb.panelEl.offsetWidth : 0;
+      return w > 0 ? w : 280;
+    };
+    const bottomVisible = bottomZoneWrapEl && !bottomZoneWrapEl.classList.contains('hidden')
+      && bottomZoneWrapEl.offsetHeight > 0;
+    return {
+      main,
+      bottomRect: bottomVisible ? bottomZoneWrapEl.getBoundingClientRect() : null,
+      leftStripWidth: visibleWidth(strips.left),
+      rightStripWidth: visibleWidth(strips.right),
+      leftPanelWidth: panelWidth('left'),
+      rightPanelWidth: panelWidth('right'),
+      bottomHeight: 312,
+    };
   }
 
   function getStripDropZoneRects() {
@@ -1140,22 +1150,21 @@
 
   function layoutStripDragOverlay(activeZone) {
     ensureStripDragOverlay();
-    const rects = getStripDropZoneRects();
-    for (const zone of DRAGGABLE_ZONES) {
-      const zEl = stripDrag.zoneEls.get(zone);
-      const rect = rects[zone];
-      if (!zEl || !rect) continue;
-      zEl.style.left = rect.left + 'px';
-      zEl.style.top = rect.top + 'px';
-      zEl.style.width = rect.width + 'px';
-      zEl.style.height = rect.height + 'px';
-      zEl.classList.toggle('active', zone === activeZone);
-      zEl.classList.toggle('forbidden', stripDrag.active && stripDrag.active.sourceZone === zone);
+    const highlight = stripDrag.highlightEl;
+    if (!highlight) return;
+    const dockHighlight = global.termlabDockHighlight;
+    const rect = activeZone && dockHighlight
+      ? dockHighlight.computeDockHighlightRect(activeZone, dockHighlightMetrics())
+      : null;
+    if (!rect) {
+      highlight.style.display = 'none';
+      return;
     }
-    const label = stripDrag.labelEl;
-    if (!label) return;
-    const labelText = activeZone ? `Drop into ${ZONE_LABELS[activeZone]}` : 'Drag to dock this tool window';
-    label.textContent = labelText;
+    highlight.style.display = 'block';
+    highlight.style.left = Math.round(rect.left) + 'px';
+    highlight.style.top = Math.round(rect.top) + 'px';
+    highlight.style.width = Math.round(rect.width) + 'px';
+    highlight.style.height = Math.round(rect.height) + 'px';
   }
 
   function hitStripDropZone(x, y, sourceZone) {

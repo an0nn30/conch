@@ -260,46 +260,21 @@
       outline: 1px solid var(--blue);
       outline-offset: -1px;
     }
+    /* IntelliJ-style split guide: the overlay is an invisible container
+       tracking the hovered pane; the zone element is one flat translucent
+       region covering exactly the half (or whole pane, for center) the drop
+       would occupy. Same DragAndDrop theme token as the tool-window guide —
+       no border, no radius, no glow, no label, no easing. */
     .pane-dnd-overlay {
       position: fixed;
       display: none;
       pointer-events: none;
       z-index: 9998;
-      border: 2px solid color-mix(in srgb, var(--blue) 78%, white);
-      border-radius: 8px;
       box-sizing: border-box;
-      background: color-mix(in srgb, var(--blue) 12%, transparent);
-      will-change: left, top, width, height, opacity;
-      transition: left 180ms cubic-bezier(0.22, 1, 0.36, 1),
-                  top 180ms cubic-bezier(0.22, 1, 0.36, 1),
-                  width 180ms cubic-bezier(0.22, 1, 0.36, 1),
-                  height 180ms cubic-bezier(0.22, 1, 0.36, 1),
-                  opacity 120ms ease;
     }
     .pane-dnd-zone {
       position: absolute;
-      border-radius: 6px;
-      border: 2px solid color-mix(in srgb, var(--blue) 88%, white);
-      background: color-mix(in srgb, var(--blue) 34%, transparent);
-      box-shadow: 0 0 22px color-mix(in srgb, var(--blue) 50%, transparent);
-      will-change: left, top, width, height, background-color;
-      transition: left 170ms cubic-bezier(0.22, 1, 0.36, 1),
-                  top 170ms cubic-bezier(0.22, 1, 0.36, 1),
-                  width 170ms cubic-bezier(0.22, 1, 0.36, 1),
-                  height 170ms cubic-bezier(0.22, 1, 0.36, 1),
-                  background-color 140ms ease;
-    }
-    .pane-dnd-label {
-      position: absolute;
-      left: 8px;
-      bottom: 8px;
-      padding: 2px 8px;
-      font-size: 11px;
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--panel-bg) 72%, black);
-      color: var(--fg);
-      border: 1px solid color-mix(in srgb, var(--blue) 40%, var(--tab-border));
-      transition: opacity 120ms ease;
+      background: color-mix(in srgb, var(--tl-DragAndDrop-areaBackground) 55%, transparent);
     }
     .pane-dnd-dragging {
       opacity: 0.75;
