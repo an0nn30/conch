@@ -91,6 +91,7 @@
   let saveLayoutFn = null;
   let invokeFn = null;
   let bottomZoneWrapEl = null;
+  let bottomZoneDividerEl = null;
   let savedZoneAssignments = null; // populated from backend before registration
   let savedActiveZoneWindows = null; // populated from backend before registration
   let savedPanelVisibility = { left: null, right: null, bottom: null }; // persisted panel visibility hints
@@ -148,11 +149,13 @@
     strips.right = document.getElementById('right-strip');
     strips.bottom = document.getElementById('bottom-strip');
     bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
+    bottomZoneDividerEl = document.getElementById('bottom-zone-divider');
 
     initSidebarResize('left');
     initSidebarResize('right');
     initZoneDivider('left');
     initZoneDivider('right');
+    initZoneDivider('bottom');
     ensureStripDragOverlay();
   }
 
@@ -968,16 +971,41 @@
     }
   }
 
-  // Interim shim: zones.bottom no longer exists now that the bottom zone is a
-  // left/right pair. This just widens the visibility check to either half
-  // until Task 2 replaces this function wholesale with real pair layout
-  // (divider, flex split — mirroring updateSidebar).
+  // The bottom zone is a left/right pair like the sidebars, just laid out
+  // horizontally instead of vertically — mirrors updateSidebar().
   function updateBottomZone() {
     if (!bottomZoneWrapEl) return;
     const appRoot = document.getElementById('app');
     const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
-    const shouldShow = !zenActive && !!(panelState.bottom.visible && (zones['bottom-left'].activeId || zones['bottom-right'].activeId));
+    const leftZone = zones['bottom-left'];
+    const rightZone = zones['bottom-right'];
+    const leftActive = leftZone.activeId !== null;
+    const rightActive = rightZone.activeId !== null;
+    const shouldShow = !zenActive && !!(panelState.bottom.visible && (leftActive || rightActive));
     bottomZoneWrapEl.classList.toggle('hidden', !shouldShow);
+
+    if (bottomZoneDividerEl) {
+      if (leftActive && rightActive) bottomZoneDividerEl.classList.remove('hidden');
+      else bottomZoneDividerEl.classList.add('hidden');
+    }
+
+    if (leftZone.el && rightZone.el) {
+      if (leftActive && !rightActive) {
+        leftZone.el.style.flex = '1';
+        rightZone.el.style.flex = '0';
+      } else if (!leftActive && rightActive) {
+        leftZone.el.style.flex = '0';
+        rightZone.el.style.flex = '1';
+      } else if (leftActive && rightActive) {
+        const lf = parseFloat(leftZone.el.style.flex) || 0;
+        const rf = parseFloat(rightZone.el.style.flex) || 0;
+        if (lf < 0.1 || rf < 0.1) {
+          const ratio = lastSplitRatios.bottom || 0.5;
+          leftZone.el.style.flex = ratio.toString();
+          rightZone.el.style.flex = (1 - ratio).toString();
+        }
+      }
+    }
     if (fitActiveTabFn) fitActiveTabFn();
   }
 
@@ -1466,39 +1494,42 @@
   // ---- Zone divider resize --------------------------------------------------
 
   function initZoneDivider(side) {
-    const dividerEl = sidebars[side].dividerEl;
-    const topZoneEl = zones[side + '-top'].el;
-    const botZoneEl = zones[side + '-bottom'].el;
-    if (!dividerEl || !topZoneEl || !botZoneEl) return;
+    const horizontal = side === 'bottom';
+    const dividerEl = horizontal ? bottomZoneDividerEl : sidebars[side].dividerEl;
+    const firstZoneEl = horizontal ? zones['bottom-left'].el : zones[side + '-top'].el;
+    const secondZoneEl = horizontal ? zones['bottom-right'].el : zones[side + '-bottom'].el;
+    if (!dividerEl || !firstZoneEl || !secondZoneEl) return;
 
-    let dragging = false, startY = 0, startTopFlex = 0, startBotFlex = 0;
+    let dragging = false, startPos = 0, startFirstFlex = 0, startSecondFlex = 0;
 
     dividerEl.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       dividerEl.setPointerCapture(e.pointerId);
       dragging = true;
-      startY = e.clientY;
-      const topH = topZoneEl.offsetHeight;
-      const botH = botZoneEl.offsetHeight;
-      const total = topH + botH;
-      startTopFlex = total > 0 ? topH / total : 0.5;
-      startBotFlex = 1 - startTopFlex;
+      startPos = horizontal ? e.clientX : e.clientY;
+      const firstSize = horizontal ? firstZoneEl.offsetWidth : firstZoneEl.offsetHeight;
+      const secondSize = horizontal ? secondZoneEl.offsetWidth : secondZoneEl.offsetHeight;
+      const total = firstSize + secondSize;
+      startFirstFlex = total > 0 ? firstSize / total : 0.5;
+      startSecondFlex = 1 - startFirstFlex;
       dividerEl.classList.add('dragging');
       beginResizeDrag();
-      document.body.style.cursor = 'row-resize';
+      document.body.style.cursor = horizontal ? 'col-resize' : 'row-resize';
       document.body.style.userSelect = 'none';
     });
 
     dividerEl.addEventListener('pointermove', (e) => {
       if (!dragging) return;
-      const container = topZoneEl.parentElement;
-      const containerH = container.clientHeight - dividerEl.offsetHeight;
-      if (containerH <= 0) return;
-      const delta = e.clientY - startY;
-      const newTopRatio = Math.max(0.15, Math.min(0.85, startTopFlex + delta / containerH));
-      topZoneEl.style.flex = newTopRatio.toString();
-      botZoneEl.style.flex = (1 - newTopRatio).toString();
-      lastSplitRatios[side] = newTopRatio;
+      const container = firstZoneEl.parentElement;
+      const containerSize = horizontal
+        ? container.clientWidth - dividerEl.offsetWidth
+        : container.clientHeight - dividerEl.offsetHeight;
+      if (containerSize <= 0) return;
+      const delta = (horizontal ? e.clientX : e.clientY) - startPos;
+      const newFirstRatio = Math.max(0.15, Math.min(0.85, startFirstFlex + delta / containerSize));
+      firstZoneEl.style.flex = newFirstRatio.toString();
+      secondZoneEl.style.flex = (1 - newFirstRatio).toString();
+      lastSplitRatios[side] = newFirstRatio;
       if (fitActiveTabFn) fitActiveTabFn();
     });
 
@@ -1673,15 +1704,22 @@
         ratios[side] = tf / (tf + bf);
       }
     }
+    const blEl = zones['bottom-left'].el;
+    const brEl = zones['bottom-right'].el;
+    if (blEl && brEl) {
+      const lf = parseFloat(blEl.style.flex) || 1;
+      const rf = parseFloat(brEl.style.flex) || 1;
+      ratios.bottom = lf / (lf + rf);
+    }
     return ratios;
   }
 
   function setSplitRatio(side, ratio) {
-    const topEl = zones[side + '-top'].el;
-    const botEl = zones[side + '-bottom'].el;
-    if (topEl && botEl && ratio > 0 && ratio < 1) {
-      topEl.style.flex = ratio.toString();
-      botEl.style.flex = (1 - ratio).toString();
+    const firstEl = side === 'bottom' ? zones['bottom-left'].el : zones[side + '-top'].el;
+    const secondEl = side === 'bottom' ? zones['bottom-right'].el : zones[side + '-bottom'].el;
+    if (firstEl && secondEl && ratio > 0 && ratio < 1) {
+      firstEl.style.flex = ratio.toString();
+      secondEl.style.flex = (1 - ratio).toString();
       lastSplitRatios[side] = ratio;
     }
   }

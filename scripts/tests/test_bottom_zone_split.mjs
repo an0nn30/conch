@@ -177,6 +177,63 @@ function loadManagerWithZoneDom() {
   );
 }
 
+// loadManagerWithZoneDom() gives every zone a real element but stubs
+// document.getElementById() to return null unconditionally, so
+// bottomZoneWrapEl / bottomZoneDividerEl never get wired up and updateBottomZone()
+// / initZoneDivider('bottom') bail on their null-element guards. This loader is
+// that harness plus real (stubbed) elements for the two bottom-zone ids, so
+// pair-layout and horizontal-divider behaviour has real DOM to act on. Built on
+// the same per-zone querySelector pattern as loadManagerWithZoneDom() rather
+// than duplicated from scratch.
+function loadManagerWithBottomDom() {
+  const body = makeElement('body');
+  const zoneEls = {};
+  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
+    const zoneEl = makeElement('div');
+    const contentEl = makeElement('div');
+    const tabStripEl = makeElement('div');
+    zoneEl.querySelector = (sel) => {
+      if (sel === '.zone-content') return contentEl;
+      if (sel === '.zone-tab-strip') return tabStripEl;
+      return null;
+    };
+    // Same insertBefore shim as loadManagerWithZoneDom() — updateZone()'s
+    // header-insertion path needs one and the base makeElement() has none.
+    zoneEl.insertBefore = (child) => zoneEl.appendChild(child);
+    zoneEls[z] = zoneEl;
+  }
+  const wrapEl = makeElement('div');
+  const dividerEl = makeElement('div');
+  const idEls = {
+    'bottom-zone-wrap': wrapEl,
+    'bottom-zone-divider': dividerEl,
+  };
+  const sandbox = {
+    console,
+    setTimeout,
+    clearTimeout,
+    document: {
+      body,
+      createElement: (t) => makeElement(t),
+      getElementById: (id) => idEls[id] || null,
+      querySelector: (sel) => {
+        const m = /^\[data-zone="([^"]+)"\]$/.exec(sel);
+        return m ? (zoneEls[m[1]] || null) : null;
+      },
+      querySelectorAll: () => [],
+      addEventListener() {},
+    },
+  };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(MODULE_PATH, 'utf8'), sandbox, { filename: MODULE_PATH });
+  const twm = sandbox.toolWindowManager;
+  assert.ok(twm, 'tool-window-manager.js must expose window.toolWindowManager');
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => {} });
+  return { twm, zoneEls, dividerEl, wrapEl };
+}
+
 // --- 5. moveTo accepts both new names -----------------------------------------
 {
   const twm = loadManagerWithZoneDom();
@@ -189,3 +246,42 @@ function loadManagerWithZoneDom() {
 }
 
 console.log('test_bottom_zone_split: zone aliasing assertions passed');
+
+// --- 6. pair layout: lone window takes full width, both restore ratio --------
+{
+  const { twm, zoneEls, dividerEl, wrapEl } = loadManagerWithBottomDom();
+  twm.setPanelVisibility('bottom', true, { save: false });
+  twm.register('a', { title: 'A', type: 'builtin', defaultZone: 'bottom-left', renderFn: () => null });
+  assert.strictEqual(zoneEls['bottom-left'].style.flex, '1', 'lone left window gets all space');
+  assert.strictEqual(zoneEls['bottom-right'].style.flex, '0');
+  assert.ok(dividerEl.classList.contains('hidden'), 'no divider with one section');
+  assert.ok(!wrapEl.classList.contains('hidden'), 'bar visible');
+
+  twm.register('b', { title: 'B', type: 'builtin', defaultZone: 'bottom-right', renderFn: () => null });
+  twm.activate('b');
+  assert.ok(!dividerEl.classList.contains('hidden'), 'divider appears with both sections');
+  const lf = parseFloat(zoneEls['bottom-left'].style.flex);
+  const rf = parseFloat(zoneEls['bottom-right'].style.flex);
+  assert.ok(Math.abs(lf - 0.5) < 0.01 && Math.abs(rf - 0.5) < 0.01, 'both active defaults to 50/50');
+
+  twm.deactivate('b');
+  assert.strictEqual(zoneEls['bottom-left'].style.flex, '1', 'closing right gives left all space');
+  assert.ok(dividerEl.classList.contains('hidden'));
+
+  twm.deactivate('a');
+  assert.ok(wrapEl.classList.contains('hidden'), 'bar hides when both sections empty');
+}
+
+// --- 7. split ratio API grows a bottom arm ------------------------------------
+{
+  const { twm } = loadManagerWithBottomDom();
+  twm.setPanelVisibility('bottom', true, { save: false });
+  twm.register('a', { title: 'A', type: 'builtin', defaultZone: 'bottom-left', renderFn: () => null });
+  twm.register('b', { title: 'B', type: 'builtin', defaultZone: 'bottom-right', renderFn: () => null });
+  twm.activate('b'); twm.activate('a');
+  twm.setSplitRatio('bottom', 0.3);
+  const ratios = JSON.parse(JSON.stringify(twm.getSplitRatios()));
+  assert.ok(Math.abs(ratios.bottom - 0.3) < 0.01, 'bottom ratio round-trips');
+}
+
+console.log('test_bottom_zone_split: pair layout assertions passed');
