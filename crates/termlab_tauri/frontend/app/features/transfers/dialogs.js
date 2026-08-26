@@ -109,13 +109,25 @@
     const handleRef = { current: null };
     const info = (batch && batch.info) || {};
     const total = Number(info.discoveredFiles) || 0;
+    const done = Number(batch && batch.filesDone) || 0;
+    // Name the files this action actually cancels, not the batch total —
+    // some may already have completed. While expansion is still running the
+    // true remaining count is a moving target, so mark it with "+".
+    const remaining = Math.max(0, total - done);
+    const stillDiscovering = !!(info.expansion && info.expansion.kind === 'running');
+    const remainingLabel = remaining === 1 && !stillDiscovering ? 'file' : 'files';
     handleRef.current = openDialog({
       title: 'Cancel folder transfer?',
       ariaLabel: 'Confirm cancel folder transfer',
       size: 'sm',
       body(bodyEl) {
         append(bodyEl, 'p', '', 'This stops the folder transfer, cancelling its remaining files. Files already transferred stay in place.');
-        append(bodyEl, 'p', 'tl-transfer-dialog__filename', `${info.name || 'Unnamed batch'} — ${total} ${total === 1 ? 'file' : 'files'}`);
+        append(
+          bodyEl,
+          'p',
+          'tl-transfer-dialog__filename',
+          `${info.name || 'Unnamed batch'} — ${remaining}${stillDiscovering ? '+' : ''} ${remainingLabel} remaining`,
+        );
       },
       buttons: [
         { label: 'Keep transfer', onSelect: () => handleRef.current && handleRef.current.close('cancel') },

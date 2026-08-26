@@ -236,14 +236,24 @@
   background: var(--tl-row-hover);
 }
 
+/* The <td> itself stays a normal table cell — `colspan` only spans columns
+   correctly while the cell participates in `table-layout: fixed` table
+   layout. Giving it `display: flex` directly took it out of that layout
+   and collapsed it to a sliver, so the flex row lives on an inner wrapper
+   div instead (.tl-transfer-center__batch-line). */
 .tl-transfer-center__batch-cell {
   height: var(--tl-row-h);
   padding: 0 var(--tl-space-2);
   overflow: hidden;
   border-bottom: 1px solid var(--tl-border);
   border-top: 1px solid var(--tl-border);
+  vertical-align: middle;
+}
+
+.tl-transfer-center__batch-line {
   display: flex;
   align-items: center;
+  height: 100%;
   gap: var(--tl-space-2);
   white-space: nowrap;
   font-weight: 500;
@@ -357,9 +367,12 @@
      its own line and the cancel button anchors last instead of hiding behind
      hover/selection (a grouping row has no selection state to reveal it). */
   .tl-transfer-center__batch-cell {
-    flex-wrap: wrap;
     height: auto;
     padding: 6px var(--tl-space-2);
+  }
+  .tl-transfer-center__batch-line {
+    flex-wrap: wrap;
+    height: auto;
     row-gap: 3px;
     white-space: normal;
   }

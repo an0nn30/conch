@@ -1407,6 +1407,20 @@ async function loadMountLifecycleHarness() {
     'batch-1',
   );
 
+  // The <td> must stay a plain table cell — no flex display of its own —
+  // or `colspan` collapses under `table-layout: fixed`. The flex row lives
+  // on an inner wrapper div instead.
+  const headerCell = headerRow.querySelector('td.tl-transfer-center__batch-cell');
+  assert.ok(headerCell, 'header renders a normal table cell');
+  assert.strictEqual(headerCell.className, 'tl-transfer-center__batch-cell',
+    'the table cell itself carries no flex-layout class');
+  assert.strictEqual(headerCell.children.length, 1, 'the cell wraps its content in exactly one child');
+  const headerLine = headerCell.children[0];
+  assert.strictEqual(headerLine.className, 'tl-transfer-center__batch-line',
+    'the flex layout lives on the inner wrapper, not the table cell');
+  assert.ok(headerLine.querySelector('.tl-transfer-center__batch-name'),
+    'header content renders inside the wrapper line');
+
   assert.deepStrictEqual(rowIds(harness.panelEl), ['m1', 'm2', 'solo'],
     'member rows render beneath their header; batchless rows are unaffected');
   const rowsInOrder = harness.panelEl.querySelector('tbody').children;
@@ -1414,6 +1428,19 @@ async function loadMountLifecycleHarness() {
   assert.strictEqual(rowsInOrder[1].dataset.jobId, 'm1');
   assert.strictEqual(rowsInOrder[2].dataset.jobId, 'm2');
   assert.strictEqual(rowsInOrder[3].dataset.jobId, 'solo');
+
+  // Cancel-batch dialog counts remaining files (discoveredFiles - filesDone),
+  // not the batch total — 3 of 5 already completed, so only 2 remain to
+  // cancel. While expansion is still running, more files may yet be
+  // discovered, so the remaining count is marked "+".
+  click(harness.panelEl, headerRow.querySelector('[data-transfer-action="cancel-batch"]'));
+  const runningDialog = harness.dialogs.at(-1);
+  assert.ok(runningDialog.bodyEl.textContent.includes('2+ files remaining'),
+    'remaining (not total) count, marked + while expansion keeps discovering files');
+  assert.ok(!runningDialog.bodyEl.textContent.includes('5 files'),
+    'dialog must not use the batch total as the cancelled count');
+  await dialogButton(runningDialog, 'Keep transfer').onSelect();
+  assert.deepStrictEqual(harness.runtimeCalls, [], 'Keep transfer must not cancel anything');
 
   // Interrupted expansion shows the warning marker with the reason as title,
   // and drops the running "+" suffix.
@@ -1446,7 +1473,10 @@ async function loadMountLifecycleHarness() {
   const batchDialog = harness.dialogs.at(-1);
   assert.strictEqual(batchDialog.options.title, 'Cancel folder transfer?');
   assert.ok(batchDialog.bodyEl.textContent.includes('photos'));
-  assert.ok(batchDialog.bodyEl.textContent.includes('5'), 'dialog names the member count');
+  assert.ok(batchDialog.bodyEl.textContent.includes('2 files remaining'),
+    'dialog names the remaining (not total) count once expansion is no longer running');
+  assert.ok(!batchDialog.bodyEl.textContent.includes('5 files'),
+    'dialog must not use the batch total as the cancelled count');
   await dialogButton(batchDialog, 'Cancel transfer').onSelect();
   assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'cancelBatch', args: ['batch-1'] }]);
 

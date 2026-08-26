@@ -377,27 +377,31 @@
       if (rowRecord.signature === next) return;
       rowRecord.signature = next;
 
-      const cellEl = rowRecord.cellEl;
-      cellEl.replaceChildren();
-      append(cellEl, 'span', 'tl-transfer-center__batch-name', agg.info.name || 'Unnamed batch');
-      append(cellEl, 'span', 'tl-transfer-center__batch-direction', titleCase(agg.info.direction));
-      append(cellEl, 'span', 'tl-transfer-center__batch-progress', batchProgressText(agg));
+      // The <td> stays a normal table cell (required for `colspan` to work
+      // under `table-layout: fixed` — a flex display on the cell itself
+      // takes it out of table layout and collapses its width). The flex
+      // layout lives on an inner wrapper div instead.
+      const lineEl = rowRecord.lineEl;
+      lineEl.replaceChildren();
+      append(lineEl, 'span', 'tl-transfer-center__batch-name', agg.info.name || 'Unnamed batch');
+      append(lineEl, 'span', 'tl-transfer-center__batch-direction', titleCase(agg.info.direction));
+      append(lineEl, 'span', 'tl-transfer-center__batch-progress', batchProgressText(agg));
       if (agg.info.expansion && agg.info.expansion.kind === 'interrupted') {
-        const marker = append(cellEl, 'span', 'tl-transfer-center__batch-marker', '⚠ expansion interrupted');
+        const marker = append(lineEl, 'span', 'tl-transfer-center__batch-marker', '⚠ expansion interrupted');
         marker.setAttribute('title', agg.info.expansion.reason || '');
       }
       append(
-        cellEl,
+        lineEl,
         'span',
         'tl-transfer-center__batch-bytes',
         `${formatSize(agg.bytesDone)} of ${formatSize(agg.info.discoveredBytes)}`,
       );
       const speed = Number(agg.speedBytesPerSecond) || 0;
-      append(cellEl, 'span', 'tl-transfer-center__batch-speed', speed > 0 ? `${formatSize(speed)}/s` : '—');
+      append(lineEl, 'span', 'tl-transfer-center__batch-speed', speed > 0 ? `${formatSize(speed)}/s` : '—');
       if (agg.etaSeconds !== null && agg.etaSeconds !== undefined) {
-        append(cellEl, 'span', 'tl-transfer-center__batch-eta', formatEta(agg.etaSeconds));
+        append(lineEl, 'span', 'tl-transfer-center__batch-eta', formatEta(agg.etaSeconds));
       }
-      const cancelButton = append(cellEl, 'button', 'tl-transfer-center__batch-cancel', 'Cancel');
+      const cancelButton = append(lineEl, 'button', 'tl-transfer-center__batch-cancel', 'Cancel');
       cancelButton.setAttribute('type', 'button');
       cancelButton.setAttribute('aria-label', `Cancel ${agg.info.name || 'folder transfer'}`);
       setData(cancelButton, 'transfer-action', 'cancel-batch');
@@ -410,7 +414,8 @@
       setData(rowEl, 'batch-id', agg.info.id);
       const cellEl = append(rowEl, 'td', 'tl-transfer-center__batch-cell');
       cellEl.setAttribute('colspan', String(COLUMNS.length));
-      const record = { element: rowEl, cellEl, signature: null };
+      const lineEl = append(cellEl, 'div', 'tl-transfer-center__batch-line');
+      const record = { element: rowEl, cellEl, lineEl, signature: null };
       patchHeaderRow(record, agg);
       return record;
     }
