@@ -35,6 +35,7 @@ const FILES_PANEL_PATH = path.join(FRONTEND, 'panels/files-panel.js');
 const FILES_DATA_SERVICE_PATH = path.join(FRONTEND, 'features/files/data-service.js');
 const FILES_PANE_STORE_PATH = path.join(FRONTEND, 'features/files/pane-store.js');
 const FILES_ACTIONS_PATH = path.join(FRONTEND, 'features/files/actions.js');
+const NATIVE_DROP_PATH = path.join(FRONTEND, 'features/files/native-drop.js');
 
 const ENTRY_MIME = 'application/x-termlab-entry';
 
@@ -440,12 +441,25 @@ async function setupLogicHarness() {
   const invokeCalls = [];
   const toastCalls = [];
   const listeners = {};
+  // Task 8: per-path local_stat responses for native-drop tests, keyed by
+  // path. A path with no entry rejects with a generic ENOENT-shaped error —
+  // tests that need a specific dir/file answer register it here before
+  // triggering the drop.
+  const localStatByPath = new Map();
 
   const invoke = (cmd, args) => {
     invokeCalls.push({ cmd, args });
     if (cmd === 'get_home_dir') return Promise.resolve('/home/demo');
     if (cmd === 'get_all_settings') return Promise.resolve({});
     if (cmd === 'local_list_dir') return Promise.resolve([]);
+    if (cmd === 'local_stat') {
+      const p = args && args.path;
+      if (localStatByPath.has(p)) {
+        const entry = localStatByPath.get(p);
+        return entry instanceof Error ? Promise.reject(entry) : Promise.resolve(entry);
+      }
+      return Promise.reject(new Error(`ENOENT: no such file or directory, stat '${p}'`));
+    }
     if (cmd === 'remote_get_servers') return Promise.resolve({ folders: [], ungrouped: [], ssh_config: [] });
     if (cmd === 'remote_get_sessions') return Promise.resolve([]);
     if (cmd === 'sftp_realpath') return Promise.resolve('/srv/pinned');
@@ -488,6 +502,10 @@ async function setupLogicHarness() {
   vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
   vm.runInContext(fs.readFileSync(FILES_DATA_SERVICE_PATH, 'utf8'), sandbox, { filename: FILES_DATA_SERVICE_PATH });
   vm.runInContext(fs.readFileSync(FILES_ACTIONS_PATH, 'utf8'), sandbox, { filename: FILES_ACTIONS_PATH });
+  // native-drop.js must load before files-panel.js — files-panel.js reaches
+  // it as window.termlabNativeDrop, same load-order requirement index.html
+  // encodes (native-drop.js's <script> tag precedes files-panel.js's).
+  vm.runInContext(fs.readFileSync(NATIVE_DROP_PATH, 'utf8'), sandbox, { filename: NATIVE_DROP_PATH });
   vm.runInContext(fs.readFileSync(FILES_PANEL_PATH, 'utf8'), sandbox, { filename: FILES_PANEL_PATH });
 
   const panelEl = makeElement('div');
@@ -518,7 +536,7 @@ async function setupLogicHarness() {
 
   return {
     sandbox, invoke, invokeCalls, toastCalls, renderCalls, listeners,
-    initialLocalRender, initialRemoteRender,
+    initialLocalRender, initialRemoteRender, localStatByPath,
   };
 }
 
@@ -700,3 +718,348 @@ function lastCall(renderCalls, prefix) {
 }
 
 console.log('files dnd (files-panel routing): all assertions passed');
+
+// ===========================================================================
+// Part C — features/files/native-drop.js: pure hit-test + routing (Task 8)
+// ===========================================================================
+//
+// OS (Finder/Explorer) drops arrive as window-level Tauri v2 events carrying
+// real filesystem paths — a different delivery mechanism from Part A/B's
+// intra-app DOM drag/drop. native-drop.js is deliberately dependency-free
+// (no DOM, no `invoke`, no files-panel.js module state) so these can run
+// against nothing but the file itself, loaded standalone.
+
+function loadNativeDrop() {
+  const sandbox = { console };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(NATIVE_DROP_PATH, 'utf8'), sandbox, { filename: NATIVE_DROP_PATH });
+  assert.ok(sandbox.termlabNativeDrop, 'native-drop IIFE must expose window.termlabNativeDrop');
+  return sandbox.termlabNativeDrop;
+}
+
+const PANE_RECT = { left: 10, top: 20, right: 110, bottom: 220 };
+
+// -- resolveNativeDrop: inside the rect + a session -> 'accept' ------------
+{
+  const nativeDrop = loadNativeDrop();
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 50, y: 50 }, PANE_RECT, true), 'accept');
+  console.log('C1. resolveNativeDrop: hit + session -> accept: ok');
+}
+
+// -- resolveNativeDrop: inside the rect, no session -> 'no-session' --------
+{
+  const nativeDrop = loadNativeDrop();
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 50, y: 50 }, PANE_RECT, false), 'no-session');
+  console.log('C2. resolveNativeDrop: hit + no session -> no-session: ok');
+}
+
+// -- resolveNativeDrop: outside the rect -> 'ignore', session state doesn't
+// matter --------------------------------------------------------------------
+{
+  const nativeDrop = loadNativeDrop();
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 5, y: 50 }, PANE_RECT, true), 'ignore', 'left of the rect');
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 500, y: 50 }, PANE_RECT, true), 'ignore', 'right of the rect');
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 50, y: 5 }, PANE_RECT, true), 'ignore', 'above the rect');
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 50, y: 500 }, PANE_RECT, true), 'ignore', 'below the rect');
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 5, y: 50 }, PANE_RECT, false), 'ignore', 'a miss ignores even with no session');
+  console.log('C3. resolveNativeDrop: miss on every side -> ignore: ok');
+}
+
+// -- resolveNativeDrop: rect edges — left/top inclusive, right/bottom
+// exclusive (the pinned convention; matches getBoundingClientRect()'s own
+// half-open box) --------------------------------------------------------
+{
+  const nativeDrop = loadNativeDrop();
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 10, y: 20 }, PANE_RECT, true), 'accept', 'top-left corner is inside (inclusive)');
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 110, y: 100 }, PANE_RECT, true), 'ignore', 'right edge is outside (exclusive)');
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 50, y: 220 }, PANE_RECT, true), 'ignore', 'bottom edge is outside (exclusive)');
+  console.log('C4. resolveNativeDrop: edge inclusivity pinned: ok');
+}
+
+// -- resolveNativeDrop: missing position or rect -> 'ignore', never throws -
+{
+  const nativeDrop = loadNativeDrop();
+  assert.equal(nativeDrop.resolveNativeDrop(null, PANE_RECT, true), 'ignore');
+  assert.equal(nativeDrop.resolveNativeDrop({ x: 50, y: 50 }, null, true), 'ignore');
+  console.log('C5. resolveNativeDrop: missing position/rect -> ignore: ok');
+}
+
+// -- routeNativeDropPaths: a directory routes to transferRecursive with the
+// destination CONTAINER as-is (no basename join — the backend appends it) -
+{
+  const nativeDrop = loadNativeDrop();
+  const recursiveCalls = [];
+  const uploadCalls = [];
+  const toastCalls = [];
+  await nativeDrop.routeNativeDropPaths(['/home/demo/photos'], {
+    statPath: async () => ({ isDir: true }),
+    transferRecursive: async (paneId, sourcePath, destPath) => { recursiveCalls.push({ paneId, sourcePath, destPath }); },
+    transferUpload: async (paneId, sourcePath, destPath) => { uploadCalls.push({ paneId, sourcePath, destPath }); },
+    targetPaneId: 1000007,
+    targetPath: '/srv/pinned',
+    toast: { error: (...a) => toastCalls.push({ kind: 'error', a }), info: (...a) => toastCalls.push({ kind: 'info', a }) },
+  });
+  assert.deepEqual(recursiveCalls, [{ paneId: 1000007, sourcePath: '/home/demo/photos', destPath: '/srv/pinned' }]);
+  assert.equal(uploadCalls.length, 0);
+  assert.equal(toastCalls.some((c) => c.kind === 'info'), true, 'a folder route announces the started transfer');
+  console.log('C6. routeNativeDropPaths: directory -> transferRecursive, container dest: ok');
+}
+
+// -- routeNativeDropPaths: a file routes to transferUpload with the
+// destination filename pre-joined, mirroring the single-file path exactly -
+{
+  const nativeDrop = loadNativeDrop();
+  const uploadCalls = [];
+  await nativeDrop.routeNativeDropPaths(['/home/demo/notes.txt'], {
+    statPath: async () => ({ isDir: false }),
+    transferRecursive: async () => { throw new Error('must not be called for a file'); },
+    transferUpload: async (paneId, sourcePath, destPath) => { uploadCalls.push({ paneId, sourcePath, destPath }); },
+    targetPaneId: 1000007,
+    targetPath: '/srv/pinned',
+    toast: null,
+  });
+  assert.deepEqual(uploadCalls, [{ paneId: 1000007, sourcePath: '/home/demo/notes.txt', destPath: '/srv/pinned/notes.txt' }]);
+  console.log('C7. routeNativeDropPaths: file -> transferUpload, joined dest: ok');
+}
+
+// -- routeNativeDropPaths: a mixed list routes each path independently, in
+// order ----------------------------------------------------------------
+{
+  const nativeDrop = loadNativeDrop();
+  const recursiveCalls = [];
+  const uploadCalls = [];
+  const stats = { '/home/demo/photos': { isDir: true }, '/home/demo/notes.txt': { isDir: false } };
+  await nativeDrop.routeNativeDropPaths(['/home/demo/photos', '/home/demo/notes.txt'], {
+    statPath: async (p) => stats[p],
+    transferRecursive: async (paneId, sourcePath, destPath) => { recursiveCalls.push({ paneId, sourcePath, destPath }); },
+    transferUpload: async (paneId, sourcePath, destPath) => { uploadCalls.push({ paneId, sourcePath, destPath }); },
+    targetPaneId: 1000007,
+    targetPath: '/srv/pinned',
+    toast: { error() {}, info() {} },
+  });
+  assert.deepEqual(recursiveCalls, [{ paneId: 1000007, sourcePath: '/home/demo/photos', destPath: '/srv/pinned' }]);
+  assert.deepEqual(uploadCalls, [{ paneId: 1000007, sourcePath: '/home/demo/notes.txt', destPath: '/srv/pinned/notes.txt' }]);
+  console.log('C8. routeNativeDropPaths: mixed list routes each entry: ok');
+}
+
+// -- routeNativeDropPaths: a stat failure on one path reports via
+// toast.error for THAT path and continues routing the rest ----------------
+{
+  const nativeDrop = loadNativeDrop();
+  const uploadCalls = [];
+  const toastCalls = [];
+  await nativeDrop.routeNativeDropPaths(['/home/demo/missing.txt', '/home/demo/notes.txt'], {
+    statPath: async (p) => {
+      if (p === '/home/demo/missing.txt') throw new Error('ENOENT');
+      return { isDir: false };
+    },
+    transferRecursive: async () => { throw new Error('must not be called'); },
+    transferUpload: async (paneId, sourcePath, destPath) => { uploadCalls.push({ paneId, sourcePath, destPath }); },
+    targetPaneId: 1000007,
+    targetPath: '/srv/pinned',
+    toast: { error: (...a) => toastCalls.push({ kind: 'error', a }), info: () => {} },
+  });
+  assert.deepEqual(uploadCalls, [{ paneId: 1000007, sourcePath: '/home/demo/notes.txt', destPath: '/srv/pinned/notes.txt' }],
+    'the second path must still be routed after the first path\'s stat failed');
+  assert.equal(toastCalls.length, 1);
+  assert.equal(toastCalls[0].kind, 'error');
+  assert.ok(String(toastCalls[0].a.join(' ')).includes('missing.txt'), 'the error toast should identify which path failed');
+  console.log('C9. routeNativeDropPaths: stat failure toasts and continues: ok');
+}
+
+// -- routeNativeDropPaths: a transfer rejection (not just a stat failure)
+// also toasts and continues to the next path --------------------------------
+{
+  const nativeDrop = loadNativeDrop();
+  const toastCalls = [];
+  const uploadCalls = [];
+  await nativeDrop.routeNativeDropPaths(['/home/demo/big.iso', '/home/demo/notes.txt'], {
+    statPath: async () => ({ isDir: false }),
+    transferRecursive: async () => {},
+    transferUpload: async (paneId, sourcePath, destPath) => {
+      if (sourcePath === '/home/demo/big.iso') throw new Error('disk full');
+      uploadCalls.push({ paneId, sourcePath, destPath });
+    },
+    targetPaneId: 1000007,
+    targetPath: '/srv/pinned',
+    toast: { error: (...a) => toastCalls.push({ kind: 'error', a }), info: () => {} },
+  });
+  assert.deepEqual(uploadCalls, [{ paneId: 1000007, sourcePath: '/home/demo/notes.txt', destPath: '/srv/pinned/notes.txt' }]);
+  assert.equal(toastCalls.some((c) => c.kind === 'error' && String(c.a.join(' ')).includes('disk full')), true);
+  console.log('C10. routeNativeDropPaths: a rejected transfer toasts and continues: ok');
+}
+
+console.log('files dnd (native-drop pure): all assertions passed');
+
+// ===========================================================================
+// Part D — files-panel.js: native OS drop wiring (Task 8, wire-level)
+// ===========================================================================
+//
+// Same logic-harness idiom as Part B, but exercising the FOUR listeners
+// init() registers via opts.listen for 'tauri://drag-enter/-over/-leave/
+// -drop' — captured in h.listeners exactly like 'transfer-progress' is —
+// instead of calling deps.onDropEntries directly. This is what proves the
+// real hit-test-against-getBoundingClientRect + devicePixelRatio-scaling +
+// routing wiring in files-panel.js's handleNativeDrop/-DragHover/-DragLeave,
+// not just native-drop.js's own pure functions (Part C).
+
+// -- not connected: a drop that hits the remote pane rect with no active
+// session shows the guard toast and calls neither stat nor transfer -------
+{
+  const h = await setupLogicHarness();
+  h.initialRemoteRender.el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200 });
+
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 50, y: 50 } },
+  });
+
+  assert.deepEqual(h.invokeCalls, [], 'no local_stat/transfer command may fire without an active remote session');
+  assert.equal(h.toastCalls.length, 1);
+  assert.equal(h.toastCalls[0].kind, 'warn');
+  console.log('D1. native drop, not connected: guard toast, no commands: ok');
+}
+
+// -- connected, drop hits the rect, dropped path is a directory ->
+// local_stat then transfer_enqueue_recursive with the container dest ------
+{
+  const h = await setupLogicHarness();
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  h.invokeCalls.length = 0;
+  h.toastCalls.length = 0;
+  h.initialRemoteRender.el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200 });
+  h.localStatByPath.set('/home/demo/photos', { name: 'photos', is_dir: true, size: 0, modified: 0 });
+
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/photos'], position: { x: 50, y: 50 } },
+  });
+  await settle();
+
+  assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['local_stat', 'transfer_enqueue_recursive']);
+  assert.deepEqual(j(h.invokeCalls[1].args), {
+    paneId: 1000007,
+    direction: 'upload',
+    sourcePath: '/home/demo/photos',
+    destPath: '/srv/pinned',
+  });
+  assert.equal(h.toastCalls.some((c) => c.kind === 'info'), true, 'a folder drop announces the started transfer');
+  console.log('D2. native drop, connected, directory: stats then recurses: ok');
+}
+
+// -- connected, drop hits the rect, dropped path is a file -> local_stat
+// then transfer_upload with the destination filename pre-joined -----------
+{
+  const h = await setupLogicHarness();
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  h.invokeCalls.length = 0;
+  h.toastCalls.length = 0;
+  h.initialRemoteRender.el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200 });
+  h.localStatByPath.set('/home/demo/notes.txt', { name: 'notes.txt', is_dir: false, size: 12, modified: 0 });
+
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 50, y: 50 } },
+  });
+  await settle();
+
+  assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['local_stat', 'transfer_upload']);
+  assert.deepEqual(j(h.invokeCalls[1].args), {
+    paneId: 1000007,
+    localPath: '/home/demo/notes.txt',
+    remotePath: '/srv/pinned/notes.txt',
+    origin: 'filesPanel',
+    conflictPolicy: { kind: 'ask' },
+  });
+  console.log('D3. native drop, connected, file: stats then uploads to joined dest: ok');
+}
+
+// -- connected, but the drop position misses the remote pane rect entirely:
+// ignored silently — no toast, no local_stat, no transfer ------------------
+{
+  const h = await setupLogicHarness();
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  h.invokeCalls.length = 0;
+  h.toastCalls.length = 0;
+  h.initialRemoteRender.el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200 });
+
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 999, y: 999 } },
+  });
+  await settle();
+
+  assert.deepEqual(h.invokeCalls, [], 'a drop that misses the remote pane must be silently ignored');
+  assert.deepEqual(h.toastCalls, []);
+  console.log('D4. native drop, miss: ignored silently: ok');
+}
+
+// -- drag-enter/-over: mark is-drop-target only when the position hits the
+// remote pane AND a session is active; a miss or no-session must not mark
+// (and must clear any prior mark) -------------------------------------------
+{
+  const h = await setupLogicHarness();
+  const remoteEl = h.initialRemoteRender.el;
+  remoteEl.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200 });
+
+  // No session yet: even a hit must not mark.
+  h.listeners['tauri://drag-enter']({ payload: { position: { x: 50, y: 50 } } });
+  assert.equal(remoteEl.classList.contains('is-drop-target'), false, 'no session: a hit must not mark the pane');
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+
+  h.listeners['tauri://drag-over']({ payload: { position: { x: 50, y: 50 } } });
+  assert.equal(remoteEl.classList.contains('is-drop-target'), true, 'connected + hit must mark the pane');
+
+  h.listeners['tauri://drag-over']({ payload: { position: { x: 999, y: 999 } } });
+  assert.equal(remoteEl.classList.contains('is-drop-target'), false, 'moving off the pane must clear the mark');
+  console.log('D5. native drag-enter/-over: marks only on hit + session, clears on miss: ok');
+}
+
+// -- drag-leave always clears is-drop-target, unconditionally --------------
+{
+  const h = await setupLogicHarness();
+  const remoteEl = h.initialRemoteRender.el;
+  remoteEl.classList.add('is-drop-target');
+  h.listeners['tauri://drag-leave']();
+  assert.equal(remoteEl.classList.contains('is-drop-target'), false);
+  console.log('D6. native drag-leave: clears unconditionally: ok');
+}
+
+// -- the physical-pixel trap: Tauri reports drag-drop positions in PHYSICAL
+// pixels, getBoundingClientRect() is LOGICAL — the same physical position
+// must hit at devicePixelRatio 2 but miss at devicePixelRatio 1 against a
+// rect sized in logical px, proving files-panel.js actually divides by
+// devicePixelRatio before hit-testing rather than comparing raw values ----
+{
+  const h = await setupLogicHarness();
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  h.invokeCalls.length = 0;
+  h.toastCalls.length = 0;
+  h.initialRemoteRender.el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 100 });
+  h.localStatByPath.set('/home/demo/notes.txt', { name: 'notes.txt', is_dir: false, size: 12, modified: 0 });
+
+  // devicePixelRatio 1: a physical (150, 150) position stays (150, 150)
+  // logical -- outside a 100x100 rect, so this drop must be ignored.
+  h.sandbox.devicePixelRatio = 1;
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } },
+  });
+  await settle();
+  assert.deepEqual(h.invokeCalls, [], 'at devicePixelRatio 1, physical (150,150) misses a 100x100 logical rect');
+
+  // devicePixelRatio 2: the SAME physical (150, 150) position scales to
+  // (75, 75) logical -- inside the rect, so this drop must route.
+  h.sandbox.devicePixelRatio = 2;
+  await h.listeners['tauri://drag-drop']({
+    payload: { paths: ['/home/demo/notes.txt'], position: { x: 150, y: 150 } },
+  });
+  await settle();
+  assert.deepEqual(h.invokeCalls.map((c) => c.cmd), ['local_stat', 'transfer_upload'],
+    'at devicePixelRatio 2, the same physical (150,150) scales to logical (75,75) and hits');
+  console.log('D7. native drop: devicePixelRatio scales physical position before hit-testing: ok');
+}
+
+console.log('files dnd (native drop wiring): all assertions passed');

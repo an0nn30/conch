@@ -513,6 +513,16 @@
       opts.listen('remote-sessions-changed', () => {
         refreshHostCombo();
       });
+      // OS file drops onto the remote pane (Task 8). Tauri v2 delivers these
+      // as window-level events carrying real filesystem paths — not the DOM
+      // drag events pane-view.js's intra-app drag/drop uses (Task 7), which
+      // never see real paths for an OS drop. `tauri://drag-enter`/`-over`
+      // share the same hover-highlight handling; `-leave` always clears;
+      // `-drop` hit-tests and routes. See handleNativeDragHover/-Leave/-Drop.
+      opts.listen('tauri://drag-enter', handleNativeDragHover);
+      opts.listen('tauri://drag-over', handleNativeDragHover);
+      opts.listen('tauri://drag-leave', handleNativeDragLeave);
+      opts.listen('tauri://drag-drop', handleNativeDrop);
     }
 
     loadFollowPathSetting();
@@ -1234,6 +1244,111 @@
     } catch (e) {
       window.toast.error(direction === 'upload' ? 'Upload Failed' : 'Download Failed', String(e));
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // OS file drops onto the remote pane (Task 8) — features/files/native-drop.js
+  // owns the pure hit-test (resolveNativeDrop) and per-path routing
+  // (routeNativeDropPaths); this section is just the DOM/event wiring: pull
+  // the event payload, scale its position, hand off, and reflect the result
+  // as either the is-drop-target highlight or the drop routing/toast.
+  // ---------------------------------------------------------------------------
+
+  // Tauri v2 drag-drop positions are reported in PHYSICAL pixels, but
+  // getBoundingClientRect() (what the hit-test compares against) is in
+  // LOGICAL/CSS pixels — on a retina display (devicePixelRatio 2) a raw
+  // physical position would land roughly twice as far right/down as it
+  // should, so every position is divided by devicePixelRatio before it ever
+  // reaches resolveNativeDrop.
+  function scaleNativeDropPosition(position) {
+    if (!position || typeof position.x !== 'number' || typeof position.y !== 'number') return null;
+    const ratio = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    return { x: position.x / ratio, y: position.y / ratio };
+  }
+
+  function nativeDropDeps() {
+    return {
+      statPath: async (path) => {
+        if (!filesDataService || typeof filesDataService.statLocal !== 'function') {
+          throw new Error('Files data service unavailable: statLocal');
+        }
+        const entry = await filesDataService.statLocal(invoke, path);
+        return { isDir: !!(entry && entry.is_dir) };
+      },
+      transferRecursive: async (paneId, sourcePath, destPath) => {
+        if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
+          throw new Error('Files data service unavailable: transferRecursive');
+        }
+        return filesDataService.transferRecursive(invoke, paneId, 'upload', sourcePath, destPath);
+      },
+      // Mirrors doUpload/onDropEntries exactly: routed through submitTransfer
+      // so the remote pane shows the same "preparing" transfer-status row a
+      // menu-driven or intra-app-dragged upload would.
+      transferUpload: async (paneId, sourcePath, destPath) => {
+        if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
+          throw new Error('Files data service unavailable: transferUpload');
+        }
+        const name = basenameOfPath(sourcePath);
+        return submitTransfer(remotePane, name, 'upload', () => (
+          filesDataService.transferUpload(invoke, paneId, sourcePath, destPath, FILES_TRANSFER_OPTIONS)
+        ));
+      },
+      targetPaneId: activeRemotePaneId,
+      targetPath: remotePane.currentPath,
+      toast: window.toast,
+    };
+  }
+
+  // Shared by drag-enter and drag-over: both just update the hover highlight,
+  // never route anything (only an actual drop does).
+  function handleNativeDragHover(event) {
+    const remoteRoot = getPaneRoot('#fp-remote');
+    if (!remoteRoot || !remoteRoot.classList) return;
+    const payload = event && event.payload;
+    const position = scaleNativeDropPosition(payload && payload.position);
+    const rect = remoteRoot.getBoundingClientRect();
+    const nativeDrop = window.termlabNativeDrop;
+    const result = nativeDrop && typeof nativeDrop.resolveNativeDrop === 'function'
+      ? nativeDrop.resolveNativeDrop(position, rect, !!activeRemotePaneId)
+      : 'ignore';
+    if (result === 'accept') {
+      remoteRoot.classList.add('is-drop-target');
+    } else {
+      remoteRoot.classList.remove('is-drop-target');
+    }
+  }
+
+  function handleNativeDragLeave() {
+    const remoteRoot = getPaneRoot('#fp-remote');
+    if (remoteRoot && remoteRoot.classList) remoteRoot.classList.remove('is-drop-target');
+  }
+
+  async function handleNativeDrop(event) {
+    const remoteRoot = getPaneRoot('#fp-remote');
+    if (!remoteRoot) return;
+    if (remoteRoot.classList) remoteRoot.classList.remove('is-drop-target');
+
+    const payload = event && event.payload;
+    const position = scaleNativeDropPosition(payload && payload.position);
+    const rect = remoteRoot.getBoundingClientRect();
+    const nativeDrop = window.termlabNativeDrop;
+    const result = nativeDrop && typeof nativeDrop.resolveNativeDrop === 'function'
+      ? nativeDrop.resolveNativeDrop(position, rect, !!activeRemotePaneId)
+      : 'ignore';
+
+    if (result === 'ignore') return; // drop missed the remote pane — silent, per spec
+    if (result === 'no-session') {
+      window.toast.warn('Not Connected', 'Connect to an SSH session to upload files.');
+      return;
+    }
+
+    const paths = payload && Array.isArray(payload.paths) ? payload.paths : [];
+    if (!paths.length) return;
+    if (!nativeDrop || typeof nativeDrop.routeNativeDropPaths !== 'function') {
+      window.toast.error('Upload Failed', 'Native drop module unavailable.');
+      return;
+    }
+    await nativeDrop.routeNativeDropPaths(paths, nativeDropDeps());
   }
 
   async function doDownloadToPath(entry) {
