@@ -230,6 +230,36 @@
         }
       }
 
+      if (global.termlabTabSwitcherRuntime && global.termlabTabSwitcherView && global.termlabTabMru) {
+        let tabSwitcherRuntime = null;
+        const tabSwitcherView = global.termlabTabSwitcherView.create({
+          getTabContainerEl: (tabId) => {
+            const tab = tabs.get(tabId);
+            return tab ? tab.containerEl : null;
+          },
+          // Every tab's tree fills the terminal host, so the host's size is
+          // the natural size of any preview clone — including hidden tabs,
+          // whose own rects measure 0.
+          getStageSize: () => {
+            const host = document.getElementById('terminal-host');
+            return host ? host.getBoundingClientRect() : null;
+          },
+          onPick: (index) => {
+            if (tabSwitcherRuntime) tabSwitcherRuntime.commitIndex(index);
+          },
+        });
+        tabSwitcherRuntime = global.termlabTabSwitcherRuntime.create({
+          getTabItems: () => Array.from(tabs.values()).map((tab) => ({
+            id: tab.id,
+            label: tab.label,
+            kind: tab.type,
+          })),
+          activateTab: (tabId) => deps.activateTab(tabId),
+          view: tabSwitcherView,
+        });
+        tabSwitcherRuntime.init();
+      }
+
       if (global.termlabConfigRuntime && global.termlabConfigRuntime.create) {
         const configRuntime = global.termlabConfigRuntime.create({
           invoke,
