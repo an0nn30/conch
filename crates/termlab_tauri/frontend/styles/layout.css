@@ -253,6 +253,13 @@
       background: var(--blue);
       opacity: 1;
     }
+    /* Which pane owns the keyboard: a 1px accent ring on the focused pane.
+       Scoped to .split-container so a lone, unsplit pane never wears it —
+       there is nothing to tell apart until a split exists. */
+    .split-container .terminal-pane.focused {
+      outline: 1px solid var(--blue);
+      outline-offset: -1px;
+    }
     .pane-dnd-overlay {
       position: fixed;
       display: none;
