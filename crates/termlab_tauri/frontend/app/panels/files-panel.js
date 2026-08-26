@@ -969,6 +969,7 @@
       onOpenRowMenu: (event, entry) => showRowContextMenu(event, pane, entry),
       joinPath,
       onDropEntries: (payload) => onDropEntries(payload),
+      onDragEnd: () => clearDropTargets(),
       onTransferAttention: (transferId, invoker) => {
         const handled = transferController
           && typeof transferController.handleTransferAttention === 'function'
@@ -1161,6 +1162,20 @@
     } catch (e) {
       window.toast.error('Download Failed', String(e));
     }
+  }
+
+  // Source-side dragend safety net (Task 7 review finding). pane-view.js's
+  // rows call this on every dragend regardless of outcome — a cancelled
+  // drag (Escape mid-drag, dropped outside any target) fires dragend on the
+  // source row without necessarily firing dragleave on whichever pane's
+  // highlight is lit, and pane-view.js has no handle to the SIBLING pane's
+  // root to clear it itself. Clearing both unconditionally is simplest and
+  // idempotent — at most one is ever actually lit.
+  function clearDropTargets() {
+    const localEl = getPaneRoot('#fp-local');
+    if (localEl && localEl.classList) localEl.classList.remove('is-drop-target');
+    const remoteEl = getPaneRoot('#fp-remote');
+    if (remoteEl && remoteEl.classList) remoteEl.classList.remove('is-drop-target');
   }
 
   function basenameOfPath(p) {

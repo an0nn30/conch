@@ -2,14 +2,29 @@
   'use strict';
 
   // Drag-and-drop between panes (Task 7). One MIME type carries the whole
-  // payload as JSON — paneKind lets the opposite pane's drop target decide
-  // whether to accept the drag; paneId/path/isDir are what files-panel.js's
-  // onDropEntries needs to route the transfer.
+  // payload as JSON — paneId/path/isDir are what files-panel.js's
+  // onDropEntries needs to route the transfer, read at `drop` time (data is
+  // universally readable there).
   const DND_ENTRY_MIME = 'application/x-termlab-entry';
+
+  // A second, empty-valued MIME type per kind, set alongside the JSON
+  // payload at dragstart. `dragover` accept/reject is decided from this
+  // ALONE — `dataTransfer.types` is reliably readable during `dragover`
+  // across engines, but `getData` is not (WebKitGTK-class engines return
+  // '' for it mid-drag): deciding from `types` keeps the drop-target
+  // highlight working everywhere instead of silently going dead on an
+  // engine that restricts `getData` at that stage.
+  const DND_KIND_MIME_PREFIX = 'application/x-termlab-entry-kind-';
+  function dndKindMime(kind) { return `${DND_KIND_MIME_PREFIX}${kind}`; }
 
   function defaultJoinPath(base, name) {
     const trimmed = String(base || '').replace(/\/+$/, '');
     return `${trimmed || ''}/${name}`;
+  }
+
+  function dndTypesOf(dataTransfer) {
+    if (!dataTransfer || !dataTransfer.types) return [];
+    return Array.isArray(dataTransfer.types) ? dataTransfer.types : Array.from(dataTransfer.types);
   }
 
   // `dataTransfer.types` is readable during `dragover` even where `getData`
@@ -17,14 +32,22 @@
   // drag (an OS file drop, or anything without our MIME) is recognized —
   // and left alone — without ever attempting to read its data.
   function dndHasEntryMime(dataTransfer) {
-    if (!dataTransfer || !dataTransfer.types) return false;
-    const types = Array.isArray(dataTransfer.types) ? dataTransfer.types : Array.from(dataTransfer.types);
-    return types.indexOf(DND_ENTRY_MIME) !== -1;
+    return dndTypesOf(dataTransfer).indexOf(DND_ENTRY_MIME) !== -1;
+  }
+
+  // The dragged entry's pane kind, from `types` alone — no `getData` call.
+  // Used by `dragover`, which must never depend on `getData` succeeding.
+  function dndSourceKindFromTypes(dataTransfer) {
+    const types = dndTypesOf(dataTransfer);
+    if (types.indexOf(dndKindMime('local')) !== -1) return 'local';
+    if (types.indexOf(dndKindMime('remote')) !== -1) return 'remote';
+    return null;
   }
 
   // Parses the JSON payload a row's dragstart wrote, or null if it is
   // missing/malformed. Never throws — a drag this module doesn't recognize
-  // must fall through untouched, not crash the handler.
+  // must fall through untouched, not crash the handler. Only called from
+  // `drop`, where reading data is universally permitted.
   function dndReadEntryPayload(dataTransfer) {
     if (!dndHasEntryMime(dataTransfer) || typeof dataTransfer.getData !== 'function') return null;
     let raw;
@@ -259,8 +282,9 @@
       tr.addEventListener('dragstart', (event) => {
         const dataTransfer = event && event.dataTransfer;
         if (!dataTransfer || typeof dataTransfer.setData !== 'function') return;
+        const kind = isRemote ? 'remote' : 'local';
         const payload = {
-          paneKind: isRemote ? 'remote' : 'local',
+          paneKind: kind,
           // Local browsing has no per-session pane id in this dual-pane
           // model (there is exactly one local pane); the remote side's id
           // is the pinned/active SSH session pane the row belongs to.
@@ -269,6 +293,19 @@
           isDir: !!entry.is_dir,
         };
         dataTransfer.setData(DND_ENTRY_MIME, JSON.stringify(payload));
+        // Empty-valued marker type, checked (never read) by dragover — see
+        // dndSourceKindFromTypes above.
+        dataTransfer.setData(dndKindMime(kind), '');
+      });
+      // Source-side safety net: an engine that cancels a drag mid-flight
+      // (Escape, dropping outside any target) fires `dragend` on the
+      // dragged row without necessarily firing `dragleave` on whichever
+      // pane's drop-target highlight is lit. Clearing both panes' roots
+      // here — rather than trying to track which one is lit — is simplest
+      // and idempotent; files-panel.js's onDragEnd dep is the one with
+      // handles to both #fp-local and #fp-remote.
+      tr.addEventListener('dragend', () => {
+        if (typeof d.onDragEnd === 'function') d.onDragEnd();
       });
       tr.addEventListener('dblclick', () => {
         if (typeof d.onActivateEntry === 'function') d.onActivateEntry(entry);
@@ -410,8 +447,11 @@
     if (tableWrap) {
       const targetPaneKind = isRemote ? 'remote' : 'local';
       tableWrap.addEventListener('dragover', (event) => {
-        const source = dndReadEntryPayload(event.dataTransfer);
-        if (!source || source.paneKind === targetPaneKind) return;
+        // Deliberately types-only — never getData — so the accept decision
+        // works on engines that restrict getData during dragover. See
+        // dndSourceKindFromTypes's comment above.
+        const sourceKind = dndSourceKindFromTypes(event.dataTransfer);
+        if (!sourceKind || sourceKind === targetPaneKind) return;
         event.preventDefault();
         el.classList.add('is-drop-target');
       });

@@ -110,19 +110,29 @@ function dragEvent(type, dataTransfer) {
 
 // A fake DataTransfer good enough for setData/getData/types — the surface
 // pane-view.js's dnd helpers use. `types` mutates on setData exactly like
-// the real DataTransfer does.
+// the real DataTransfer does. `getDataCallCount` lets tests prove dragover
+// never calls getData (finding 2: some engines restrict it mid-drag, so
+// the accept decision must be derivable from `types` alone).
 function fakeDataTransfer(initialTypes = []) {
   const data = new Map();
-  return {
+  const dt = {
     types: initialTypes.slice(),
     data,
+    getDataCallCount: 0,
     setData(type, value) {
       data.set(type, value);
       if (this.types.indexOf(type) === -1) this.types.push(type);
     },
-    getData(type) { return data.has(type) ? data.get(type) : ''; },
+    getData(type) {
+      dt.getDataCallCount += 1;
+      return data.has(type) ? data.get(type) : '';
+    },
   };
+  return dt;
 }
+
+const KIND_MIME_LOCAL = 'application/x-termlab-entry-kind-local';
+const KIND_MIME_REMOTE = 'application/x-termlab-entry-kind-remote';
 
 function pane(overrides) {
   return {
@@ -170,7 +180,12 @@ function renderWithDnd(view, p, deps) {
   const dt = fakeDataTransfer();
   rows[0].dispatchEvent(dragEvent('dragstart', dt));
 
-  assert.deepEqual(dt.types, [ENTRY_MIME], 'dragstart must write exactly the one entry MIME type');
+  assert.deepEqual(
+    dt.types,
+    [ENTRY_MIME, KIND_MIME_LOCAL],
+    'dragstart must write the JSON payload plus an empty local-kind marker',
+  );
+  assert.equal(dt.getData(KIND_MIME_LOCAL), '', 'the kind marker carries no data, only its presence in types matters');
   const payload = JSON.parse(dt.getData(ENTRY_MIME));
   assert.deepEqual(payload, {
     paneKind: 'local',
@@ -193,6 +208,7 @@ function renderWithDnd(view, p, deps) {
   const dt = fakeDataTransfer();
   rows[0].dispatchEvent(dragEvent('dragstart', dt));
 
+  assert.deepEqual(dt.types, [ENTRY_MIME, KIND_MIME_REMOTE]);
   const payload = JSON.parse(dt.getData(ENTRY_MIME));
   assert.deepEqual(payload, {
     paneKind: 'remote',
@@ -215,36 +231,41 @@ function renderWithDnd(view, p, deps) {
   assert.equal(JSON.parse(dt.getData(ENTRY_MIME)).path, '/x::y');
 }
 
-// -- dragover from the opposite pane kind: preventDefault + is-drop-target -
+// -- dragover from the opposite pane kind: preventDefault + is-drop-target,
+// decided from `types` alone — getData is never called (finding 2) --------
 {
   const view = loadPaneView();
   const localPane = pane({ isLocal: true, currentPath: '/home/user' });
   const { paneRoot, tableWrap } = renderWithDnd(view, localPane, {});
-  const dt = fakeDataTransfer([ENTRY_MIME]);
-  dt.setData(ENTRY_MIME, JSON.stringify({ paneKind: 'remote', paneId: 3, path: '/srv/a', isDir: false }));
+  // A real dragstart would also carry the JSON payload under ENTRY_MIME,
+  // but dragover must not need it — only the marker type is set here, to
+  // prove the accept decision doesn't depend on it.
+  const dt = fakeDataTransfer([ENTRY_MIME, KIND_MIME_REMOTE]);
 
   const evt = dragEvent('dragover', dt);
   tableWrap.dispatchEvent(evt);
   assert.equal(evt.defaultPrevented, true, 'opposite-kind dragover must preventDefault');
   assert.equal(paneRoot.classList.contains('is-drop-target'), true, 'opposite-kind dragover marks the pane root');
+  assert.equal(dt.getDataCallCount, 0, 'dragover must decide accept/reject from types alone, never call getData');
 }
 
-// -- dragover from the SAME pane kind: neither preventDefault nor class ----
+// -- dragover from the SAME pane kind: neither preventDefault nor class,
+// and still no getData call -------------------------------------------------
 {
   const view = loadPaneView();
   const localPane = pane({ isLocal: true, currentPath: '/home/user' });
   const { paneRoot, tableWrap } = renderWithDnd(view, localPane, {});
-  const dt = fakeDataTransfer([ENTRY_MIME]);
-  dt.setData(ENTRY_MIME, JSON.stringify({ paneKind: 'local', paneId: null, path: '/home/user/other', isDir: false }));
+  const dt = fakeDataTransfer([ENTRY_MIME, KIND_MIME_LOCAL]);
 
   const evt = dragEvent('dragover', dt);
   tableWrap.dispatchEvent(evt);
   assert.equal(evt.defaultPrevented, false, 'same-kind dragover must not preventDefault (no intra-pane move in v1)');
   assert.equal(paneRoot.classList.contains('is-drop-target'), false, 'same-kind dragover must not mark the pane root');
+  assert.equal(dt.getDataCallCount, 0, 'same-kind rejection must also be decided from types alone');
 }
 
-// -- foreign dragover (types lacks the entry MIME — an OS file drop is
-// Task 8's territory): neither preventDefault nor class --------------------
+// -- foreign dragover (types carries neither kind marker — an OS file drop
+// is Task 8's territory): neither preventDefault nor class, no getData ----
 {
   const view = loadPaneView();
   const remotePaneObj = pane({ isLocal: false, currentPath: '/srv' });
@@ -253,8 +274,9 @@ function renderWithDnd(view, p, deps) {
 
   const evt = dragEvent('dragover', dt);
   tableWrap.dispatchEvent(evt);
-  assert.equal(evt.defaultPrevented, false, 'a drag without our MIME must fall through untouched');
+  assert.equal(evt.defaultPrevented, false, 'a drag without either kind marker must fall through untouched');
   assert.equal(paneRoot.classList.contains('is-drop-target'), false);
+  assert.equal(dt.getDataCallCount, 0);
 }
 
 // -- drop: parses the payload and calls onDropEntries with the exact shape;
@@ -312,6 +334,46 @@ function renderWithDnd(view, p, deps) {
   paneRoot.classList.add('is-drop-target');
   tableWrap.dispatchEvent(dragEvent('dragleave'));
   assert.equal(paneRoot.classList.contains('is-drop-target'), false);
+}
+
+// -- dragend on the SOURCE row (review finding 1): a drag cancelled mid-
+// flight (Escape, dropped outside any target) fires dragend on the dragged
+// row without necessarily firing dragleave on whichever pane is lit.
+// dragstart -> dragover (class set on the opposite/target pane) -> dragend
+// on the source row, with NO dragleave/drop -> the class must still clear.
+// pane-view.js has no handle to the sibling pane's root, so it delegates to
+// d.onDragEnd (files-panel.js's job — it can reach both #fp-local/#fp-remote);
+// here we simulate that dep clearing every known pane root, exactly as
+// files-panel.js's real clearDropTargets() does.
+{
+  const view = loadPaneView();
+  const localPaneObj = pane({ isLocal: true, currentPath: '/home/user', entries: [{ name: 'a.txt', is_dir: false, size: 0, modified: 0 }] });
+  const remotePaneObj = pane({ isLocal: false, currentPath: '/srv' });
+
+  let localRoot;
+  let remoteRoot;
+  const onDragEnd = () => {
+    if (localRoot) localRoot.classList.remove('is-drop-target');
+    if (remoteRoot) remoteRoot.classList.remove('is-drop-target');
+  };
+
+  const localRendered = renderWithDnd(view, localPaneObj, { onDragEnd });
+  localRoot = localRendered.paneRoot;
+  const remoteRendered = renderWithDnd(view, remotePaneObj, { activeRemotePaneId: 1, onDragEnd });
+  remoteRoot = remoteRendered.paneRoot;
+
+  const dt = fakeDataTransfer();
+  localRendered.rows[0].dispatchEvent(dragEvent('dragstart', dt));
+
+  // dragover on the opposite (remote) pane accepts and lights its root.
+  const overEvt = dragEvent('dragover', dt);
+  remoteRendered.tableWrap.dispatchEvent(overEvt);
+  assert.equal(overEvt.defaultPrevented, true);
+  assert.equal(remoteRoot.classList.contains('is-drop-target'), true, 'setup: dragover must have lit the target pane');
+
+  // Cancelled mid-drag: dragend fires on the SOURCE row, no dragleave/drop.
+  localRendered.rows[0].dispatchEvent(dragEvent('dragend', dt));
+  assert.equal(remoteRoot.classList.contains('is-drop-target'), false, 'dragend must clear a lit target pane even with no dragleave/drop');
 }
 
 console.log('files dnd (pane-view): all assertions passed');
@@ -616,6 +678,25 @@ function lastCall(renderCalls, prefix) {
     'the error toast should include the underlying failure reason',
   );
   console.log('B6. transfer failure surfaces an error toast: ok');
+}
+
+// -- onDragEnd (review finding 1, files-panel.js side): clears the
+// is-drop-target class on BOTH #fp-local and #fp-remote roots
+// unconditionally — this is the real clearDropTargets() pane-view.js's
+// dragend handler delegates to, since it has no handle to the sibling
+// pane's root itself. ---------------------------------------------------
+{
+  const h = await setupLogicHarness();
+  const localEl = h.initialLocalRender.el;
+  const remoteEl = h.initialRemoteRender.el;
+  localEl.classList.add('is-drop-target');
+  remoteEl.classList.add('is-drop-target');
+
+  h.initialLocalRender.deps.onDragEnd();
+
+  assert.equal(localEl.classList.contains('is-drop-target'), false, 'onDragEnd must clear the local pane root');
+  assert.equal(remoteEl.classList.contains('is-drop-target'), false, 'onDragEnd must clear the remote pane root too, unconditionally');
+  console.log('B7. onDragEnd clears both pane roots: ok');
 }
 
 console.log('files dnd (files-panel routing): all assertions passed');
