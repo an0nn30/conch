@@ -1023,8 +1023,24 @@
       // where Tauri's drag-drop interception swallows DOM dragover/drop
       // (macOS does; proven live). dragstart records the in-flight payload;
       // the native drop with empty paths consumes it (see handleNativeDrop).
-      onDragStart: (payload) => { inFlightInternalDrag = payload || null; },
-      onDragEnd: () => { inFlightInternalDrag = null; clearDropTargets(); },
+      onDragStart: (payload) => {
+        if (internalDragClearTimer) { clearTimeout(internalDragClearTimer); internalDragClearTimer = null; }
+        inFlightInternalDrag = payload || null;
+      },
+      // DOM dragend fires BEFORE wry delivers the native drop event (~30ms
+      // gap, proven live), so the record must outlive dragend briefly: clear
+      // highlights now, clear the record after a grace period long enough
+      // for the trailing native drop to consume it first. A cancelled drag
+      // (Escape / dropped outside the window) produces no native drop, and
+      // the timer disposes of the record then.
+      onDragEnd: () => {
+        clearDropTargets();
+        if (internalDragClearTimer) clearTimeout(internalDragClearTimer);
+        internalDragClearTimer = setTimeout(() => {
+          internalDragClearTimer = null;
+          inFlightInternalDrag = null;
+        }, 500);
+      },
       onTransferAttention: (transferId, invoker) => {
         const handled = transferController
           && typeof transferController.handleTransferAttention === 'function'
@@ -1238,9 +1254,11 @@
   // root to clear it itself. Clearing both unconditionally is simplest and
   // idempotent — at most one is ever actually lit.
   // The row payload a DOM dragstart recorded, consumed by the native-channel
-  // drop when the platform intercepts DOM drag events (macOS). Cleared on
-  // dragend, on any native drop, and on native drag-leave.
+  // drop when the platform intercepts DOM drag events (macOS). Consumed by
+  // the native drop, or disposed by the grace-period timer dragend arms
+  // (dragend precedes the native drop — see onDragEnd).
   let inFlightInternalDrag = null;
+  let internalDragClearTimer = null;
 
   // Both panes' logical rects + current paths, for internal-drop hit-testing.
   function internalDropPanes() {
