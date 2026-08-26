@@ -1,7 +1,7 @@
 # Composite Panel Host (SFTP + Transfers pop-out) — Design
 
 **Date:** 2026-08-26
-**Status:** Approved in chat (spec pending user review)
+**Status:** Implemented (manual verification pending)
 **Owner request:** Popping out the SFTP tool window should produce a window
 that contains BOTH the SFTP and Transfers tool windows — Transfers as a
 bottom panel, SFTP as the main content — so it reads as its own complete
@@ -222,3 +222,13 @@ No event payload changes — dock/hide/abort still name only the host tool id.
   appears in the host; drag divider; start a transfer (progress visible in
   host); dock → both return, prior active/closed state preserved; restart
   while popped out → composite restored; hide host then summon from rail.
+
+## Manual verification
+
+- [ ] Pop out SFTP: Transfers leaves the main bottom zone and appears in
+  the host.
+- [ ] Drag the divider between SFTP and Transfers in the host.
+- [ ] Start a transfer: progress is visible in the host.
+- [ ] Dock: both return, prior active/closed state preserved.
+- [ ] Restart while popped out: composite is restored.
+- [ ] Hide the host, then summon it from the rail.
