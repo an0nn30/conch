@@ -120,6 +120,22 @@
       // returns without acting when the focused pane is not an editor.
       add('core:save-file-as', 'Save File As…', 'Editor', 'save as file editor copy rename local remote sftp host upload', () => handleMenuAction('save-file-as'));
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
+      add('core:install-cli', "Install 'termlab' Command in PATH", 'Application',
+        'install cli path shell command terminal termlab symlink',
+        async () => {
+          const msg = await invoke('install_cli_symlink');
+          if (global.toast && typeof global.toast.success === 'function') {
+            global.toast.success("Install 'termlab' Command", String(msg));
+          }
+        });
+      add('core:uninstall-cli', "Uninstall 'termlab' Command from PATH", 'Application',
+        'uninstall remove cli path shell command termlab symlink',
+        async () => {
+          const msg = await invoke('uninstall_cli_symlink');
+          if (global.toast && typeof global.toast.success === 'function') {
+            global.toast.success("Uninstall 'termlab' Command", String(msg));
+          }
+        });
       add('core:manage-tunnels', 'Manage Tunnels', 'SSH', 'tunnels manager', () => handleMenuAction('manage-tunnels'), 'Tunnels');
       add('core:focus-sessions', 'Focus Sessions', 'SSH', 'ssh sessions quick connect', () => handleMenuAction('focus-sessions'), 'SSH Hosts');
       add('core:toggle-left', 'Toggle Left Panel', 'View', 'panel left sidebar files explorer tool windows', () => handleMenuAction('toggle-left-panel'));

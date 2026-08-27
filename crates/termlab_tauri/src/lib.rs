@@ -8,6 +8,7 @@ pub(crate) mod bundled_themes;
 pub(crate) mod chooser_window;
 pub(crate) mod cleanup;
 pub mod cli;
+pub(crate) mod cli_install;
 pub(crate) mod close_guard;
 mod commands;
 mod editor_fs;
@@ -853,6 +854,8 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             panel_host::panel_host_broadcast,
             panel_host::panel_host_action,
             commands::rebuild_menu,
+            cli_install::install_cli_symlink,
+            cli_install::uninstall_cli_symlink,
             settings::get_all_settings,
             settings::save_settings,
             theme_catalog::list_terminal_themes,
