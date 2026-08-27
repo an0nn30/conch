@@ -15,6 +15,7 @@ pub(crate) mod font_metrics;
 pub(crate) mod fonts;
 mod ipc;
 pub(crate) mod menu;
+pub(crate) mod open_path;
 pub(crate) mod panel_host;
 pub mod platform;
 pub(crate) mod plugins;
@@ -328,6 +329,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(close_guard::CloseGuard::default())
         .manage(Mutex::new(chooser_window::ChooserRegistry::default()))
         .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
+        .manage(open_path::PendingOpens::default())
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
 
@@ -820,6 +822,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::clipboard_write_text,
             windows::open_new_window,
             windows::open_settings_window,
+            open_path::take_pending_open_paths,
             chooser_window::open_file_chooser,
             chooser_window::get_chooser_request,
             chooser_window::resolve_file_chooser,

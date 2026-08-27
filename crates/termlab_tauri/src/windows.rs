@@ -97,7 +97,9 @@ fn create_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri
     Ok(())
 }
 
-pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+pub(crate) fn create_new_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<String> {
     let label = loop {
         let id = NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed);
         let candidate = format!("window-{id}");
@@ -130,14 +132,15 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
     };
     let theme = appearance_to_theme(&user_cfg.colors.appearance_mode);
 
-    let new_win = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-        .title("TermLab")
-        .inner_size(w, h)
-        .resizable(true)
-        .decorations(dec)
-        .theme(theme)
-        .visible(false)
-        .build()?;
+    let new_win =
+        WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::App("index.html".into()))
+            .title("TermLab")
+            .inner_size(w, h)
+            .resizable(true)
+            .decorations(dec)
+            .theme(theme)
+            .visible(false)
+            .build()?;
     // Same deal as the main window: this one is built hidden and shown by
     // app_ready once the frontend has sized it, so it needs the same rescue
     // timer for a frontend that never gets that far.
@@ -146,5 +149,5 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
     if zoom > 0.0 && (zoom - 1.0).abs() > f32::EPSILON {
         let _ = new_win.set_zoom(zoom as f64);
     }
-    Ok(())
+    Ok(label)
 }
