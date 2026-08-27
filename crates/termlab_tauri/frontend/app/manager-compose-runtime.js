@@ -376,6 +376,21 @@
           currentPane: () => paneManager.currentPane(),
         });
       }
+      // Hover and signature help need the same two lookups completion does:
+      // view -> pane for the pointer and keyboard hooks CodeMirror hands a
+      // view, and the focused pane for the configured editor_signature_help
+      // shortcut and the palette's Show Hover action.
+      if (global.termlabLspTooltips && typeof global.termlabLspTooltips.configure === 'function') {
+        global.termlabLspTooltips.configure({
+          paneForView: (view) => {
+            for (const pane of panes.values()) {
+              if (pane && pane.view === view) return pane;
+            }
+            return null;
+          },
+          currentPane: () => paneManager.currentPane(),
+        });
+      }
       // Diagnostics need the whole pane map rather than one lookup: a
       // publication is workspace-wide, so every local editor pane in this
       // window is a candidate owner for the URIs it carries.

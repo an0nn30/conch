@@ -359,6 +359,33 @@ pub(crate) struct LspCapabilities {
     pub diagnostics: bool,
 }
 
+/// Trigger characters as the server advertised them, carried from the session
+/// to the status payload. Internal only: the frontend reads the normalized
+/// lists off `LspStatus`, not this.
+///
+/// Deliberately NOT part of `LspCapabilities`, which is `Copy` and read in
+/// hot paths; owning three `Vec`s there would cost a clone on every status
+/// emission for data that changes once per session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NegotiatedTriggers {
+    pub completion: Vec<String>,
+    pub signature_help: Vec<String>,
+    pub signature_help_retrigger: Vec<String>,
+}
+
+/// Drop empties and duplicates, preserving the server's order. The same shape
+/// of normalization `TriggerNormalizationPolicy` applies to completion, minus
+/// the curated list — there is no curated signature-help list to merge with.
+pub(crate) fn normalize_triggers(triggers: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for trigger in triggers {
+        if !trigger.is_empty() && !normalized.iter().any(|value| value == trigger) {
+            normalized.push(trigger.clone());
+        }
+    }
+    normalized
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -374,6 +401,18 @@ pub(crate) struct LspStatus {
     #[ts(optional)]
     pub unavailable_reason: Option<LspUnavailableReason>,
     pub capabilities: LspCapabilities,
+    // Normalized trigger characters for the two surfaces that open
+    // automatically. The frontend reads these to decide when to ask; an older
+    // payload that omits them degrades to identifier typing for completion and
+    // to manual invocation for signature help, which is why all three are
+    // `#[serde(default)]` rather than required. (A `///` comment here would be
+    // copied into the exported TypeScript declaration.)
+    #[serde(default)]
+    pub completion_trigger_characters: Vec<String>,
+    #[serde(default)]
+    pub signature_help_trigger_characters: Vec<String>,
+    #[serde(default)]
+    pub signature_help_retrigger_characters: Vec<String>,
     pub error_count: u32,
     pub warning_count: u32,
 }
@@ -404,6 +443,7 @@ mod tests {
         Diagnostic, DiagnosticCounts, DiagnosticSnapshot, DiagnosticUpdate, EditorLocation,
         EditorPosition, EditorRange, HoverBlock, LspCapabilities, LspChangeBatch, LspSessionState,
         LspStatus, LspTextChange, LspUnavailableReason, ProjectCandidate, SignatureHelpResponse,
+        normalize_triggers,
     };
     use ts_rs::TS;
 
@@ -543,6 +583,9 @@ mod tests {
                 definition: false,
                 diagnostics: false,
             },
+            completion_trigger_characters: Vec::new(),
+            signature_help_trigger_characters: Vec::new(),
+            signature_help_retrigger_characters: Vec::new(),
             error_count: 0,
             warning_count: 0,
         };
@@ -559,6 +602,9 @@ mod tests {
                 "message": null,
                 "unavailableReason": { "kind": "notBundledYet", "adapterId": "json" },
                 "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "diagnostics": false },
+                "completionTriggerCharacters": [],
+                "signatureHelpTriggerCharacters": [],
+                "signatureHelpRetriggerCharacters": [],
                 "errorCount": 0,
                 "warningCount": 0,
             })
@@ -580,6 +626,9 @@ mod tests {
                 definition: false,
                 diagnostics: false,
             },
+            completion_trigger_characters: Vec::new(),
+            signature_help_trigger_characters: Vec::new(),
+            signature_help_retrigger_characters: Vec::new(),
             error_count: 0,
             warning_count: 0,
         };
@@ -595,6 +644,9 @@ mod tests {
                 "state": "disabled",
                 "message": null,
                 "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "diagnostics": false },
+                "completionTriggerCharacters": [],
+                "signatureHelpTriggerCharacters": [],
+                "signatureHelpRetriggerCharacters": [],
                 "errorCount": 0,
                 "warningCount": 0,
             })
@@ -608,7 +660,7 @@ mod tests {
         );
         assert_eq!(
             LspStatus::decl(&ts_rs::Config::default()),
-            "type LspStatus = { revision: number, documentId: string | null, sessionId: string | null, adapterId: string | null, projectRootUri: string | null, state: LspSessionState, message: string | null, unavailableReason?: LspUnavailableReason, capabilities: LspCapabilities, errorCount: number, warningCount: number, };"
+            "type LspStatus = { revision: number, documentId: string | null, sessionId: string | null, adapterId: string | null, projectRootUri: string | null, state: LspSessionState, message: string | null, unavailableReason?: LspUnavailableReason, capabilities: LspCapabilities, completionTriggerCharacters: Array<string>, signatureHelpTriggerCharacters: Array<string>, signatureHelpRetriggerCharacters: Array<string>, errorCount: number, warningCount: number, };"
         );
     }
 
@@ -698,6 +750,56 @@ mod tests {
                 "newText": "wide",
             })
         );
+    }
+
+    #[test]
+    fn normalize_triggers_drops_empties_and_duplicates_in_order() {
+        let normalized = normalize_triggers(&[
+            ".".to_owned(),
+            String::new(),
+            "::".to_owned(),
+            ".".to_owned(),
+            "<".to_owned(),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![".".to_owned(), "::".to_owned(), "<".to_owned()],
+            "the server's order survives; empties and repeats do not"
+        );
+        assert!(
+            normalize_triggers(&[]).is_empty(),
+            "a server that advertises none normalizes to none"
+        );
+    }
+
+    #[test]
+    fn status_without_trigger_characters_deserializes_to_empty_lists() {
+        // An LspStatus persisted or sent by a build that predates the trigger
+        // lists must still load: the frontend degrades to identifier typing.
+        let restored: LspStatus = serde_json::from_value(serde_json::json!({
+            "revision": 5,
+            "documentId": "doc-1",
+            "sessionId": null,
+            "adapterId": null,
+            "projectRootUri": null,
+            "state": "ready",
+            "message": null,
+            "capabilities": {
+                "completion": true,
+                "hover": true,
+                "signatureHelp": true,
+                "definition": true,
+                "diagnostics": true,
+            },
+            "errorCount": 0,
+            "warningCount": 0,
+        }))
+        .expect("a status without the trigger lists still deserializes");
+
+        assert!(restored.completion_trigger_characters.is_empty());
+        assert!(restored.signature_help_trigger_characters.is_empty());
+        assert!(restored.signature_help_retrigger_characters.is_empty());
     }
 
     #[test]

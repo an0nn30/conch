@@ -127,3 +127,73 @@
   color: var(--tl-fg-muted);
   font-family: var(--tl-font-mono, monospace);
 }
+
+/* Hover overlay body (features/editor/lsp-tooltips.js). CodeMirror's tooltip
+   plugin owns the chrome and the placement; these style only what we put
+   inside it. `pre-wrap` matters for the same reason it does on diagnostics:
+   rust-analyzer and gopls both send hover text with its own line breaks, and
+   collapsing them turns a readable signature into one long line. */
+.tl-hover {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-1);
+  max-width: 480px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tl-hover__text {
+  color: var(--tl-fg);
+}
+
+/* Fenced code from the server's Markdown, kept verbatim. Monospaced and
+   tinted so a type signature reads as code rather than as prose. */
+.tl-hover__code {
+  margin: 0;
+  padding: var(--tl-space-1) var(--tl-space-2);
+  border-radius: var(--tl-radius-sm, 4px);
+  background: var(--tl-bg-subtle, var(--tl-bg));
+  color: var(--tl-fg);
+  font-family: var(--tl-font-mono, monospace);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* Signature help. One overload at a time, with the parameter the caret is
+   inside picked out — colour is not the only signal, the weight changes too,
+   because the tooltip is small and the highlight has to survive a theme with
+   little contrast between fg and accent. */
+.tl-signature {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-1);
+  max-width: 480px;
+  overflow-wrap: anywhere;
+}
+
+.tl-signature__label {
+  color: var(--tl-fg-muted);
+  font-family: var(--tl-font-mono, monospace);
+  white-space: pre-wrap;
+}
+
+.tl-signature__param {
+  color: var(--tl-fg-muted);
+}
+
+.tl-signature__param--active {
+  color: var(--tl-fg);
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+/* "2 of 3" for an overload set. Shown only when there is more than one. */
+.tl-signature__count {
+  color: var(--tl-fg-muted);
+  font-size: var(--tl-font-size-sm, 12px);
+}
+
+.tl-signature__doc {
+  color: var(--tl-fg);
+  white-space: pre-wrap;
+}

@@ -3,4 +3,4 @@ import type { LspCapabilities } from "./LspCapabilities";
 import type { LspSessionState } from "./LspSessionState";
 import type { LspUnavailableReason } from "./LspUnavailableReason";
 
-export type LspStatus = { revision: number, documentId: string | null, sessionId: string | null, adapterId: string | null, projectRootUri: string | null, state: LspSessionState, message: string | null, unavailableReason?: LspUnavailableReason, capabilities: LspCapabilities, errorCount: number, warningCount: number, };
+export type LspStatus = { revision: number, documentId: string | null, sessionId: string | null, adapterId: string | null, projectRootUri: string | null, state: LspSessionState, message: string | null, unavailableReason?: LspUnavailableReason, capabilities: LspCapabilities, completionTriggerCharacters: Array<string>, signatureHelpTriggerCharacters: Array<string>, signatureHelpRetriggerCharacters: Array<string>, errorCount: number, warningCount: number, };

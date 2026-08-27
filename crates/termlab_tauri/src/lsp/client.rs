@@ -13,7 +13,8 @@ use super::types::{
     CompletionItem, CompletionResponse, CompletionTextEdit, CompletionUnsupportedEffect,
     DefinitionResponse, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
     EditorLocation, EditorPosition, EditorRange, EditorTextEdit, HoverBlock, HoverResponse,
-    LspCapabilities, SignatureHelpResponse, SignatureInformation, SignatureParameter,
+    LspCapabilities, NegotiatedTriggers, SignatureHelpResponse, SignatureInformation,
+    SignatureParameter,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +107,10 @@ impl Default for SyncPolicy {
 pub(crate) struct SessionCapabilityState {
     static_sync: SyncPolicy,
     features: LspCapabilities,
+    /// Set once, from the initialize result. Dynamic (un)registration changes
+    /// which features exist, never which characters open them, so the
+    /// `CapabilitiesChanged` path deliberately leaves these alone.
+    triggers: NegotiatedTriggers,
     registrations: Vec<DynamicRegistration>,
 }
 
@@ -120,6 +125,7 @@ impl Default for SessionCapabilityState {
                 definition: false,
                 diagnostics: false,
             },
+            triggers: NegotiatedTriggers::default(),
             registrations: Vec::new(),
         }
     }
@@ -136,6 +142,14 @@ impl SessionCapabilityState {
 
     pub(crate) fn features(&self) -> LspCapabilities {
         self.features
+    }
+
+    pub(crate) fn set_triggers(&mut self, triggers: NegotiatedTriggers) {
+        self.triggers = triggers;
+    }
+
+    pub(crate) fn triggers(&self) -> NegotiatedTriggers {
+        self.triggers.clone()
     }
 
     pub(crate) fn sync_policy(&self) -> SyncPolicy {

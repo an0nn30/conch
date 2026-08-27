@@ -119,6 +119,16 @@
       // Editor-only, like the keybinding: handleMenuAction('save-file-as')
       // returns without acting when the focused pane is not an editor.
       add('core:save-file-as', 'Save File As…', 'Editor', 'save as file editor copy rename local remote sftp host upload', () => handleMenuAction('save-file-as'));
+      // Show Hover has no default chord: the shortcut router models single
+      // combinations, not VS Code-style multi-step chords, and there is no
+      // spare single combination worth claiming for it. The palette is how it
+      // stays reachable from the keyboard. features/editor/lsp-tooltips.js
+      // listens for the event and no-ops outside an LSP-capable editor.
+      add('core:editor-show-hover', 'Show Hover', 'Editor',
+        'hover documentation docs type signature lsp language server tooltip',
+        () => {
+          global.dispatchEvent(new global.CustomEvent('termlab:editor-show-hover'));
+        });
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
       add('core:install-cli', "Install 'termlab' Command in PATH", 'Application',
         'install cli path shell command terminal termlab symlink',

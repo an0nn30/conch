@@ -29,11 +29,10 @@ use super::session::{LspSession, ProcessServerLauncher, SessionDocument, Session
 use super::trust::{ProjectTrustStore, RootBinding, TrustDecision};
 use super::types::{
     ApplyChangesResponse, CompletionItem, CompletionResponse, DefinitionResponse, Diagnostic,
-    DiagnosticSeverity,
-    DiagnosticSnapshot, DiagnosticUpdate, DocumentId, EditorPosition, HoverResponse,
-    LspCapabilities, LspChangeBatch, LspSessionState, LspStatus, LspUnavailableReason,
-    OpenDocumentResponse, ProjectCandidate, ReservationId, ReserveResult, ResyncDocumentResponse,
-    SignatureHelpResponse,
+    DiagnosticSeverity, DiagnosticSnapshot, DiagnosticUpdate, DocumentId, EditorPosition,
+    HoverResponse, LspCapabilities, LspChangeBatch, LspSessionState, LspStatus,
+    LspUnavailableReason, NegotiatedTriggers, OpenDocumentResponse, ProjectCandidate,
+    ReservationId, ReserveResult, ResyncDocumentResponse, SignatureHelpResponse,
 };
 
 const COMMAND_CAPACITY: usize = 64;
@@ -254,6 +253,12 @@ pub(crate) enum ManagerEvent {
 #[async_trait]
 pub(crate) trait SessionClient: Send + Sync + 'static {
     fn capabilities(&self) -> LspCapabilities;
+    /// Trigger characters from the initialize result. Defaulted so a client
+    /// that has none — every test double, and any future in-process client —
+    /// simply advertises none rather than having to restate this.
+    fn trigger_characters(&self) -> NegotiatedTriggers {
+        NegotiatedTriggers::default()
+    }
     async fn did_open(&self, document: SessionDocument) -> Result<(), String>;
     async fn did_change(&self, batch: LspChangeBatch) -> Result<i32, String>;
     async fn did_save(&self, document_id: &str) -> Result<(), String>;
@@ -323,6 +328,10 @@ struct RealSessionClient(LspSession);
 impl SessionClient for RealSessionClient {
     fn capabilities(&self) -> LspCapabilities {
         self.0.capabilities()
+    }
+
+    fn trigger_characters(&self) -> NegotiatedTriggers {
+        self.0.trigger_characters()
     }
 
     async fn did_open(&self, document: SessionDocument) -> Result<(), String> {
@@ -1424,6 +1433,7 @@ struct ManagedSession {
     logs: VecDeque<SessionLogEntry>,
     next_log_sequence: u64,
     capabilities: LspCapabilities,
+    triggers: NegotiatedTriggers,
     protocol_started: bool,
 }
 
@@ -4047,6 +4057,7 @@ impl LspManager {
                     logs: VecDeque::new(),
                     next_log_sequence: 1,
                     capabilities: capabilities(false),
+                    triggers: NegotiatedTriggers::default(),
                     protocol_started: false,
                 },
             );
@@ -4508,6 +4519,25 @@ impl LspManager {
             .and_then(|key| self.state.sessions.get(key))
             .map(|session| session.capabilities)
             .unwrap_or_else(|| capabilities(false));
+        // Completion triggers are the CURATED list merged with the server's,
+        // per the adapter's normalization policy, so a server that advertises
+        // none still opens on `.`; signature-help triggers are the server's
+        // alone, because the catalog curates no list for them.
+        let negotiated_triggers = session_key
+            .as_ref()
+            .and_then(|key| self.state.sessions.get(key))
+            .map(|session| {
+                let catalog = BundledServerCatalog::new();
+                (
+                    catalog.normalize_completion_triggers(
+                        session.language,
+                        &session.triggers.completion,
+                    ),
+                    session.triggers.signature_help.clone(),
+                    session.triggers.signature_help_retrigger.clone(),
+                )
+            })
+            .unwrap_or_default();
         let Some(document) = self.state.documents.get_mut(&document_id) else {
             return;
         };
@@ -4545,6 +4575,33 @@ impl LspManager {
             } else {
                 capabilities(false)
             },
+            // Gated on the same states as the capabilities: a trigger
+            // character for a feature the status says is unavailable would
+            // only make the frontend ask a session that cannot answer.
+            completion_trigger_characters: if matches!(
+                state,
+                LspSessionState::Ready | LspSessionState::Indexing
+            ) {
+                negotiated_triggers.0
+            } else {
+                Vec::new()
+            },
+            signature_help_trigger_characters: if matches!(
+                state,
+                LspSessionState::Ready | LspSessionState::Indexing
+            ) {
+                negotiated_triggers.1
+            } else {
+                Vec::new()
+            },
+            signature_help_retrigger_characters: if matches!(
+                state,
+                LspSessionState::Ready | LspSessionState::Indexing
+            ) {
+                negotiated_triggers.2
+            } else {
+                Vec::new()
+            },
             error_count,
             warning_count,
         };
@@ -4581,6 +4638,9 @@ impl LspManager {
             message: None,
             unavailable_reason: None,
             capabilities: capabilities(false),
+            completion_trigger_characters: Vec::new(),
+            signature_help_trigger_characters: Vec::new(),
+            signature_help_retrigger_characters: Vec::new(),
             error_count: 0,
             warning_count: 0,
         }
@@ -4899,6 +4959,7 @@ impl LspManager {
         match result {
             Ok(client) => {
                 let negotiated_capabilities = client.capabilities();
+                let negotiated_triggers = client.trigger_characters();
                 let worker =
                     spawn_session_worker(key.clone(), generation, client, self.input_tx.clone());
                 let documents = {
@@ -4907,6 +4968,7 @@ impl LspManager {
                     session.worker = Some(worker);
                     session.exit_observed = false;
                     session.capabilities = negotiated_capabilities;
+                    session.triggers = negotiated_triggers;
                     session.protocol_started = true;
                     session.documents.iter().copied().collect::<Vec<_>>()
                 };
@@ -6649,6 +6711,17 @@ mod tests {
             }
         }
 
+        // What a real typescript-language-server advertises. `::` is not in
+        // the curated list, which is what makes the merge visible in the
+        // status assertions below.
+        fn trigger_characters(&self) -> crate::lsp::types::NegotiatedTriggers {
+            crate::lsp::types::NegotiatedTriggers {
+                completion: vec![".".to_owned(), "::".to_owned()],
+                signature_help: vec!["(".to_owned(), ",".to_owned()],
+                signature_help_retrigger: vec![",".to_owned()],
+            }
+        }
+
         async fn did_open(
             &self,
             document: crate::lsp::session::SessionDocument,
@@ -7135,6 +7208,7 @@ mod tests {
             logs: std::collections::VecDeque::new(),
             next_log_sequence: 1,
             capabilities: super::capabilities(false),
+            triggers: Default::default(),
             protocol_started: true,
         }
     }
@@ -9024,6 +9098,20 @@ mod tests {
         let path = harness.file("capabilities.ts", "let value = 1;");
         let document = harness.open(&path, "main", "pane").await;
         let root = harness.root.clone();
+        // Before a project is chosen there is no session, so the status must
+        // advertise neither the features nor the characters that would open
+        // them: a trigger for a feature nothing can answer only produces a
+        // request the frontend has to throw away.
+        let unattached = harness
+            .manager
+            .status_snapshot(Some(document))
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(!unattached.capabilities.completion);
+        assert!(unattached.completion_trigger_characters.is_empty());
+        assert!(unattached.signature_help_trigger_characters.is_empty());
+        assert!(unattached.signature_help_retrigger_characters.is_empty());
         harness
             .choose_and_trust(document, &root, "typescript")
             .await;
@@ -9034,6 +9122,29 @@ mod tests {
             .unwrap()
             .remove(0);
         assert!(ready.capabilities.completion);
+        // Completion triggers are the CURATED list merged with the server's,
+        // in that order; signature-help triggers are the server's alone.
+        assert_eq!(
+            ready.completion_trigger_characters,
+            vec![
+                ".".to_owned(),
+                "'".to_owned(),
+                "\"".to_owned(),
+                "/".to_owned(),
+                "@".to_owned(),
+                "<".to_owned(),
+                "::".to_owned(),
+            ],
+            "the curated list opens completion even where the server named nothing"
+        );
+        assert_eq!(
+            ready.signature_help_trigger_characters,
+            vec!["(".to_owned(), ",".to_owned()]
+        );
+        assert_eq!(
+            ready.signature_help_retrigger_characters,
+            vec![",".to_owned()]
+        );
         let changed = crate::lsp::types::LspCapabilities {
             completion: false,
             hover: true,
@@ -9599,6 +9710,7 @@ mod tests {
                 logs: std::collections::VecDeque::new(),
                 next_log_sequence: 1,
                 capabilities: super::capabilities(false),
+                triggers: Default::default(),
                 protocol_started: false,
             },
         );
@@ -10290,6 +10402,7 @@ mod tests {
                 logs: std::collections::VecDeque::new(),
                 next_log_sequence: 1,
                 capabilities: super::capabilities(false),
+                triggers: Default::default(),
                 protocol_started: true,
             },
         );
@@ -10406,6 +10519,7 @@ mod tests {
                 logs: std::collections::VecDeque::new(),
                 next_log_sequence: 1,
                 capabilities: super::capabilities(false),
+                triggers: Default::default(),
                 protocol_started: true,
             },
         );

@@ -45,6 +45,19 @@
       : [];
   }
 
+  // LSP hover and signature help. Same contract as the two above: [] when the
+  // module or the bundle's tooltip exports are missing, so a stale vendor
+  // bundle costs the overlays and nothing else. These DO carry precedence —
+  // the Escape handler is a Prec.highest domEventHandler, for the same reason
+  // the completion one is — but it travels with the extension, not with the
+  // position in this list.
+  function tooltipExtensions() {
+    return global.termlabLspTooltips
+      && typeof global.termlabLspTooltips.extensions === 'function'
+      ? global.termlabLspTooltips.extensions()
+      : [];
+  }
+
   function languageExtension(filename) {
     const CM = global.CM6;
     const map = global.termlabEditorLanguageMap;
@@ -112,6 +125,7 @@
           // of vim's plugin while the popup is open.
           ...completionExtensions(),
           ...diagnosticsExtensions(),
+          ...tooltipExtensions(),
           CM.lineNumbers(),
           CM.highlightActiveLineGutter(),
           CM.highlightSpecialChars(),

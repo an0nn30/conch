@@ -6,11 +6,18 @@
 // be folded into the snippet's own transaction with CodeMirror's own position
 // mapping rather than hand-rolled arithmetic (features/editor/
 // lsp-completion-apply.js).
-export { EditorState, Compartment, Prec, ChangeSet, StateEffect } from '@codemirror/state';
+// `StateField` and `showTooltip` are the hover/signature overlay
+// (features/editor/lsp-tooltips.js): the field holds the one overlay a view
+// may show, and the facet is how CodeMirror places it and remaps it as the
+// document changes, instead of this app recomputing coordinates on scroll.
+// `hoverTooltip` is deliberately NOT re-exported: its dwell source cannot be
+// invoked manually, and the command palette's Show Hover action has to reach
+// the same overlay the pointer does.
+export { EditorState, Compartment, Prec, ChangeSet, StateEffect, StateField } from '@codemirror/state';
 export {
   EditorView, keymap, lineNumbers, highlightActiveLine,
   highlightActiveLineGutter, drawSelection, rectangularSelection,
-  highlightSpecialChars,
+  highlightSpecialChars, showTooltip,
 } from '@codemirror/view';
 export { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 export {

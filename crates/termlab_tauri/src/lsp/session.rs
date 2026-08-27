@@ -34,7 +34,7 @@ use super::client::{
 use super::document::{DocumentError, VersionedDocument};
 use super::types::{
     CompletionItem, CompletionResponse, DefinitionResponse, Diagnostic, HoverResponse,
-    LspCapabilities, LspChangeBatch, SignatureHelpResponse,
+    LspCapabilities, LspChangeBatch, NegotiatedTriggers, SignatureHelpResponse, normalize_triggers,
 };
 
 const SHORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -615,11 +615,13 @@ impl LspSession {
                 },
             }?;
             let features = normalized_capabilities(&result.capabilities);
+            let triggers = negotiated_triggers(&result.capabilities);
             let sync = sync_policy(result.capabilities.text_document_sync);
             {
                 let mut capabilities = capabilities.lock().expect("LSP capability state poisoned");
                 capabilities.set_static_sync(sync);
                 capabilities.set_features(features);
+                capabilities.set_triggers(triggers);
             }
             event_sink.send(ClientEvent::CapabilitiesChanged(features));
             if cancellation.is_cancelled() {
@@ -714,6 +716,14 @@ impl LspSession {
             .lock()
             .expect("LSP capability state poisoned")
             .features()
+    }
+
+    pub(crate) fn trigger_characters(&self) -> NegotiatedTriggers {
+        self.inner
+            .capabilities
+            .lock()
+            .expect("LSP capability state poisoned")
+            .triggers()
     }
 
     pub(crate) async fn did_change(&self, batch: LspChangeBatch) -> Result<i32, SessionError> {
@@ -1174,6 +1184,33 @@ fn sync_policy(capability: Option<lsp::TextDocumentSyncCapability>) -> SyncPolic
     }
 }
 
+/// The trigger characters the server advertised, normalized (empties and
+/// duplicates dropped) but not yet merged with the catalog's curated
+/// completion list — that merge needs the document's language, which only the
+/// manager knows.
+fn negotiated_triggers(capabilities: &lsp::ServerCapabilities) -> NegotiatedTriggers {
+    let completion = capabilities
+        .completion_provider
+        .as_ref()
+        .and_then(|provider| provider.trigger_characters.clone())
+        .unwrap_or_default();
+    let (signature_help, signature_help_retrigger) = capabilities
+        .signature_help_provider
+        .as_ref()
+        .map(|provider| {
+            (
+                provider.trigger_characters.clone().unwrap_or_default(),
+                provider.retrigger_characters.clone().unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
+    NegotiatedTriggers {
+        completion: normalize_triggers(&completion),
+        signature_help: normalize_triggers(&signature_help),
+        signature_help_retrigger: normalize_triggers(&signature_help_retrigger),
+    }
+}
+
 fn normalized_capabilities(capabilities: &lsp::ServerCapabilities) -> LspCapabilities {
     let hover = capabilities
         .hover_provider
@@ -1218,6 +1255,44 @@ mod tests {
         test_command, test_descriptor,
     };
     use crate::lsp::types::{LspChangeBatch, LspTextChange};
+
+    #[test]
+    fn negotiated_triggers_reads_both_providers_and_normalizes_them() {
+        let capabilities = async_lsp::lsp_types::ServerCapabilities {
+            completion_provider: Some(async_lsp::lsp_types::CompletionOptions {
+                trigger_characters: Some(vec![
+                    ".".to_owned(),
+                    ".".to_owned(),
+                    String::new(),
+                    "::".to_owned(),
+                ]),
+                ..Default::default()
+            }),
+            signature_help_provider: Some(async_lsp::lsp_types::SignatureHelpOptions {
+                trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
+                retrigger_characters: Some(vec![",".to_owned()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let triggers = super::negotiated_triggers(&capabilities);
+
+        assert_eq!(triggers.completion, vec![".".to_owned(), "::".to_owned()]);
+        assert_eq!(
+            triggers.signature_help,
+            vec!["(".to_owned(), ",".to_owned()]
+        );
+        assert_eq!(triggers.signature_help_retrigger, vec![",".to_owned()]);
+    }
+
+    #[test]
+    fn a_server_advertising_no_providers_negotiates_no_triggers() {
+        let triggers =
+            super::negotiated_triggers(&async_lsp::lsp_types::ServerCapabilities::default());
+
+        assert_eq!(triggers, crate::lsp::types::NegotiatedTriggers::default());
+    }
 
     fn descriptor_with_configuration(configuration: &'static str) -> &'static AdapterDescriptor {
         Box::leak(Box::new(AdapterDescriptor {
