@@ -268,7 +268,8 @@ mod tests {
                     "globalLimit": 4,
                     "perHostLimit": 6,
                     "pipelineDepth": 16,
-                    "pipelineChunkBytes": 262144
+                    "pipelineChunkBytes": 262144,
+                    "maxQueued": 2000
                 },
                 "batches": [{
                     "info": {

@@ -298,8 +298,8 @@ function loadHarness(options = {}) {
     },
   };
   for (const method of [
-    'pause', 'resume', 'cancel', 'cancelBatch', 'retry', 'resolve', 'pauseAll', 'resumeAll',
-    'clearCompleted', 'reorder', 'setPriority', 'updateSettings', 'reconnect',
+    'pause', 'resume', 'cancel', 'cancelBatch', 'cancelAll', 'retry', 'resolve', 'pauseAll',
+    'resumeAll', 'clearCompleted', 'reorder', 'setPriority', 'updateSettings', 'reconnect',
   ]) {
     runtime[method] = (...args) => {
       runtimeCalls.push({ method, args });
@@ -621,10 +621,14 @@ function dialogButton(dialog, label) {
   concurrency.bodyEl.querySelector('[data-transfer-field="per-host-limit"]').value = '3';
   concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-depth"]').value = '8';
   concurrency.bodyEl.querySelector('[data-transfer-field="pipeline-chunk-kib"]').value = '512';
+  concurrency.bodyEl.querySelector('[data-transfer-field="max-queued"]').value = '5000';
   await dialogButton(concurrency, 'Save').onSelect();
   assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.runtimeCalls.at(-1))), {
     method: 'updateSettings',
-    args: [{ globalLimit: 6, perHostLimit: 3, pipelineDepth: 8, pipelineChunkBytes: 512 * 1024 }],
+    args: [{
+      globalLimit: 6, perHostLimit: 3, pipelineDepth: 8,
+      pipelineChunkBytes: 512 * 1024, maxQueued: 5000,
+    }],
   });
 
   const priorCallCount = harness.runtimeCalls.length;
@@ -809,7 +813,10 @@ function dialogButton(dialog, label) {
   chunkInput.value = '128';
   await dialogButton(concurrency, 'Save').onSelect();
   assert.deepStrictEqual(JSON.parse(JSON.stringify(settings)),
-    [{ globalLimit: 8, perHostLimit: 4, pipelineDepth: 12, pipelineChunkBytes: 128 * 1024 }]);
+    [{
+      globalLimit: 8, perHostLimit: 4, pipelineDepth: 12,
+      pipelineChunkBytes: 128 * 1024, maxQueued: 2000,
+    }]);
   assert.strictEqual(globalInput.value, '');
   assert.strictEqual(hostInput.value, '');
   assert.strictEqual(depthInput.value, '');
@@ -1599,6 +1606,78 @@ async function loadMountLifecycleHarness() {
     'a batch with no remaining members in view renders no header',
   );
   assert.strictEqual(harness.panelEl.querySelector('tr[data-job-id="x1"]'), null);
+}
+
+// --- Cancel All lives in the toolbar, disables with nothing active, and
+// routes through its own confirm dialog before touching the runtime. ---
+{
+  const harness = loadHarness();
+  harness.emit(snapshot([], { summary: summary() }));
+  const cancelAllButton = harness.panelEl.querySelector('[data-transfer-action="cancel-all"]');
+  assert.ok(cancelAllButton, 'toolbar exposes a cancel-all action');
+  assert.strictEqual(cancelAllButton.disabled, true, 'nothing to cancel disables the button');
+  click(harness.panelEl, cancelAllButton);
+  assert.deepStrictEqual(harness.dialogs, [], 'a disabled cancel-all opens no dialog');
+
+  harness.emit(snapshot([job('a', 'running'), job('b', 'queued')], {
+    revision: 2,
+    summary: summary({ active: 2, running: 1, queued: 1 }),
+  }));
+  assert.strictEqual(cancelAllButton.disabled, false);
+
+  click(harness.panelEl, cancelAllButton);
+  assert.deepStrictEqual(harness.runtimeCalls, [], 'cancel-all waits for confirmation');
+  const firstDialog = harness.dialogs.at(-1);
+  assert.strictEqual(firstDialog.options.title, 'Cancel all transfers?');
+  assert.ok(firstDialog.bodyEl.textContent.includes('2 transfers will be cancelled'));
+  await dialogButton(firstDialog, 'Keep transfers').onSelect();
+  assert.deepStrictEqual(harness.runtimeCalls, [], 'Keep transfers must not cancel anything');
+
+  click(harness.panelEl, cancelAllButton);
+  await dialogButton(harness.dialogs.at(-1), 'Cancel all').onSelect();
+  assert.deepStrictEqual(harness.runtimeCalls, [{ method: 'cancelAll', args: [] }]);
+}
+
+// --- A huge batch renders only its leading members plus one "N more" row,
+// and a later discovery tick patches that row's count without rebuilding
+// the table. The full queue stays in the backend document; the view is a
+// bounded window over it. ---
+{
+  const harness = loadHarness();
+  const members = (count) => Array.from({ length: count }, (_, index) => (
+    job(`m${index}`, 'queued', { batchId: 'batch-1' })
+  ));
+  harness.emit(snapshot(members(120), {
+    batches: [batchAgg('batch-1', { info: { discoveredFiles: 120 } })],
+    summary: summary({ active: 120, queued: 120 }),
+  }));
+
+  assert.strictEqual(rowIds(harness.panelEl).length, 100,
+    'member rows are capped per batch');
+  const moreRow = harness.panelEl.querySelector('tr.tl-transfer-center__more');
+  assert.ok(moreRow, 'the remainder collapses into one row');
+  assert.ok(moreRow.textContent.includes('+ 20 more transfers not shown'), moreRow.textContent);
+
+  const tbody = harness.panelEl.querySelector('tbody');
+  harness.emit(snapshot(members(150), {
+    revision: 2,
+    batches: [batchAgg('batch-1', { info: { discoveredFiles: 150 } })],
+    summary: summary({ active: 150, queued: 150 }),
+  }));
+  assert.strictEqual(harness.panelEl.querySelector('tbody'), tbody);
+  assert.strictEqual(harness.panelEl.querySelector('tr.tl-transfer-center__more'), moreRow,
+    'a growing remainder patches the existing row instead of rebuilding the table');
+  assert.ok(moreRow.textContent.includes('+ 50 more transfers not shown'), moreRow.textContent);
+}
+
+// --- Batchless queues are also capped, with the tail collapsed. ---
+{
+  const harness = loadHarness();
+  const jobs = Array.from({ length: 510 }, (_, index) => job(`j${index}`, 'queued'));
+  harness.emit(snapshot(jobs, { summary: summary({ active: 510, queued: 510 }) }));
+  assert.strictEqual(rowIds(harness.panelEl).length, 500, 'total rendered rows are capped');
+  const moreRow = harness.panelEl.querySelector('tr.tl-transfer-center__more');
+  assert.ok(moreRow.textContent.includes('+ 10 more transfers not shown'), moreRow.textContent);
 }
 
 console.log('transfer center: all assertions passed');

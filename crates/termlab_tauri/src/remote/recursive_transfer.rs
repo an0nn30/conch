@@ -18,7 +18,7 @@ use termlab_remote::sftp::{DirEntryKind, list_dir_children};
 use uuid::Uuid;
 
 use super::RemoteState;
-use super::transfer_queue::TransferQueueHandle;
+use super::transfer_queue::{QUEUE_FULL_ERROR_PREFIX, TransferQueueHandle};
 use super::transfer_queue::batch::{BatchCancellation, BatchExpansion, BatchInfo};
 use super::transfer_queue::expansion::{
     DirectoryCreator, DiscoveredFile, ExpansionPlan, ExpansionSink, ExpansionTotals, TreeLister,
@@ -184,8 +184,15 @@ impl DirectoryCreator for SftpDirCreator {
 // Queue sink
 // ---------------------------------------------------------------------------
 
-/// Turns discovered files into ordinary member jobs and mirrors expansion
-/// progress onto the batch record.
+/// How long to wait between retries while the queue is at its `max_queued`
+/// ceiling. The walk holds no scheduler slot, so waiting costs nothing but
+/// keeps the queue document — and everything downstream of it — bounded.
+const QUEUE_FULL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Turns discovered chunks into ordinary member jobs and mirrors expansion
+/// progress onto the batch record. When the queue is full, delivery waits
+/// for capacity instead of failing the batch: this is the backpressure that
+/// lets a folder with more files than `max_queued` still transfer whole.
 struct QueueExpansionSink {
     queue: TransferQueueHandle,
     remote: Arc<Mutex<RemoteState>>,
@@ -194,13 +201,33 @@ struct QueueExpansionSink {
     caller_label: String,
     parent_label: Option<String>,
     pane_id: u32,
+    /// The walk's own stop flag; it breaks the capacity wait so a cancelled
+    /// batch never leaves this sink parked forever.
+    cancellation: BatchCancellation,
 }
 
 #[async_trait]
 impl ExpansionSink for QueueExpansionSink {
-    async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String> {
-        let request = self.build_request(&file)?;
-        self.queue.enqueue(request).await.map(|_| ())
+    async fn enqueue_files(&self, files: Vec<DiscoveredFile>) -> Result<(), String> {
+        // Ids are fixed here, before the retry loop: a chunk is accepted or
+        // refused whole, so retrying the identical requests cannot duplicate
+        // members.
+        let requests = files
+            .iter()
+            .map(|file| self.build_request(file))
+            .collect::<Result<Vec<NewTransferJob>, String>>()?;
+        loop {
+            match self.queue.enqueue_many(requests.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(error) if error.starts_with(QUEUE_FULL_ERROR_PREFIX) => {
+                    if self.cancellation.is_cancelled() {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(QUEUE_FULL_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     async fn record_batch(
@@ -334,6 +361,7 @@ pub(super) async fn start_recursive_transfer(
         caller_label,
         parent_label,
         pane_id,
+        cancellation: cancellation.clone(),
     };
 
     spawn_expansion(queue, batch_id, lister, creator, sink, plan, cancellation);

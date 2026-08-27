@@ -2,6 +2,11 @@
   'use strict';
 
   const TERMINAL_KINDS = new Set(['completed', 'failed', 'cancelled']);
+  // Row ceilings keep a huge queue (a large folder transfer) from freezing
+  // the webview: rows beyond these collapse into one "N more" line while the
+  // full queue lives untouched in the backend document.
+  const MAX_BATCH_MEMBER_ROWS = 100;
+  const MAX_RENDERED_JOB_ROWS = 500;
   const COLUMNS = [
     'File / Direction',
     'Host',
@@ -122,24 +127,42 @@
   }
 
   // Flatten into the row sequence the table renders, interleaving by first
-  // appearance: a batch's header (followed by ALL of its members, so a group
+  // appearance: a batch's header (followed by its leading members, so a group
   // stays contiguous) lands where its first member sits in the queue, and a
   // batchless job keeps its own natural position. Emitting every group ahead
   // of every batchless row — the previous behaviour — reordered rows against
   // the queue the user is actually watching, e.g. a single file queued before
-  // a folder transfer would render below it.
+  // a folder transfer would render below it. Members beyond the row ceilings
+  // fold into a single "N more" row; the active view drops terminal jobs, so
+  // the visible window advances on its own as transfers complete.
   function renderItems(jobs, batchAggregates) {
     const { order, aggById, membersByBatch } = groupJobs(jobs, batchAggregates);
     const items = [];
+    let renderedJobs = 0;
+    let overflow = 0;
     for (const entry of order) {
       if (entry.type === 'job') {
-        items.push({ type: 'job', id: entry.job.id, job: entry.job });
+        if (renderedJobs < MAX_RENDERED_JOB_ROWS) {
+          items.push({ type: 'job', id: entry.job.id, job: entry.job });
+          renderedJobs += 1;
+        } else {
+          overflow += 1;
+        }
         continue;
       }
       const agg = aggById.get(entry.id);
       items.push({ type: 'header', id: entry.id, agg });
-      for (const job of membersByBatch.get(entry.id)) items.push({ type: 'job', id: job.id, job });
+      const members = membersByBatch.get(entry.id);
+      const room = Math.max(0, MAX_RENDERED_JOB_ROWS - renderedJobs);
+      const visible = Math.min(members.length, MAX_BATCH_MEMBER_ROWS, room);
+      for (let index = 0; index < visible; index += 1) {
+        items.push({ type: 'job', id: members[index].id, job: members[index] });
+      }
+      renderedJobs += visible;
+      const hidden = members.length - visible;
+      if (hidden > 0) items.push({ type: 'more', id: entry.id, count: hidden });
     }
+    if (overflow > 0) items.push({ type: 'more', id: 'tail', count: overflow });
     return items;
   }
 
@@ -217,6 +240,12 @@
     );
     const queueButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
     queueButtonEl.setAttribute('type', 'button');
+    const cancelAllButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
+    cancelAllButtonEl.setAttribute('type', 'button');
+    cancelAllButtonEl.innerHTML = actionIcon('close', 'Cancel all');
+    cancelAllButtonEl.setAttribute('aria-label', 'Cancel all transfers');
+    cancelAllButtonEl.setAttribute('title', 'Cancel all transfers');
+    setData(cancelAllButtonEl, 'transfer-action', 'cancel-all');
     const clearButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
     clearButtonEl.setAttribute('type', 'button');
     clearButtonEl.innerHTML = actionIcon('gc', 'Clear completed');
@@ -255,6 +284,7 @@
     let currentTokens = [];
     let rowsById = new Map();
     let headerRowsById = new Map();
+    let moreRowsById = new Map();
     let latestSnapshot = null;
     let latestState = { viewMode: 'active', selectedId: null };
     let lastSummaryText = null;
@@ -416,6 +446,22 @@
       setData(cancelButton, 'batch-id', agg.info.id);
     }
 
+    function patchMoreRow(rowRecord, count) {
+      if (rowRecord.count === count) return;
+      rowRecord.count = count;
+      rowRecord.cellEl.textContent = `+ ${count} more ${count === 1 ? 'transfer' : 'transfers'} not shown`;
+    }
+
+    function createMoreRow(item) {
+      const rowEl = document.createElement('tr');
+      rowEl.className = 'tl-transfer-center__more';
+      const cellEl = append(rowEl, 'td', 'tl-transfer-center__more-cell');
+      cellEl.setAttribute('colspan', String(COLUMNS.length));
+      const record = { element: rowEl, cellEl, count: null };
+      patchMoreRow(record, item.count);
+      return record;
+    }
+
     function createHeaderRow(agg) {
       const rowEl = document.createElement('tr');
       rowEl.className = 'tl-transfer-center__batch';
@@ -462,6 +508,7 @@
       queueButtonEl.setAttribute('aria-label', queueLabel);
       queueButtonEl.setAttribute('title', queueLabel);
       setData(queueButtonEl, 'transfer-action', paused ? 'resume-all' : 'pause-all');
+      cancelAllButtonEl.disabled = active === 0;
       clearButtonEl.disabled = history === 0;
     }
 
@@ -492,10 +539,15 @@
         tbodyEl.replaceChildren();
         rowsById = new Map();
         headerRowsById = new Map();
+        moreRowsById = new Map();
         for (const item of items) {
           if (item.type === 'header') {
             const record = createHeaderRow(item.agg);
             headerRowsById.set(item.id, record);
+            tbodyEl.appendChild(record.element);
+          } else if (item.type === 'more') {
+            const record = createMoreRow(item);
+            moreRowsById.set(item.id, record);
             tbodyEl.appendChild(record.element);
           } else {
             const record = createRow(item.job, latestState.selectedId === item.job.id);
@@ -508,6 +560,9 @@
           if (item.type === 'header') {
             const record = headerRowsById.get(item.id);
             if (record) patchHeaderRow(record, item.agg);
+          } else if (item.type === 'more') {
+            const record = moreRowsById.get(item.id);
+            if (record) patchMoreRow(record, item.count);
           } else {
             const record = rowsById.get(item.id);
             if (record) patchRow(record, item.job, latestState.selectedId === item.job.id);

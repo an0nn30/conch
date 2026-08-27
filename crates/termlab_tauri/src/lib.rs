@@ -940,6 +940,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             remote::transfer_commands::transfer_pause_all,
             remote::transfer_commands::transfer_resume_all,
             remote::transfer_commands::transfer_cancel,
+            remote::transfer_commands::transfer_cancel_all,
             remote::transfer_commands::transfer_retry,
             remote::transfer_commands::transfer_resolve,
             remote::transfer_commands::transfer_reorder,

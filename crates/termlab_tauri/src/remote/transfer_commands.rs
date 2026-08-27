@@ -359,6 +359,15 @@ pub(crate) async fn transfer_resume_all(
     queue.resume_all().await
 }
 
+/// Cancel every non-terminal transfer and stop every running folder
+/// expansion. Returns how many transfers were cancelled.
+#[tauri::command]
+pub(crate) async fn transfer_cancel_all(
+    queue: tauri::State<'_, TransferQueueHandle>,
+) -> Result<usize, String> {
+    queue.cancel_all().await
+}
+
 #[tauri::command]
 pub(crate) async fn transfer_retry(
     queue: tauri::State<'_, TransferQueueHandle>,

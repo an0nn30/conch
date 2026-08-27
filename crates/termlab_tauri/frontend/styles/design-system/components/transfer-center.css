@@ -236,6 +236,16 @@
   background: var(--tl-row-hover);
 }
 
+/* Collapsed remainder of a queue too large to render row-by-row. */
+.tl-transfer-center__more-cell {
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  border-bottom: 1px solid var(--tl-border);
+  vertical-align: middle;
+  color: var(--tl-fg-muted);
+  font-size: var(--tl-font-size-sm);
+}
+
 /* The <td> itself stays a normal table cell — `colspan` only spans columns
    correctly while the cell participates in `table-layout: fixed` table
    layout. Giving it `display: flex` directly took it out of that layout

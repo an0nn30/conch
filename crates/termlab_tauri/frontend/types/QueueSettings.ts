@@ -8,4 +8,10 @@ pipelineDepth: number,
 /**
  * Requested bytes per chunk; clamped to the server limit at attempt time.
  */
-pipelineChunkBytes: number, };
+pipelineChunkBytes: number, 
+/**
+ * Ceiling on non-terminal jobs held in the queue at once. Folder
+ * expansion throttles against this instead of flooding the document,
+ * and direct enqueues beyond it are refused.
+ */
+maxQueued: number, };

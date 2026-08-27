@@ -69,6 +69,17 @@
       if (action === 'pause-all') return acknowledge(runtime.pauseAll());
       if (action === 'resume-all') return acknowledge(runtime.resumeAll());
       if (action === 'clear-completed') return acknowledge(runtime.clearCompleted());
+      if (action === 'cancel-all') {
+        const summary = latestSnapshot && latestSnapshot.summary;
+        const activeCount = Number(summary && summary.active) || 0;
+        if (activeCount === 0) return undefined;
+        if (dialogs && typeof dialogs.showCancelAll === 'function') {
+          dialogs.showCancelAll(activeCount, event.invoker, () => acknowledge(runtime.cancelAll()));
+        } else {
+          return acknowledge(runtime.cancelAll());
+        }
+        return undefined;
+      }
       if (action === 'concurrency') {
         if (dialogs && typeof dialogs.showConcurrency === 'function') {
           dialogs.showConcurrency(latestSnapshot && latestSnapshot.settings, event.invoker, (settings) => (
