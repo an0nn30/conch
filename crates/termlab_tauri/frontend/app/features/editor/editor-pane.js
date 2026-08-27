@@ -23,6 +23,17 @@
       : [];
   }
 
+  // LSP completion. Returns [] when the module or the bundle's autocomplete
+  // export is missing, so a stale vendor bundle costs completion and nothing
+  // else. The extensions carry their own precedence (Prec.highest on the
+  // keymap) — where they sit in this list is not what makes them heard.
+  function completionExtensions() {
+    return global.termlabLspCompletion
+      && typeof global.termlabLspCompletion.extensions === 'function'
+      ? global.termlabLspCompletion.extensions()
+      : [];
+  }
+
   function languageExtension(filename) {
     const CM = global.CM6;
     const map = global.termlabEditorLanguageMap;
@@ -80,6 +91,10 @@
           // nothing, and the feature looks broken rather than absent.
           // test_editor_vim_glue.mjs pins the position.
           vimComp.of(vimExtensions(opts.vimMode === true)),
+          // After vim in the list, ahead of it in precedence: its keymap is
+          // wrapped in Prec.highest so the popup can own Escape/Enter/Tab
+          // while it is open, without vim losing the first slot above.
+          ...completionExtensions(),
           CM.lineNumbers(),
           CM.highlightActiveLineGutter(),
           CM.highlightSpecialChars(),

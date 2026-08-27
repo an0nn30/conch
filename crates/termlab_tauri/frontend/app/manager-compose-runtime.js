@@ -360,6 +360,22 @@
           },
         });
       }
+      // Completion needs two lookups nothing else can build: view -> pane
+      // (CodeMirror hands its source a view, and only `panes` maps one back to
+      // a pane) and the focused pane for the configured editor_completion
+      // shortcut. The request itself goes through editor-service, which owns
+      // the flush/version barrier, and from there through lsp-bridge.
+      if (global.termlabLspCompletion && typeof global.termlabLspCompletion.configure === 'function') {
+        global.termlabLspCompletion.configure({
+          paneForView: (view) => {
+            for (const pane of panes.values()) {
+              if (pane && pane.view === view) return pane;
+            }
+            return null;
+          },
+          currentPane: () => paneManager.currentPane(),
+        });
+      }
     }
 
     // vim's `:w` and `:q` have to mean what Cmd+S and closing the tab mean, and

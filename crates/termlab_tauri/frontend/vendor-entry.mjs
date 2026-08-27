@@ -1,7 +1,7 @@
 // The ESM entry esbuild bundles into vendor/codemirror/codemirror.js as the
 // IIFE global `CM6`. This file is the app's entire CodeMirror API surface:
 // if a module needs something not re-exported here, add it here first.
-export { EditorState, Compartment } from '@codemirror/state';
+export { EditorState, Compartment, Prec } from '@codemirror/state';
 export {
   EditorView, keymap, lineNumbers, highlightActiveLine,
   highlightActiveLineGutter, drawSelection, rectangularSelection,
@@ -14,6 +14,22 @@ export {
 } from '@codemirror/language';
 export { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 export { tags } from '@lezer/highlight';
+
+// LSP completion (features/editor/lsp-completion.js). Deliberately narrow:
+// `autocompletion` is the extension, the commands are what the dedicated
+// completion keymap binds (list navigation included — with `defaultKeymap`
+// off, nothing else binds the arrows), `completionStatus` is how every one of
+// those bindings decides whether to consume the key or hand it back to vim,
+// and `snippet` is the applier a snippet item's expansion goes through.
+//
+// `completionKeymap` is NOT re-exported: autocompletion() is configured with
+// `defaultKeymap: false` precisely so that one keymap owns these keys.
+// @codemirror/lint is a declared dependency but exports nothing yet — the
+// diagnostics task adds its names.
+export {
+  autocompletion, startCompletion, closeCompletion, acceptCompletion,
+  moveCompletionSelection, completionStatus, snippet, snippetCompletion,
+} from '@codemirror/autocomplete';
 
 // Optional vim keybindings ([editor] vim_mode). `vim()` returns the extension,
 // `Vim` is the engine object that owns defineEx (how :w/:q are bound to this
