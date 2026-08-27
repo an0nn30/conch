@@ -523,14 +523,12 @@ mod tests {
 
     use termlab_remote::callbacks::RemotePaths;
     use termlab_remote::config::{ServerEntry, SshConfig};
-    use termlab_remote::transfer::TransferRegistry;
     use termlab_remote::tunnel::TunnelManager;
 
     use super::super::PendingPrompts;
 
     /// Build a minimal RemoteState for testing (no config files, no SSH config).
     fn test_state_with(config: SshConfig, ssh_config_entries: Vec<ServerEntry>) -> RemoteState {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         RemoteState {
             sessions: HashMap::new(),
             connections: HashMap::new(),
@@ -538,8 +536,6 @@ mod tests {
             ssh_config_entries,
             pending_prompts: Arc::new(Mutex::new(PendingPrompts::new())),
             tunnel_manager: TunnelManager::new(),
-            transfers: Arc::new(Mutex::new(TransferRegistry::new())),
-            transfer_progress_tx: tx,
             paths: RemotePaths {
                 known_hosts_file: std::path::PathBuf::from("/tmp/test_known_hosts"),
                 config_dir: std::path::PathBuf::from("/tmp/test_config"),

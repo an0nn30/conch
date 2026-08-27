@@ -1,4 +1,34 @@
 (function initTermLabEventWiringRuntime(global) {
+  // Wire the CLI/second-instance "open this path" drain for THIS window (see
+  // src/open_path.rs's per-window pending-open queue and the
+  // `take_pending_open_paths` command).
+  //
+  // Extracted from init() and exported so this seam is testable on its own:
+  // it is a guard clause over two globals composed by completely different
+  // modules, and a rename on either side would silently turn `termlab
+  // notes.md` into a no-op with every routing test still passing.
+  //
+  // Returns null — meaning "nothing to drain here" — when either global is
+  // absent. That is the normal state for a panel-host window: main-runtime.js
+  // branches to panelHostRuntime.boot() before ever constructing this
+  // runtime, so a popped-out tool window (no editor, no tabs) never attempts
+  // to drain a queue it was never given anything on.
+  //
+  // `g` is passed in rather than closed over so the globals can be swapped
+  // per test case.
+  function wirePendingOpenDrain(g, deps) {
+    const routing = g.termlabOpenPathRouting;
+    const editor = g.termlabEditorService;
+    if (!routing || typeof routing.create !== 'function') return null;
+    if (!editor || typeof editor.openLocalFile !== 'function') return null;
+    return routing.create({
+      invoke: deps.invoke,
+      openLocalFile: (filePath) => g.termlabEditorService.openLocalFile(filePath),
+      toastError: (title, body) => { if (g.toast) g.toast.error(title, body); },
+      toastInfo: (title, body) => { if (g.toast) g.toast.info(title, body); },
+    });
+  }
+
   function create(deps) {
     const invoke = deps.invoke;
     const listen = deps.listen;
@@ -230,6 +260,36 @@
         }
       }
 
+      if (global.termlabTabSwitcherRuntime && global.termlabTabSwitcherView && global.termlabTabMru) {
+        let tabSwitcherRuntime = null;
+        const tabSwitcherView = global.termlabTabSwitcherView.create({
+          getTabContainerEl: (tabId) => {
+            const tab = tabs.get(tabId);
+            return tab ? tab.containerEl : null;
+          },
+          // Every tab's tree fills the terminal host, so the host's size is
+          // the natural size of any preview clone — including hidden tabs,
+          // whose own rects measure 0.
+          getStageSize: () => {
+            const host = document.getElementById('terminal-host');
+            return host ? host.getBoundingClientRect() : null;
+          },
+          onPick: (index) => {
+            if (tabSwitcherRuntime) tabSwitcherRuntime.commitIndex(index);
+          },
+        });
+        tabSwitcherRuntime = global.termlabTabSwitcherRuntime.create({
+          getTabItems: () => Array.from(tabs.values()).map((tab) => ({
+            id: tab.id,
+            label: tab.label,
+            kind: tab.type,
+          })),
+          activateTab: (tabId) => deps.activateTab(tabId),
+          view: tabSwitcherView,
+        });
+        tabSwitcherRuntime.init();
+      }
+
       if (global.termlabConfigRuntime && global.termlabConfigRuntime.create) {
         const configRuntime = global.termlabConfigRuntime.create({
           invoke,
@@ -247,9 +307,30 @@
         configRuntime.init();
       }
 
+      // Build (but do NOT run) the pending-open drain. Editor service
+      // composition (manager-compose-runtime's __termlabPaneAccess) has
+      // already run by this point in main-runtime.js's boot sequence, so
+      // termlabEditorService.openLocalFile is safe to bind here.
+      //
+      // Running it is main-runtime.js's job, and it must happen AFTER the
+      // first tab is created: createEditorTab activates its own tab
+      // synchronously, so a drain racing createTab() lands the file the user
+      // asked for behind an empty terminal roughly half the time.
+      const pendingOpenDrain = wirePendingOpenDrain(global, { invoke });
+
       return {
         handleMenuAction,
         showUpdateAvailableToast,
+        // Null when this window has nothing to drain (see
+        // wirePendingOpenDrain).
+        drainPendingOpens: pendingOpenDrain
+          ? () => pendingOpenDrain.drainPendingOpens()
+          : null,
+        // Routes an already-pulled path list; main-runtime pulls the queue
+        // itself, early, to decide the window layout before any tab exists.
+        routePendingPaths: pendingOpenDrain
+          ? (paths) => pendingOpenDrain.routePaths(paths)
+          : null,
       };
     }
 
@@ -260,5 +341,6 @@
 
   global.termlabEventWiringRuntime = {
     create,
+    wirePendingOpenDrain,
   };
 })(window);

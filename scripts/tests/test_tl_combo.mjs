@@ -263,3 +263,32 @@ eval(readFileSync('crates/termlab_tauri/frontend/app/ui/tl-combo.js', 'utf8'));
 }
 
 console.log('ok');
+
+// --- tl-combo popup width matches its trigger ------------------------------
+// UI convention: a dropdown popup must be at least as wide as the control
+// that opened it. The combo passes its button width as tl-menu's minWidth,
+// and tl-menu applies it to the popup element.
+{
+  const select = makeElement('select');
+  select.parentNode = document.body;
+  document.body.appendChild(select);
+  select.options = [{ value: 'a', textContent: 'A', index: 0 }];
+  select.selectedIndex = 0;
+  window.tlCombo.attach(select);
+  const button = select.parentNode.children.find((c) => c.className && c.className.includes('tl-combo'));
+
+  let opened = null;
+  const originalOpen = window.tlMenu.open;
+  window.tlMenu.open = (opts) => { opened = opts; return originalOpen(opts); };
+  button.dispatchEvent({ type: 'click' });
+  window.tlMenu.open = originalOpen;
+
+  assert.ok(opened, 'popup must open');
+  assert.equal(opened.minWidth, 90, 'combo passes its trigger width as the popup minWidth');
+
+  const menuEl = document.body.children.find((c) => c.className && c.className.includes('tl-menu'));
+  assert.ok(menuEl, 'menu element must be in the DOM');
+  assert.equal(menuEl.style.minWidth, '90px', 'tl-menu applies minWidth to the popup');
+  window.tlMenu.close();
+  console.log('tl-combo popup width: ok');
+}

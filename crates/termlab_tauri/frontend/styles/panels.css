@@ -3,24 +3,71 @@
       flex: 1; display: flex; flex-direction: column; overflow: hidden;
     }
     .fp-pane-container { flex: 1; display: flex; flex-direction: row; overflow: hidden; }
-    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; }
-    .fp-pane + .fp-pane { border-left: 1px solid var(--tl-border); }
-    .fp-toolbar {
-      display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0;
+    /* Each pane is a size container so the toolbar can restack on the pane's
+       own width — narrow sidebar docks and skinny splits alike. */
+    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0; container: fp-pane / inline-size; }
+    /* Drag-and-drop between panes (Task 7): a drag from the opposite-kind
+       pane marks this pane as the drop target — accent border + tint over
+       the whole pane, echoing the row menu's own upload/download actions. */
+    .fp-pane.is-drop-target {
+      outline: 2px solid var(--tl-accent);
+      outline-offset: -2px;
+      background: color-mix(in srgb, var(--tl-accent) 8%, transparent);
     }
+    /* The divider between the panes is both the visual border and the drag
+       handle for the resizable split (app/features/files/split.js). */
+    .fp-pane-divider {
+      flex: 0 0 5px; cursor: col-resize; touch-action: none;
+      background: transparent; border-left: 1px solid var(--tl-border);
+    }
+    .fp-pane-divider:hover, .fp-pane-divider:active { background: var(--tl-border); }
+    /* Sidebar zones are tall and narrow: stack the panes vertically there.
+       The bottom zone and popped-out hosts keep the side-by-side layout. */
+    .tool-zone[data-zone^="left"] .fp-pane-container,
+    .tool-zone[data-zone^="right"] .fp-pane-container { flex-direction: column; }
+    .tool-zone[data-zone^="left"] .fp-pane-divider,
+    .tool-zone[data-zone^="right"] .fp-pane-divider {
+      cursor: row-resize; border-left: none; border-top: 1px solid var(--tl-border);
+    }
+    /* Remote pane context header: connection status dot + host picker +
+       disconnect. The whole strip reads as the pane's identity; the tl-combo
+       inside renders "ghost" (borderless) so it looks like a header, not a
+       form control. */
+    .fp-host-strip {
+      display: flex; align-items: center; gap: 6px; padding: 4px 8px; flex-shrink: 0;
+      background: var(--panel-bg); border-bottom: 1px solid var(--tab-border);
+    }
+    .fp-host-status {
+      width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+      background: var(--dim-fg);
+    }
+    .fp-host-status.is-connected { background: var(--green); }
+    .fp-host-strip .fp-host-combo-slot { flex: 1; max-width: none; margin-left: 0; }
+    .fp-host-strip .fp-host-combo-slot .tl-combo {
+      flex: 1; max-width: none; border-color: transparent; background: transparent; font-weight: 500;
+    }
+    .fp-host-strip .fp-host-combo-slot .tl-combo:hover { background: var(--active-highlight); }
+    .fp-toolbar {
+      display: flex; align-items: center; gap: 3px; padding: 5px 8px 4px; flex-shrink: 0;
+    }
+    .fp-tb-group { display: flex; align-items: center; gap: 3px; min-width: 0; }
+    .fp-tb-nav { flex: 1 1 auto; }
     .fp-tb-btn {
       background: none; border: 1px solid transparent; border-radius: 3px;
       color: var(--text-muted); cursor: pointer; padding: 2px 5px; font-size: var(--ui-font-small); line-height: 1;
     }
     .fp-tb-btn:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
     .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
-    .fp-tb-btn.active { color: var(--green); }
+    /* Active state needs more than a text color now that the glyphs are
+       <img> icons: highlight the button surface itself. */
+    .fp-tb-btn.active { color: var(--green); background: var(--active-highlight); border-color: var(--tab-border); }
+    .fp-tb-btn .tl-icon { display: block; }
     /* Remote pane's host dropdown + disconnect — mounted into this slot by
        pane-view.js after every toolbar rebuild (app/ui/tl-combo.js wraps the
        hidden .fp-host-select; see files-panel.js's onComboMount). Sized down
        from tl-combo's 26px default to match this toolbar's 24px controls. */
-    .fp-host-combo-slot { display: flex; align-items: center; gap: 4px; margin-left: 4px; min-width: 0; max-width: 220px; }
-    .fp-host-combo-slot .tl-combo { height: 24px; font-size: var(--ui-font-small); max-width: 200px; }
+    .fp-host-combo-slot { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .fp-host-combo-slot .tl-combo { height: 24px; font-size: var(--ui-font-small); }
     .fp-host-disconnect { flex-shrink: 0; }
     .fp-path-input {
       flex: 1; min-width: 0; height: 24px; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
@@ -28,6 +75,25 @@
     }
     .fp-path-input:focus { border-color: var(--dim-fg); }
     .fp-path-input:disabled { opacity: 0.4; }
+    .fp-path-input--hidden { display: none; }
+    /* Breadcrumb path bar — the default view of the pane's location. Click a
+       crumb to jump, the … crumb lists folded ancestors, click empty space to
+       type a path (swaps to .fp-path-input). */
+    .fp-crumbs {
+      flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px;
+      height: 24px; padding: 0 6px; overflow: hidden; cursor: text;
+      background: var(--input-bg); border: 1px solid var(--tab-border); border-radius: 3px;
+      font: 11px "JetBrains Mono", monospace;
+    }
+    .fp-crumb {
+      background: none; border: none; border-radius: 2px; padding: 1px 3px;
+      color: var(--fg); font: inherit; cursor: pointer; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; max-width: 12em;
+    }
+    .fp-crumb:hover { background: var(--active-highlight); }
+    .fp-crumb.is-current { color: var(--fg); cursor: text; font-weight: 500; }
+    .fp-crumb-sep { color: var(--dim-fg); flex-shrink: 0; user-select: none; }
+    .fp-crumb-overflow { color: var(--text-muted); }
     .fp-error { padding: 4px 8px; font-size: var(--ui-font-small); color: var(--red); flex-shrink: 0; }
     /* The listing surface owns the background so it reaches the bottom of the
        pane even when rows don't fill it (docked and panel-host windows alike);
@@ -55,8 +121,36 @@
     .fp-th-ext { width: 45px; }
     .fp-th-size { width: 65px; }
     .fp-th-mod { width: 110px; }
-    .fp-footer { padding: 3px 8px; font-size: var(--ui-font-small); color: var(--dim-fg); flex-shrink: 0; }
-    .fp-transfer-pct { margin-left: 6px; color: var(--green); font-weight: 600; font-size: var(--ui-font-small); }
+    .fp-footer {
+      display: flex; align-items: center; gap: var(--tl-space-2);
+      padding: 3px 8px; font-size: var(--ui-font-small); color: var(--dim-fg); flex-shrink: 0;
+    }
+    .fp-footer__activity {
+      min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--green); font-weight: 600;
+    }
+    .fp-transfer-pct, .fp-transfer-phase, .fp-transfer-waiting, .fp-transfer-attention { margin-left: 6px; font-weight: 600; font-size: var(--ui-font-small); }
+    .fp-transfer-pct { color: var(--green); }
+    .fp-transfer-phase { color: var(--green); }
+    .fp-transfer-waiting { color: var(--text-muted); }
+    .fp-transfer-phase::before, .fp-footer__activity::before {
+      content: ''; display: inline-block; width: 0.65em; height: 0.65em; margin-right: 0.35em;
+      border: 1px solid currentColor; border-right-color: transparent; border-radius: 50%;
+      animation: fp-transfer-spin 0.8s linear infinite;
+    }
+    @keyframes fp-transfer-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .fp-transfer-phase::before, .fp-footer__activity::before { animation: none; }
+    }
+    .fp-transfer-attention {
+      display: inline-block; padding: 0 var(--tl-space-1);
+      color: var(--tl-warning-fg); background: var(--tl-warning-bg);
+      border: 1px solid var(--tl-warning-border); border-radius: var(--tl-radius);
+      font: inherit; font-weight: 600; line-height: inherit; cursor: pointer;
+      appearance: none;
+    }
+    .fp-transfer-attention:hover { filter: brightness(1.12); }
+    .fp-transfer-attention:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
     /* Row context menu (right-click on a file/dir row) and the column-chooser
        menu (right-click a column header) both render through the shared
        .tl-menu component (styles/design-system/components/menu.css,
@@ -340,3 +434,31 @@
       white-space: pre-wrap; word-break: break-all;
     }
     .ssh-auth-question { font-size: var(--ui-font-normal); color: var(--dim-fg); }
+    /* Panel host composite layout (Task 4): a companion tool window mounted
+       behind a draggable divider under the host's main tool. Sibling of
+       .tl-panelhost__content inside .tl-panelhost (styles/design-system/
+       components/toolwindow.css) — that root is already a flex column, and
+       .tl-panelhost__content already carries min-height: 0, so this section
+       can claim space without any change there. */
+    .panel-host-bottom {
+      flex-shrink: 0;
+      height: 35%;
+      min-height: 120px;
+      max-height: 70%;
+      display: flex;
+      flex-direction: column;
+      border-top: 1px solid var(--tl-border);
+    }
+    .panel-host-divider {
+      height: 4px;
+      flex-shrink: 0;
+      cursor: row-resize;
+    }
+    .panel-host-divider:hover { background: var(--dim-fg); }
+    .panel-host-bottom-content {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }

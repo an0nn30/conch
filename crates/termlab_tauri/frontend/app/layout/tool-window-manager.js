@@ -1,13 +1,13 @@
 // Tool Window Manager — IntelliJ-style zone-based panel system.
-// Manages tool windows (built-in panels + plugin panels) across 5 zones:
-//   left-top, left-bottom, right-top, right-bottom, bottom
+// Manages tool windows (built-in panels + plugin panels) across 6 zones:
+//   left-top, left-bottom, right-top, right-bottom, bottom-left, bottom-right
 
 (function (exports) {
   'use strict';
 
-  const ZONE_IDS = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom'];
+  const ZONE_IDS = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right'];
 
-  // id → { id, title, icon, type, zone, renderFn, el, active }
+  // id → { id, title, icon, type, zone, renderFn, renderDisposer, el, active }
   const toolWindows = new Map();
 
   const zones = {};
@@ -26,17 +26,10 @@
   };
 
   const strips = { left: null, right: null, bottom: null };
-  const DRAGGABLE_ZONES = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom'];
-  const ZONE_LABELS = {
-    'left-top': 'Left Top',
-    'left-bottom': 'Left Bottom',
-    'right-top': 'Right Top',
-    'right-bottom': 'Right Bottom',
-    bottom: 'Bottom',
-  };
+  const DRAGGABLE_ZONES = ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right'];
 
   // Last user-set split ratios per side (preserved across toggle cycles)
-  const lastSplitRatios = { left: 0.5, right: 0.5 };
+  const lastSplitRatios = { left: 0.5, right: 0.5, bottom: 0.5 };
 
   // ---- View mode ------------------------------------------------------------
   // Every tool window — built-in or plugin, no special cases — carries a view
@@ -54,6 +47,13 @@
   const VIEW_MODE_DOCK = 'dock';
   const VIEW_MODE_WINDOW = 'window';
   const viewModes = new Map();   // id → 'dock' | 'window'
+  // companionId → { hostId, wasActive } while the companion rides inside a
+  // live composite host; nothing here persists — dock/abort/unregister of
+  // the host lifts it, restart re-derives it from the host's own summon.
+  const companionSuppressions = new Map();
+  // Registration order on boot: the host tool can enter window mode before
+  // its companion's register() call arrives.
+  const pendingCompanionSuppressions = new Map(); // companionId → hostId
   // Last known panel-host visibility per popped-out id. Drives the rail
   // button's lit state and the toggle routing; kept in sync by the
   // panel-host-shown/hidden events the parent receives from Rust.
@@ -90,15 +90,15 @@
   let saveLayoutFn = null;
   let invokeFn = null;
   let bottomZoneWrapEl = null;
+  let bottomZoneDividerEl = null;
   let savedZoneAssignments = null; // populated from backend before registration
   let savedActiveZoneWindows = null; // populated from backend before registration
   let savedPanelVisibility = { left: null, right: null, bottom: null }; // persisted panel visibility hints
   const stripDrag = {
     active: null,
     overlayEl: null,
-    labelEl: null,
+    highlightEl: null,
     previewEl: null,
-    zoneEls: new Map(),
   };
   let resizeDragDepth = 0;
 
@@ -147,22 +147,58 @@
     strips.right = document.getElementById('right-strip');
     strips.bottom = document.getElementById('bottom-strip');
     bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
+    bottomZoneDividerEl = document.getElementById('bottom-zone-divider');
 
     initSidebarResize('left');
     initSidebarResize('right');
     initZoneDivider('left');
     initZoneDivider('right');
+    initZoneDivider('bottom');
     ensureStripDragOverlay();
   }
 
-  // Provide persisted zone map so register() can honour user overrides.
+  // 'bottom' predates the bottom-left/right pair and stays accepted forever:
+  // old state.toml zone values, plugin location strings, and defaultZone
+  // registrations all still say it. Unknown names return null so callers
+  // keep their existing fallback behaviour.
+  function normalizeZoneName(name) {
+    if (name === 'bottom') return 'bottom-left';
+    return ZONE_IDS.includes(name) ? name : null;
+  }
+
+  // Provide persisted zone map so register() can honour user overrides. Values
+  // are normalized on the way in — a legacy 'bottom' value becomes
+  // 'bottom-left' — so every reader downstream only ever sees current zone
+  // names. A value that normalizes to nothing (junk) is dropped rather than
+  // kept as null, so the lookup in register() misses and falls back to
+  // defaultZone exactly as it does for an id with no saved entry at all.
   function setPersistedZones(map) {
-    savedZoneAssignments = map || {};
+    const next = {};
+    for (const [id, zone] of Object.entries(map || {})) {
+      const normalized = normalizeZoneName(zone);
+      if (normalized) next[id] = normalized;
+    }
+    savedZoneAssignments = next;
   }
 
   // Provide persisted active window map so register() can restore active window per zone.
+  // Keys are normalized the same way values are above. A saved layout can
+  // carry both the legacy 'bottom' key and a current 'bottom-left' key at once
+  // (an old file touched by a newer build, say) — the current-name key always
+  // wins that collision, so the alias is applied first and the canonical keys
+  // are layered on top of it rather than the other way around.
   function setPersistedActiveZoneWindows(map) {
-    savedActiveZoneWindows = map || {};
+    const src = map || {};
+    const next = {};
+    for (const [key, value] of Object.entries(src)) {
+      if (key === 'bottom') next['bottom-left'] = value;
+    }
+    for (const [key, value] of Object.entries(src)) {
+      if (key === 'bottom') continue;
+      const normalized = normalizeZoneName(key);
+      if (normalized) next[normalized] = value;
+    }
+    savedActiveZoneWindows = next;
   }
 
   // Provide persisted view modes so register() knows which windows are popped
@@ -184,12 +220,15 @@
   // value means "configured, nothing active", and only a wholly absent key means
   // "never configured", where auto-activating a default is still right.
   //
-  // The bottom zone is a single zone rather than a top/bottom pair, so it has no
-  // '<side>-top'/'<side>-bottom' keys to look up — its own name is the key.
+  // The bottom zone is a left/right pair like the sides, but keyed by
+  // 'bottom-left'/'bottom-right' rather than '<side>-top'/'<side>-bottom'.
+  // Keys are already normalized by setPersistedActiveZoneWindows by the time
+  // this runs, so a legacy 'bottom' key never reaches here — it has already
+  // become 'bottom-left'.
   function hasPersistedActiveForSide(side) {
     const active = savedActiveZoneWindows || {};
     const has = (key) => Object.prototype.hasOwnProperty.call(active, key);
-    if (side === 'bottom') return has('bottom');
+    if (side === 'bottom') return has('bottom-left') || has('bottom-right');
     if (side !== 'left' && side !== 'right') return false;
     return has(side + '-top') || has(side + '-bottom');
   }
@@ -197,7 +236,7 @@
   // ---- Registration ---------------------------------------------------------
 
   function register(id, opts) {
-    const defaultZone = opts.defaultZone || 'right-bottom';
+    const defaultZone = normalizeZoneName(opts.defaultZone) || 'right-bottom';
     const zone = (savedZoneAssignments && savedZoneAssignments[id]) || defaultZone;
 
     const tw = {
@@ -207,9 +246,14 @@
       type:     opts.type  || 'plugin',
       zone,
       renderFn: opts.renderFn,
+      renderDisposer: null,
       el:       null,
       renderRootEl: null,
       active:   false,
+      // Companion tool windows this one carries when it pops into its own
+      // window (a "composite host") — e.g. SFTP carries the transfer center.
+      // { id, position }[]; consumed by companionIdsFor()/suppressCompanionsFor().
+      companions: Array.isArray(opts.companions) ? opts.companions.filter((c) => c && c.id) : [],
     };
     toolWindows.set(id, tw);
     zones[zone].windows.push(id);
@@ -242,7 +286,31 @@
         tw.active = true;
         if (summonImmediately) summonWindowHost(id);
         else pendingWindowSummons.add(id);
+        // The host is visible/popped as of the saved layout, so its
+        // companions are riding along whether or not they have registered
+        // yet — a registered one is suppressed on the spot, an unregistered
+        // one is queued for the moment its own register() call arrives.
+        for (const c of tw.companions) {
+          const cid = c && c.id;
+          if (!cid || cid === id) continue;
+          if (toolWindows.has(cid)) suppressCompanion(cid, id);
+          else pendingCompanionSuppressions.set(cid, id);
+        }
       }
+      updateZone(zone);
+      updateSidebar(side);
+      updateBottomZone();
+      updateStrips();
+      return;
+    }
+
+    // This id was queued as a companion by a composite host that registered
+    // (and was already popped out) before this arrived. Absorb it straight
+    // into suppression rather than letting it activate/restore normally.
+    if (pendingCompanionSuppressions.has(id)) {
+      const hostId = pendingCompanionSuppressions.get(id);
+      pendingCompanionSuppressions.delete(id);
+      suppressCompanion(id, hostId);
       updateZone(zone);
       updateSidebar(side);
       updateBottomZone();
@@ -296,6 +364,7 @@
       }
     }
 
+    disposeWindowRender(tw);
     if (tw.el && tw.el.parentNode) tw.el.parentNode.removeChild(tw.el);
     // A popped-out window whose plugin was just removed would otherwise leave
     // its host on screen with nothing to host. DESTROY it rather than hide it:
@@ -318,6 +387,11 @@
     hostReqIds.delete(id);
     pendingWindowSummons.delete(id);
     toolWindows.delete(id);
+    // A removed composite host must not leave its companions suppressed
+    // forever, and a removed companion must not linger in either map.
+    liftCompanionsFor(id);
+    companionSuppressions.delete(id);
+    pendingCompanionSuppressions.delete(id);
 
     updateZone(tw.zone);
     updateSidebar(sideForZone(tw.zone));
@@ -333,6 +407,27 @@
     return !!(appRoot && appRoot.classList.contains('zen-mode'));
   }
 
+  // A renderFn may return either a disposer function or an object with a
+  // destroy() method. Most existing tool windows return nothing and keep
+  // their historical render-once behavior; stateful panels use this focused
+  // contract to release subscriptions before their DOM is detached.
+  function disposerForRenderResult(result) {
+    if (typeof result === 'function') return result;
+    if (result && typeof result.destroy === 'function') return () => result.destroy();
+    return null;
+  }
+
+  function disposeWindowRender(tw) {
+    if (!tw || typeof tw.renderDisposer !== 'function') return;
+    const dispose = tw.renderDisposer;
+    tw.renderDisposer = null;
+    try {
+      dispose();
+    } catch (error) {
+      console.error('tool-window-manager: render disposal failed', tw.id, error);
+    }
+  }
+
   function ensureWindowElement(tw, zone) {
     if (!tw || tw.el) return;
     const targetZone = zone || zones[tw.zone];
@@ -345,12 +440,17 @@
     tw.el.appendChild(renderRootEl);
     tw.renderRootEl = renderRootEl;
     targetZone.contentEl.appendChild(tw.el);
-    tw.renderFn(renderRootEl);
+    tw.renderDisposer = disposerForRenderResult(tw.renderFn(renderRootEl));
   }
 
   // ---- Activation / Deactivation --------------------------------------------
 
   function activate(id) {
+    // A companion currently riding inside its host's composite window has no
+    // docked presence to activate — auto-open (register's shouldAutoActivate
+    // path won't hit a suppressed id, but the palette/rail/plugin callers can
+    // still ask) must be a no-op until the host lifts the suppression.
+    if (companionSuppressions.has(id)) return;
     const tw = toolWindows.get(id);
     if (!tw) return;
     // A popped-out window has no docked presence to activate. Callers that
@@ -478,6 +578,7 @@
   function detachFromZone(tw) {
     const zone = zones[tw.zone];
     if (zone && zone.activeId === tw.id) zone.activeId = null;
+    disposeWindowRender(tw);
     if (tw.el && tw.el.parentNode) tw.el.parentNode.removeChild(tw.el);
     tw.el = null;
     tw.renderRootEl = null;
@@ -519,13 +620,14 @@
   function enterWindowMode(tw) {
     const id = tw.id;
     detachFromZone(tw);
+    suppressCompanionsFor(id);
     viewModes.set(id, VIEW_MODE_WINDOW);
     hostVisible.set(id, true);
     tw.active = true;
     const issue = markHostRequested(id);
     refreshZoneChrome(tw.zone);
     triggerSave();
-    panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
+    panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title, companionIds: companionIdsFor(id) })
       .then((reqId) => markHostOpened(id, issue, reqId))
       .catch(() => {
         // The pop-out never happened, so put back what the user was looking
@@ -557,6 +659,7 @@
     if (!tw) return;
     const teardownHost = !opts || opts.teardownHost !== false;
     resetToDock(id);
+    liftCompanionsFor(id);
     if (teardownHost) panelHostInvoke('dock_panel_host', { toolWindowId: id }).catch(() => {});
     activate(id);
   }
@@ -571,6 +674,72 @@
     hostReqIds.delete(id);
     pendingWindowSummons.delete(id);
     if (tw) tw.active = false;
+  }
+
+  // ---- Companion suppression (composite hosts) -------------------------------
+  // A composite host (e.g. SFTP) can carry companion tool windows (e.g. the
+  // transfer center) into its own OS window when it pops out, rather than
+  // leaving them docked behind. While that ride is live the companion has no
+  // docked presence — the host renders it — so it must vanish from its zone,
+  // and reappear exactly as it left (active or not) the moment the host
+  // returns to dock, aborts, or is unregistered. Hiding the host does NOT
+  // lift the suppression: the companion is still riding along, just not on
+  // screen right now, same as the host itself.
+
+  function companionIdsFor(id) {
+    const tw = toolWindows.get(id);
+    if (!tw || !Array.isArray(tw.companions)) return [];
+    return tw.companions
+      .map((c) => c.id)
+      .filter((cid) => cid && cid !== id && toolWindows.has(cid));
+  }
+
+  function suppressCompanion(companionId, hostId) {
+    if (companionSuppressions.has(companionId)) return;
+    const tw = toolWindows.get(companionId);
+    if (!tw) return;
+    // A companion living in its own host window folds back first — the
+    // composite absorbs it, two hosts for one pair would fight over it.
+    if (getViewMode(companionId) === VIEW_MODE_WINDOW) {
+      dockFromWindowMode(companionId);
+    }
+    companionSuppressions.set(companionId, { hostId, wasActive: !!tw.active });
+    tw.active = false;
+    if (tw.el) tw.el.style.display = 'none';
+    const zone = zones[tw.zone];
+    if (zone && zone.activeId === companionId) zone.activeId = null;
+    updateZone(tw.zone);
+    updateSidebar(sideForZone(tw.zone));
+    updateBottomZone();
+    updateStrips();
+  }
+
+  function suppressCompanionsFor(hostId) {
+    for (const cid of companionIdsFor(hostId)) suppressCompanion(cid, hostId);
+  }
+
+  function liftCompanionsFor(hostId) {
+    for (const [cid, info] of Array.from(companionSuppressions)) {
+      if (info.hostId !== hostId) continue;
+      companionSuppressions.delete(cid);
+      const tw = toolWindows.get(cid);
+      if (!tw) continue;
+      if (info.wasActive && zones[tw.zone] && zones[tw.zone].activeId === null) {
+        activate(cid);
+      } else {
+        updateZone(tw.zone);
+        updateSidebar(sideForZone(tw.zone));
+        updateBottomZone();
+        updateStrips();
+      }
+    }
+    for (const [cid, hid] of Array.from(pendingCompanionSuppressions)) {
+      if (hid === hostId) pendingCompanionSuppressions.delete(cid);
+    }
+  }
+
+  function isCompanionSuppressed(id) {
+    return companionSuppressions.has(id);
   }
 
   function hideWindowHost(id) {
@@ -600,11 +769,18 @@
         // No host in this session (a mode restored from the saved layout, say):
         // building one mints a NEW generation, so claim the slot before asking.
         const issue = markHostRequested(id);
-        return panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title })
+        suppressCompanionsFor(id);
+        return panelHostInvoke('open_panel_host', { toolWindowId: id, title: tw.title, companionIds: companionIdsFor(id) })
           .then((reqId) => markHostOpened(id, issue, reqId));
       })
       .catch(() => {
+        // Both focus and open failed: no host is coming for this id, popped-out
+        // or not. Lift companions here too, not just in notifyHostAborted/
+        // dockFromWindowMode/unregister — otherwise this is a dead end with
+        // every other escape hatch inert and the companion suppressed forever
+        // (I3, branch review).
         resetToDock(id);
+        liftCompanionsFor(id);
         refreshZoneChrome(tw.zone);
       });
   }
@@ -692,6 +868,7 @@
     const tw = toolWindows.get(id);
     if (!tw || getViewMode(id) !== VIEW_MODE_WINDOW) return;
     resetToDock(id);
+    liftCompanionsFor(id);
     refreshZoneChrome(tw.zone);
     triggerSave();
   }
@@ -699,9 +876,17 @@
   // ---- Moving ---------------------------------------------------------------
 
   function moveTo(id, targetZone) {
+    targetZone = normalizeZoneName(targetZone);
+    if (!targetZone) return;
     const tw = toolWindows.get(id);
     if (!tw || tw.zone === targetZone) return;
     if (!zones[targetZone] || !zones[targetZone].contentEl) return;
+    // A suppressed companion has no docked presence to move — its host still
+    // owns it. Reachable via the away strip button's pointerdown->drag path
+    // (makeStripBtn wires beginStripDrag on every button, away ones included;
+    // only the plain click is intercepted), which would otherwise re-dock and
+    // reactivate it out from under the host (see I1, branch review).
+    if (companionSuppressions.has(id)) return;
 
     const oldZoneName = tw.zone;
     const oldZone = zones[oldZoneName];
@@ -904,12 +1089,41 @@
     }
   }
 
+  // The bottom zone is a left/right pair like the sidebars, just laid out
+  // horizontally instead of vertically — mirrors updateSidebar().
   function updateBottomZone() {
     if (!bottomZoneWrapEl) return;
     const appRoot = document.getElementById('app');
     const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
-    const shouldShow = !zenActive && !!(panelState.bottom.visible && zones.bottom.activeId);
+    const leftZone = zones['bottom-left'];
+    const rightZone = zones['bottom-right'];
+    const leftActive = leftZone.activeId !== null;
+    const rightActive = rightZone.activeId !== null;
+    const shouldShow = !zenActive && !!(panelState.bottom.visible && (leftActive || rightActive));
     bottomZoneWrapEl.classList.toggle('hidden', !shouldShow);
+
+    if (bottomZoneDividerEl) {
+      if (leftActive && rightActive) bottomZoneDividerEl.classList.remove('hidden');
+      else bottomZoneDividerEl.classList.add('hidden');
+    }
+
+    if (leftZone.el && rightZone.el) {
+      if (leftActive && !rightActive) {
+        leftZone.el.style.flex = '1';
+        rightZone.el.style.flex = '0';
+      } else if (!leftActive && rightActive) {
+        leftZone.el.style.flex = '0';
+        rightZone.el.style.flex = '1';
+      } else if (leftActive && rightActive) {
+        const lf = parseFloat(leftZone.el.style.flex) || 0;
+        const rf = parseFloat(rightZone.el.style.flex) || 0;
+        if (lf < 0.1 || rf < 0.1) {
+          const ratio = lastSplitRatios.bottom || 0.5;
+          leftZone.el.style.flex = ratio.toString();
+          rightZone.el.style.flex = (1 - ratio).toString();
+        }
+      }
+    }
     if (fitActiveTabFn) fitActiveTabFn();
   }
 
@@ -922,21 +1136,13 @@
     const overlay = document.createElement('div');
     overlay.className = 'twm-dnd-overlay';
 
-    for (const zone of DRAGGABLE_ZONES) {
-      const z = document.createElement('div');
-      z.className = 'twm-dnd-zone';
-      z.dataset.zone = zone;
-      const title = document.createElement('div');
-      title.className = 'twm-dnd-zone-title';
-      title.textContent = ZONE_LABELS[zone] || zone;
-      z.appendChild(title);
-      overlay.appendChild(z);
-      stripDrag.zoneEls.set(zone, z);
-    }
-
-    const label = document.createElement('div');
-    label.className = 'twm-dnd-label';
-    overlay.appendChild(label);
+    // IntelliJ shows nothing while dragging except the ghost of the dragged
+    // button — until the pointer is over a drop target, when one flat region
+    // appears over the real dock area. One highlight element, no zone boxes,
+    // no labels.
+    const highlight = document.createElement('div');
+    highlight.className = 'twm-dnd-highlight';
+    overlay.appendChild(highlight);
 
     const preview = document.createElement('div');
     preview.className = 'twm-drag-preview';
@@ -944,8 +1150,35 @@
 
     document.body.appendChild(overlay);
     stripDrag.overlayEl = overlay;
-    stripDrag.labelEl = label;
+    stripDrag.highlightEl = highlight;
     stripDrag.previewEl = preview;
+  }
+
+  // Live layout measurements for computeDockHighlightRect: real rects where
+  // a panel is open, remembered/default sizes where it is closed — the same
+  // way IntelliJ previews a hidden tool area at the size it would open at.
+  function dockHighlightMetrics() {
+    const mainEl = document.getElementById('main-area');
+    const main = mainEl
+      ? mainEl.getBoundingClientRect()
+      : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    const visibleWidth = (el) => (el && !el.classList.contains('hidden') ? el.offsetWidth : 0);
+    const panelWidth = (side) => {
+      const sb = sidebars[side];
+      const w = sb && sb.panelEl ? sb.panelEl.offsetWidth : 0;
+      return w > 0 ? w : 280;
+    };
+    const bottomVisible = bottomZoneWrapEl && !bottomZoneWrapEl.classList.contains('hidden')
+      && bottomZoneWrapEl.offsetHeight > 0;
+    return {
+      main,
+      bottomRect: bottomVisible ? bottomZoneWrapEl.getBoundingClientRect() : null,
+      leftStripWidth: visibleWidth(strips.left),
+      rightStripWidth: visibleWidth(strips.right),
+      leftPanelWidth: panelWidth('left'),
+      rightPanelWidth: panelWidth('right'),
+      bottomHeight: 312,
+    };
   }
 
   function getStripDropZoneRects() {
@@ -968,7 +1201,8 @@
       'left-bottom': { left: leftX, top: bottomY, width: zoneW, height: zoneH },
       'right-top': { left: rightX, top: topY, width: zoneW, height: zoneH },
       'right-bottom': { left: rightX, top: bottomY, width: zoneW, height: zoneH },
-      bottom: { left: pad, top: bottomBarY, width: vw - pad * 2, height: Math.min(bottomBarH, Math.max(40, vh - bottomBarY - pad)) },
+      'bottom-left':  { left: pad, top: bottomBarY, width: Math.round((vw - pad * 2 - gap) / 2), height: Math.min(bottomBarH, Math.max(40, vh - bottomBarY - pad)) },
+      'bottom-right': { left: pad + Math.round((vw - pad * 2 - gap) / 2) + gap, top: bottomBarY, width: Math.round((vw - pad * 2 - gap) / 2), height: Math.min(bottomBarH, Math.max(40, vh - bottomBarY - pad)) },
     };
   }
 
@@ -1043,22 +1277,21 @@
 
   function layoutStripDragOverlay(activeZone) {
     ensureStripDragOverlay();
-    const rects = getStripDropZoneRects();
-    for (const zone of DRAGGABLE_ZONES) {
-      const zEl = stripDrag.zoneEls.get(zone);
-      const rect = rects[zone];
-      if (!zEl || !rect) continue;
-      zEl.style.left = rect.left + 'px';
-      zEl.style.top = rect.top + 'px';
-      zEl.style.width = rect.width + 'px';
-      zEl.style.height = rect.height + 'px';
-      zEl.classList.toggle('active', zone === activeZone);
-      zEl.classList.toggle('forbidden', stripDrag.active && stripDrag.active.sourceZone === zone);
+    const highlight = stripDrag.highlightEl;
+    if (!highlight) return;
+    const dockHighlight = window.termlabDockHighlight;
+    const rect = activeZone && dockHighlight
+      ? dockHighlight.computeDockHighlightRect(activeZone, dockHighlightMetrics())
+      : null;
+    if (!rect) {
+      highlight.style.display = 'none';
+      return;
     }
-    const label = stripDrag.labelEl;
-    if (!label) return;
-    const labelText = activeZone ? `Drop into ${ZONE_LABELS[activeZone]}` : 'Drag to dock this tool window';
-    label.textContent = labelText;
+    highlight.style.display = 'block';
+    highlight.style.left = Math.round(rect.left) + 'px';
+    highlight.style.top = Math.round(rect.top) + 'px';
+    highlight.style.width = Math.round(rect.width) + 'px';
+    highlight.style.height = Math.round(rect.height) + 'px';
   }
 
   function hitStripDropZone(x, y, sourceZone) {
@@ -1213,11 +1446,25 @@
     const bottomStripEl = strips.bottom;
     if (bottomStripEl) {
       bottomStripEl.innerHTML = '';
-      const bottomZone = zones.bottom;
-      const hasWindows = bottomZone.windows.length > 0;
-      bottomStripEl.classList.toggle('hidden', !hasWindows);
-      for (const wid of bottomZone.windows) {
-        bottomStripEl.appendChild(makeStripBtn(wid, bottomZone, true, 'bottom'));
+      const leftZone = zones['bottom-left'];
+      const rightZone = zones['bottom-right'];
+      const totalWindows = leftZone.windows.length + rightZone.windows.length;
+      bottomStripEl.classList.toggle('hidden', totalWindows === 0);
+      if (totalWindows > 0) {
+        // IntelliJ split ends: bottom-left windows at the strip's left end,
+        // bottom-right windows at the right end (space-between in CSS).
+        const leftSection = document.createElement('div');
+        leftSection.className = 'strip-section strip-section--row';
+        for (const wid of leftZone.windows) {
+          leftSection.appendChild(makeStripBtn(wid, leftZone, true, 'bottom'));
+        }
+        const rightSection = document.createElement('div');
+        rightSection.className = 'strip-section strip-section--row strip-section--end';
+        for (const wid of rightZone.windows) {
+          rightSection.appendChild(makeStripBtn(wid, rightZone, true, 'bottom'));
+        }
+        bottomStripEl.appendChild(leftSection);
+        bottomStripEl.appendChild(rightSection);
       }
     }
   }
@@ -1232,11 +1479,19 @@
 
     // A popped-out window's rail button reflects its HOST window's visibility,
     // which is independent of whether this window's docked panel is showing.
-    const isActive = getViewMode(windowId) === VIEW_MODE_WINDOW
-      ? hostVisible.get(windowId) === true
-      : (tw.active && isPanelVisible(side));
+    //
+    // A companion riding inside a composite host's own window is "away": it
+    // has no docked presence to toggle, so it never lights up as active no
+    // matter what its own (frozen) active flag says.
+    const away = companionSuppressions.get(windowId) || null;
+    const isActive = away
+      ? false
+      : (getViewMode(windowId) === VIEW_MODE_WINDOW
+          ? hostVisible.get(windowId) === true
+          : (tw.active && isPanelVisible(side)));
     const btn = document.createElement('button');
-    btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '') + (isActive ? ' active' : '');
+    btn.className = 'strip-btn' + (horizontal ? ' strip-btn--horizontal' : '')
+      + (away ? ' strip-btn--away' : '') + (isActive ? ' active' : '');
     if (tw.icon && window.tlIcon) {
       btn.appendChild(window.tlIcon.create(tw.icon, { size: 16, alt: '' }));
     }
@@ -1250,6 +1505,14 @@
         delete btn.dataset.suppressClick;
         e.preventDefault();
         e.stopPropagation();
+        return;
+      }
+      if (away) {
+        // The tool lives in the host's window, not here — bring that window
+        // forward rather than trying to dock/undock a panel that has no DOM
+        // of its own to show.
+        panelHostInvoke('focus_panel_host', { toolWindowId: away.hostId })
+          .catch(() => summonWindowHost(away.hostId));
         return;
       }
       toggle(windowId);
@@ -1279,12 +1542,19 @@
     const tw = toolWindows.get(windowId);
     if (!tw) return null;
 
+    // A suppressed companion is riding inside its host's window right now —
+    // it has no docked presence and no window of its own to move, dock, pop
+    // out, or hide, so every actionable entry disables until the host lets
+    // it go (dock-back or abort; see liftCompanionsFor()).
+    const suppressed = companionSuppressions.has(windowId);
+
     const targets = [
       { zone: 'left-top',     label: 'Left (Top)' },
       { zone: 'left-bottom',  label: 'Left (Bottom)' },
       { zone: 'right-top',    label: 'Right (Top)' },
       { zone: 'right-bottom', label: 'Right (Bottom)' },
-      { zone: 'bottom',       label: 'Bottom' },
+      { zone: 'bottom-left',  label: 'Bottom (Left)' },
+      { zone: 'bottom-right', label: 'Bottom (Right)' },
     ];
 
     const items = targets.map((t) => {
@@ -1292,7 +1562,7 @@
       return {
         label: 'Move to ' + t.label,
         checked: isCurrent,
-        disabled: isCurrent,
+        disabled: isCurrent || suppressed,
         onSelect: () => moveTo(windowId, t.zone),
       };
     });
@@ -1302,18 +1572,18 @@
     items.push({
       label: 'View Mode: Dock',
       checked: mode === VIEW_MODE_DOCK,
-      disabled: mode === VIEW_MODE_DOCK,
+      disabled: mode === VIEW_MODE_DOCK || suppressed,
       onSelect: () => setViewMode(windowId, VIEW_MODE_DOCK),
     });
     items.push({
       label: 'View Mode: Window',
       checked: mode === VIEW_MODE_WINDOW,
-      disabled: mode === VIEW_MODE_WINDOW,
+      disabled: mode === VIEW_MODE_WINDOW || suppressed,
       onSelect: () => setViewMode(windowId, VIEW_MODE_WINDOW),
     });
 
     items.push({ separator: true });
-    items.push({ label: 'Hide', onSelect: () => deactivate(windowId) });
+    items.push({ label: 'Hide', disabled: suppressed, onSelect: () => deactivate(windowId) });
 
     return items;
   }
@@ -1394,39 +1664,42 @@
   // ---- Zone divider resize --------------------------------------------------
 
   function initZoneDivider(side) {
-    const dividerEl = sidebars[side].dividerEl;
-    const topZoneEl = zones[side + '-top'].el;
-    const botZoneEl = zones[side + '-bottom'].el;
-    if (!dividerEl || !topZoneEl || !botZoneEl) return;
+    const horizontal = side === 'bottom';
+    const dividerEl = horizontal ? bottomZoneDividerEl : sidebars[side].dividerEl;
+    const firstZoneEl = horizontal ? zones['bottom-left'].el : zones[side + '-top'].el;
+    const secondZoneEl = horizontal ? zones['bottom-right'].el : zones[side + '-bottom'].el;
+    if (!dividerEl || !firstZoneEl || !secondZoneEl) return;
 
-    let dragging = false, startY = 0, startTopFlex = 0, startBotFlex = 0;
+    let dragging = false, startPos = 0, startFirstFlex = 0, startSecondFlex = 0;
 
     dividerEl.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       dividerEl.setPointerCapture(e.pointerId);
       dragging = true;
-      startY = e.clientY;
-      const topH = topZoneEl.offsetHeight;
-      const botH = botZoneEl.offsetHeight;
-      const total = topH + botH;
-      startTopFlex = total > 0 ? topH / total : 0.5;
-      startBotFlex = 1 - startTopFlex;
+      startPos = horizontal ? e.clientX : e.clientY;
+      const firstSize = horizontal ? firstZoneEl.offsetWidth : firstZoneEl.offsetHeight;
+      const secondSize = horizontal ? secondZoneEl.offsetWidth : secondZoneEl.offsetHeight;
+      const total = firstSize + secondSize;
+      startFirstFlex = total > 0 ? firstSize / total : 0.5;
+      startSecondFlex = 1 - startFirstFlex;
       dividerEl.classList.add('dragging');
       beginResizeDrag();
-      document.body.style.cursor = 'row-resize';
+      document.body.style.cursor = horizontal ? 'col-resize' : 'row-resize';
       document.body.style.userSelect = 'none';
     });
 
     dividerEl.addEventListener('pointermove', (e) => {
       if (!dragging) return;
-      const container = topZoneEl.parentElement;
-      const containerH = container.clientHeight - dividerEl.offsetHeight;
-      if (containerH <= 0) return;
-      const delta = e.clientY - startY;
-      const newTopRatio = Math.max(0.15, Math.min(0.85, startTopFlex + delta / containerH));
-      topZoneEl.style.flex = newTopRatio.toString();
-      botZoneEl.style.flex = (1 - newTopRatio).toString();
-      lastSplitRatios[side] = newTopRatio;
+      const container = firstZoneEl.parentElement;
+      const containerSize = horizontal
+        ? container.clientWidth - dividerEl.offsetWidth
+        : container.clientHeight - dividerEl.offsetHeight;
+      if (containerSize <= 0) return;
+      const delta = (horizontal ? e.clientX : e.clientY) - startPos;
+      const newFirstRatio = Math.max(0.15, Math.min(0.85, startFirstFlex + delta / containerSize));
+      firstZoneEl.style.flex = newFirstRatio.toString();
+      secondZoneEl.style.flex = (1 - newFirstRatio).toString();
+      lastSplitRatios[side] = newFirstRatio;
       if (fitActiveTabFn) fitActiveTabFn();
     });
 
@@ -1474,11 +1747,14 @@
 
   // A zone's fallback pick when a panel is revealed with nothing active in it.
   // Popped-out windows are skipped: revealing a sidebar must never yank an OS
-  // window onto the screen.
+  // window onto the screen. A suppressed companion is skipped too — it has no
+  // docked presence either, its host is rendering it elsewhere, and promoting
+  // it here would re-render a panel the host still owns and leak "suppressed"
+  // into the persisted active-zone map (I2, branch review).
   function firstDockableIn(list) {
     if (!list) return null;
     for (const wid of list) {
-      if (getViewMode(wid) === VIEW_MODE_DOCK) return wid;
+      if (getViewMode(wid) === VIEW_MODE_DOCK && !companionSuppressions.has(wid)) return wid;
     }
     return null;
   }
@@ -1499,11 +1775,18 @@
     panelState[side].visible = !!visible;
 
     if (side === 'bottom') {
-      if (panelState.bottom.visible && zones.bottom.activeId === null) {
-        const candidate = firstDockableIn(zones.bottom.windows);
+      // Same pattern as the left/right branch below, generalized to a pair:
+      // reveal-with-nothing-active tries the left half before the right half.
+      const leftZone = zones['bottom-left'];
+      const rightZone = zones['bottom-right'];
+      if (panelState.bottom.visible && leftZone.activeId === null && rightZone.activeId === null) {
+        const candidate = firstDockableIn(leftZone.windows) || firstDockableIn(rightZone.windows);
         if (candidate) activate(candidate);
       }
-      updateZone('bottom');
+      if (panelState.bottom.visible) {
+        updateZone('bottom-left');
+        updateZone('bottom-right');
+      }
       updateBottomZone();
       updateStrips();
       if (!opts || opts.save !== false) triggerSave();
@@ -1594,15 +1877,22 @@
         ratios[side] = tf / (tf + bf);
       }
     }
+    const blEl = zones['bottom-left'].el;
+    const brEl = zones['bottom-right'].el;
+    if (blEl && brEl) {
+      const lf = parseFloat(blEl.style.flex) || 1;
+      const rf = parseFloat(brEl.style.flex) || 1;
+      ratios.bottom = lf / (lf + rf);
+    }
     return ratios;
   }
 
   function setSplitRatio(side, ratio) {
-    const topEl = zones[side + '-top'].el;
-    const botEl = zones[side + '-bottom'].el;
-    if (topEl && botEl && ratio > 0 && ratio < 1) {
-      topEl.style.flex = ratio.toString();
-      botEl.style.flex = (1 - ratio).toString();
+    const firstEl = side === 'bottom' ? zones['bottom-left'].el : zones[side + '-top'].el;
+    const secondEl = side === 'bottom' ? zones['bottom-right'].el : zones[side + '-bottom'].el;
+    if (firstEl && secondEl && ratio > 0 && ratio < 1) {
+      firstEl.style.flex = ratio.toString();
+      secondEl.style.flex = (1 - ratio).toString();
       lastSplitRatios[side] = ratio;
     }
   }
@@ -1639,6 +1929,7 @@
 
   exports.toolWindowManager = {
     init,
+    normalizeZoneName,
     setPersistedZones,
     setPersistedActiveZoneWindows,
     setPersistedPanelVisibility,
@@ -1674,6 +1965,8 @@
     notifyHostHidden,
     notifyHostDocked,
     notifyHostAborted,
+    // Composite host companion suppression (Task 2)
+    isCompanionSuppressed,
     // Exposed for scripts/tests/test_panel_host.mjs: showContextMenu's pure
     // item list, so the "every registered id carries the trait" check needs no
     // popup DOM.

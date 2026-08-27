@@ -331,6 +331,36 @@
   // renderFn cannot tell which side of the pop-out it is running on and the
   // shared `.tool-window-content` / `.tool-window-scroll-viewport` rules in
   // styles/tool-windows.css apply unchanged.
+  function disposerForRenderResult(result) {
+    if (typeof result === 'function') return result;
+    if (result && typeof result.destroy === 'function') return () => result.destroy();
+    return null;
+  }
+
+  // Bottom-section resize: same pointer idiom as the zone dividers, clamped
+  // 120px .. 70% of the window. Session-only — nothing persists.
+  function initHostBottomDivider(dividerEl, bottomEl, rootEl) {
+    let dragging = false;
+    let startY = 0;
+    let startHeight = 0;
+    dividerEl.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      dividerEl.setPointerCapture(e.pointerId);
+      dragging = true;
+      startY = e.clientY;
+      startHeight = bottomEl.offsetHeight;
+    });
+    dividerEl.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const max = Math.round((rootEl.offsetHeight || window.innerHeight) * 0.7);
+      const next = Math.max(120, Math.min(max, startHeight + (startY - e.clientY)));
+      bottomEl.style.height = next + 'px';
+    });
+    const stop = () => { dragging = false; };
+    dividerEl.addEventListener('pointerup', stop);
+    dividerEl.addEventListener('pointercancel', stop);
+  }
+
   function mountRegistration(contentRootEl, registration) {
     const panelEl = document.createElement('div');
     panelEl.className = 'tool-window-content';
@@ -339,8 +369,17 @@
     renderRootEl.className = 'tool-window-scroll-viewport';
     panelEl.appendChild(renderRootEl);
     contentRootEl.appendChild(panelEl);
-    registration.renderFn(renderRootEl);
-    return { panelEl, renderRootEl };
+    const disposeRender = disposerForRenderResult(registration.renderFn(renderRootEl));
+    let disposed = false;
+    return {
+      panelEl,
+      renderRootEl,
+      destroy() {
+        if (disposed) return;
+        disposed = true;
+        if (disposeRender) disposeRender();
+      },
+    };
   }
 
   // ---- Boot ----------------------------------------------------------------
@@ -385,6 +424,10 @@
         invoke,
         listen,
         listenOnCurrentWindow,
+        // The files panel derives its native drag-drop subscription
+        // (onDragDropEvent) from this window; without it, Finder-to-pane and
+        // pane-to-pane drops are silently dead in every popped-out host.
+        currentWindow,
         // A host owns no sidebars and no zones, so it has nothing truthful to
         // say about the saved layout — and a write from here would clobber
         // the widths and visibility flags the PARENT is keeping. Reads answer
@@ -427,6 +470,46 @@
     document.body.appendChild(chrome.rootEl);
 
     const mounted = mountRegistration(chrome.contentRootEl, registration);
+
+    // Companions ride along in a bottom section — SFTP + Transfers reads as
+    // one small app. Unresolvable ids degrade to today's solo host.
+    const companionIds = Array.isArray(request.companionIds) ? request.companionIds : [];
+    const companionMounts = [];
+    const companionRegs = companionIds
+      .filter((cid) => cid && cid !== request.toolWindowId)
+      .map((cid) => manager.getRegistration(cid))
+      .filter((reg) => reg && typeof reg.renderFn === 'function');
+    if (companionRegs.length > 0) {
+      const bottom = document.createElement('div');
+      bottom.className = 'panel-host-bottom';
+      const divider = document.createElement('div');
+      divider.className = 'panel-host-divider';
+      const bottomContent = document.createElement('div');
+      bottomContent.className = 'panel-host-bottom-content';
+      bottom.appendChild(divider);
+      bottom.appendChild(bottomContent);
+      chrome.rootEl.appendChild(bottom);
+      for (const reg of companionRegs) {
+        companionMounts.push(mountRegistration(bottomContent, reg));
+      }
+      initHostBottomDivider(divider, bottom, chrome.rootEl);
+    }
+
+    const disposeMountedPanel = () => {
+      if (typeof global.removeEventListener === 'function') {
+        global.removeEventListener('beforeunload', disposeMountedPanel);
+      }
+      // Teardown mirrors mount order reversed: companions rode in after the
+      // main mount, so they come apart first.
+      for (const companionMount of companionMounts) companionMount.destroy();
+      mounted.destroy();
+    };
+    if (typeof global.addEventListener === 'function') {
+      // A native close hides a live host and must keep its projection current.
+      // Destructive dock-back/parent teardown unloads the webview; only that
+      // lifecycle releases the mounted controller subscription.
+      global.addEventListener('beforeunload', disposeMountedPanel);
+    }
 
     // Subscribed BEFORE `panel_host_ready`: the parent may broadcast the
     // moment this window becomes visible, and an event that arrives before
@@ -472,6 +555,7 @@
       closeButtonEl: chrome.closeButtonEl,
       panelEl: mounted.panelEl,
       renderRootEl: mounted.renderRootEl,
+      destroy: disposeMountedPanel,
     };
   }
 

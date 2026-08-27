@@ -195,7 +195,9 @@ async function setupLogicHarness(invokeExtra, opts = {}) {
     showColumnMenu: () => {},
     showRowContextMenu: () => {},
   };
-  sandbox.termlabFilesTransfers = {};
+  sandbox.termlabFilesTransfers = opts.filesTransfers || {};
+  if (opts.transferRuntime) sandbox.termlabTransferRuntime = opts.transferRuntime;
+  if (opts.transferDialogs) sandbox.termlabTransferDialogs = opts.transferDialogs;
 
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
@@ -227,6 +229,8 @@ async function setupLogicHarness(invokeExtra, opts = {}) {
     listen: (name, handler) => { listeners[name] = handler; },
   });
   await settle();
+  const initialLocalRender = renderCalls.find((call) => call.pane.prefix === 'local');
+  const initialRemoteRender = renderCalls.find((call) => call.pane.prefix === 'remote');
   invokeCalls.length = 0; // discard boot traffic (getHomeDir/settings/local_list_dir/servers/sessions)
   renderCalls.length = 0;
 
@@ -235,6 +239,10 @@ async function setupLogicHarness(invokeExtra, opts = {}) {
     invoke,
     invokeCalls,
     renderCalls,
+    initialLocalRender,
+    initialRemoteRender,
+    localPane: initialLocalRender.pane,
+    remotePane: initialRemoteRender.pane,
     listeners,
     setServersFixture: (v) => { serversFixture = v; },
     setSessionsFixture: (v) => { sessionsFixture = v; },
@@ -713,6 +721,144 @@ function lastRemoteCall(renderCalls) {
   await picked;
   await settle();
   console.log("12. L1: busy-clear scoped to the busy entry's session appearing: ok");
+}
+
+// --- 12b. Directory loads may finish out of order. An older response must not
+// replace a newer listing after back-to-back transfer completion refreshes. --
+{
+  const listingResolvers = [];
+  let deferListings = false;
+  const h = await setupLogicHarness((cmd) => {
+    if (cmd === 'sftp_list_dir' && deferListings) {
+      return new Promise((resolve) => { listingResolvers.push(resolve); });
+    }
+    return undefined;
+  });
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  const rendered = lastRemoteCall(h.renderCalls);
+  deferListings = true;
+
+  const olderLoad = rendered.deps.onRefresh();
+  const newerLoad = rendered.deps.onRefresh();
+  await settle(1);
+  assert.equal(listingResolvers.length, 2, 'both refresh requests must be in flight');
+
+  listingResolvers[1]([{ name: 'latest.txt', is_dir: false, size: 9, modified: 2 }]);
+  await newerLoad;
+  assert.equal(rendered.pane.entries[0].name, 'latest.txt', 'the newer response becomes visible');
+
+  listingResolvers[0]([{ name: 'stale.txt', is_dir: false, size: 5, modified: 1 }]);
+  await olderLoad;
+  assert.equal(
+    rendered.pane.entries[0].name,
+    'latest.txt',
+    'a superseded response must not overwrite the latest listing',
+  );
+  console.log('12b. out-of-order directory loads keep the newest listing: ok');
+}
+
+// --- 12c. Files-pane attention controls reach the transfer controller. ---
+// The visible badge is the recovery entry point; dropping this callback from
+// render deps recreates the inert "Needs attention" regression.
+{
+  const activations = [];
+  const runtime = { resolve() {} };
+  const dialogs = { showConflict() {} };
+  const h = await setupLogicHarness(undefined, {
+    transferRuntime: runtime,
+    transferDialogs: dialogs,
+    filesTransfers: {
+      createController(deps) {
+        assert.equal(deps.transferRuntime, runtime);
+        assert.equal(deps.transferDialogs, dialogs);
+        return {
+          handleTransferAttention(transferId, invoker) {
+            activations.push({ transferId, invoker });
+          },
+        };
+      },
+    },
+  });
+
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+  const rendered = lastRemoteCall(h.renderCalls);
+  const invoker = { id: 'attention-control' };
+  rendered.deps.onTransferAttention('upload-2', invoker);
+  assert.deepEqual(activations, [{ transferId: 'upload-2', invoker }]);
+  console.log('12c. file-pane attention control reaches transfer resolution: ok');
+}
+
+// --- 12d. Transfer submission paints immediately and a late invoke reply ---
+// cannot overwrite a newer authoritative queue state. The durable enqueue may
+// fsync before replying; that wait must never look like a dead click.
+{
+  let resolveUpload;
+  const pendingUpload = new Promise((resolve) => { resolveUpload = resolve; });
+  const h = await setupLogicHarness((cmd) => {
+    if (cmd === 'transfer_upload') return pendingUpload;
+    return undefined;
+  });
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+
+  let menuItems = [];
+  h.sandbox.termlabFilesPaneView.showRowContextMenu = (_event, items) => { menuItems = items; };
+  const entry = { name: 'large.iso', is_dir: false, size: 1_000_000_000, modified: 1 };
+  h.initialLocalRender.deps.onOpenRowMenu({}, entry);
+  const upload = menuItems.find((item) => item.label === 'Upload to remote host');
+  const submission = upload.action();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.remotePane.transferStatus['large.iso'])), {
+    status: 'preparing', direction: 'upload', provisional: true,
+  }, 'Preparing upload is rendered before transfer_upload resolves');
+  assert.equal(
+    lastRemoteCall(h.renderCalls).pane.transferStatus['large.iso'].status,
+    'preparing',
+    'the immediate provisional state triggers a pane render',
+  );
+
+  h.remotePane.transferStatus['large.iso'] = {
+    status: 'attention', percent: 0, transferId: 'upload-authoritative',
+  };
+  resolveUpload('upload-authoritative');
+  await submission;
+  assert.equal(
+    h.remotePane.transferStatus['large.iso'].status,
+    'attention',
+    'the command response does not overwrite a newer conflict snapshot',
+  );
+  console.log('12d. transfer submission paints immediately and preserves newer queue state: ok');
+}
+
+// --- 12e. A rejected durable enqueue removes only its own provisional state.
+{
+  let rejectUpload;
+  const pendingUpload = new Promise((_resolve, reject) => { rejectUpload = reject; });
+  const h = await setupLogicHarness((cmd) => {
+    if (cmd === 'transfer_upload') return pendingUpload;
+    return undefined;
+  });
+  await h.sandbox.filesPanel.pinRemotePane('main:1000007');
+  await settle();
+
+  let menuItems = [];
+  h.sandbox.termlabFilesPaneView.showRowContextMenu = (_event, items) => { menuItems = items; };
+  h.initialLocalRender.deps.onOpenRowMenu({}, {
+    name: 'failed.iso', is_dir: false, size: 1_000_000_000, modified: 1,
+  });
+  const submission = menuItems.find((item) => item.label === 'Upload to remote host').action();
+  assert.equal(h.remotePane.transferStatus['failed.iso'].status, 'preparing');
+  rejectUpload(new Error('queue unavailable'));
+  await submission;
+  assert.equal(
+    h.remotePane.transferStatus['failed.iso'],
+    undefined,
+    'failed enqueue clears the provisional activity instead of leaving it stuck',
+  );
+  console.log('12e. failed transfer submission clears provisional activity: ok');
 }
 
 console.log('sftp connect part 1 (host dropdown + pinning): all assertions passed');

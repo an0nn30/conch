@@ -20,12 +20,22 @@
   let fitActiveTabFn = null;
   let getActiveTabFn = null;
   let transferController = null;
+  let unsubscribeTransferRuntime = null;
+  const FILES_TRANSFER_OPTIONS = Object.freeze({
+    origin: 'filesPanel',
+    conflictPolicy: Object.freeze({ kind: 'ask' }),
+  });
 
   // Navigation icons — PNG assets from icons/ directory
-  const ICON_BACK = '<img src="icons/go-previous-dark.png" width="12" height="12" class="fp-icon">';
-  const ICON_FWD = '<img src="icons/go-next-dark.png" width="12" height="12" class="fp-icon">';
-  const ICON_HOME = '<img src="icons/go-home-dark.png" width="12" height="12" class="fp-icon">';
-  const ICON_REFRESH = '<img src="icons/view-refresh-dark.png" width="12" height="12" class="fp-icon">';
+  // Branded, appearance-aware toolbar glyphs (tl-icon resolves the light or
+  // dark variant per render; refreshAll() heals stamped imgs on theme flips).
+  // Resolved per call, not baked at module load, so a theme change after
+  // startup renders the correct variant on the next pane render.
+  function toolbarIcon(name) {
+    return window.tlIcon && typeof window.tlIcon.html === 'function'
+      ? window.tlIcon.html(name, { size: 12 })
+      : '';
+  }
 
   function createPaneState(prefix, isLocal) {
     if (!filesPaneStore || typeof filesPaneStore.createPaneState !== 'function') {
@@ -423,20 +433,32 @@
       || null;
     fitActiveTabFn = opts.fitActiveTab;
     getActiveTabFn = opts.getActiveTab;
+    const transferRuntime = window.termlabTransferRuntime;
+    const transferDialogs = window.termlabTransferDialogs;
     transferController = filesTransfers && typeof filesTransfers.createController === 'function'
       ? filesTransfers.createController({
         localPane,
         remotePane,
-        loadEntries,
-        formatSize: window.utils && window.utils.formatSize,
         toast: window.toast,
-        cancelTransfer: (transferId) => (
-          filesDataService && typeof filesDataService.transferCancel === 'function'
-            ? filesDataService.transferCancel(invoke, transferId)
-            : Promise.reject(new Error('Files data service unavailable: transferCancel'))
-        ),
+        transferRuntime,
+        transferDialogs,
+        loadEntries,
+        renderTransferStatus: (pane) => {
+          const selector = pane && pane.isLocal ? '#fp-local' : '#fp-remote';
+          renderPane(pane, getPaneRoot(selector));
+        },
       })
       : null;
+
+    if (typeof unsubscribeTransferRuntime === 'function') unsubscribeTransferRuntime();
+    unsubscribeTransferRuntime = null;
+    if (transferRuntime && typeof transferRuntime.subscribe === 'function'
+        && transferController
+        && typeof transferController.handleTransferSnapshot === 'function') {
+      unsubscribeTransferRuntime = transferRuntime.subscribe((snapshot) => {
+        transferController.handleTransferSnapshot(snapshot);
+      });
+    }
 
     if (!panelEl) {
       console.warn('filesPanel.init called without a panel element');
@@ -446,9 +468,27 @@
     panelEl.innerHTML = `
       <div class="fp-pane-container">
         <div class="fp-pane" id="fp-local"></div>
+        <div class="fp-pane-divider" id="fp-pane-divider"></div>
         <div class="fp-pane" id="fp-remote"></div>
       </div>
     `;
+
+    // Resizable splitter between the panes. Orientation is read per-drag from
+    // the computed style because the zone CSS flips the container to a column
+    // when this tool window docks in a sidebar.
+    if (window.termlabFilesSplit) {
+      const containerEl = panelEl.querySelector('.fp-pane-container');
+      window.termlabFilesSplit.attach({
+        container: containerEl,
+        firstEl: panelEl.querySelector('#fp-local'),
+        secondEl: panelEl.querySelector('#fp-remote'),
+        dividerEl: panelEl.querySelector('#fp-pane-divider'),
+        storage: window.localStorage,
+        getOrientation: () => (
+          window.getComputedStyle(containerEl).flexDirection === 'column' ? 'column' : 'row'
+        ),
+      });
+    }
 
     // Start local pane at home
     const homePromise = filesDataService && typeof filesDataService.getHomeDir === 'function'
@@ -473,6 +513,22 @@
       opts.listen('remote-sessions-changed', () => {
         refreshHostCombo();
       });
+      // OS file drops onto the remote pane (Task 8). Tauri v2 delivers these
+      // ONLY through the window's onDragDropEvent API — a plain
+      // `listen('tauri://drag-*')` registers against a different event target
+      // and never fires (verified live: drops were silently ignored). One
+      // subscription fans out to the hover/leave/drop handlers via the
+      // dispatcher; `enter`/`over` share the hover-highlight handling,
+      // `leave` always clears, `drop` hit-tests and routes.
+      if (typeof opts.onDragDropEvent === 'function' && window.termlabNativeDrop) {
+        opts.onDragDropEvent((event) => {
+          window.termlabNativeDrop.dispatchNativeDragDropEvent(event, {
+            hover: handleNativeDragHover,
+            leave: handleNativeDragLeave,
+            drop: handleNativeDrop,
+          });
+        });
+      }
     }
 
     loadFollowPathSetting();
@@ -650,6 +706,8 @@
 
   async function loadEntries(pane) {
     if (!hasPanelDom()) return;
+    const generation = (pane.loadGeneration || 0) + 1;
+    pane.loadGeneration = generation;
     pane.error = null;
     pane.loading = true;
     const el = getPaneRoot(`#fp-${pane.prefix}`);
@@ -657,24 +715,28 @@
 
     try {
       let entries;
+      const path = pane.currentPath;
       if (pane.isLocal) {
         entries = filesDataService && typeof filesDataService.listLocalDir === 'function'
-          ? await filesDataService.listLocalDir(invoke, pane.currentPath)
+          ? await filesDataService.listLocalDir(invoke, path)
           : await Promise.reject(new Error('Files data service unavailable: listLocalDir'));
       } else {
-        if (!activeRemotePaneId) {
+        const paneId = activeRemotePaneId;
+        if (!paneId) {
           pane.entries = [];
           pane.loading = false;
           renderPane(pane, el);
           return;
         }
         entries = filesDataService && typeof filesDataService.listRemoteDir === 'function'
-          ? await filesDataService.listRemoteDir(invoke, activeRemotePaneId, pane.currentPath)
+          ? await filesDataService.listRemoteDir(invoke, paneId, path)
           : await Promise.reject(new Error('Files data service unavailable: listRemoteDir'));
       }
+      if (pane.loadGeneration !== generation) return;
       pane.entries = entries;
       sortEntries(pane);
     } catch (e) {
+      if (pane.loadGeneration !== generation) return;
       pane.error = String(e);
       pane.entries = [];
     }
@@ -894,10 +956,10 @@
     const comboState = computeHostComboState();
     filesPaneView.renderPane(pane, el, {
       activeRemotePaneId,
-      iconBack: ICON_BACK,
-      iconForward: ICON_FWD,
-      iconHome: ICON_HOME,
-      iconRefresh: ICON_REFRESH,
+      iconBack: toolbarIcon('back'),
+      iconForward: toolbarIcon('forward'),
+      iconRefresh: toolbarIcon('refresh'),
+      iconMore: toolbarIcon('moreVertical'),
       fileIcons: window.fileIcons,
       sortArrow,
       extOf,
@@ -921,6 +983,40 @@
       },
       onOpenColumnMenu: (event) => showColumnMenu(event, pane, el),
       onOpenRowMenu: (event, entry) => showRowContextMenu(event, pane, entry),
+      joinPath,
+      onDropEntries: (payload) => onDropEntries(payload),
+      // Pane-to-pane drags complete over the NATIVE channel on platforms
+      // where Tauri's drag-drop interception swallows DOM dragover/drop
+      // (macOS does; proven live). dragstart records the in-flight payload;
+      // the native drop with empty paths consumes it (see handleNativeDrop).
+      onDragStart: (payload) => {
+        if (internalDragClearTimer) { clearTimeout(internalDragClearTimer); internalDragClearTimer = null; }
+        inFlightInternalDrag = payload || null;
+      },
+      // DOM dragend fires BEFORE wry delivers the native drop event (~30ms
+      // gap, proven live), so the record must outlive dragend briefly: clear
+      // highlights now, clear the record after a grace period long enough
+      // for the trailing native drop to consume it first. A cancelled drag
+      // (Escape / dropped outside the window) produces no native drop, and
+      // the timer disposes of the record then.
+      onDragEnd: () => {
+        clearDropTargets();
+        if (internalDragClearTimer) clearTimeout(internalDragClearTimer);
+        internalDragClearTimer = setTimeout(() => {
+          internalDragClearTimer = null;
+          inFlightInternalDrag = null;
+        }, 500);
+      },
+      onTransferAttention: (transferId, invoker) => {
+        const handled = transferController
+          && typeof transferController.handleTransferAttention === 'function'
+          && transferController.handleTransferAttention(transferId, invoker);
+        if (!handled
+            && window.toolWindowManager
+            && typeof window.toolWindowManager.activate === 'function') {
+          window.toolWindowManager.activate('transfer-center');
+        }
+      },
       hostOptions: comboState.hostOptions,
       hostComboValue: comboState.hostComboValue,
       hostComboBusy: comboState.hostComboBusy,
@@ -969,6 +1065,26 @@
     return (trimmed || '') + '/' + name;
   }
 
+  async function submitTransfer(pane, fileName, direction, start) {
+    const provisional = { status: 'preparing', direction, provisional: true };
+    pane.transferStatus[fileName] = provisional;
+    renderPane(pane, getPaneRoot(`#fp-${pane.prefix}`));
+    try {
+      const transferId = await start();
+      if (pane.transferStatus[fileName] === provisional) {
+        pane.transferStatus[fileName] = { status: 'preparing', direction, transferId };
+        renderPane(pane, getPaneRoot(`#fp-${pane.prefix}`));
+      }
+      return transferId;
+    } catch (error) {
+      if (pane.transferStatus[fileName] === provisional) {
+        delete pane.transferStatus[fileName];
+        renderPane(pane, getPaneRoot(`#fp-${pane.prefix}`));
+      }
+      throw error;
+    }
+  }
+
   async function doDownload(entry) {
     if (!entry || !activeRemotePaneId) return;
     if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
@@ -980,9 +1096,15 @@
       if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
         throw new Error('Files data service unavailable: transferDownload');
       }
-      const transferId = await filesDataService.transferDownload(invoke, activeRemotePaneId, remotePath, localPath);
-      // Mark as transferring in local pane
-      localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+      await submitTransfer(localPane, entry.name, 'download', () => (
+        filesDataService.transferDownload(
+          invoke,
+          activeRemotePaneId,
+          remotePath,
+          localPath,
+          FILES_TRANSFER_OPTIONS,
+        )
+      ));
     } catch (e) {
       window.toast.error('Download Failed', String(e));
     }
@@ -999,9 +1121,15 @@
       if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
         throw new Error('Files data service unavailable: transferUpload');
       }
-      const transferId = await filesDataService.transferUpload(invoke, activeRemotePaneId, localPath, remotePath);
-      // Mark as transferring in remote pane
-      remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+      await submitTransfer(remotePane, entry.name, 'upload', () => (
+        filesDataService.transferUpload(
+          invoke,
+          activeRemotePaneId,
+          localPath,
+          remotePath,
+          FILES_TRANSFER_OPTIONS,
+        )
+      ));
     } catch (e) {
       window.toast.error('Upload Failed', String(e));
     }
@@ -1022,13 +1150,310 @@
           if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
             throw new Error('Files data service unavailable: transferUpload');
           }
-          const transferId = await filesDataService.transferUpload(invoke, activeRemotePaneId, localPath, remotePath);
-          remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+          await submitTransfer(remotePane, entry.name, 'upload', () => (
+            filesDataService.transferUpload(
+              invoke,
+              activeRemotePaneId,
+              localPath,
+              remotePath,
+              FILES_TRANSFER_OPTIONS,
+            )
+          ));
         } catch (e) {
           window.toast.error('Upload Failed', String(e));
         }
       },
     });
+  }
+
+  // Whole-folder transfers hand the tree to the backend's recursive-expansion
+  // command (`transfer_enqueue_recursive`) instead of walking it client-side.
+  // `destPath` is the opposite pane's current directory as-is — never
+  // joined with the folder's own name — because the backend appends that
+  // basename itself (see features/files/data-service.js's transferRecursive).
+  // Every folder transfer this panel starts goes through here so the batch
+  // it creates is registered with the transfer controller. A folder with no
+  // files in it produces a batch with no member jobs, and every other
+  // completion notice is aggregated from member jobs — without this
+  // registration that transfer would finish in total silence (see
+  // features/files/transfers.js's watchFolderBatch).
+  async function startFolderTransfer(paneId, direction, sourcePath, destPath) {
+    if (!filesDataService || typeof filesDataService.transferRecursive !== 'function') {
+      throw new Error('Files data service unavailable: transferRecursive');
+    }
+    const batchId = await filesDataService.transferRecursive(invoke, paneId, direction, sourcePath, destPath);
+    if (transferController && typeof transferController.watchFolderBatch === 'function') {
+      transferController.watchFolderBatch(batchId);
+    }
+    return batchId;
+  }
+
+  async function doUploadFolder(entry) {
+    if (!entry || !activeRemotePaneId) return;
+    const sourcePath = joinPath(localPane.currentPath, entry.name);
+    const destPath = remotePane.currentPath;
+    try {
+      await startFolderTransfer(activeRemotePaneId, 'upload', sourcePath, destPath);
+      window.toast.info('Folder transfer started', entry.name);
+    } catch (e) {
+      window.toast.error('Upload Failed', String(e));
+    }
+  }
+
+  async function doDownloadFolder(entry) {
+    if (!entry || !activeRemotePaneId) return;
+    const sourcePath = joinPath(remotePane.currentPath, entry.name);
+    const destPath = localPane.currentPath;
+    try {
+      await startFolderTransfer(activeRemotePaneId, 'download', sourcePath, destPath);
+      window.toast.info('Folder transfer started', entry.name);
+    } catch (e) {
+      window.toast.error('Download Failed', String(e));
+    }
+  }
+
+  // Source-side dragend safety net (Task 7 review finding). pane-view.js's
+  // rows call this on every dragend regardless of outcome — a cancelled
+  // drag (Escape mid-drag, dropped outside any target) fires dragend on the
+  // source row without necessarily firing dragleave on whichever pane's
+  // highlight is lit, and pane-view.js has no handle to the SIBLING pane's
+  // root to clear it itself. Clearing both unconditionally is simplest and
+  // idempotent — at most one is ever actually lit.
+  // The row payload a DOM dragstart recorded, consumed by the native-channel
+  // drop when the platform intercepts DOM drag events (macOS). Consumed by
+  // the native drop, or disposed by the grace-period timer dragend arms
+  // (dragend precedes the native drop — see onDragEnd).
+  let inFlightInternalDrag = null;
+  let internalDragClearTimer = null;
+
+  // Both panes' logical rects + current paths, for internal-drop hit-testing.
+  function internalDropPanes() {
+    const localRoot = getPaneRoot('#fp-local');
+    const remoteRoot = getPaneRoot('#fp-remote');
+    return {
+      local: localRoot && typeof localRoot.getBoundingClientRect === 'function'
+        ? { rect: localRoot.getBoundingClientRect(), currentPath: localPane.currentPath, root: localRoot }
+        : null,
+      remote: remoteRoot && typeof remoteRoot.getBoundingClientRect === 'function'
+        ? { rect: remoteRoot.getBoundingClientRect(), currentPath: remotePane.currentPath, root: remoteRoot }
+        : null,
+    };
+  }
+
+  function clearDropTargets() {
+    const localEl = getPaneRoot('#fp-local');
+    if (localEl && localEl.classList) localEl.classList.remove('is-drop-target');
+    const remoteEl = getPaneRoot('#fp-remote');
+    if (remoteEl && remoteEl.classList) remoteEl.classList.remove('is-drop-target');
+  }
+
+  function basenameOfPath(p) {
+    const trimmed = String(p || '').replace(/\/+$/, '');
+    const idx = trimmed.lastIndexOf('/');
+    return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+  }
+
+  // Drag-and-drop between panes (Task 7) — the drop side of pane-view.js's
+  // dragstart/dragover/drop wiring. `source` is the parsed payload
+  // ({ paneKind, paneId, path, isDir }); `targetPaneKind`/`targetPath`
+  // describe the pane the drop landed on. Routing mirrors the row-menu
+  // transfer actions above exactly (doUpload/doDownload/doUploadFolder/
+  // doDownloadFolder) — same guard, same call shapes, same destination-join
+  // rule (recursive gets the container as-is; single-file pre-joins the
+  // name) — just reached from a drop instead of a menu click. Same-kind
+  // drops never reach here: pane-view.js's drop handler only calls
+  // onDropEntries when the payload's paneKind differs from the target pane.
+  async function onDropEntries({ source, targetPaneKind, targetPath } = {}) {
+    if (!source) return;
+    const direction = targetPaneKind === 'remote' ? 'upload' : 'download';
+    if (!activeRemotePaneId) {
+      window.toast.warn('Not Connected', direction === 'upload'
+        ? 'Connect to an SSH session to upload files.'
+        : 'Connect to an SSH session to download files.');
+      return;
+    }
+
+    const name = basenameOfPath(source.path);
+    try {
+      if (source.isDir) {
+        await startFolderTransfer(activeRemotePaneId, direction, source.path, targetPath);
+        window.toast.info('Folder transfer started', name);
+        return;
+      }
+
+      const destPath = joinPath(targetPath, name);
+      if (direction === 'upload') {
+        if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
+          throw new Error('Files data service unavailable: transferUpload');
+        }
+        await submitTransfer(remotePane, name, 'upload', () => (
+          filesDataService.transferUpload(invoke, activeRemotePaneId, source.path, destPath, FILES_TRANSFER_OPTIONS)
+        ));
+      } else {
+        if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
+          throw new Error('Files data service unavailable: transferDownload');
+        }
+        await submitTransfer(localPane, name, 'download', () => (
+          filesDataService.transferDownload(invoke, activeRemotePaneId, source.path, destPath, FILES_TRANSFER_OPTIONS)
+        ));
+      }
+    } catch (e) {
+      window.toast.error(direction === 'upload' ? 'Upload Failed' : 'Download Failed', String(e));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // OS file drops onto the remote pane (Task 8) — features/files/native-drop.js
+  // owns the pure hit-test (resolveNativeDrop) and per-path routing
+  // (routeNativeDropPaths); this section is just the DOM/event wiring: pull
+  // the event payload, scale its position, hand off, and reflect the result
+  // as either the is-drop-target highlight or the drop routing/toast.
+  // ---------------------------------------------------------------------------
+
+  // Tauri v2 drag-drop positions are reported in PHYSICAL pixels, but
+  // getBoundingClientRect() (what the hit-test compares against) is in
+  // LOGICAL/CSS pixels — on a retina display (devicePixelRatio 2) a raw
+  // physical position would land roughly twice as far right/down as it
+  // should, so every position is divided by devicePixelRatio before it ever
+  // reaches resolveNativeDrop. The scaling itself lives in
+  // features/files/native-drop.js (loaded before this file — see
+  // index.html) so core/dragdrop-runtime.js's terminal-drop hit-test (the
+  // Task 8 fix-round collision fix) shares the exact same math rather than
+  // keeping its own copy.
+  function scaleNativeDropPosition(position) {
+    const nativeDrop = window.termlabNativeDrop;
+    return nativeDrop && typeof nativeDrop.scaleNativeDropPosition === 'function'
+      ? nativeDrop.scaleNativeDropPosition(position)
+      : null;
+  }
+
+  function nativeDropDeps() {
+    return {
+      statPath: async (path) => {
+        if (!filesDataService || typeof filesDataService.statLocal !== 'function') {
+          throw new Error('Files data service unavailable: statLocal');
+        }
+        const entry = await filesDataService.statLocal(invoke, path);
+        return { isDir: !!(entry && entry.is_dir) };
+      },
+      transferRecursive: async (paneId, sourcePath, destPath) => (
+        startFolderTransfer(paneId, 'upload', sourcePath, destPath)
+      ),
+      // Mirrors doUpload/onDropEntries exactly: routed through submitTransfer
+      // so the remote pane shows the same "preparing" transfer-status row a
+      // menu-driven or intra-app-dragged upload would.
+      transferUpload: async (paneId, sourcePath, destPath) => {
+        if (!filesDataService || typeof filesDataService.transferUpload !== 'function') {
+          throw new Error('Files data service unavailable: transferUpload');
+        }
+        const name = basenameOfPath(sourcePath);
+        return submitTransfer(remotePane, name, 'upload', () => (
+          filesDataService.transferUpload(invoke, paneId, sourcePath, destPath, FILES_TRANSFER_OPTIONS)
+        ));
+      },
+      targetPaneId: activeRemotePaneId,
+      targetPath: remotePane.currentPath,
+      toast: window.toast,
+    };
+  }
+
+  // Shared by drag-enter and drag-over: both just update the hover highlight,
+  // never route anything (only an actual drop does).
+  function handleNativeDragHover(event) {
+    // Internal (pane-to-pane) drag in flight: highlight the OPPOSITE pane
+    // when the native position hits it; external logic below never runs.
+    if (inFlightInternalDrag) {
+      const nativeDropApi = window.termlabNativeDrop;
+      const scaled = scaleNativeDropPosition(event && event.payload && event.payload.position);
+      const panes = internalDropPanes();
+      const verdict = nativeDropApi && typeof nativeDropApi.resolveInternalNativeDrop === 'function'
+        ? nativeDropApi.resolveInternalNativeDrop(scaled, panes, inFlightInternalDrag)
+        : null;
+      clearDropTargets();
+      if (verdict && panes[verdict.targetPaneKind] && panes[verdict.targetPaneKind].root.classList) {
+        panes[verdict.targetPaneKind].root.classList.add('is-drop-target');
+      }
+      return;
+    }
+    const remoteRoot = getPaneRoot('#fp-remote');
+    if (!remoteRoot || !remoteRoot.classList) return;
+    const payload = event && event.payload;
+    const position = scaleNativeDropPosition(payload && payload.position);
+    const rect = remoteRoot.getBoundingClientRect();
+    const nativeDrop = window.termlabNativeDrop;
+    const result = nativeDrop && typeof nativeDrop.resolveNativeDrop === 'function'
+      ? nativeDrop.resolveNativeDrop(position, rect, !!activeRemotePaneId)
+      : 'ignore';
+    if (result === 'accept') {
+      remoteRoot.classList.add('is-drop-target');
+    } else {
+      remoteRoot.classList.remove('is-drop-target');
+    }
+  }
+
+  function handleNativeDragLeave() {
+    // A native leave during an internal drag means the cursor left the
+    // window; the highlight clears but the in-flight record survives (the
+    // drag may re-enter) — dragend is the authoritative cleanup.
+    clearDropTargets();
+  }
+
+  async function handleNativeDrop(event) {
+    // Internal (pane-to-pane) drop: the native channel delivers it with
+    // EMPTY paths while a DOM dragstart's payload is in flight. Route it to
+    // the opposite pane through the same onDropEntries path the (macOS-
+    // intercepted) DOM drop would have used.
+    if (inFlightInternalDrag) {
+      const internalSource = inFlightInternalDrag;
+      inFlightInternalDrag = null;
+      const externalPaths = event && event.payload && Array.isArray(event.payload.paths)
+        ? event.payload.paths
+        : [];
+      if (externalPaths.length === 0) {
+        const nativeDropApi = window.termlabNativeDrop;
+        const scaled = scaleNativeDropPosition(event && event.payload && event.payload.position);
+        const panes = internalDropPanes();
+        const verdict = nativeDropApi && typeof nativeDropApi.resolveInternalNativeDrop === 'function'
+          ? nativeDropApi.resolveInternalNativeDrop(scaled, panes, internalSource)
+          : null;
+        clearDropTargets();
+        if (verdict) {
+          await onDropEntries({
+            source: internalSource,
+            targetPaneKind: verdict.targetPaneKind,
+            targetPath: verdict.targetPath,
+          });
+        }
+        return;
+      }
+      // Paths present while an internal drag was recorded: stale record —
+      // fall through to the external routing below.
+    }
+    const remoteRoot = getPaneRoot('#fp-remote');
+    if (!remoteRoot) return;
+    if (remoteRoot.classList) remoteRoot.classList.remove('is-drop-target');
+
+    const payload = event && event.payload;
+    const position = scaleNativeDropPosition(payload && payload.position);
+    const rect = remoteRoot.getBoundingClientRect();
+    const nativeDrop = window.termlabNativeDrop;
+    const result = nativeDrop && typeof nativeDrop.resolveNativeDrop === 'function'
+      ? nativeDrop.resolveNativeDrop(position, rect, !!activeRemotePaneId)
+      : 'ignore';
+
+    if (result === 'ignore') return; // drop missed the remote pane — silent, per spec
+    if (result === 'no-session') {
+      window.toast.warn('Not Connected', 'Connect to an SSH session to upload files.');
+      return;
+    }
+
+    const paths = payload && Array.isArray(payload.paths) ? payload.paths : [];
+    if (!paths.length) return;
+    if (!nativeDrop || typeof nativeDrop.routeNativeDropPaths !== 'function') {
+      window.toast.error('Upload Failed', 'Native drop module unavailable.');
+      return;
+    }
+    await nativeDrop.routeNativeDropPaths(paths, nativeDropDeps());
   }
 
   async function doDownloadToPath(entry) {
@@ -1046,8 +1471,15 @@
           if (!filesDataService || typeof filesDataService.transferDownload !== 'function') {
             throw new Error('Files data service unavailable: transferDownload');
           }
-          const transferId = await filesDataService.transferDownload(invoke, activeRemotePaneId, remotePath, localPath);
-          localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
+          await submitTransfer(localPane, entry.name, 'download', () => (
+            filesDataService.transferDownload(
+              invoke,
+              activeRemotePaneId,
+              remotePath,
+              localPath,
+              FILES_TRANSFER_OPTIONS,
+            )
+          ));
         } catch (e) {
           window.toast.error('Download Failed', String(e));
         }
@@ -1170,6 +1602,14 @@
         title: noSession ? sessionTitle : undefined,
         action: () => doUploadToPath(entry),
       });
+      if (entry && entry.is_dir) {
+        items.push({
+          label: 'Upload Folder',
+          disabled: noSession,
+          title: noSession ? sessionTitle : undefined,
+          action: () => doUploadFolder(entry),
+        });
+      }
     } else {
       items.push({
         label: 'Download to local host',
@@ -1183,6 +1623,14 @@
         title: noSession ? sessionTitle : undefined,
         action: () => doDownloadToPath(entry),
       });
+      if (entry && entry.is_dir) {
+        items.push({
+          label: 'Download Folder',
+          disabled: noSession,
+          title: noSession ? sessionTitle : undefined,
+          action: () => doDownloadFolder(entry),
+        });
+      }
     }
 
     items.push({ type: 'separator' });

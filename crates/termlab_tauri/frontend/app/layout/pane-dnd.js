@@ -20,7 +20,6 @@
       active: null,
       overlay: null,
       zoneEl: null,
-      labelEl: null,
       latestPointer: null,
       pointerRaf: 0,
       lastRectSig: '',
@@ -45,23 +44,17 @@
       const zone = document.createElement('div');
       zone.className = 'pane-dnd-zone';
 
-      const label = document.createElement('div');
-      label.className = 'pane-dnd-label';
-
       overlay.appendChild(zone);
-      overlay.appendChild(label);
       document.body.appendChild(overlay);
 
       state.overlay = overlay;
       state.zoneEl = zone;
-      state.labelEl = label;
     }
 
     function showOverlay(rect, zone) {
       if (!rect || !zone) return;
       const overlay = state.overlay;
       const zoneEl = state.zoneEl;
-      const label = state.labelEl;
       const left = Math.round(rect.left);
       const top = Math.round(rect.top);
       const width = Math.round(rect.width);
@@ -80,32 +73,27 @@
       if (state.lastZoneSig === zoneSig) return;
       state.lastZoneSig = zoneSig;
 
-      const edge = Math.max(36, Math.min(84, Math.round(Math.min(rect.width, rect.height) * 0.3)));
+      // IntelliJ shows the region the drop actually produces: the split is
+      // 50/50, so an edge zone highlights that half; center covers the whole
+      // pane.
+      const halfW = Math.round(width / 2);
+      const halfH = Math.round(height / 2);
       zoneEl.style.left = '0px';
       zoneEl.style.top = '0px';
       zoneEl.style.width = width + 'px';
       zoneEl.style.height = height + 'px';
 
       if (zone === 'left') {
-        zoneEl.style.width = edge + 'px';
+        zoneEl.style.width = halfW + 'px';
       } else if (zone === 'right') {
-        zoneEl.style.left = Math.max(0, Math.round(rect.width - edge)) + 'px';
-        zoneEl.style.width = edge + 'px';
+        zoneEl.style.left = (width - halfW) + 'px';
+        zoneEl.style.width = halfW + 'px';
       } else if (zone === 'top') {
-        zoneEl.style.height = edge + 'px';
+        zoneEl.style.height = halfH + 'px';
       } else if (zone === 'bottom') {
-        zoneEl.style.top = Math.max(0, Math.round(rect.height - edge)) + 'px';
-        zoneEl.style.height = edge + 'px';
-      } else {
-        const cx = Math.round(rect.width * 0.2);
-        const cy = Math.round(rect.height * 0.2);
-        zoneEl.style.left = cx + 'px';
-        zoneEl.style.top = cy + 'px';
-        zoneEl.style.width = Math.max(40, Math.round(rect.width - cx * 2)) + 'px';
-        zoneEl.style.height = Math.max(28, Math.round(rect.height - cy * 2)) + 'px';
+        zoneEl.style.top = (height - halfH) + 'px';
+        zoneEl.style.height = halfH + 'px';
       }
-
-      label.textContent = `Dock ${zone}`;
     }
 
     function hideOverlay() {

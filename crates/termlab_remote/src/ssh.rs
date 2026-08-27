@@ -303,6 +303,21 @@ pub(crate) async fn connect_via_proxy(
         .map_err(|e| RemoteError::Connection(format!("Connection via proxy failed: {e}")))
 }
 
+#[derive(Debug, Clone, Copy)]
+enum KeyAuthLogOutcome {
+    Succeeded,
+    Rejected,
+    LoadFailed,
+}
+
+fn key_auth_log_message(outcome: KeyAuthLogOutcome) -> &'static str {
+    match outcome {
+        KeyAuthLogOutcome::Succeeded => "SSH key authentication succeeded",
+        KeyAuthLogOutcome::Rejected => "SSH key authentication failed",
+        KeyAuthLogOutcome::LoadFailed => "SSH private key could not be loaded",
+    }
+}
+
 /// Try key-based authentication with common SSH key files.
 pub(crate) async fn try_key_auth(
     session: &mut client::Handle<TermLabSshHandler>,
@@ -325,17 +340,20 @@ pub(crate) async fn try_key_auth(
         match russh_keys::load_secret_key(key_path, key_passphrase) {
             Ok(key) => match session.authenticate_publickey(user, Arc::new(key)).await {
                 Ok(true) => {
-                    log::info!("SSH key auth success with {}", key_path.display());
+                    log::info!("{}", key_auth_log_message(KeyAuthLogOutcome::Succeeded));
                     return Ok(true);
                 }
-                Ok(false) => continue,
-                Err(e) => {
-                    log::warn!("SSH key auth error with {}: {e}", key_path.display());
+                Ok(false) => {
+                    log::warn!("{}", key_auth_log_message(KeyAuthLogOutcome::Rejected));
+                    continue;
+                }
+                Err(_) => {
+                    log::warn!("{}", key_auth_log_message(KeyAuthLogOutcome::Rejected));
                     continue;
                 }
             },
-            Err(e) => {
-                log::warn!("Failed to load SSH key {}: {e}", key_path.display());
+            Err(_) => {
+                log::warn!("{}", key_auth_log_message(KeyAuthLogOutcome::LoadFailed));
                 continue;
             }
         }
@@ -579,6 +597,26 @@ mod tests {
         assert_eq!(key_paths.len(), 1);
         assert!(!key_paths[0].to_str().unwrap().starts_with('~'));
         assert!(key_paths[0].to_str().unwrap().contains(".ssh/my_key"));
+    }
+
+    #[test]
+    fn key_auth_log_messages_never_include_private_key_paths() {
+        let sentinel = "/Users/alice/.ssh/customer-production-ed25519";
+        for outcome in [
+            KeyAuthLogOutcome::Succeeded,
+            KeyAuthLogOutcome::Rejected,
+            KeyAuthLogOutcome::LoadFailed,
+        ] {
+            let message = key_auth_log_message(outcome);
+            assert!(!message.contains(sentinel));
+            assert!(!message.contains(".ssh/"));
+        }
+        let source = include_str!("ssh.rs");
+        let path_format_call = ["key_path.", "display()"].concat();
+        assert!(
+            !source.contains(&path_format_call),
+            "production key-auth logging must never format the attempted pathname"
+        );
     }
 
     #[test]

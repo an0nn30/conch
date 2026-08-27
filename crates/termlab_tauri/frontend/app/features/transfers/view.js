@@ -1,0 +1,619 @@
+(function initTermLabTransferCenterView(global) {
+  'use strict';
+
+  const TERMINAL_KINDS = new Set(['completed', 'failed', 'cancelled']);
+  const COLUMNS = [
+    'File / Direction',
+    'Host',
+    'Destination',
+    'Status / Progress',
+    'Speed / ETA',
+    'Actions',
+  ];
+
+  function append(parent, tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    parent.appendChild(element);
+    return element;
+  }
+
+  function setData(element, name, value) {
+    element.setAttribute(`data-${name}`, value);
+  }
+
+  function titleCase(value) {
+    const text = String(value || '');
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Unknown';
+  }
+
+  function isHistoryJob(job) {
+    return TERMINAL_KINDS.has(job && job.state ? job.state.kind : '');
+  }
+
+  function jobsFor(snapshot, viewMode) {
+    const jobs = snapshot && Array.isArray(snapshot.jobs) ? snapshot.jobs : [];
+    const history = viewMode === 'history';
+    return jobs.filter((job) => isHistoryJob(job) === history);
+  }
+
+  function endpointLabel(endpoint) {
+    if (!endpoint) return 'Unknown host';
+    if (endpoint.kind === 'configured') return endpoint.label || endpoint.serverEntryId || 'Configured host';
+    if (endpoint.kind === 'adHoc') {
+      const user = endpoint.user ? `${endpoint.user}@` : '';
+      const port = endpoint.port ? `:${endpoint.port}` : '';
+      return `${user}${endpoint.host || 'Unknown host'}${port}`;
+    }
+    return endpoint.label || endpoint.host || 'Unknown host';
+  }
+
+  function transferPaths(job) {
+    const upload = job && job.direction === 'upload';
+    return {
+      source: upload ? job.localPath : job.remotePath,
+      destination: upload ? job.remotePath : job.localPath,
+    };
+  }
+
+  function percentFor(job) {
+    const total = Number(job && job.totalBytes);
+    if (!(total > 0)) return null;
+    const transferred = Number(job.bytesTransferred) || 0;
+    return Math.max(0, Math.min(100, Math.round((transferred / total) * 100)));
+  }
+
+  function statusFor(job) {
+    const state = (job && job.state) || {};
+    switch (state.kind) {
+      case 'queued': return 'Queued';
+      case 'connecting': return 'Connecting';
+      case 'checking': return 'Checking';
+      case 'running': return 'Running';
+      case 'paused': return 'Paused';
+      case 'needsConnection': return state.message ? `Needs connection — ${state.message}` : 'Needs connection';
+      case 'needsAttention': return 'Needs attention';
+      case 'retryWaiting': return `Retry waiting${state.attempt ? ` — attempt ${state.attempt}` : ''}`;
+      case 'completed': return state.result === 'skipped' ? 'Completed — Skipped' : 'Completed';
+      case 'failed': return state.error ? `Failed — ${state.error}` : 'Failed';
+      case 'cancelled': return state.cleanupError ? `Cancelled — ${state.cleanupError}` : 'Cancelled';
+      default: return titleCase(state.kind);
+    }
+  }
+
+  function formatEta(seconds) {
+    const value = Math.max(0, Math.round(Number(seconds) || 0));
+    if (value < 60) return `${value}s remaining`;
+    const minutes = Math.floor(value / 60);
+    const remainder = value % 60;
+    return remainder ? `${minutes}m ${remainder}s remaining` : `${minutes}m remaining`;
+  }
+
+  function batchAggregatesFor(snapshot) {
+    return snapshot && Array.isArray(snapshot.batches) ? snapshot.batches : [];
+  }
+
+  // Partition the currently visible jobs (already filtered to the active or
+  // history view) by batch, recording the order in which each batch and each
+  // batchless job is FIRST encountered. A job's batchId only groups it when
+  // the referenced batch aggregate is actually present in this snapshot — an
+  // unknown/stale batchId falls back to a plain batchless row rather than
+  // silently dropping the job.
+  function groupJobs(jobs, batchAggregates) {
+    const aggById = new Map();
+    for (const agg of batchAggregates) {
+      if (agg && agg.info && agg.info.id) aggById.set(agg.info.id, agg);
+    }
+    const membersByBatch = new Map();
+    const order = [];
+    for (const job of jobs) {
+      if (job.batchId && aggById.has(job.batchId)) {
+        if (!membersByBatch.has(job.batchId)) {
+          membersByBatch.set(job.batchId, []);
+          order.push({ type: 'batch', id: job.batchId });
+        }
+        membersByBatch.get(job.batchId).push(job);
+      } else {
+        order.push({ type: 'job', job });
+      }
+    }
+    return { order, aggById, membersByBatch };
+  }
+
+  // Flatten into the row sequence the table renders, interleaving by first
+  // appearance: a batch's header (followed by ALL of its members, so a group
+  // stays contiguous) lands where its first member sits in the queue, and a
+  // batchless job keeps its own natural position. Emitting every group ahead
+  // of every batchless row — the previous behaviour — reordered rows against
+  // the queue the user is actually watching, e.g. a single file queued before
+  // a folder transfer would render below it.
+  function renderItems(jobs, batchAggregates) {
+    const { order, aggById, membersByBatch } = groupJobs(jobs, batchAggregates);
+    const items = [];
+    for (const entry of order) {
+      if (entry.type === 'job') {
+        items.push({ type: 'job', id: entry.job.id, job: entry.job });
+        continue;
+      }
+      const agg = aggById.get(entry.id);
+      items.push({ type: 'header', id: entry.id, agg });
+      for (const job of membersByBatch.get(entry.id)) items.push({ type: 'job', id: job.id, job });
+    }
+    return items;
+  }
+
+  function batchProgressText(agg) {
+    const total = Number(agg.info.discoveredFiles) || 0;
+    const done = Number(agg.filesDone) || 0;
+    const suffix = agg.info.expansion && agg.info.expansion.kind === 'running' ? '+' : '';
+    return `${done}/${total}${suffix}`;
+  }
+
+  function actionsFor(job) {
+    const kind = job && job.state ? job.state.kind : '';
+    switch (kind) {
+      case 'running': return [['pause', 'Pause'], ['cancel', 'Cancel']];
+      case 'paused': return [['resume', 'Resume'], ['cancel', 'Cancel']];
+      case 'failed': return [['retry', 'Retry'], ['details', 'Details']];
+      case 'needsConnection': return [['connect', 'Connect'], ['cancel', 'Cancel']];
+      case 'needsAttention': return [['resolve', 'Resolve'], ['cancel', 'Cancel']];
+      case 'queued': return [
+        ['pause', 'Pause'],
+        ['toggle-priority', job.priority === 'interactive' ? 'Normal priority' : 'Prioritize'],
+        ['move-up', 'Move up'],
+        ['move-down', 'Move down'],
+        ['cancel', 'Cancel'],
+      ];
+      case 'completed':
+      case 'cancelled':
+        return [['details', 'Details']];
+      default:
+        return [];
+    }
+  }
+
+  function create(options) {
+    const opts = options || {};
+    const panelEl = opts.panelEl;
+    if (!panelEl) throw new Error('Transfer Center view requires panelEl');
+    const formatSize = typeof opts.formatSize === 'function'
+      ? opts.formatSize
+      : (value) => `${Number(value) || 0} B`;
+    const onViewChange = typeof opts.onViewChange === 'function' ? opts.onViewChange : () => {};
+    const onSelect = typeof opts.onSelect === 'function' ? opts.onSelect : () => {};
+    const onAction = typeof opts.onAction === 'function' ? opts.onAction : () => {};
+
+    panelEl.classList.add('tl-transfer-center');
+    panelEl.setAttribute('tabindex', '-1');
+
+    const toolbarEl = append(panelEl, 'div', 'tl-transfer-center__toolbar');
+    toolbarEl.setAttribute('role', 'toolbar');
+    toolbarEl.setAttribute('aria-label', 'Transfer controls');
+    const tabsEl = append(toolbarEl, 'div', 'tl-transfer-center__tabs');
+    tabsEl.setAttribute('role', 'tablist');
+    tabsEl.setAttribute('aria-label', 'Transfer view');
+    const activeButtonEl = append(tabsEl, 'button', 'tl-transfer-center__tab');
+    activeButtonEl.setAttribute('type', 'button');
+    activeButtonEl.setAttribute('role', 'tab');
+    setData(activeButtonEl, 'transfer-view', 'active');
+    const historyButtonEl = append(tabsEl, 'button', 'tl-transfer-center__tab');
+    historyButtonEl.setAttribute('type', 'button');
+    historyButtonEl.setAttribute('role', 'tab');
+    setData(historyButtonEl, 'transfer-view', 'history');
+
+    const summaryEl = append(toolbarEl, 'div', 'tl-transfer-center__summary');
+    summaryEl.setAttribute('aria-live', 'polite');
+    summaryEl.setAttribute('aria-atomic', 'true');
+
+    const toolbarActionsEl = append(toolbarEl, 'div', 'tl-transfer-center__toolbar-actions');
+    // Toolbar actions are compact icon buttons (the tool-window header's
+    // tl-icon-btn chrome) with `title` tooltips mirroring their aria-labels.
+    // The harness has no tlIcon, so fall back to the action's text label.
+    const actionIcon = (name, fallback) => (
+      global.tlIcon && typeof global.tlIcon.html === 'function'
+        ? global.tlIcon.html(name, { size: 16, alt: '' })
+        : fallback
+    );
+    const queueButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
+    queueButtonEl.setAttribute('type', 'button');
+    const clearButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
+    clearButtonEl.setAttribute('type', 'button');
+    clearButtonEl.innerHTML = actionIcon('gc', 'Clear completed');
+    clearButtonEl.setAttribute('aria-label', 'Clear completed transfer history');
+    clearButtonEl.setAttribute('title', 'Clear completed transfer history');
+    setData(clearButtonEl, 'transfer-action', 'clear-completed');
+    const concurrencyButtonEl = append(toolbarActionsEl, 'button', 'tl-icon-btn tl-transfer-center__toolbar-button');
+    concurrencyButtonEl.setAttribute('type', 'button');
+    concurrencyButtonEl.innerHTML = actionIcon('settings', 'Concurrency');
+    concurrencyButtonEl.setAttribute('aria-label', 'Configure transfer concurrency');
+    concurrencyButtonEl.setAttribute('title', 'Configure transfer concurrency');
+    setData(concurrencyButtonEl, 'transfer-action', 'concurrency');
+
+    const recoveryEl = append(panelEl, 'div', 'tl-transfer-center__recovery');
+    recoveryEl.setAttribute('role', 'alert');
+    setData(recoveryEl, 'transfer-state', 'recovery-error');
+    recoveryEl.hidden = true;
+
+    const stateEl = append(panelEl, 'div', 'tl-transfer-center__state');
+    setData(stateEl, 'transfer-state', 'loading');
+    stateEl.textContent = 'Loading transfers…';
+
+    const tableViewportEl = append(panelEl, 'div', 'tl-transfer-center__table-viewport');
+    tableViewportEl.hidden = true;
+    const tableEl = append(tableViewportEl, 'table', 'tl-transfer-center__table');
+    tableEl.setAttribute('aria-label', 'Transfers');
+    const theadEl = append(tableEl, 'thead');
+    const headerRowEl = append(theadEl, 'tr');
+    for (const column of COLUMNS) {
+      const cell = append(headerRowEl, 'th', '', column);
+      cell.setAttribute('scope', 'col');
+    }
+    const tbodyEl = append(tableEl, 'tbody');
+
+    let currentIds = [];
+    let currentTokens = [];
+    let rowsById = new Map();
+    let headerRowsById = new Map();
+    let latestSnapshot = null;
+    let latestState = { viewMode: 'active', selectedId: null };
+    let lastSummaryText = null;
+
+    function patchIdentity(rowRecord, job) {
+      const fileCell = rowRecord.cells.file;
+      fileCell.replaceChildren();
+      append(fileCell, 'span', 'tl-transfer-center__file-name', job.fileName || 'Unnamed transfer');
+      append(fileCell, 'span', 'tl-transfer-center__direction', titleCase(job.direction));
+
+      rowRecord.cells.host.textContent = endpointLabel(job.endpoint);
+      const paths = transferPaths(job);
+      const destinationCell = rowRecord.cells.destination;
+      destinationCell.replaceChildren();
+      const sourceEl = append(destinationCell, 'span', 'tl-transfer-center__path', paths.source || '—');
+      sourceEl.setAttribute('title', paths.source || '');
+      append(destinationCell, 'span', 'tl-transfer-center__path-arrow', '→');
+      const destinationEl = append(destinationCell, 'span', 'tl-transfer-center__path', paths.destination || '—');
+      destinationEl.setAttribute('title', paths.destination || '');
+      // The narrow card layout hides this cell entirely, so the row itself
+      // carries the full route as a hover tooltip.
+      rowRecord.element.setAttribute('title', `${paths.source || '—'} → ${paths.destination || '—'}`);
+    }
+
+    function patchProgress(rowRecord, job) {
+      const statusCell = rowRecord.cells.status;
+      statusCell.replaceChildren();
+      const paths = transferPaths(job);
+      const percentage = percentFor(job);
+      const status = statusFor(job);
+      append(
+        statusCell,
+        'span',
+        `tl-transfer-center__status tl-transfer-center__status--${job.state && job.state.kind ? job.state.kind : 'unknown'}`,
+        percentage === null ? status : `${status} — ${percentage}%`,
+      );
+      if (percentage !== null) {
+        const progressEl = append(statusCell, 'progress', 'tl-transfer-center__progress');
+        progressEl.value = Number(job.bytesTransferred) || 0;
+        progressEl.max = Number(job.totalBytes) || 1;
+        const progressName = job.fileName || paths.destination || paths.source || 'Transfer';
+        progressEl.setAttribute('aria-label', `${progressName} progress: ${percentage}%`);
+      }
+
+      const speedCell = rowRecord.cells.speed;
+      speedCell.replaceChildren();
+      const speed = Number(job.speedBytesPerSecond) || 0;
+      append(speedCell, 'span', 'tl-transfer-center__speed', speed > 0 ? `${formatSize(speed)}/s` : '—');
+      if (job.etaSeconds !== null && job.etaSeconds !== undefined) {
+        append(speedCell, 'span', 'tl-transfer-center__eta', formatEta(job.etaSeconds));
+      }
+    }
+
+    function patchActions(rowRecord, job) {
+      const actionsCell = rowRecord.cells.actions;
+      actionsCell.replaceChildren();
+      for (const [action, label] of actionsFor(job)) {
+        const button = append(actionsCell, 'button', 'tl-transfer-center__action', label);
+        button.setAttribute('type', 'button');
+        button.setAttribute('aria-label', `${label} ${job.fileName || 'transfer'}`);
+        setData(button, 'transfer-action', action);
+        setData(button, 'job-id', job.id);
+      }
+    }
+
+    function signatures(job) {
+      return {
+        identity: JSON.stringify([
+          job.fileName,
+          job.direction,
+          job.endpoint,
+          job.localPath,
+          job.remotePath,
+        ]),
+        progress: JSON.stringify([
+          job.state,
+          job.bytesTransferred,
+          job.totalBytes,
+          job.speedBytesPerSecond,
+          job.etaSeconds,
+        ]),
+        actions: JSON.stringify([job.state && job.state.kind, job.priority]),
+      };
+    }
+
+    function patchRow(rowRecord, job, selected) {
+      const next = signatures(job);
+      const previous = rowRecord.signatures;
+      if (!previous || previous.identity !== next.identity) patchIdentity(rowRecord, job);
+      if (!previous || previous.progress !== next.progress) patchProgress(rowRecord, job);
+      if (!previous || previous.actions !== next.actions) patchActions(rowRecord, job);
+      rowRecord.signatures = next;
+      rowRecord.element.setAttribute('aria-selected', selected ? 'true' : 'false');
+      rowRecord.element.classList.toggle('is-selected', selected);
+    }
+
+    function createRow(job, selected) {
+      const rowEl = document.createElement('tr');
+      rowEl.className = 'tl-transfer-center__row';
+      setData(rowEl, 'job-id', job.id);
+      rowEl.setAttribute('tabindex', '0');
+      const cells = {};
+      for (const name of ['file', 'host', 'destination', 'status', 'speed', 'actions']) {
+        cells[name] = append(rowEl, 'td', `tl-transfer-center__cell tl-transfer-center__cell--${name}`);
+        setData(cells[name], 'transfer-cell', name);
+      }
+      const record = { element: rowEl, cells, signatures: null };
+      patchRow(record, job, selected);
+      return record;
+    }
+
+    function batchSignature(agg) {
+      return JSON.stringify([
+        agg.info.name,
+        agg.info.direction,
+        agg.info.expansion,
+        agg.filesDone,
+        agg.info.discoveredFiles,
+        agg.bytesDone,
+        agg.info.discoveredBytes,
+        agg.speedBytesPerSecond,
+        agg.etaSeconds,
+      ]);
+    }
+
+    function patchHeaderRow(rowRecord, agg) {
+      const next = batchSignature(agg);
+      if (rowRecord.signature === next) return;
+      rowRecord.signature = next;
+
+      // The <td> stays a normal table cell (required for `colspan` to work
+      // under `table-layout: fixed` — a flex display on the cell itself
+      // takes it out of table layout and collapses its width). The flex
+      // layout lives on an inner wrapper div instead.
+      const lineEl = rowRecord.lineEl;
+      lineEl.replaceChildren();
+      append(lineEl, 'span', 'tl-transfer-center__batch-name', agg.info.name || 'Unnamed batch');
+      append(lineEl, 'span', 'tl-transfer-center__batch-direction', titleCase(agg.info.direction));
+      append(lineEl, 'span', 'tl-transfer-center__batch-progress', batchProgressText(agg));
+      if (agg.info.expansion && agg.info.expansion.kind === 'interrupted') {
+        const marker = append(lineEl, 'span', 'tl-transfer-center__batch-marker', '⚠ expansion interrupted');
+        marker.setAttribute('title', agg.info.expansion.reason || '');
+      }
+      append(
+        lineEl,
+        'span',
+        'tl-transfer-center__batch-bytes',
+        `${formatSize(agg.bytesDone)} of ${formatSize(agg.info.discoveredBytes)}`,
+      );
+      const speed = Number(agg.speedBytesPerSecond) || 0;
+      append(lineEl, 'span', 'tl-transfer-center__batch-speed', speed > 0 ? `${formatSize(speed)}/s` : '—');
+      if (agg.etaSeconds !== null && agg.etaSeconds !== undefined) {
+        append(lineEl, 'span', 'tl-transfer-center__batch-eta', formatEta(agg.etaSeconds));
+      }
+      const cancelButton = append(lineEl, 'button', 'tl-transfer-center__batch-cancel', 'Cancel');
+      cancelButton.setAttribute('type', 'button');
+      cancelButton.setAttribute('aria-label', `Cancel ${agg.info.name || 'folder transfer'}`);
+      setData(cancelButton, 'transfer-action', 'cancel-batch');
+      setData(cancelButton, 'batch-id', agg.info.id);
+    }
+
+    function createHeaderRow(agg) {
+      const rowEl = document.createElement('tr');
+      rowEl.className = 'tl-transfer-center__batch';
+      setData(rowEl, 'batch-id', agg.info.id);
+      const cellEl = append(rowEl, 'td', 'tl-transfer-center__batch-cell');
+      cellEl.setAttribute('colspan', String(COLUMNS.length));
+      const lineEl = append(cellEl, 'div', 'tl-transfer-center__batch-line');
+      const record = { element: rowEl, cellEl, lineEl, signature: null };
+      patchHeaderRow(record, agg);
+      return record;
+    }
+
+    function updateSummary(snapshot, state) {
+      const summary = snapshot && snapshot.summary ? snapshot.summary : {};
+      const active = Number(summary.active) || 0;
+      const history = Number(summary.history) || 0;
+      activeButtonEl.textContent = `Active ${active}`;
+      historyButtonEl.textContent = `History ${history}`;
+      const historySelected = state.viewMode === 'history';
+      activeButtonEl.setAttribute('aria-selected', historySelected ? 'false' : 'true');
+      historyButtonEl.setAttribute('aria-selected', historySelected ? 'true' : 'false');
+      activeButtonEl.classList.toggle('is-active', !historySelected);
+      historyButtonEl.classList.toggle('is-active', historySelected);
+
+      const parts = [
+        `${active} active`,
+        `${Number(summary.running) || 0} running`,
+        `${Number(summary.queued) || 0} queued`,
+        `${Number(summary.paused) || 0} paused`,
+        `${Number(summary.attention) || 0} need attention`,
+        `${Number(summary.failed) || 0} failed`,
+      ];
+      const summaryText = `${snapshot.queuePaused ? 'Queue paused · ' : ''}${parts.join(' · ')}`;
+      if (summaryText !== lastSummaryText) {
+        summaryEl.textContent = summaryText;
+        lastSummaryText = summaryText;
+      }
+
+      const paused = !!snapshot.queuePaused;
+      queueButtonEl.innerHTML = paused
+        ? actionIcon('resume', 'Resume all')
+        : actionIcon('suspend', 'Pause all');
+      const queueLabel = paused ? 'Resume all eligible transfers' : 'Pause all active transfers';
+      queueButtonEl.setAttribute('aria-label', queueLabel);
+      queueButtonEl.setAttribute('title', queueLabel);
+      setData(queueButtonEl, 'transfer-action', paused ? 'resume-all' : 'pause-all');
+      clearButtonEl.disabled = history === 0;
+    }
+
+    function render(snapshot, state) {
+      latestSnapshot = snapshot;
+      latestState = { viewMode: state && state.viewMode === 'history' ? 'history' : 'active', selectedId: state && state.selectedId };
+
+      if (!snapshot) {
+        recoveryEl.hidden = true;
+        tableViewportEl.hidden = true;
+        stateEl.hidden = false;
+        setData(stateEl, 'transfer-state', 'loading');
+        stateEl.textContent = 'Loading transfers…';
+        return;
+      }
+
+      updateSummary(snapshot, latestState);
+      recoveryEl.hidden = !snapshot.recoveryError;
+      recoveryEl.textContent = snapshot.recoveryError ? `Transfer recovery error: ${snapshot.recoveryError}` : '';
+
+      const jobs = jobsFor(snapshot, latestState.viewMode);
+      const items = renderItems(jobs, batchAggregatesFor(snapshot));
+      const nextTokens = items.map((item) => `${item.type}:${item.id}`);
+      const structureChanged = nextTokens.length !== currentTokens.length
+        || nextTokens.some((token, index) => token !== currentTokens[index]);
+
+      if (structureChanged) {
+        tbodyEl.replaceChildren();
+        rowsById = new Map();
+        headerRowsById = new Map();
+        for (const item of items) {
+          if (item.type === 'header') {
+            const record = createHeaderRow(item.agg);
+            headerRowsById.set(item.id, record);
+            tbodyEl.appendChild(record.element);
+          } else {
+            const record = createRow(item.job, latestState.selectedId === item.job.id);
+            rowsById.set(item.id, record);
+            tbodyEl.appendChild(record.element);
+          }
+        }
+      } else {
+        for (const item of items) {
+          if (item.type === 'header') {
+            const record = headerRowsById.get(item.id);
+            if (record) patchHeaderRow(record, item.agg);
+          } else {
+            const record = rowsById.get(item.id);
+            if (record) patchRow(record, item.job, latestState.selectedId === item.job.id);
+          }
+        }
+      }
+      currentTokens = nextTokens;
+      currentIds = items.filter((item) => item.type === 'job').map((item) => item.id);
+
+      const empty = jobs.length === 0;
+      tableViewportEl.hidden = empty;
+      stateEl.hidden = !empty;
+      if (empty) {
+        setData(stateEl, 'transfer-state', 'empty');
+        stateEl.textContent = latestState.viewMode === 'history' ? 'No transfer history' : 'No active transfers';
+      }
+    }
+
+    function setSelection(selectedId) {
+      latestState.selectedId = selectedId;
+      for (const [id, record] of rowsById) {
+        const selected = id === selectedId;
+        record.element.setAttribute('aria-selected', selected ? 'true' : 'false');
+        record.element.classList.toggle('is-selected', selected);
+      }
+    }
+
+    function onClick(event) {
+      const target = event && event.target;
+      if (!target || typeof target.closest !== 'function') return;
+      const viewButton = target.closest('[data-transfer-view]');
+      if (viewButton) {
+        onViewChange(viewButton.getAttribute('data-transfer-view'));
+        return;
+      }
+
+      const actionButton = target.closest('[data-transfer-action]');
+      if (actionButton) {
+        const jobId = actionButton.getAttribute('data-job-id');
+        const batchId = actionButton.getAttribute('data-batch-id');
+        if (jobId) onSelect(jobId);
+        onAction({ action: actionButton.getAttribute('data-transfer-action'), jobId, batchId, invoker: actionButton });
+        return;
+      }
+
+      const row = target.closest('tr[data-job-id]');
+      if (row) onSelect(row.getAttribute('data-job-id'));
+    }
+
+    function onKeyDown(event) {
+      const target = event && event.target;
+      if (!target || typeof target.closest !== 'function') return;
+      const tag = String(target.tagName || '').toUpperCase();
+      if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
+          || target.getAttribute('contenteditable') === 'true') return;
+
+      const key = event.key;
+      const row = target.closest('tr[data-job-id]');
+      const currentId = row ? row.getAttribute('data-job-id') : latestState.selectedId;
+      if (key === 'ArrowUp' || key === 'ArrowDown') {
+        if (currentIds.length === 0) return;
+        const currentIndex = Math.max(0, currentIds.indexOf(currentId));
+        const delta = key === 'ArrowUp' ? -1 : 1;
+        const nextIndex = Math.max(0, Math.min(currentIds.length - 1, currentIndex + delta));
+        const nextId = currentIds[nextIndex];
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        onSelect(nextId);
+        const nextRow = rowsById.get(nextId);
+        if (nextRow && typeof nextRow.element.focus === 'function') nextRow.element.focus();
+        return;
+      }
+
+      const jobId = currentId || latestState.selectedId;
+      const jobs = latestSnapshot && Array.isArray(latestSnapshot.jobs) ? latestSnapshot.jobs : [];
+      const job = jobs.find((item) => item.id === jobId);
+      const kind = job && job.state ? job.state.kind : '';
+      let action = null;
+      if (key === ' ' || key === 'Spacebar') {
+        if (kind === 'running' || kind === 'queued') action = 'pause';
+        else if (kind === 'paused') action = 'resume';
+      } else if (key === 'Enter') {
+        if (kind === 'needsAttention') action = 'resolve';
+        else if (actionsFor(job).some(([name]) => name === 'details')) action = 'details';
+      } else if (key === 'Delete' && actionsFor(job).some(([name]) => name === 'cancel')) {
+        action = 'cancel';
+      }
+      if (!action) return;
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      if (currentId && latestState.selectedId !== currentId) onSelect(currentId);
+      const invoker = rowsById.get(jobId);
+      onAction({ action, jobId, invoker: invoker ? invoker.element : row });
+    }
+
+    panelEl.addEventListener('click', onClick);
+    panelEl.addEventListener('keydown', onKeyDown);
+
+    return {
+      render,
+      setSelection,
+      destroy() {
+        panelEl.removeEventListener('click', onClick);
+        panelEl.removeEventListener('keydown', onKeyDown);
+      },
+      getSnapshot: () => latestSnapshot,
+    };
+  }
+
+  global.termlabTransferCenterView = { create, jobsFor, isHistoryJob };
+})(window);

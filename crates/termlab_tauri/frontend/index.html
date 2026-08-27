@@ -21,7 +21,9 @@
   <link rel="stylesheet" href="styles/design-system/components/file-dialog.css" />
   <link rel="stylesheet" href="styles/design-system/components/settings.css" />
   <link rel="stylesheet" href="styles/design-system/components/palette.css" />
+  <link rel="stylesheet" href="styles/design-system/components/tab-switcher.css" />
   <link rel="stylesheet" href="styles/design-system/components/editor.css" />
+  <link rel="stylesheet" href="styles/design-system/components/transfer-center.css" />
   <link rel="stylesheet" href="styles/base.css" />
   <link rel="stylesheet" href="styles/layout.css" />
   <link rel="stylesheet" href="styles/tool-windows.css" />
@@ -36,7 +38,7 @@
       <div id="left-strip" class="side-strip"></div>
       <div id="left-sidebar" class="sidebar-wrap hidden">
         <div id="left-panel-container" class="sidebar-panel">
-          <div class="tool-zone" data-zone="left-top">
+          <div class="tool-zone empty" data-zone="left-top">
             <div class="zone-tab-strip hidden"></div>
             <div class="zone-content"></div>
           </div>
@@ -55,7 +57,7 @@
       <div id="right-sidebar" class="sidebar-wrap hidden">
         <div id="right-sidebar-resize" class="sidebar-resize"></div>
         <div id="right-panel-container" class="sidebar-panel">
-          <div class="tool-zone" data-zone="right-top">
+          <div class="tool-zone empty" data-zone="right-top">
             <div class="zone-tab-strip hidden"></div>
             <div class="zone-content"></div>
           </div>
@@ -70,9 +72,16 @@
     </div>
     <div id="bottom-zone-wrap" class="bottom-zone-wrap hidden">
       <div id="bottom-zone-resize" class="bottom-zone-resize"></div>
-      <div class="tool-zone" data-zone="bottom">
-        <div class="zone-tab-strip hidden"></div>
-        <div class="zone-content"></div>
+      <div class="bottom-zone-row">
+        <div class="tool-zone empty" data-zone="bottom-left">
+          <div class="zone-tab-strip hidden"></div>
+          <div class="zone-content"></div>
+        </div>
+        <div id="bottom-zone-divider" class="zone-divider zone-divider--vertical hidden"></div>
+        <div class="tool-zone empty" data-zone="bottom-right">
+          <div class="zone-tab-strip hidden"></div>
+          <div class="zone-content"></div>
+        </div>
       </div>
     </div>
     <div id="bottom-strip" class="side-strip side-strip--horizontal"></div>
@@ -125,6 +134,13 @@
   <script src="app/ui/titlebar.js"></script>
   <script src="app/ui/toast.js"></script>
   <script src="app/ui/notification-panel.js"></script>
+  <script src="app/features/transfers/data-service.js"></script>
+  <script src="app/features/transfers/store.js"></script>
+  <script src="app/features/transfers/runtime.js"></script>
+  <script src="app/features/transfers/auto-open.js"></script>
+  <script src="app/features/transfers/dialogs.js"></script>
+  <script src="app/features/transfers/view.js"></script>
+  <script src="app/panels/transfer-center.js"></script>
   <script src="app/panels/plugin-widgets.js"></script>
   <script src="app/features/settings/constants.js"></script>
   <script src="app/features/settings/data-service.js"></script>
@@ -146,9 +162,12 @@
   <script src="app/features/files/data-service.js"></script>
   <script src="app/features/files/pane-store.js"></script>
   <script src="app/features/files/actions.js"></script>
+  <script src="app/features/files/breadcrumbs.js"></script>
   <script src="app/features/files/pane-view.js"></script>
   <script src="app/features/files/transfers.js"></script>
   <script src="app/features/files/connect-auth.js"></script>
+  <script src="app/features/files/split.js"></script>
+  <script src="app/features/files/native-drop.js"></script>
   <script src="app/panels/files-panel.js"></script>
   <script src="app/features/vault/data-service.js"></script>
   <script src="app/features/vault/dialogs.js"></script>
@@ -167,6 +186,7 @@
   <script src="app/features/ssh/connection-form.js"></script>
   <script src="app/features/ssh/dialogs.js"></script>
   <script src="app/panels/ssh-panel.js"></script>
+  <script src="app/layout/dock-highlight.js"></script>
   <script src="app/layout/tool-window-manager.js"></script>
   <script src="app/panels/tunnel-manager.js"></script>
   <script src="app/panels/tunnels-panel.js"></script>
@@ -182,6 +202,7 @@
   <script src="app/features/editor/editor-service.js"></script>
   <script src="app/features/editor/file-dialog-model.js"></script>
   <script src="app/features/editor/file-dialog.js"></script>
+  <script src="app/features/editor/open-path-routing.js"></script>
   <script src="app/layout/split-tree.js"></script>
   <script src="app/layout/split-pane.js"></script>
   <script src="app/layout/pane-dnd.js"></script>
@@ -194,6 +215,9 @@
   <script src="app/bridge-runtime.js"></script>
   <script src="app/manager-compose-runtime.js"></script>
   <script src="app/orchestration-runtime.js"></script>
+  <script src="app/features/tab-switcher/mru.js"></script>
+  <script src="app/features/tab-switcher/view.js"></script>
+  <script src="app/features/tab-switcher/runtime.js"></script>
   <script src="app/event-wiring-runtime.js"></script>
   <script src="app/pane-manager.js"></script>
   <script src="app/tab-manager.js"></script>

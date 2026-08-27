@@ -92,6 +92,7 @@
       const menu = global.tlMenu.open({
         x: rect.left,
         y: rect.bottom + 2,
+        minWidth: rect.width,
         items,
         ariaLabel: button.getAttribute('aria-label') || selectEl.getAttribute('aria-label') || 'Select an option',
       });

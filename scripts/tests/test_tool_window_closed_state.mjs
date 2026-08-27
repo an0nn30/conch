@@ -110,7 +110,7 @@ const BOTTOM_WINDOW = {
 
   const openMap = twm.getActiveZoneAssignments();
   assert.strictEqual(
-    openMap.bottom,
+    openMap['bottom-left'],
     'file-explorer',
     'a freshly registered window should serialise as the bottom zone\'s active window',
   );
@@ -120,12 +120,12 @@ const BOTTOM_WINDOW = {
 
   const closedMap = twm.getActiveZoneAssignments();
   assert.ok(
-    Object.prototype.hasOwnProperty.call(closedMap, 'bottom'),
+    Object.prototype.hasOwnProperty.call(closedMap, 'bottom-left'),
     'after closing the only window in a zone, the saved layout must still record '
     + 'the zone — otherwise "closed" is indistinguishable from "never configured"',
   );
   assert.strictEqual(
-    closedMap.bottom,
+    closedMap['bottom-left'],
     '',
     'a zone with windows but none active must serialise as the empty string',
   );
@@ -146,7 +146,7 @@ const BOTTOM_WINDOW = {
   twm.register('file-explorer', BOTTOM_WINDOW);
 
   assert.strictEqual(
-    twm.getActiveZoneAssignments().bottom,
+    twm.getActiveZoneAssignments()['bottom-left'],
     '',
     'registering a window into a zone the user closed must NOT auto-activate it',
   );
@@ -166,7 +166,7 @@ const BOTTOM_WINDOW = {
   twm.register('file-explorer', BOTTOM_WINDOW);
 
   assert.strictEqual(
-    twm.getActiveZoneAssignments().bottom,
+    twm.getActiveZoneAssignments()['bottom-left'],
     'file-explorer',
     'an absent key still means "unconfigured", so the default window opens as before',
   );

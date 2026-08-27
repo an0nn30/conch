@@ -65,6 +65,58 @@ pub async fn list_dir(
         .collect())
 }
 
+/// What a directory child is, resolved WITHOUT following symlinks.
+///
+/// `FileEntry` deliberately collapses this to `is_dir` for the file browser.
+/// A recursive walk cannot: it must descend directories, transfer files, and
+/// refuse to follow links (which risk cycles and surprise trees).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirEntryKind {
+    Dir,
+    File,
+    Symlink,
+    Other,
+}
+
+/// One directory child with its unresolved type and size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirChild {
+    pub name: String,
+    pub kind: DirEntryKind,
+    pub size: u64,
+}
+
+/// List directory children at `path`, typed for a recursive walk. `.` and
+/// `..` are filtered out by the underlying reader.
+pub async fn list_dir_children(
+    ssh: &russh::client::Handle<TermLabSshHandler>,
+    path: &str,
+) -> Result<Vec<DirChild>, RemoteError> {
+    use russh_sftp::protocol::FileType;
+
+    let sftp = open_sftp(ssh).await?;
+    let entries = sftp
+        .read_dir(path)
+        .await
+        .map_err(|e| RemoteError::Sftp(format!("read_dir failed: {e}")))?;
+
+    Ok(entries
+        .map(|entry| {
+            let metadata = entry.metadata();
+            DirChild {
+                name: entry.file_name(),
+                kind: match entry.file_type() {
+                    FileType::Dir => DirEntryKind::Dir,
+                    FileType::File => DirEntryKind::File,
+                    FileType::Symlink => DirEntryKind::Symlink,
+                    FileType::Other => DirEntryKind::Other,
+                },
+                size: metadata.size.unwrap_or(0),
+            }
+        })
+        .collect())
+}
+
 /// Stat a single path.
 pub async fn stat(
     ssh: &russh::client::Handle<TermLabSshHandler>,

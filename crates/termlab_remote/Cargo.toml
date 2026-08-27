@@ -16,6 +16,7 @@ dirs = { workspace = true }
 termlab_vault = { path = "../termlab_vault" }
 base64 = { workspace = true }
 async-trait = "0.1"
+futures = "0.3"
 russh = "0.48"
 russh-keys = "0.48"
 russh-sftp = "2.1"

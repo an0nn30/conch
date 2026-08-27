@@ -7,6 +7,8 @@
 pub(crate) mod bundled_themes;
 pub(crate) mod chooser_window;
 pub(crate) mod cleanup;
+pub mod cli;
+pub(crate) mod cli_install;
 pub(crate) mod close_guard;
 mod commands;
 mod editor_fs;
@@ -16,6 +18,7 @@ pub(crate) mod fonts;
 mod ipc;
 pub(crate) mod lsp;
 pub(crate) mod menu;
+pub(crate) mod open_path;
 pub(crate) mod panel_host;
 pub mod platform;
 pub(crate) mod plugins;
@@ -36,12 +39,18 @@ pub(crate) mod windows;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use termlab_core::config::{self, UserConfig};
 use parking_lot::{Mutex, RwLock};
 use pty_backend::PtyBackend;
-use remote::RemoteState;
+use remote::{
+    RemoteState,
+    transfer_queue::{
+        QueueActor, SftpTransferJobRunner, SystemQueueClock, TauriTransferEventSink,
+        store::TransferStore,
+    },
+};
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
+use termlab_core::config::{self, UserConfig};
 
 pub(crate) struct TauriState {
     ptys: Arc<Mutex<HashMap<String, PtyBackend>>>,
@@ -247,7 +256,30 @@ mod window_px_tests {
     }
 }
 
-pub fn run(config: UserConfig) -> anyhow::Result<()> {
+/// Mark this process as "the app is actually booting" for any *later*
+/// re-exec of it. Tauri's restart-required flow (see `close_guard.rs`)
+/// re-execs with the original argv, which on this branch may still carry the
+/// paths the user passed on the command line — a restart would then re-open
+/// phantom files, or try to forward them into the instance that is in the
+/// middle of exiting. The re-exec inherits this environment, and
+/// `cli::run_cli_if_requested` checks the marker before anything else and
+/// comes back as a plain app.
+///
+/// Called from `main` immediately after CLI dispatch has already decided to
+/// boot, and deliberately BEFORE any of the app's background threads exist:
+/// `set_var` is only unsound when it races another thread reading the
+/// environment, and at this point in startup there is nothing else running.
+pub fn mark_app_running() {
+    // SAFETY: single-threaded at this point in startup — this runs on the
+    // main thread before platform probes, watchers, the IPC listener, or
+    // Tauri's own thread pool are spawned, so no concurrent getenv can race
+    // it. See the doc comment above for why the marker has to exist at all.
+    unsafe {
+        std::env::set_var(cli::APP_RUNNING_ENV, "1");
+    }
+}
+
+pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()> {
     // Use the user's home directory as a stable "workspace" label rather than
     // the process's actual cwd (current_dir() titled the window after the
     // build directory) or a PTY's shell cwd (pty_backend spawns shells with
@@ -255,15 +287,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     // Mirrors the reference app, whose title segment is its launch workspace.
     let workspace_dir = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
 
-    let (transfer_tx, mut transfer_rx) =
-        tokio::sync::mpsc::unbounded_channel::<termlab_remote::transfer::TransferProgress>();
-    let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
+    let remote_state = Arc::new(Mutex::new(RemoteState::new()));
     let plugins_config = config.termlab.plugins.clone();
     let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new(
         plugins_config.clone(),
     )));
 
     let config_dir = config::config_dir();
+    let (queue_bootstrap, queue_handle) =
+        QueueActor::bootstrap(TransferStore::new(config_dir.join("transfers.json")))
+            .map_err(anyhow::Error::msg)?;
     let vault_path = config_dir.join("vault.enc");
     let lsp_enablement = lsp::manager::Enablement::from_config(&config.editor.lsp);
     let lsp_project_config_dir = config_dir.clone();
@@ -320,14 +353,22 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         })
         .manage(settings::SettingsTransactionGate::default())
         .manage(Arc::clone(&remote_state))
+        .manage(queue_handle.clone())
         .manage(Arc::clone(&plugin_state))
         .manage(Arc::clone(&vault_state))
         .manage(updater::PendingUpdate::new())
         .manage(close_guard::CloseGuard::default())
         .manage(Mutex::new(chooser_window::ChooserRegistry::default()))
         .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
+        .manage(open_path::PendingOpens::default())
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
+
+            queue_bootstrap.start(
+                Arc::new(TauriTransferEventSink::new(app.handle().clone())),
+                Arc::new(SystemQueueClock),
+                Arc::new(SftpTransferJobRunner::new(Arc::clone(&remote_state))),
+            );
 
             let architecture = if cfg!(target_arch = "aarch64") {
                 "arm64"
@@ -351,6 +392,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             lsp::commands::spawn_event_forwarder(app.handle().clone(), lsp_events);
             app.manage(lsp::commands::LspState::new(lsp_manager));
 
+
             // Inject the packaged bundled-themes dir (if this is a packaged
             // build) before anything else runs, so no command can resolve a
             // theme — including the "auto" default — before the override is
@@ -371,6 +413,19 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 app.handle()
                     .set_menu(the_menu)
                     .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
+            }
+
+            // Seed the CLI/IPC "open this path" queue for the "main" window
+            // before its frontend has any chance to load and pull it via
+            // `take_pending_open_paths` — this runs synchronously in setup(),
+            // well before the webview's JS finishes booting and issues that
+            // request-pull invoke.
+            if !pending_paths.is_empty() {
+                open_path::seed_for_label(
+                    &app.state::<open_path::PendingOpens>(),
+                    "main",
+                    pending_paths,
+                );
             }
 
             // Apply persisted window size, decorations, theme, and zoom.
@@ -453,22 +508,15 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             // Start IPC socket listener.
             let _ipc_guard = ipc::start(app.handle().clone());
             // Keep the guard alive for the app's lifetime by leaking it.
-            // The socket file is cleaned up on process exit.
+            // Leaking means its Drop never runs, so the socket file is NOT
+            // removed on exit — it is left behind and unlinked by the next
+            // boot's `remove_file` in `ipc::start` before rebinding. A stale
+            // socket file is inert (nothing is listening, so `connect`
+            // fails), which is exactly what the CLI's not-connected branch
+            // already handles.
             if let Some(guard) = _ipc_guard {
                 std::mem::forget(guard);
             }
-
-            // Forward transfer progress events to the frontend.
-            // Use a std::thread since we're not inside a tokio runtime here.
-            let handle = app.handle().clone();
-            std::thread::Builder::new()
-                .name("transfer-progress".into())
-                .spawn(move || {
-                    while let Some(progress) = transfer_rx.blocking_recv() {
-                        let _ = handle.emit("transfer-progress", &progress);
-                    }
-                })
-                .ok();
 
             // Sweep orphaned light-editor temp files left by a previous crash.
             // Uses a std::thread since we're not inside a tokio runtime here.
@@ -685,7 +733,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                             };
                             let json = serde_json::to_string(&event).unwrap_or_default();
                             sender
-                                .blocking_send(termlab_plugin::bus::PluginMail::WidgetEvent { json })
+                                .blocking_send(termlab_plugin::bus::PluginMail::WidgetEvent {
+                                    json,
+                                })
                                 .is_ok()
                         } else {
                             false
@@ -847,6 +897,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::clipboard_write_text,
             windows::open_new_window,
             windows::open_settings_window,
+            open_path::take_pending_open_paths,
+            open_path::has_pending_open_paths,
             chooser_window::open_file_chooser,
             chooser_window::get_chooser_request,
             chooser_window::resolve_file_chooser,
@@ -863,6 +915,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             panel_host::panel_host_broadcast,
             panel_host::panel_host_action,
             commands::rebuild_menu,
+            cli_install::install_cli_symlink,
+            cli_install::uninstall_cli_symlink,
             settings::get_all_settings,
             settings::save_settings,
             theme_catalog::list_terminal_themes,
@@ -910,7 +964,20 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::sftp_commands::local_remove,
             remote::transfer_commands::transfer_download,
             remote::transfer_commands::transfer_upload,
+            remote::transfer_commands::transfer_enqueue_recursive,
+            remote::transfer_commands::transfer_cancel_batch,
+            remote::transfer_commands::transfer_queue_snapshot,
+            remote::transfer_commands::transfer_pause,
+            remote::transfer_commands::transfer_resume,
+            remote::transfer_commands::transfer_pause_all,
+            remote::transfer_commands::transfer_resume_all,
             remote::transfer_commands::transfer_cancel,
+            remote::transfer_commands::transfer_retry,
+            remote::transfer_commands::transfer_resolve,
+            remote::transfer_commands::transfer_reorder,
+            remote::transfer_commands::transfer_set_priority,
+            remote::transfer_commands::transfer_clear_completed,
+            remote::transfer_commands::transfer_update_settings,
             remote::tunnel_commands::tunnel_start,
             remote::tunnel_commands::tunnel_stop,
             remote::tunnel_commands::tunnel_save,

@@ -36,6 +36,13 @@
      from "red" entirely if the user picks a different terminal palette. */
   --tl-danger: var(--tl-base-errorForeground, #cd3359);
 
+  /* Warning badges use the matching notification surface as a complete
+     foreground/background/border set. All three raw tokens exist in both
+     generated themes, so the semantic aliases remain appearance-safe. */
+  --tl-warning-bg: var(--tl-Notification-ToolWindow-warningBackground);
+  --tl-warning-border: var(--tl-Notification-ToolWindow-warningBorderColor);
+  --tl-warning-fg: var(--tl-Notification-ToolWindow-warningForeground);
+
   /* Active-tab fill + underline (styles/layout.css .tab-btn.active). The raw
      --tl-EditorTabs-underlinedTabBackground / --tl-DefaultTabs-underlineColor
      tokens only exist in tokens-dark.css — tokens-light.css defines no

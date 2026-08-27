@@ -1,0 +1,115 @@
+/* ctrl+tab MRU switcher (app/features/tab-switcher/view.js) — an alt-tab
+   style transient overlay, styled with the same tokens as the command
+   palette but NOT a tl-dialog: it never takes focus and lives only while
+   ctrl is held. Two columns: MRU tab rows (number badges 1-5) on the left,
+   a scaled DOM-clone preview of the selected tab on the right. */
+
+.tl-tabswitcher-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10010;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+}
+
+.tl-tabswitcher {
+  display: flex;
+  width: min(920px, 88vw);
+  /* No fixed height: the preview column carries the terminal host's
+     aspect-ratio (set inline by view.js), so the panel wraps a preview
+     that fills its box edge to edge instead of floating in dead space. */
+  max-height: 76vh;
+  background: var(--tl-panel-bg);
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.tl-tabswitcher__list {
+  flex: 0 0 250px;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--tl-space-2) 0;
+  border-right: 1px solid var(--tl-border);
+}
+
+.tl-tabswitcher__item {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-3);
+  padding: var(--tl-space-2) var(--tl-space-4);
+  cursor: pointer;
+}
+.tl-tabswitcher__item.is-active {
+  background: var(--tl-List-selectionBackground);
+}
+.tl-tabswitcher__item.is-active .tl-tabswitcher__title {
+  color: var(--tl-List-selectionForeground, var(--tl-fg));
+}
+/* Muted gray drowns in the selection color: keep the subtitle and badge on
+   the selection foreground too, dimmed by opacity so hierarchy survives. */
+.tl-tabswitcher__item.is-active .tl-tabswitcher__subtitle,
+.tl-tabswitcher__item.is-active .tl-tabswitcher__badge {
+  color: var(--tl-List-selectionForeground, var(--tl-fg));
+  opacity: 0.75;
+}
+
+.tl-tabswitcher__badge {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font: 600 11px var(--tl-font-ui);
+  color: var(--tl-fg-muted);
+}
+
+.tl-tabswitcher__main { min-width: 0; }
+
+.tl-tabswitcher__title {
+  font: 400 var(--tl-font-size-ui, 13px) var(--tl-font-ui);
+  color: var(--tl-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tl-tabswitcher__subtitle {
+  font: 400 11px var(--tl-font-ui);
+  color: var(--tl-fg-muted);
+}
+
+.tl-tabswitcher__preview {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--tl-space-1);
+  background: var(--tl-terminal-bg, var(--tl-panel-bg));
+  overflow: hidden;
+}
+
+.tl-tabswitcher__stage {
+  overflow: hidden;
+  border: 1px solid var(--tl-border);
+  border-radius: 3px;
+}
+
+.tl-tabswitcher__stage-inner {
+  transform-origin: top left;
+  pointer-events: none;
+}
+
+/* The cloned .tab-tree-root arrives display:none (only the active tab's
+   tree shows in the terminal host) and absolutely positioned; the clone
+   must lay out inside the stage instead. */
+.tl-tabswitcher__stage-inner .tab-tree-root.tl-tabswitcher__clone {
+  display: flex;
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+}

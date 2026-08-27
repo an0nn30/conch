@@ -176,7 +176,6 @@ mod tests {
     /// real `russh::client::Handle` requires an active SSH connection.
     #[test]
     fn cleanup_ssh_sessions_removes_matching_sessions() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let remote = Arc::new(Mutex::new(RemoteState {
             sessions: HashMap::new(),
             connections: HashMap::new(),
@@ -184,8 +183,6 @@ mod tests {
             ssh_config_entries: vec![],
             pending_prompts: Arc::new(Mutex::new(crate::remote::PendingPrompts::new())),
             tunnel_manager: termlab_remote::tunnel::TunnelManager::new(),
-            transfers: Arc::new(Mutex::new(termlab_remote::transfer::TransferRegistry::new())),
-            transfer_progress_tx: tx,
             paths: termlab_remote::callbacks::RemotePaths {
                 known_hosts_file: std::path::PathBuf::from("/tmp/test"),
                 config_dir: std::path::PathBuf::from("/tmp/test"),
@@ -268,7 +265,6 @@ mod tests {
 
     #[test]
     fn cleanup_ssh_sessions_noop_when_no_matching_sessions() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let remote = Arc::new(Mutex::new(RemoteState {
             sessions: HashMap::new(),
             connections: HashMap::new(),
@@ -276,8 +272,6 @@ mod tests {
             ssh_config_entries: vec![],
             pending_prompts: Arc::new(Mutex::new(crate::remote::PendingPrompts::new())),
             tunnel_manager: termlab_remote::tunnel::TunnelManager::new(),
-            transfers: Arc::new(Mutex::new(termlab_remote::transfer::TransferRegistry::new())),
-            transfer_progress_tx: tx,
             paths: termlab_remote::callbacks::RemotePaths {
                 known_hosts_file: std::path::PathBuf::from("/tmp/test"),
                 config_dir: std::path::PathBuf::from("/tmp/test"),

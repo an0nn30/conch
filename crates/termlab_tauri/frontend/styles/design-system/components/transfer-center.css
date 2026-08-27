@@ -1,0 +1,394 @@
+#transfer-center-panel,
+.tl-transfer-center {
+  --tl-transfer-center-table-min-width: 840px;
+
+  /* Size container: the narrow card layout and scrollable toolbar key off
+     the panel's own width. On the ROOT (not the table viewport) because the
+     toolbar is the viewport's sibling and must respond too. */
+  container: tl-transfer-center / inline-size;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  color: var(--tl-fg);
+  background: var(--tl-panel-bg);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+}
+
+.tl-transfer-center [hidden] { display: none; }
+
+.tl-transfer-center__toolbar {
+  flex: 0 0 var(--tl-toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-width: 0;
+  padding: 0 var(--tl-space-2);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+.tl-transfer-center__tabs,
+.tl-transfer-center__toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  flex: 0 0 auto;
+}
+
+.tl-transfer-center__tab,
+.tl-transfer-center__action {
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--tl-radius);
+  font: 500 var(--tl-font-size-ui) var(--tl-font-ui);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tl-transfer-center__tab:hover,
+.tl-transfer-center__action:hover {
+  color: var(--tl-fg);
+  background: var(--tl-row-hover);
+}
+
+.tl-transfer-center__tab.is-active {
+  color: var(--tl-fg);
+  border-color: var(--tl-accent);
+}
+
+.tl-transfer-center__tab:focus-visible,
+.tl-transfer-center__action:focus-visible,
+.tl-transfer-center__row:focus-visible {
+  outline: 1px solid var(--tl-accent);
+  outline-offset: -1px;
+}
+
+.tl-transfer-center__summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tl-fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Toolbar actions are tl-icon-btn icon buttons (22x22, see button.css); this
+   class only pins them in the flex row and dims the disabled state. */
+.tl-transfer-center__toolbar-button {
+  flex: 0 0 auto;
+}
+.tl-transfer-center__toolbar-button:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+
+.tl-transfer-center__recovery {
+  flex: 0 0 auto;
+  padding: var(--tl-space-1) var(--tl-space-2);
+  color: var(--tl-danger);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+.tl-transfer-center__state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--tl-row-h);
+  padding: var(--tl-space-3);
+  color: var(--tl-fg-muted);
+}
+
+.tl-transfer-center__table-viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tl-transfer-center__table {
+  width: 100%;
+  min-width: var(--tl-transfer-center-table-min-width);
+  border-collapse: collapse;
+  table-layout: fixed;
+  color: var(--tl-fg);
+}
+
+.tl-transfer-center__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  overflow: hidden;
+  color: var(--tl-fg-muted);
+  background: var(--tl-panel-bg);
+  border-bottom: 1px solid var(--tl-border);
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__table th:nth-child(1) { width: 20%; }
+.tl-transfer-center__table th:nth-child(2) { width: 14%; }
+.tl-transfer-center__table th:nth-child(3) { width: 22%; }
+.tl-transfer-center__table th:nth-child(4) { width: 18%; }
+.tl-transfer-center__table th:nth-child(5) { width: 12%; }
+.tl-transfer-center__table th:nth-child(6) { width: 14%; }
+
+.tl-transfer-center__row {
+  height: var(--tl-row-h);
+}
+
+.tl-transfer-center__row:hover {
+  background: var(--tl-row-hover);
+}
+
+.tl-transfer-center__row.is-selected {
+  background: var(--tl-selection-bg);
+  color: var(--tl-selection-fg);
+}
+
+.tl-transfer-center__cell {
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  overflow: hidden;
+  border-bottom: 1px solid var(--tl-border);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.tl-transfer-center__cell--file,
+.tl-transfer-center__cell--destination,
+.tl-transfer-center__cell--status,
+.tl-transfer-center__cell--speed {
+  min-width: 0;
+}
+
+.tl-transfer-center__file-name,
+.tl-transfer-center__path,
+.tl-transfer-center__status,
+.tl-transfer-center__speed,
+.tl-transfer-center__eta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__file-name {
+  color: var(--tl-fg);
+}
+
+.tl-transfer-center__direction,
+.tl-transfer-center__eta,
+.tl-transfer-center__path-arrow {
+  color: var(--tl-fg-muted);
+}
+
+.tl-transfer-center__direction {
+  margin-left: var(--tl-space-2);
+}
+
+.tl-transfer-center__path-arrow {
+  margin: 0 var(--tl-space-1);
+}
+
+.tl-transfer-center__status--failed,
+.tl-transfer-center__status--needsAttention,
+.tl-transfer-center__status--needsConnection {
+  color: var(--tl-danger);
+}
+
+.tl-transfer-center__progress {
+  width: 35%;
+  min-width: var(--tl-row-h);
+  height: var(--tl-space-1);
+  margin-left: var(--tl-space-2);
+  vertical-align: middle;
+  accent-color: var(--tl-accent);
+}
+
+.tl-transfer-center__eta { margin-left: var(--tl-space-2); }
+
+.tl-transfer-center__cell--actions {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__action {
+  padding: 0 var(--tl-space-1);
+}
+
+.tl-transfer-center__action + .tl-transfer-center__action {
+  margin-left: var(--tl-space-1);
+}
+
+/* Batch grouping row: a full-width banner (single spanning <td>) above its
+   member rows. Visually distinct from a member row (row-hover tint, a top
+   rule) but never a keyboard stop of its own — only its cancel button is. */
+.tl-transfer-center__batch {
+  background: var(--tl-row-hover);
+}
+
+/* The <td> itself stays a normal table cell — `colspan` only spans columns
+   correctly while the cell participates in `table-layout: fixed` table
+   layout. Giving it `display: flex` directly took it out of that layout
+   and collapsed it to a sliver, so the flex row lives on an inner wrapper
+   div instead (.tl-transfer-center__batch-line). */
+.tl-transfer-center__batch-cell {
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  overflow: hidden;
+  border-bottom: 1px solid var(--tl-border);
+  border-top: 1px solid var(--tl-border);
+  vertical-align: middle;
+}
+
+.tl-transfer-center__batch-line {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: var(--tl-space-2);
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.tl-transfer-center__batch-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tl-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__batch-direction,
+.tl-transfer-center__batch-progress,
+.tl-transfer-center__batch-bytes,
+.tl-transfer-center__batch-speed,
+.tl-transfer-center__batch-eta {
+  flex: 0 0 auto;
+  color: var(--tl-fg-muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__batch-marker {
+  flex: 0 0 auto;
+  color: var(--tl-danger);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.tl-transfer-center__batch-cancel {
+  flex: 0 0 auto;
+  margin-left: auto;
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg-muted);
+  background: transparent;
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  font: 500 var(--tl-font-size-ui) var(--tl-font-ui);
+  cursor: default;
+}
+
+.tl-transfer-center__batch-cancel:hover {
+  color: var(--tl-fg);
+  background: var(--tl-panel-bg);
+}
+
+.tl-transfer-center__batch-cancel:focus-visible {
+  outline: 1px solid var(--tl-accent);
+  outline-offset: -1px;
+}
+
+/* Narrow docks (left/right sidebars, skinny splits): the six-column table
+   reflows into two-line cards — same DOM, CSS-only. Line 1: file + speed +
+   actions; line 2: status + full-width progress; line 3: host and paths,
+   muted. Wide docks keep the dense table above. */
+@container tl-transfer-center (max-width: 560px) {
+  .tl-transfer-center__table { display: block; min-width: 0; width: 100%; }
+  .tl-transfer-center__table thead { display: none; }
+  .tl-transfer-center__table tbody { display: block; }
+  .tl-transfer-center__row {
+    display: flex; flex-wrap: wrap; align-items: center;
+    height: auto; padding: 5px var(--tl-space-2); column-gap: 6px; row-gap: 3px;
+    border-bottom: 1px solid var(--tl-border);
+  }
+  .tl-transfer-center__cell {
+    display: block; height: auto; padding: 0; border-bottom: none;
+  }
+  .tl-transfer-center__cell--file {
+    order: 1; flex: 1 1 auto; min-width: 0;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .tl-transfer-center__cell--speed { order: 2; flex: 0 0 auto; }
+  /* Cards show their actions on the selected (or hovered) row only; the
+     keyboard path is unaffected — arrow selection reveals them, and the
+     Space/Enter/Delete shortcuts never depended on the buttons being shown. */
+  .tl-transfer-center__cell--actions { order: 3; flex: 0 0 auto; display: none; }
+  .tl-transfer-center__row.is-selected .tl-transfer-center__cell--actions,
+  .tl-transfer-center__row:hover .tl-transfer-center__cell--actions,
+  .tl-transfer-center__row:focus-within .tl-transfer-center__cell--actions { display: block; }
+  .tl-transfer-center__cell--status { order: 4; flex: 1 1 100%; }
+  .tl-transfer-center__cell--host { order: 5; flex: 0 0 auto; }
+  /* The full route lives in the row's hover tooltip (see patchIdentity);
+     showing both paths inline made every card three dense lines. */
+  .tl-transfer-center__cell--destination { display: none; }
+  .tl-transfer-center__cell--host,
+  .tl-transfer-center__cell--speed {
+    font-size: 10px;
+    color: var(--tl-fg-muted);
+  }
+  /* The toolbar never ellipsizes in cards mode — when the tabs, summary, and
+     icon buttons outgrow the panel it pans horizontally instead (scrollbar
+     hidden; trackpad/shift-wheel scrolls). */
+  .tl-transfer-center__toolbar {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tl-transfer-center__toolbar::-webkit-scrollbar { display: none; }
+  .tl-transfer-center__summary {
+    flex: 0 0 auto;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .tl-transfer-center__progress { width: 100%; display: block; margin-top: 2px; margin-left: 0; }
+
+  /* The batch header becomes its own card, stacked directly above its member
+     cards: same wrap-and-stack treatment as a row, but the name always keeps
+     its own line and the cancel button anchors last instead of hiding behind
+     hover/selection (a grouping row has no selection state to reveal it). */
+  .tl-transfer-center__batch-cell {
+    height: auto;
+    padding: 6px var(--tl-space-2);
+  }
+  .tl-transfer-center__batch-line {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: 3px;
+    white-space: normal;
+  }
+  .tl-transfer-center__batch-name {
+    flex: 1 1 100%;
+  }
+  .tl-transfer-center__batch-direction,
+  .tl-transfer-center__batch-progress,
+  .tl-transfer-center__batch-bytes,
+  .tl-transfer-center__batch-speed,
+  .tl-transfer-center__batch-eta,
+  .tl-transfer-center__batch-marker {
+    font-size: 10px;
+  }
+  .tl-transfer-center__batch-cancel {
+    order: 1;
+    margin-left: 0;
+  }
+}

@@ -3,6 +3,13 @@
     const invoke = deps.invoke;
     const listen = deps.listen;
     const listenOnCurrentWindow = deps.listenOnCurrentWindow;
+    // Tauri v2 drag-drop events only arrive through onDragDropEvent — plain
+    // window listens never fire for them; passed to the files panel for OS
+    // file drops (see app/features/files/native-drop.js's dispatcher).
+    const onDragDropEvent = deps.currentWindow
+      && typeof deps.currentWindow.onDragDropEvent === 'function'
+      ? (handler) => deps.currentWindow.onDragDropEvent(handler)
+      : null;
     const layoutService = deps.layoutService
       || (global.termlabLayoutService && typeof global.termlabLayoutService.create === 'function'
         ? global.termlabLayoutService.create({ invoke })
@@ -18,6 +25,21 @@
     const getPluginViewPaneById = deps.getPluginViewPaneById;
     const registeredPluginToolWindows = new Set();
     let resizeDragDepth = 0;
+    let transferRuntimeStartup = null;
+
+    function ensureTransferRuntimeStarted() {
+      if (transferRuntimeStartup) return transferRuntimeStartup;
+      if (!global.termlabTransferRuntime
+          || typeof global.termlabTransferRuntime.ensureStarted !== 'function') {
+        return Promise.resolve();
+      }
+      transferRuntimeStartup = Promise.resolve(global.termlabTransferRuntime.ensureStarted({
+        invoke,
+        listen: listenOnCurrentWindow,
+        toast: global.toast,
+      }));
+      return transferRuntimeStartup;
+    }
 
     function refreshShortcutFallbacks() {
       if (typeof global.__termlabRefreshKeyboardShortcutFallbacks === 'function') {
@@ -79,7 +101,7 @@
       }
     }
 
-    // The four built-in tool windows, in registration order (the order is
+    // The five built-in tool windows, in registration order (the order is
     // load-bearing — see the comment on 'notifications'). Shared verbatim
     // between the main window's init() and a panel host's registrationsOnly
     // boot: a host mounts a panel through the SAME renderFn the docked panel
@@ -90,6 +112,7 @@
         icon: 'sftp',
         type: 'built-in',
         defaultZone: 'bottom',
+        companions: [{ id: 'transfer-center', position: 'bottom' }],
         renderFn: (container) => {
           const panelEl = document.createElement('div');
           panelEl.id = 'files-panel';
@@ -98,6 +121,7 @@
             global.filesPanel.init({
               invoke,
               listen: listenOnCurrentWindow,
+              onDragDropEvent,
               panelEl,
               panelWrapEl: document.getElementById('left-sidebar'),
               resizeHandleEl: null,
@@ -106,6 +130,28 @@
               getActiveTab: () => getCurrentTab(),
             });
           }
+        },
+      });
+
+      // Registered after SFTP so file-explorer remains the first/default
+      // active window in the bottom zone for existing layouts.
+      global.toolWindowManager.register('transfer-center', {
+        title: 'Transfers',
+        icon: null,
+        type: 'built-in',
+        defaultZone: 'bottom',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'transfer-center-panel';
+          container.appendChild(panelEl);
+          if (global.transferCenterPanel) {
+            return global.transferCenterPanel.init({
+              panelEl,
+              invoke,
+              listen: listenOnCurrentWindow,
+            });
+          }
+          return undefined;
         },
       });
 
@@ -292,6 +338,7 @@
         throw new Error('registerAll requires { registrationsOnly: true }');
       }
       if (!global.toolWindowManager) return;
+      await ensureTransferRuntimeStarted();
       registerBuiltInToolWindows();
       refreshShortcutFallbacks();
       // `chrome: false` — a host has no app titlebar to refresh, and asking
@@ -301,6 +348,8 @@
     }
 
     async function init() {
+      await ensureTransferRuntimeStarted();
+
       const bottomZoneWrapEl = document.getElementById('bottom-zone-wrap');
       const bottomZoneResizeEl = document.getElementById('bottom-zone-resize');
       let initialLayoutData = null;
@@ -488,10 +537,10 @@
 
             const savedZones = initialLayoutData.tool_window_zones;
             const knowsBottomZone = Object.keys(savedZones)
-              .some((id) => savedZones[id] === 'bottom');
+              .some((id) => String(savedZones[id]).startsWith('bottom'));
             if (!sftpBottomMigrationAlreadyRan && !knowsBottomZone && savedZones['file-explorer']) {
               const previousZone = savedZones['file-explorer'];
-              savedZones['file-explorer'] = 'bottom';
+              savedZones['file-explorer'] = 'bottom-left';
               global.toolWindowManager.setPersistedZones(savedZones);
               if (!initialLayoutData.active_tool_windows || typeof initialLayoutData.active_tool_windows !== 'object') {
                 initialLayoutData.active_tool_windows = {};
@@ -499,7 +548,7 @@
               if (initialLayoutData.active_tool_windows[previousZone] === 'file-explorer') {
                 delete initialLayoutData.active_tool_windows[previousZone];
               }
-              initialLayoutData.active_tool_windows['bottom'] = 'file-explorer';
+              initialLayoutData.active_tool_windows['bottom-left'] = 'file-explorer';
               // bottom_panel_visible used to describe the notifications bar,
               // which most layouts recorded as hidden. Honouring that here
               // would silently swallow the panel we just moved, so reveal the
@@ -532,6 +581,9 @@
           if (initialLayoutData.right_split_ratio > 0 && initialLayoutData.right_split_ratio < 1) {
             global.toolWindowManager.setSplitRatio('right', initialLayoutData.right_split_ratio);
           }
+          if (initialLayoutData.bottom_split_ratio > 0 && initialLayoutData.bottom_split_ratio < 1) {
+            global.toolWindowManager.setSplitRatio('bottom', initialLayoutData.bottom_split_ratio);
+          }
         } catch (_) {}
 
         if (initialLayoutData) {
@@ -559,6 +611,17 @@
         // the manager summons those as they arrive instead.
         if (typeof global.toolWindowManager.summonPendingWindowHosts === 'function') {
           global.toolWindowManager.summonPendingWindowHosts();
+        }
+
+        // Main window only — a panel host projects panels but must never
+        // steal a zone tab in response to queue events; the parent window
+        // does the summoning. The runtime finished hydrating above, so the
+        // subscription baseline is the restored queue, not an empty store.
+        if (global.termlabTransferAutoOpen && global.termlabTransferRuntime) {
+          global.termlabTransferAutoOpen.init({
+            runtime: global.termlabTransferRuntime,
+            toolWindowManager: global.toolWindowManager,
+          });
         }
       }
 

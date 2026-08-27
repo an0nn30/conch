@@ -41,16 +41,39 @@
     return invoke('sftp_stat', { paneId, path });
   }
 
-  async function transferDownload(invoke, paneId, remotePath, localPath) {
-    return invoke('transfer_download', { paneId, remotePath, localPath });
+  function transferArgs(paths, options) {
+    const result = { ...paths };
+    if (options && options.origin) result.origin = options.origin;
+    if (options && options.conflictPolicy) result.conflictPolicy = options.conflictPolicy;
+    return result;
   }
 
-  async function transferUpload(invoke, paneId, localPath, remotePath) {
-    return invoke('transfer_upload', { paneId, localPath, remotePath });
+  async function transferDownload(invoke, paneId, remotePath, localPath, options) {
+    return invoke('transfer_download', transferArgs(
+      { paneId, remotePath, localPath },
+      options,
+    ));
+  }
+
+  async function transferUpload(invoke, paneId, localPath, remotePath, options) {
+    return invoke('transfer_upload', transferArgs(
+      { paneId, localPath, remotePath },
+      options,
+    ));
   }
 
   async function transferCancel(invoke, transferId) {
     return invoke('transfer_cancel', { transferId });
+  }
+
+  // Recursive folder transfer: the backend owns the whole walk (see
+  // remote/recursive_transfer.rs's doc comment), so the frontend sends one
+  // command and never lists a subtree itself. `destPath` is the destination
+  // CONTAINER, not a pre-joined path — the backend appends the source
+  // folder's own basename onto it. Callers must pass the opposite pane's
+  // `currentPath` as-is.
+  async function transferRecursive(invoke, paneId, direction, sourcePath, destPath) {
+    return invoke('transfer_enqueue_recursive', { paneId, direction, sourcePath, destPath });
   }
 
   async function localMkdir(invoke, path) {
@@ -173,6 +196,7 @@
     statRemote,
     transferDownload,
     transferUpload,
+    transferRecursive,
     transferCancel,
     localMkdir,
     localRename,

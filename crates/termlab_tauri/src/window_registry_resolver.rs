@@ -103,7 +103,12 @@ mod tests {
     #[test]
     fn panel_host_caller_resolves_to_its_parent() {
         let mut panel_host = PanelHostRegistry::default();
-        let (_, entry) = panel_host.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, entry) = panel_host.open(
+            "window-1".into(),
+            "ssh-sessions".into(),
+            "SSH".into(),
+            vec![],
+        );
         assert_eq!(
             resolve_caller_label(None, Some(&panel_host), &entry.window_label),
             "window-1"
@@ -141,7 +146,12 @@ mod tests {
     #[test]
     fn a_stale_panel_host_label_resolves_to_itself() {
         let mut panel_host = PanelHostRegistry::default();
-        let (_, entry) = panel_host.open("window-1".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, entry) = panel_host.open(
+            "window-1".into(),
+            "ssh-sessions".into(),
+            "SSH".into(),
+            vec![],
+        );
         let stale = entry.window_label.clone();
         panel_host.remove("window-1", "ssh-sessions");
 
@@ -162,8 +172,12 @@ mod tests {
         chooser.open("chooser-parent".into(), chooser_request());
 
         let mut panel_host = PanelHostRegistry::default();
-        let (_, entry) =
-            panel_host.open("panel-host-parent".into(), "ssh-sessions".into(), "SSH".into());
+        let (_, entry) = panel_host.open(
+            "panel-host-parent".into(),
+            "ssh-sessions".into(),
+            "SSH".into(),
+            vec![],
+        );
 
         assert_eq!(
             resolve_caller_label(Some(&chooser), Some(&panel_host), &entry.window_label),
@@ -202,7 +216,7 @@ mod tests {
             let state = handle.state::<Mutex<PanelHostRegistry>>();
             let mut guard = state.lock();
             guard
-                .open("window-2".into(), "ssh-sessions".into(), "SSH".into())
+                .open("window-2".into(), "ssh-sessions".into(), "SSH".into(), vec![])
                 .1
                 .window_label
         };

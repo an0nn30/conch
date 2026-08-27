@@ -136,7 +136,7 @@ function loadManager(opts) {
   const options = opts || {};
   const body = makeElement('body');
   const zoneEls = new Map();
-  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom']) {
+  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
     zoneEls.set(z, makeZoneEl(z));
   }
 
@@ -242,8 +242,9 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
 
   assert.deepStrictEqual(
     plain(invokeCalls),
-    [{ cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts' } }],
-    'selecting Window must invoke open_panel_host with the id AND the title',
+    [{ cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts', companionIds: [] } }],
+    'selecting Window must invoke open_panel_host with the id AND the title, and companionIds '
+    + '(empty here — this registration carries no companions)',
   );
   assert.strictEqual(twm.getViewModes()['ssh-sessions'], 'window');
   assert.strictEqual(content.children.length, 0, 'the panel element must be DETACHED from its zone');
@@ -327,7 +328,7 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
   twm.toggle('ssh-sessions');
   await tick();
   assert.deepStrictEqual(invokeCalls.map((c) => c.cmd), ['focus_panel_host', 'open_panel_host']);
-  assert.deepStrictEqual(plain(invokeCalls[1].args), { toolWindowId: 'ssh-sessions', title: 'Hosts' });
+  assert.deepStrictEqual(plain(invokeCalls[1].args), { toolWindowId: 'ssh-sessions', title: 'Hosts', companionIds: [] });
   assert.strictEqual(twm.getViewModes()['ssh-sessions'], 'window');
 }
 
@@ -528,7 +529,7 @@ const TUNNELS = { title: 'Tunnels', type: 'built-in', defaultZone: 'right-bottom
 
   assert.deepStrictEqual(plain(invokeCalls), [
     { cmd: 'focus_panel_host', args: { toolWindowId: 'ssh-sessions' } },
-    { cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts' } },
+    { cmd: 'open_panel_host', args: { toolWindowId: 'ssh-sessions', title: 'Hosts', companionIds: [] } },
   ], 'only the previously-open window-mode id is summoned, via focus then the '
     + 'open fallback (no host exists after a relaunch)');
   assert.strictEqual(twm.getViewModes().tunnels, 'window',
@@ -909,10 +910,12 @@ function makeFakeManager() {
   };
 }
 
-async function loadRuntime(savedLayout) {
+async function loadRuntime(savedLayout, opts) {
+  const options = opts || {};
   const twm = makeFakeManager();
   const invokeCalls = [];
   const listeners = new Map();
+  const transferPanelInits = [];
   const elements = new Map([
     ['bottom-zone-wrap', makeElement('div')],
     ['bottom-zone-resize', makeElement('div')],
@@ -938,6 +941,23 @@ async function loadRuntime(savedLayout) {
   sandbox.window = sandbox;
   sandbox.global = sandbox;
   sandbox.toolWindowManager = twm;
+  sandbox.toast = {};
+  sandbox.termlabTransferRuntime = {
+    ensureStarted(options) {
+      twm.calls.push({ name: 'transferEnsureStarted', args: [options] });
+      return Promise.resolve();
+    },
+  };
+  sandbox.transferCenterPanel = {
+    init(options) { transferPanelInits.push(options); },
+  };
+  // Only wired up when a scenario cares about the localStorage-backed
+  // migration flag (see the SFTP-bottom-zone migration regression below);
+  // every other caller keeps the prior behaviour of global.localStorage
+  // being undefined, which the migration's try/catch already tolerates.
+  if (options.localStorage) {
+    sandbox.localStorage = options.localStorage;
+  }
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(RUNTIME_PATH, 'utf8'), sandbox, { filename: RUNTIME_PATH });
 
@@ -962,7 +982,44 @@ async function loadRuntime(savedLayout) {
   const emit = (name, payload) => {
     for (const fn of listeners.get(name) || []) fn({ payload });
   };
-  return { twm, invokeCalls, listeners, emit, result };
+  return { twm, invokeCalls, listeners, emit, result, transferPanelInits };
+}
+
+// --- 14j. Main-window transfer state starts before panels can consume it ---
+{
+  const { twm } = await loadRuntime({});
+  const transferStartIdx = twm.calls.findIndex((call) => call.name === 'transferEnsureStarted');
+  const firstRegisterIdx = twm.calls.findIndex((call) => call.name === 'register');
+  assert.ok(transferStartIdx >= 0, 'main tool-window init must start the transfer runtime');
+  assert.ok(transferStartIdx < firstRegisterIdx, 'transfer listeners/snapshot must start before built-in panel registration');
+  const options = twm.calls[transferStartIdx].args[0];
+  assert.equal(typeof options.invoke, 'function');
+  assert.equal(typeof options.listen, 'function');
+  assert.ok(options.toast && typeof options.toast === 'object');
+}
+
+// --- 14k. Transfers registers after SFTP and mounts through one renderFn ---
+{
+  const { twm, transferPanelInits } = await loadRuntime({});
+  const registrations = twm.calls.filter((call) => call.name === 'register');
+  const ids = registrations.map((call) => call.args[0]);
+  assert.strictEqual(ids[0], 'file-explorer',
+    'SFTP remains the first/default active bottom window for existing layouts');
+  assert.strictEqual(ids[1], 'transfer-center',
+    'Transfers registers immediately after SFTP without taking the default slot');
+
+  const registration = registrations[1].args[1];
+  assert.deepStrictEqual(
+    plain({ title: registration.title, icon: registration.icon, type: registration.type, defaultZone: registration.defaultZone }),
+    { title: 'Transfers', icon: null, type: 'built-in', defaultZone: 'bottom' },
+  );
+  const container = makeElement('div');
+  registration.renderFn(container);
+  assert.strictEqual(container.children[0].id, 'transfer-center-panel');
+  assert.strictEqual(transferPanelInits.length, 1);
+  assert.strictEqual(transferPanelInits[0].panelEl, container.children[0]);
+  assert.strictEqual(typeof transferPanelInits[0].invoke, 'function');
+  assert.strictEqual(typeof transferPanelInits[0].listen, 'function');
 }
 
 // --- 15. The save payload carries the view modes ---------------------------
@@ -1022,6 +1079,45 @@ async function loadRuntime(savedLayout) {
   const call = twm.calls.find((c) => c.name === 'notifyHostDocked');
   assert.deepStrictEqual(plain(call.args), ['tunnels', 12],
     'reqId must reach the manager, or the stale-echo guard has nothing to compare');
+}
+
+// --- 17c. Regression: a post-split bottom-right layout must not be re-migrated
+//
+// The one-time "SFTP moved into the bottom zone" migration (init(), just
+// above the setPersistedZones/setPersistedActiveZoneWindows calls exercised
+// here) used to detect "this layout already knows about the bottom zone" by
+// checking for the exact legacy value 'bottom'. getZoneAssignments() (and
+// therefore every layout saved by a build with the bottom-left/bottom-right
+// split) never emits that legacy value again, so a user whose SFTP already
+// lived in 'bottom-right' — with the migration's localStorage flag unset,
+// e.g. a fresh profile or one where the flag was cleared — would get the
+// migration re-fired on next boot: rewritten to 'bottom-left' and the
+// bottom-right active entry deleted, silently undoing their arrangement.
+{
+  const store = new Map();
+  const fakeLocalStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)); },
+  };
+  const { twm } = await loadRuntime({
+    tool_window_zones: { 'file-explorer': 'bottom-right' },
+    active_tool_windows: { 'bottom-right': 'file-explorer' },
+  }, { localStorage: fakeLocalStorage });
+
+  const zonesCall = twm.calls.find((c) => c.name === 'setPersistedZones');
+  assert.ok(zonesCall, 'tool_window_zones must still be handed to the manager');
+  assert.strictEqual(zonesCall.args[0]['file-explorer'], 'bottom-right',
+    'a layout that already knows about a bottom-* zone must not be force-migrated to bottom-left');
+
+  const activeCall = twm.calls.find((c) => c.name === 'setPersistedActiveZoneWindows');
+  assert.ok(activeCall, 'active_tool_windows must still be handed to the manager');
+  assert.strictEqual(activeCall.args[0]['bottom-right'], 'file-explorer',
+    'the bottom-right active-window entry must survive untouched');
+  assert.ok(!('bottom-left' in activeCall.args[0]),
+    'no bottom-left key should appear when the migration correctly does not fire');
+
+  assert.strictEqual(store.has('termlab.migration.sftpBottomZone'), false,
+    'the one-time migration flag must stay unset when the migration does not fire');
 }
 
 // ===========================================================================
@@ -1191,11 +1287,14 @@ function makeHostSandbox(config) {
   const uiConfigApplies = [];
   const appearanceSyncs = [];
   const panelInits = [];
+  const transferRuntimeStarts = [];
+  const panelDestroys = [];
+  const windowLifecycleListeners = new Map();
 
   const body = makeElement('body');
   const appEl = makeElement('div');
   const zoneEls = new Map();
-  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom']) {
+  for (const z of ['left-top', 'left-bottom', 'right-top', 'right-bottom', 'bottom-left', 'bottom-right']) {
     zoneEls.set(z, makeZoneEl(z));
   }
   const byId = new Map([
@@ -1207,6 +1306,7 @@ function makeHostSandbox(config) {
     ['right-sidebar', makeElement('div')],
     ['bottom-zone-wrap', makeElement('div')],
     ['bottom-zone-resize', makeElement('div')],
+    ['bottom-zone-divider', makeElement('div')],
   ]);
 
   const warnCalls = [];
@@ -1234,12 +1334,20 @@ function makeHostSandbox(config) {
       querySelectorAll: () => [],
       addEventListener() {},
     },
-    addEventListener() {},
+    addEventListener(name, handler) {
+      if (!windowLifecycleListeners.has(name)) windowLifecycleListeners.set(name, []);
+      windowLifecycleListeners.get(name).push(handler);
+    },
+    removeEventListener(name, handler) {
+      const handlers = windowLifecycleListeners.get(name) || [];
+      const index = handlers.indexOf(handler);
+      if (index >= 0) handlers.splice(index, 1);
+    },
   };
   sandbox.window = sandbox;
   sandbox.global = sandbox;
 
-  // The four built-in panels, stubbed at their init boundary so a render is
+  // The five built-in panels, stubbed at their init boundary so a render is
   // observable without dragging the real panels into the harness.
   const filesPanelOnTabChangedCalls = [];
   const panelStub = (name) => ({
@@ -1257,6 +1365,19 @@ function makeHostSandbox(config) {
   sandbox.sshPanel = panelStub('ssh-sessions');
   sandbox.tunnelsPanel = panelStub('tunnels');
   sandbox.notificationsPanel = panelStub('notifications');
+  sandbox.transferCenterPanel = {
+    init: (opts) => {
+      timeline.push('render:transfer-center');
+      panelInits.push({ name: 'transfer-center', opts });
+      return { destroy: () => panelDestroys.push(1) };
+    },
+  };
+  sandbox.termlabTransferRuntime = {
+    ensureStarted(options) {
+      transferRuntimeStarts.push(options);
+      return Promise.resolve();
+    },
+  };
 
   sandbox.pluginWidgets = {
     init: (opts) => { pluginWidgetsInits.push(opts); },
@@ -1376,6 +1497,8 @@ function makeHostSandbox(config) {
     uiConfigApplies,
     appearanceSyncs,
     panelInits,
+    transferRuntimeStarts,
+    panelDestroys,
     titlebarRefreshes,
     routerRegistrations,
     warnCalls,
@@ -1387,6 +1510,29 @@ function makeHostSandbox(config) {
     byId,
     emitWindow: (name, payload) => {
       for (const fn of listens.window.get(name) || []) fn({ payload });
+    },
+    fireWindowLifecycle: (name) => {
+      for (const fn of windowLifecycleListeners.get(name) || []) fn({ type: name });
+    },
+    // DFS over the stub DOM tree rooted at <body> for the first element
+    // carrying `cls` — the composite layout's only observable shape (Part 4,
+    // scenario 26c/26d) is the class names buildChrome/boot hang off the
+    // elements they create, so this is the minimal query surface those
+    // scenarios need. Accepts either 'panel-host-bottom' or '.panel-host-
+    // bottom'.
+    query: (sel) => {
+      const cls = String(sel || '').replace(/^\./, '');
+      const visit = (el) => {
+        if (!el) return null;
+        const classes = String(el.className || '').split(/\s+/).filter(Boolean);
+        if (classes.includes(cls)) return el;
+        for (const child of el.children || []) {
+          const found = visit(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return visit(body);
     },
   };
 }
@@ -1523,13 +1669,13 @@ function makeHostSandbox(config) {
   }
 }
 
-// --- 22. Registrations only: all four built-ins, no zone/strip DOM -------
+// --- 22. Registrations only: all five built-ins, no zone/strip DOM --------
 {
   const host = makeHostSandbox();
   await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
   const twm = host.sandbox.toolWindowManager;
 
-  for (const id of ['file-explorer', 'ssh-sessions', 'tunnels', 'notifications']) {
+  for (const id of ['file-explorer', 'transfer-center', 'ssh-sessions', 'tunnels', 'notifications']) {
     assert.ok(twm.getRegistration(id), `${id} must be registered in a host too`);
   }
   // toolWindowManager.init is a throwing canary in this harness, so simply
@@ -1543,7 +1689,7 @@ function makeHostSandbox(config) {
     assert.strictEqual(host.byId.get(stripId).children.length, 0,
       `${stripId} must stay empty — a host builds no rails`);
   }
-  // Only the ONE requested panel rendered; the other three registrations are
+  // Only the ONE requested panel rendered; the other four registrations are
   // inert bookkeeping.
   assert.deepStrictEqual(host.panelInits.map((p) => p.name), ['ssh-sessions']);
 
@@ -1553,6 +1699,38 @@ function makeHostSandbox(config) {
     'already-loaded plugin panels are replayed');
   assert.ok(host.listens.app.has('plugin-panel-registered'));
   assert.ok(host.listens.app.has('plugin-panels-removed'));
+}
+
+// --- 22b. A host starts and mounts the same Transfer Center registration --
+{
+  const host = makeHostSandbox({
+    answers: {
+      get_panel_host_request: () => Promise.resolve({
+        reqId: 8,
+        toolWindowId: 'transfer-center',
+        parentLabel: 'window-1',
+        title: 'Transfers',
+      }),
+    },
+  });
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.status, 'mounted');
+  assert.strictEqual(host.transferRuntimeStarts.length, 1,
+    'the host window starts its own idempotent transfer projection exactly once');
+  assert.strictEqual(host.transferRuntimeStarts[0].listen, host.bootDeps.listenOnCurrentWindow,
+    'host transfer events listen on that host window, not app-global');
+  assert.deepStrictEqual(host.panelInits.map((item) => item.name), ['transfer-center']);
+  const init = host.panelInits[0].opts;
+  assert.strictEqual(init.panelEl.id, 'transfer-center-panel');
+  assert.strictEqual(init.panelEl.parentNode, result.renderRootEl,
+    'the shared renderFn mounts into the panel host content root');
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(host.panelDestroys.length, 1,
+    'destroying the host window must dispose its mounted panel controller');
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(host.panelDestroys.length, 1,
+    'host mount disposal is exactly once even if lifecycle delivery repeats');
 }
 
 // --- 23. A plugin panel that is already loaded registers and can mount ---
@@ -1709,6 +1887,88 @@ function makeHostSandbox(config) {
 
   host.emitWindow('panel-host-event', { event: 'queued-three', payload: {} });
   assert.strictEqual(seen.length, 3, 'and later events go straight through');
+}
+
+// --- 26c. Composite: request.companionIds mounts main + companion behind --
+// a divider, and BOTH disposers run on teardown. Registered as fresh,
+// harness-owned tool windows (rather than reusing the real 'file-explorer'/
+// 'transfer-center' registrations) so the disposer assertion is meaningful:
+// the real file-explorer renderFn (tool-window-runtime.js) never returns a
+// disposer at all — that is a pre-existing property of that registration,
+// unrelated to what this scenario is pinning, which is boot()'s OWN
+// mount/dispose wiring for a companion pair.
+{
+  const host = makeHostSandbox({
+    answers: {
+      get_panel_host_request: () => Promise.resolve({
+        reqId: 9,
+        toolWindowId: 'composite-main',
+        parentLabel: 'window-1',
+        title: 'SFTP',
+        companionIds: ['composite-companion'],
+      }),
+    },
+  });
+  const renderCalls = {};
+  const disposeCalls = {};
+  const bump = (table, key) => { table[key] = (table[key] || 0) + 1; };
+  host.sandbox.toolWindowManager.register('composite-main', {
+    title: 'Main',
+    renderFn: () => {
+      bump(renderCalls, 'composite-main');
+      return () => bump(disposeCalls, 'composite-main');
+    },
+  });
+  host.sandbox.toolWindowManager.register('composite-companion', {
+    title: 'Companion',
+    renderFn: () => {
+      bump(renderCalls, 'composite-companion');
+      return () => bump(disposeCalls, 'composite-companion');
+    },
+  });
+
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.status, 'mounted');
+  assert.strictEqual(renderCalls['composite-main'], 1, 'main tool rendered');
+  assert.strictEqual(renderCalls['composite-companion'], 1, 'companion rendered');
+  assert.ok(host.query('panel-host-bottom'), 'bottom section exists');
+  assert.ok(host.query('panel-host-divider'), 'divider exists');
+
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(disposeCalls['composite-main'], 1, 'main disposer ran');
+  assert.strictEqual(disposeCalls['composite-companion'], 1, 'companion disposer ran');
+  host.fireWindowLifecycle('beforeunload');
+  assert.strictEqual(disposeCalls['composite-main'], 1, 'main disposal is exactly once');
+  assert.strictEqual(disposeCalls['composite-companion'], 1, 'companion disposal is exactly once');
+}
+
+// --- 26d. Degrade: an unresolvable companion id falls back to the solo -----
+// layout — the main tool still mounts, but no bottom section is built.
+{
+  const host = makeHostSandbox({
+    answers: {
+      get_panel_host_request: () => Promise.resolve({
+        reqId: 10,
+        toolWindowId: 'solo-main',
+        parentLabel: 'window-1',
+        title: 'SFTP',
+        companionIds: ['ghost-tool'],
+      }),
+    },
+  });
+  const renderCalls = {};
+  host.sandbox.toolWindowManager.register('solo-main', {
+    title: 'Solo',
+    renderFn: () => { renderCalls['solo-main'] = (renderCalls['solo-main'] || 0) + 1; },
+  });
+
+  const result = await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+
+  assert.strictEqual(result.status, 'mounted');
+  assert.strictEqual(renderCalls['solo-main'], 1, 'main tool still mounts');
+  assert.ok(!host.query('panel-host-bottom'), 'no bottom section for an unresolvable companion');
+  assert.ok(!host.query('panel-host-divider'), 'no divider either');
 }
 
 // ===========================================================================
@@ -2395,6 +2655,28 @@ async function loadRuntimeWithEditor(editorSpies) {
   assert.deepStrictEqual(publishActionCalls(invokeCalls), [
     { cmd: 'panel_host_action', args: { event: 'open-in-editor', payload: { kind: 'local', path: '/tmp/x.txt' } } },
   ], 'the rejected publishAction call must never reach invoke a second time');
+}
+
+// --- 41. Host boot threads currentWindow into the tool-window runtime -------
+// tool-window-runtime.js derives the files panel's native drag-drop channel
+// (onDragDropEvent) from deps.currentWindow. A host boot that omits it makes
+// Finder-to-pane and pane-to-pane drops silently dead in every popped-out
+// window — the regression this scenario pins.
+{
+  const host = makeHostSandbox();
+  const realCreate = host.sandbox.termlabToolWindowRuntime.create;
+  let recordedDeps = null;
+  host.sandbox.termlabToolWindowRuntime.create = (deps) => {
+    recordedDeps = deps;
+    return realCreate(deps);
+  };
+  await host.sandbox.termlabPanelHostRuntime.boot(host.bootDeps);
+  assert.ok(recordedDeps, 'boot created the tool-window runtime');
+  assert.strictEqual(
+    recordedDeps.currentWindow,
+    host.bootDeps.currentWindow,
+    'the host window itself must reach the runtime, or native drag-drop never subscribes',
+  );
 }
 
 console.log('panel host: all assertions passed');

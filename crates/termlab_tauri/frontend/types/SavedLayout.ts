@@ -10,4 +10,4 @@ export type SavedLayout = { window_width: number, window_height: number, ssh_pan
  * view mode but never learn it again, so a popped-out tool window would
  * silently come back docked on the next launch.
  */
-tool_window_view_modes: { [key in string]: string }, left_split_ratio: number, right_split_ratio: number, };
+tool_window_view_modes: { [key in string]: string }, left_split_ratio: number, right_split_ratio: number, bottom_split_ratio: number, };

@@ -80,6 +80,16 @@ impl PtyBackend {
             cmd.arg(arg);
         }
 
+        // The CLI layer's private env markers must not reach the user's
+        // shell. They stay set in the app's own environment for the whole
+        // session (Tauri's restart re-exec depends on it), and a shell that
+        // inherited TERMLAB_APP_RUNNING would make `termlab notes.md` typed
+        // in this very terminal boot a second blank app instead of opening
+        // the file here. See cli::INTERNAL_MARKER_VARS.
+        for var in crate::cli::INTERNAL_MARKER_VARS {
+            cmd.env_remove(var);
+        }
+
         // Match termlab_pty behavior: defaults first, then user overrides.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
