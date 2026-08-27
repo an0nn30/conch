@@ -120,6 +120,19 @@
         });
     }
 
+    // Completion's suggestions-as-you-type flag. Absent or unreadable config
+    // leaves the module's own default (on) alone rather than forcing it off:
+    // manual completion works either way, so a failed read must not silently
+    // disable a feature the user turned on.
+    function applySuggestionsWhileTyping(appCfg) {
+      const completion = global.termlabLspCompletion;
+      if (!appCfg || !completion || typeof completion.setSuggestionsWhileTyping !== 'function') {
+        return;
+      }
+      if (typeof appCfg.editor_lsp_suggestions_while_typing !== 'boolean') return;
+      completion.setSuggestionsWhileTyping(appCfg.editor_lsp_suggestions_while_typing);
+    }
+
     async function applyAppConfig(invoke) {
       let borderlessMode = false;
       // The editor's vim keymap, returned so main-runtime can seed the flag it
@@ -129,6 +142,7 @@
       try {
         const appCfg = await invoke('get_app_config');
         vimMode = appCfg && appCfg.editor_vim_mode === true;
+        applySuggestionsWhileTyping(appCfg);
         // Published for the post-fit window sizing in main-runtime.js, which
         // runs long after this and needs the configured columns/lines.
         window.__termlabAppConfig = appCfg;

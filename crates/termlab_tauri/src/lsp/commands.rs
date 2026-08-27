@@ -10,7 +10,8 @@ use super::manager::{
 };
 use super::trust::TrustDecision;
 use super::types::{
-    ApplyChangesResponse, CompletionResponse, DefinitionResponse, DiagnosticSnapshot, DocumentId,
+    ApplyChangesResponse, CompletionItem, CompletionResponse, DefinitionResponse,
+    DiagnosticSnapshot, DocumentId,
     EditorPosition, HoverResponse, LspChangeBatch, LspStatus, OpenDocumentResponse,
     ProjectCandidate, ReservationId, ReserveResult, ResyncDocumentResponse, SignatureHelpResponse,
 };
@@ -35,6 +36,7 @@ pub(crate) fn invoke_handler<R: Runtime>()
         lsp_set_project_context,
         lsp_set_project_trust,
         lsp_completion,
+        lsp_resolve_completion_item,
         lsp_hover,
         lsp_signature_help,
         lsp_definition,
@@ -129,6 +131,11 @@ pub(crate) const LSP_COMMAND_CONTRACTS: &[CommandContract] = &[
         name: "lsp_completion",
         args: &["documentId", "position", "trigger"],
         result: "CompletionResponse",
+    },
+    CommandContract {
+        name: "lsp_resolve_completion_item",
+        args: &["documentId", "itemId"],
+        result: "CompletionItem",
     },
     CommandContract {
         name: "lsp_hover",
@@ -419,6 +426,23 @@ pub(crate) async fn lsp_completion(
         .map_err(command_error)
 }
 
+/// `completionItem/resolve` for one item the session already handed out. The
+/// item id carries its own document, version and generation, so there is no
+/// position argument; `documentId` is what routes the request to the session
+/// that owns the item.
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn lsp_resolve_completion_item(
+    document_id: DocumentId,
+    item_id: String,
+    state: tauri::State<'_, LspState>,
+) -> Result<CompletionItem, String> {
+    state
+        .manager
+        .resolve_completion_item(document_id, item_id)
+        .await
+        .map_err(command_error)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lsp_hover(
     document_id: DocumentId,
@@ -603,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn all_twenty_two_invoke_contracts_have_exact_names_args_and_results() {
+    fn all_twenty_three_invoke_contracts_have_exact_names_args_and_results() {
         let expected = [
             (
                 "editor_reserve_document",
@@ -655,6 +679,11 @@ mod tests {
                 "CompletionResponse",
             ),
             (
+                "lsp_resolve_completion_item",
+                &["documentId", "itemId"][..],
+                "CompletionItem",
+            ),
+            (
                 "lsp_hover",
                 &["documentId", "position"][..],
                 "HoverResponse",
@@ -684,7 +713,7 @@ mod tests {
                 "void",
             ),
         ];
-        assert_eq!(LSP_COMMAND_CONTRACTS.len(), 22);
+        assert_eq!(LSP_COMMAND_CONTRACTS.len(), 23);
         for (contract, (name, args, result)) in LSP_COMMAND_CONTRACTS.iter().zip(expected) {
             assert_eq!(
                 (contract.name, contract.args, contract.result),
@@ -706,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn all_twenty_two_commands_decode_and_dispatch_through_the_production_invoke_handler() {
+    fn all_twenty_three_commands_decode_and_dispatch_through_the_production_invoke_handler() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();

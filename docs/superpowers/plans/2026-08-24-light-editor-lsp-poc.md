@@ -893,6 +893,8 @@ Only one LSP overlay may be visible at a time. Flush pending document changes be
 
 Read trigger characters from server capabilities. Automatic requests occur only in insert/edit mode and when LSP is ready; manual signature help can request at any cursor position. Hover remains discoverable through the command palette and pointer dwell, with no default chord.
 
+Carrying trigger characters to the frontend is this task's job for completion as well as signature help: extend the `LspCapabilities`/`LspStatus` payload with the normalized `completion_trigger_characters` the catalog already computes (`catalog.rs`), so `lsp-completion.js` — which already reads `status.completionTriggerCharacters` and falls back to identifier typing when it is absent — begins opening automatically after `.`, `::` and the rest without further frontend change.
+
 - [ ] **Step 5: Run tests**
 
 Run: `node scripts/tests/test_lsp_tooltips.mjs`

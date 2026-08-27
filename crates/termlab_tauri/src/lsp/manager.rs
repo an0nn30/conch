@@ -28,7 +28,8 @@ use super::root::{LanguageId, discover_project_roots};
 use super::session::{LspSession, ProcessServerLauncher, SessionDocument, SessionError};
 use super::trust::{ProjectTrustStore, RootBinding, TrustDecision};
 use super::types::{
-    ApplyChangesResponse, CompletionResponse, DefinitionResponse, Diagnostic, DiagnosticSeverity,
+    ApplyChangesResponse, CompletionItem, CompletionResponse, DefinitionResponse, Diagnostic,
+    DiagnosticSeverity,
     DiagnosticSnapshot, DiagnosticUpdate, DocumentId, EditorPosition, HoverResponse,
     LspCapabilities, LspChangeBatch, LspSessionState, LspStatus, LspUnavailableReason,
     OpenDocumentResponse, ProjectCandidate, ReservationId, ReserveResult, ResyncDocumentResponse,
@@ -263,6 +264,11 @@ pub(crate) trait SessionClient: Send + Sync + 'static {
         position: lsp::Position,
         source_version: i32,
     ) -> Result<CompletionResponse, String>;
+    /// Resolve one completion item the session already handed out. There is
+    /// no position and no source version: the item id carries its own
+    /// document, version and generation, and the session's cache rejects an
+    /// id whose generation it has since purged.
+    async fn resolve_completion(&self, item_id: &str) -> Result<CompletionItem, String>;
     async fn hover(
         &self,
         document_id: &str,
@@ -355,6 +361,13 @@ impl SessionClient for RealSessionClient {
     ) -> Result<CompletionResponse, String> {
         self.0
             .completion(document_id, position)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn resolve_completion(&self, item_id: &str) -> Result<CompletionItem, String> {
+        self.0
+            .resolve_completion_item(item_id)
             .await
             .map_err(|error| error.to_string())
     }
@@ -652,6 +665,21 @@ impl LspManagerHandle {
         result.await.map_err(|_| ManagerError::ActorStopped)?
     }
 
+    pub(crate) async fn resolve_completion_item(
+        &self,
+        document_id: DocumentId,
+        item_id: String,
+    ) -> Result<CompletionItem, ManagerError> {
+        let (reply, result) = oneshot::channel();
+        self.send(ManagerCommand::ResolveCompletionItem {
+            document_id,
+            item_id,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| ManagerError::ActorStopped)?
+    }
+
     pub(crate) async fn hover(
         &self,
         document_id: DocumentId,
@@ -855,6 +883,11 @@ enum ManagerCommand {
         trigger: Option<String>,
         reply: oneshot::Sender<Result<CompletionResponse, ManagerError>>,
     },
+    ResolveCompletionItem {
+        document_id: DocumentId,
+        item_id: String,
+        reply: oneshot::Sender<Result<CompletionItem, ManagerError>>,
+    },
     Hover {
         document_id: DocumentId,
         position: EditorPosition,
@@ -942,6 +975,7 @@ impl ManagerCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RequestKind {
     Completion,
+    ResolveCompletion,
     Hover,
     SignatureHelp,
     Definition,
@@ -949,6 +983,7 @@ enum RequestKind {
 
 enum PendingReply {
     Completion(oneshot::Sender<Result<CompletionResponse, ManagerError>>),
+    ResolveCompletion(oneshot::Sender<Result<CompletionItem, ManagerError>>),
     Hover(oneshot::Sender<Result<HoverResponse, ManagerError>>),
     SignatureHelp(oneshot::Sender<Result<SignatureHelpResponse, ManagerError>>),
     Definition(oneshot::Sender<Result<DefinitionResponse, ManagerError>>),
@@ -958,6 +993,9 @@ impl PendingReply {
     fn send_error(self, error: ManagerError) {
         match self {
             Self::Completion(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::ResolveCompletion(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Hover(reply) => {
@@ -975,6 +1013,9 @@ impl PendingReply {
 
 enum RequestResult {
     Completion(Result<CompletionResponse, String>),
+    /// Boxed: a `CompletionItem` is several times the size of every other
+    /// result here, and this enum crosses a channel on every request.
+    ResolveCompletion(Box<Result<CompletionItem, String>>),
     Hover(Result<HoverResponse, String>),
     SignatureHelp(Result<SignatureHelpResponse, String>),
     Definition(Result<DefinitionResponse, String>),
@@ -1007,6 +1048,9 @@ enum SessionOperation {
         kind: RequestKind,
         document_id: String,
         position: lsp::Position,
+        /// Only a `ResolveCompletion` carries one; every other kind is
+        /// addressed by position.
+        item_id: Option<String>,
         source_version: i32,
         cancellation: CancellationToken,
     },
@@ -1949,10 +1993,25 @@ impl LspManager {
                 self.start_request(
                     document_id,
                     position,
+                    None,
                     RequestKind::Completion,
                     PendingReply::Completion(reply),
                 );
             }
+            ManagerCommand::ResolveCompletionItem {
+                document_id,
+                item_id,
+                reply,
+            } => self.start_request(
+                document_id,
+                EditorPosition {
+                    line: 0,
+                    character: 0,
+                },
+                Some(item_id),
+                RequestKind::ResolveCompletion,
+                PendingReply::ResolveCompletion(reply),
+            ),
             ManagerCommand::Hover {
                 document_id,
                 position,
@@ -1960,6 +2019,7 @@ impl LspManager {
             } => self.start_request(
                 document_id,
                 position,
+                None,
                 RequestKind::Hover,
                 PendingReply::Hover(reply),
             ),
@@ -1973,6 +2033,7 @@ impl LspManager {
                 self.start_request(
                     document_id,
                     position,
+                    None,
                     RequestKind::SignatureHelp,
                     PendingReply::SignatureHelp(reply),
                 );
@@ -1984,6 +2045,7 @@ impl LspManager {
             } => self.start_request(
                 document_id,
                 position,
+                None,
                 RequestKind::Definition,
                 PendingReply::Definition(reply),
             ),
@@ -4342,6 +4404,7 @@ impl LspManager {
         &mut self,
         document_id: DocumentId,
         position: EditorPosition,
+        item_id: Option<String>,
         kind: RequestKind,
         reply: PendingReply,
     ) {
@@ -4392,6 +4455,7 @@ impl LspManager {
             kind,
             document_id: document_id_text(document_id),
             position: lsp::Position::new(position.line, position.character),
+            item_id,
             source_version: pending.version,
             cancellation,
         };
@@ -5095,6 +5159,12 @@ impl LspManager {
                             .ok_or(ManagerError::StaleResponse)
                     });
                 let _ = reply.send(result);
+            }
+            // No `source_version` to check: the response is one item, and its
+            // freshness is already established by the guard above plus the
+            // session's own generation cache.
+            (PendingReply::ResolveCompletion(reply), RequestResult::ResolveCompletion(result)) => {
+                let _ = reply.send((*result).map_err(ManagerError::Infrastructure));
             }
             (PendingReply::Hover(reply), RequestResult::Hover(result)) => {
                 let result = result
@@ -6215,6 +6285,7 @@ fn spawn_session_worker(
                     kind,
                     document_id,
                     position,
+                    item_id,
                     source_version,
                     cancellation,
                 } => {
@@ -6228,6 +6299,12 @@ fn spawn_session_worker(
                                     client
                                         .completion(&document_id, position, source_version)
                                         .await,
+                                ),
+                                RequestKind::ResolveCompletion => RequestResult::ResolveCompletion(
+                                    Box::new(match item_id.as_deref() {
+                                        Some(id) => client.resolve_completion(id).await,
+                                        None => Err("completion resolve without an item".into()),
+                                    }),
                                 ),
                                 RequestKind::Hover => RequestResult::Hover(
                                     client.hover(&document_id, position, source_version).await,
@@ -6359,6 +6436,7 @@ mod tests {
         Save(String),
         Close(String),
         Completion(String),
+        ResolveCompletion(String),
         Hover(String),
         Signature(String),
         Definition(String),
@@ -6659,6 +6737,36 @@ mod tests {
                 source_version,
                 is_incomplete: false,
                 items: Vec::new(),
+            })
+        }
+
+        async fn resolve_completion(
+            &self,
+            item_id: &str,
+        ) -> Result<crate::lsp::types::CompletionItem, String> {
+            self.factory
+                .record(&self.key, Observation::ResolveCompletion(item_id.into()));
+            self.factory
+                .wait_if_held(
+                    &self.factory.block_requests,
+                    &self.factory.requests_released,
+                )
+                .await;
+            Ok(crate::lsp::types::CompletionItem {
+                id: item_id.into(),
+                label: "resolved".into(),
+                detail: Some("resolved detail".into()),
+                kind: Some("variable".into()),
+                documentation: Vec::new(),
+                sort_text: None,
+                filter_text: None,
+                insert_text: None,
+                is_snippet: false,
+                text_edit: None,
+                additional_text_edits: Vec::new(),
+                commit_characters: Vec::new(),
+                deprecated: false,
+                unsupported_effects: Vec::new(),
             })
         }
 
@@ -8282,6 +8390,56 @@ mod tests {
                 ReserveResult::Reserved { .. }
             ));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completion_resolve_reaches_the_session_and_is_discarded_when_the_document_moves_on() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("a.ts", "let value = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+
+        let resolved = harness
+            .manager
+            .resolve_completion_item(document, "item-7".into())
+            .await
+            .expect("an attached document resolves through its session");
+        assert_eq!(resolved.id, "item-7", "the session was asked for that item");
+        assert_eq!(resolved.detail.as_deref(), Some("resolved detail"));
+        assert!(
+            harness
+                .factory
+                .observations(&key("typescript", &root))
+                .iter()
+                .any(|observation| matches!(
+                    observation,
+                    Observation::ResolveCompletion(id) if id == "item-7"
+                )),
+            "the request really reached the session client"
+        );
+
+        // A resolve whose document has moved on is stale, exactly like the
+        // positional requests: the popup it belonged to is gone.
+        harness.factory.hold_requests();
+        let pending = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move {
+                manager
+                    .resolve_completion_item(document, "item-7".into())
+                    .await
+            }
+        });
+        spin().await;
+        harness
+            .manager
+            .apply_changes(document, batch(document, 1, 2, "z"))
+            .await
+            .unwrap();
+        harness.factory.release_requests();
+        assert_eq!(pending.await.unwrap(), Err(ManagerError::StaleResponse));
     }
 
     #[tokio::test(start_paused = true)]
@@ -10898,6 +11056,7 @@ mod tests {
                 line: 0,
                 character: 0,
             },
+            None,
             super::RequestKind::Hover,
             super::PendingReply::Hover(hover_reply),
         );
@@ -11425,6 +11584,7 @@ mod tests {
                 line: 0,
                 character: 0,
             },
+            None,
             super::RequestKind::Hover,
             super::PendingReply::Hover(hover_reply),
         );

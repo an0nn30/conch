@@ -69,3 +69,36 @@
 .editor-project-status__button[data-state="ready"]::before {
   content: "Ready · ";
 }
+
+/* Completion documentation panel (features/editor/lsp-completion.js).
+   CodeMirror owns the popup chrome; these only set the type scale and the
+   two tones inside the info pane, so server text and TermLab's own notes are
+   distinguishable without colour being the only signal. */
+.tl-completion-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 420px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tl-completion-info-detail {
+  color: var(--tl-fg-muted);
+  font-family: var(--tl-font-mono, monospace);
+}
+
+.tl-completion-info-doc {
+  color: var(--tl-fg);
+}
+
+/* Unsupported effects and deprecation. Prefixed rather than only recoloured:
+   the popup is small and the note has to read as a note. */
+.tl-completion-info-note {
+  color: var(--tl-fg-muted);
+  font-style: italic;
+}
+
+.tl-completion-info-note::before {
+  content: "Note · ";
+}

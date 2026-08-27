@@ -46,6 +46,12 @@ pub(crate) fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json:
         // payload is already re-fetched on every `config-changed` — which is
         // what lets the toggle reach open editor panes without a restart.
         "editor_vim_mode": cfg.editor.vim_mode,
+        // Whether completion opens on its own as you type. Carried on the
+        // same payload and for the same reason as the vim flag: it is
+        // re-fetched on every `config-changed`, so the toggle reaches open
+        // editor panes without a restart. Manual completion is unaffected
+        // by it.
+        "editor_lsp_suggestions_while_typing": cfg.editor.lsp.suggestions_while_typing,
         "ui_font_small": cfg.termlab.ui.font.small,
         "ui_font_list": cfg.termlab.ui.font.list,
         "ui_font_normal": cfg.termlab.ui.font.normal,

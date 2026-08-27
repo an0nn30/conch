@@ -157,6 +157,12 @@
     setProjectContext: (documentId, context) => invoke('lsp_set_project_context', { documentId, context }),
     setProjectTrust: (root, adapterId, decision) => invoke('lsp_set_project_trust', { root, adapterId, decision }),
     completion: (documentId, position, trigger) => invoke('lsp_completion', { documentId, position, trigger }),
+    // `completionItem/resolve`. The item id carries its own document, version
+    // and generation, so there is no position; `documentId` routes it to the
+    // session that handed the item out.
+    resolveCompletionItem: (documentId, itemId) => invoke('lsp_resolve_completion_item', {
+      documentId, itemId,
+    }),
     hover: (documentId, position) => invoke('lsp_hover', { documentId, position }),
     signatureHelp: (documentId, position, trigger) => invoke('lsp_signature_help', { documentId, position, trigger }),
     definition: (documentId, position) => invoke('lsp_definition', { documentId, position }),

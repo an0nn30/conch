@@ -1,31 +1,22 @@
 // LSP-backed completion for CodeMirror editor panes.
 //
-// Three jobs and no more:
+// Two jobs; the third — turning an item into a transaction — lives next door
+// in lsp-completion-apply.js.
 //
 //   1. an async completion source that asks the language service for the
-//      caret's position and drops anything that comes back for a document or
-//      a version that has since moved on;
-//   2. a translation from normalized completion items into CodeMirror options,
-//      including an `apply` that lands the primary edit, the snippet and every
-//      supported same-document additional edit in ONE transaction — undo,
-//      dirty tracking and document synchronisation all have to see one change,
-//      not three;
-//   3. a dedicated keymap that outranks vim while the popup is open and hands
-//      every key straight back when it is not.
+//      caret's position and drops anything that comes back for a document
+//      that has since changed identity;
+//   2. keyboard ownership of the popup that outranks vim while it is open and
+//      hands every key straight back when it is not.
 //
 // It reaches the backend only through editor-service's requestFeature, which
-// owns the flush/barrier/staleness protocol, and therefore only through
-// lsp-bridge. It never calls invoke() and it registers NO document- or
-// window-level KEY handlers: everything keyboard-shaped is a CodeMirror
-// binding, so a focused terminal pane and vim normal mode are untouched.
+// owns the flush/barrier/staleness protocol, and from there through
+// lsp-bridge. It never calls invoke(), and it registers no document- or
+// window-level KEY handlers: the one keyboard hook is a CodeMirror
+// domEventHandler on the editor itself, so a focused terminal pane is
+// untouched.
 (function initTermLabLspCompletion(global) {
   'use strict';
-
-  // Bounded because it is fed by server data on a hot path: a server that
-  // returns an unsupported workspace edit on every keystroke must not grow
-  // this without limit.
-  const SESSION_LOG_LIMIT = 200;
-  const sessionLogEntries = [];
 
   // What a completion item's `kind` means to CodeMirror's own icon set.
   // Unknown and absent both fall to 'text' rather than to no icon at all.
@@ -57,11 +48,6 @@
     typeParameter: 'type',
   };
 
-  const UNSUPPORTED_EFFECT_TEXT = {
-    workspaceEdit: 'This suggestion also edits other files. Those edits were not applied.',
-    command: 'This suggestion asks to run a server command, which is not supported yet.',
-  };
-
   const IDENTIFIER_CHARACTER = /[A-Za-z0-9_$]/;
   const WORD_BEFORE_CARET = /[A-Za-z0-9_$]*$/;
 
@@ -75,9 +61,13 @@
     return global.CM6 || null;
   }
 
+  function apply() {
+    return global.termlabLspCompletionApply || null;
+  }
+
   function record(kind, message) {
-    sessionLogEntries.push({ at: Date.now(), kind: String(kind), message: String(message) });
-    while (sessionLogEntries.length > SESSION_LOG_LIMIT) sessionLogEntries.shift();
+    const module = apply();
+    if (module && typeof module.record === 'function') module.record(kind, message);
   }
 
   // --- pane and document lookup --------------------------------------------
@@ -116,6 +106,10 @@
     return state;
   }
 
+  function completableView(view) {
+    return documentStateFor(paneForView(view)) !== null;
+  }
+
   function triggerCharactersFor(state) {
     const status = state && state.status;
     const characters = status && status.completionTriggerCharacters;
@@ -123,22 +117,10 @@
   }
 
   // --- position conversion --------------------------------------------------
-  //
-  // CodeMirror columns are already UTF-16 code units, which is what LSP
-  // positions count, so both directions are pure arithmetic. Rust owns the
-  // conversion for everything it sends; this owns only the caret.
 
   function lspPositionAt(doc, offset) {
     const line = doc.lineAt(offset);
     return { line: line.number - 1, character: offset - line.from };
-  }
-
-  function offsetAt(doc, position) {
-    if (!position) return null;
-    const lineNumber = Math.min(Math.max(Number(position.line) + 1, 1), doc.lines);
-    const line = doc.line(lineNumber);
-    const character = Math.max(Number(position.character) || 0, 0);
-    return Math.min(line.from + character, line.to);
   }
 
   function textBeforeCaret(context) {
@@ -182,6 +164,7 @@
   }
 
   function renderInfo(item, resolved) {
+    const module = apply();
     const source = resolved || item;
     const node = global.document.createElement('div');
     node.className = 'tl-completion-info';
@@ -198,15 +181,17 @@
     // whose workspace edit silently does not happen is worse than one that
     // says so.
     for (const effect of (item.unsupportedEffects || [])) {
-      const text = UNSUPPORTED_EFFECT_TEXT[effect];
+      const text = module && typeof module.unsupportedEffectText === 'function'
+        ? module.unsupportedEffectText(effect)
+        : null;
       if (text) node.appendChild(paragraph('tl-completion-info-note', text));
     }
     return node;
   }
 
-  // completionItem/resolve when the bridge exposes it. Resolved once per item
-  // and cached; a failure degrades to what the item already carried.
-  function makeInfoRenderer(item) {
+  // completionItem/resolve. Resolved once per item and cached; a failure
+  // degrades to what the item already carried.
+  function makeInfoRenderer(item, documentId) {
     let pending = null;
     let resolved = null;
     return function info() {
@@ -215,137 +200,12 @@
         if (!bridge || typeof bridge.resolveCompletionItem !== 'function') {
           return renderInfo(item, null);
         }
-        pending = Promise.resolve(bridge.resolveCompletionItem(item.id))
+        pending = Promise.resolve(bridge.resolveCompletionItem(documentId, item.id))
           .then((value) => { resolved = value || null; })
           .catch((error) => { record('resolve', `completion resolve failed: ${error}`); });
       }
       return pending.then(() => renderInfo(item, resolved));
     };
-  }
-
-  // --- applying an item -----------------------------------------------------
-
-  function primaryEdit(doc, item, from, to) {
-    const edit = item.textEdit;
-    if (edit && edit.kind === 'textEdit' && edit.range) {
-      return {
-        from: offsetAt(doc, edit.range.start),
-        to: offsetAt(doc, edit.range.end),
-        insert: String(edit.newText || ''),
-      };
-    }
-    if (edit && edit.kind === 'insertReplaceEdit' && edit.insert) {
-      // Insert, never replace: this phase does not eat text to the right of
-      // the caret on the strength of a suggestion.
-      return {
-        from: offsetAt(doc, edit.insert.start),
-        to: offsetAt(doc, edit.insert.end),
-        insert: String(edit.newText || ''),
-      };
-    }
-    const insert = typeof item.insertText === 'string' && item.insertText
-      ? item.insertText
-      : String(item.label || '');
-    return { from, to, insert };
-  }
-
-  function additionalChanges(doc, item, primary) {
-    const edits = Array.isArray(item.additionalTextEdits) ? item.additionalTextEdits : [];
-    if (!edits.length) return [];
-    const changes = edits
-      .filter((edit) => edit && edit.range)
-      .map((edit) => ({
-        from: offsetAt(doc, edit.range.start),
-        to: offsetAt(doc, edit.range.end),
-        insert: String(edit.newText || ''),
-      }));
-    const ordered = changes.concat([primary]).sort((a, b) => a.from - b.from || a.to - b.to);
-    for (let index = 1; index < ordered.length; index += 1) {
-      if (ordered[index].from < ordered[index - 1].to) {
-        // All or nothing for the extras: a half-applied import block is worse
-        // than none, and the primary edit is what the user actually asked for.
-        record(
-          'additionalEdits',
-          `refused ${changes.length} additional edit(s) for "${item.label}": ranges overlap`,
-        );
-        return [];
-      }
-    }
-    return changes;
-  }
-
-  function noteUnsupportedEffects(item) {
-    for (const effect of (item.unsupportedEffects || [])) {
-      const text = UNSUPPORTED_EFFECT_TEXT[effect];
-      if (text) record('unsupportedEffect', `"${item.label}": ${effect} not applied — ${text}`);
-    }
-  }
-
-  // Run CodeMirror's snippet applier without letting its transaction land, so
-  // the additional edits can ride in it.
-  //
-  // The applier takes a duck-typed {state, dispatch} editor and ends in
-  // `editor.dispatch(editor.state.update(spec))` — a Transaction, which
-  // nothing can be merged into. Handing it a state whose `update` returns the
-  // spec unchanged is what turns that into something mergeable. Returns null
-  // if anything about that assumption stops holding (a Transaction arrives
-  // anyway, or the applier throws), so the caller can fall back rather than
-  // dispatch something malformed.
-  function captureSnippetSpec(view, template, item, from, to) {
-    const CM = cm();
-    if (!CM || typeof CM.snippet !== 'function') return null;
-    let captured = null;
-    try {
-      const proxyState = Object.create(view.state);
-      proxyState.update = (spec) => spec;
-      CM.snippet(template)(
-        { state: proxyState, dispatch: (value) => { captured = value; } },
-        item,
-        from,
-        to,
-      );
-    } catch (error) {
-      record('snippet', `snippet expansion failed for "${item.label}": ${error}`);
-      return null;
-    }
-    // A Transaction carries the resulting state; a spec does not.
-    if (!captured || captured.state !== undefined) return null;
-    return captured;
-  }
-
-  // The one transaction. Undo, the dirty flag and the versioned change stream
-  // sent to Rust must all see a single coherent change, never a primary edit
-  // followed by a separate import insertion.
-  function applyItem(item, view, from, to) {
-    const CM = cm();
-    if (!CM || !view) return;
-    noteUnsupportedEffects(item);
-    const doc = view.state.doc;
-    const primary = primaryEdit(doc, item, from, to);
-    const extras = additionalChanges(doc, item, primary);
-
-    if (item.isSnippet && typeof CM.snippet === 'function') {
-      // Nothing to merge: let the applier dispatch its own transaction, which
-      // is already exactly one and exactly what CodeMirror intends.
-      if (!extras.length) {
-        CM.snippet(primary.insert)(view, item, primary.from, primary.to);
-        return;
-      }
-      const spec = captureSnippetSpec(view, primary.insert, item, primary.from, primary.to);
-      if (spec) {
-        // Array entries are all relative to the pre-change document, which is
-        // what both the server's ranges and the snippet's own range are.
-        view.dispatch({ ...spec, changes: [spec.changes].concat(extras) });
-        return;
-      }
-      record(
-        'snippet',
-        `"${item.label}": expanded as plain text so its additional edits could stay in one change`,
-      );
-    }
-
-    const changes = extras.concat([primary]).sort((a, b) => a.from - b.from);
-    view.dispatch({ changes });
   }
 
   // --- option translation ---------------------------------------------------
@@ -367,7 +227,9 @@
       .map((wrapped) => wrapped.entry);
   }
 
-  function toOption(item, index) {
+  // `requestPos` travels with every option because the item's edit ranges were
+  // measured against the document at that caret; see lsp-completion-apply.js.
+  function toOption(item, index, requestPos, documentId) {
     const option = {
       // CodeMirror matches on `label`, so filterText — which is what the
       // server said to match on — has to be the label, with the human-facing
@@ -376,11 +238,13 @@
       type: KIND_TYPES[item.kind] || 'text',
       // Descending, so the server's ranking survives CodeMirror's own sort.
       // Clamped because CodeMirror documents boost as -99..99 and a long list
-      // would otherwise run straight out of that range; past the first ~200
-      // items the ranking no longer decides anything a user sees.
+      // would otherwise run straight out of that range.
       boost: Math.max(-99, 99 - index),
-      info: makeInfoRenderer(item),
-      apply: (view, completion, from, to) => applyItem(item, view, from, to),
+      info: makeInfoRenderer(item, documentId),
+      apply: (view, completion, from, to) => {
+        const module = apply();
+        if (module) module.applyItem(item, view, from, to, requestPos);
+      },
     };
     if (item.filterText && item.filterText !== item.label) option.displayLabel = String(item.label);
     if (item.detail) option.detail = String(item.detail);
@@ -402,8 +266,8 @@
     if (!trigger) return null;
 
     const documentId = state.documentId;
-    const version = state.version;
-    const position = lspPositionAt(context.state.doc, context.pos);
+    const requestPos = context.pos;
+    const position = lspPositionAt(context.state.doc, requestPos);
     const from = wordStart(context);
 
     let response = null;
@@ -414,17 +278,22 @@
       return null;
     }
     if (!response || !Array.isArray(response.items) || !response.items.length) return null;
-    // Everything below is the stale-result guard. requestFeature applies its
-    // own; this one is what makes the guard true of THIS source's context too.
+    // The version guard belongs to editor-service's barrier, which captures it
+    // AFTER flushing the pending change batch and rejects on its own admission
+    // sequence, attachment generation, document id and version. Re-checking a
+    // version captured BEFORE the flush here only ever discarded good results,
+    // because a batched keystroke bumps the version between the two. What is
+    // left is the guard the barrier cannot make: that this source's own
+    // context and pane still refer to the same document.
     if (context.aborted) return null;
     const current = documentStateFor(pane);
     if (!current || current.documentId !== documentId) return null;
     if (response.documentId !== documentId) return null;
-    if (response.sourceVersion !== version || current.version !== version) return null;
 
     return {
       from,
-      options: orderedItems(response.items).map(toOption),
+      options: orderedItems(response.items)
+        .map((entry, index) => toOption(entry, index, requestPos, documentId)),
       // An incomplete list has to be re-requested as the prefix grows.
       validFor: response.isIncomplete ? undefined : /^[A-Za-z0-9_$]*$/,
     };
@@ -441,15 +310,32 @@
 
   // --- keyboard -------------------------------------------------------------
   //
-  // Every binding below asks completionStatus first and returns false when the
-  // popup is not open, which is the whole reason this can outrank vim: with no
-  // popup, Escape still leaves insert mode in one press, Enter still opens a
-  // line and Tab still indents.
+  // This has to beat @replit/codemirror-vim, and a keymap cannot.
+  //
+  // Every CodeMirror keymap in a state — whatever its precedence — is served
+  // by ONE shared DOM handler that @codemirror/view registers at Prec.default
+  // (`handleKeyEvents`); precedence inside the keymap facet only orders
+  // bindings against each other, behind that single handler. vim is not a
+  // keymap at all: it is a ViewPlugin with an `eventHandlers.keydown` that
+  // preventDefaults whatever it consumes, and the view runs plugin handlers in
+  // plugin order, stopping at the first one that returns true or has already
+  // called preventDefault. A vim plugin at default precedence therefore beats
+  // `Prec.highest(keymap.of(...))` every time, and Escape would leave insert
+  // mode instead of closing the popup.
+  //
+  // So the hook is a domEventHandler of our own, raised with Prec.highest,
+  // which lands ahead of vim's plugin. It returns false — no preventDefault —
+  // for every key it does not own and whenever the popup is closed, so vim and
+  // the default keymap see those keys exactly as before.
 
   function popupOpen(view) {
     const CM = cm();
-    if (!CM || typeof CM.completionStatus !== 'function' || !view) return false;
-    return CM.completionStatus(view.state) !== null;
+    if (!CM || typeof CM.completionStatus !== 'function' || !view || !view.state) return false;
+    try {
+      return CM.completionStatus(view.state) !== null;
+    } catch (_) {
+      return false;
+    }
   }
 
   function whenOpen(command) {
@@ -459,7 +345,7 @@
     };
   }
 
-  function keymapBindings() {
+  function keyBindings() {
     const CM = cm();
     if (!CM) return [];
     // moveCompletionSelection is a Command FACTORY: called once here, not once
@@ -470,14 +356,19 @@
     return [
       {
         key: 'Ctrl-Space',
-        run: (view) => (typeof CM.startCompletion === 'function' ? CM.startCompletion(view) : false),
+        // Guarded like the rest: on a remote or plain-text pane there is no
+        // source to open, and swallowing the key for nothing is worse than
+        // letting it through.
+        run: (view) => (completableView(view) && typeof CM.startCompletion === 'function'
+          ? CM.startCompletion(view) !== false
+          : false),
       },
       { key: 'Escape', run: whenOpen(CM.closeCompletion) },
       { key: 'Enter', run: whenOpen(CM.acceptCompletion) },
       { key: 'Tab', run: whenOpen(CM.acceptCompletion) },
       // With autocompletion's own keymap off, these are the only thing
       // navigating the list — and while the popup is closed they are still
-      // vim's (and the default keymap's) arrows.
+      // vim's and the default keymap's arrows.
       { key: 'ArrowDown', run: whenOpen(move(true)) },
       { key: 'ArrowUp', run: whenOpen(move(false)) },
       { key: 'PageDown', run: whenOpen(move(true, 'page')) },
@@ -485,10 +376,30 @@
     ];
   }
 
-  // What editor-pane mounts. The keymap is raised with Prec.highest rather
-  // than moved to the front of the extension list: vim's own keymap has to
-  // stay the FIRST extension (test_editor_vim_glue.mjs pins that), and
-  // precedence is the only other way to be heard before it.
+  // KeyboardEvent -> the name of the binding it could match, or null. Anything
+  // carrying Meta or Alt is somebody else's (and Ctrl is ours only for the
+  // manual trigger), so vim's own Ctrl-/Alt- bindings are never intercepted.
+  function eventKey(event) {
+    if (!event || event.altKey || event.metaKey) return null;
+    const key = event.key;
+    if (event.ctrlKey) return key === ' ' || key === 'Spacebar' ? 'Ctrl-Space' : null;
+    if (key === 'Escape' || key === 'Esc') return 'Escape';
+    if (key === 'Enter') return 'Enter';
+    if (key === 'Tab') return event.shiftKey ? null : 'Tab';
+    if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'PageDown' || key === 'PageUp') {
+      return key;
+    }
+    return null;
+  }
+
+  function handleKeydown(event, view) {
+    const key = eventKey(event);
+    if (!key) return false;
+    const binding = keyBindings().find((candidate) => candidate.key === key);
+    return binding ? binding.run(view) === true : false;
+  }
+
+  // What editor-pane mounts.
   function extensions() {
     const CM = cm();
     if (!CM || typeof CM.autocompletion !== 'function') return [];
@@ -496,15 +407,20 @@
       CM.autocompletion({
         override: [completionSource],
         activateOnTyping: true,
-        // One keymap owns these keys. Two competing ones is exactly how
+        // One handler owns these keys. Two competing ones is exactly how
         // Escape starts needing two presses in insert mode.
         defaultKeymap: false,
         closeOnBlur: true,
         maxRenderedOptions: 100,
       }),
     ];
-    if (CM.Prec && typeof CM.Prec.highest === 'function' && CM.keymap) {
-      list.push(CM.Prec.highest(CM.keymap.of(keymapBindings())));
+    if (
+      CM.Prec && typeof CM.Prec.highest === 'function'
+      && CM.EditorView && typeof CM.EditorView.domEventHandlers === 'function'
+    ) {
+      list.push(CM.Prec.highest(CM.EditorView.domEventHandlers({
+        keydown: (event, view) => handleKeydown(event, view),
+      })));
     }
     return list;
   }
@@ -517,6 +433,7 @@
     const pane = currentPane();
     if (!CM || typeof CM.startCompletion !== 'function') return false;
     if (!pane || pane.kind !== 'editor' || !pane.view) return false;
+    if (!documentStateFor(pane)) return false;
     return CM.startCompletion(pane.view) === true;
   }
 
@@ -545,10 +462,15 @@
     configure,
     dispose,
     extensions,
-    keymapBindings,
+    keyBindings,
+    eventKey,
+    handleKeydown,
     completionSource,
     triggerManualCompletion,
     setSuggestionsWhileTyping: (enabled) => { suggestionsWhileTyping = enabled !== false; },
-    sessionLog: () => sessionLogEntries.slice(),
+    sessionLog: () => {
+      const module = apply();
+      return module && typeof module.sessionLog === 'function' ? module.sessionLog() : [];
+    },
   };
 })(window);

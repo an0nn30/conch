@@ -139,6 +139,13 @@
         // flag and no new UI config to apply, and forcing vim off from a
         // missing config would be a worse answer than leaving it alone.
         if (appCfg) {
+          if (typeof appCfg.editor_lsp_suggestions_while_typing === 'boolean'
+              && global.termlabLspCompletion
+              && typeof global.termlabLspCompletion.setSuggestionsWhileTyping === 'function') {
+            global.termlabLspCompletion.setSuggestionsWhileTyping(
+              appCfg.editor_lsp_suggestions_while_typing,
+            );
+          }
           const vimMode = appCfg.editor_vim_mode === true;
           if (typeof setEditorVimMode === 'function') setEditorVimMode(vimMode);
           for (const pane of getPanes().values()) {

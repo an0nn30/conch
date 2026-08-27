@@ -84,16 +84,21 @@
       state: CM.EditorState.create({
         doc: typeof opts.doc === 'string' ? opts.doc : '',
         extensions: [
-          // FIRST, and it has to stay first. CodeMirror resolves keymaps in
-          // extension order, so anything ahead of vim wins the keystroke:
-          // put this after CM.keymap.of([...defaultKeymap]) below and `i`
-          // types an "i" instead of entering insert mode, `dd` deletes
-          // nothing, and the feature looks broken rather than absent.
+          // FIRST, and it has to stay first. vim is a ViewPlugin with a
+          // `keydown` DOM handler, and the view runs plugin handlers in
+          // plugin order — which is extension order at equal precedence.
+          // Anything ahead of vim that consumes keydown wins the keystroke,
+          // so a plugin placed above this one could stop `i` entering insert
+          // mode. (The *keymap* below is a different mechanism: every keymap
+          // in the state shares one DOM handler that @codemirror/view
+          // registers at Prec.default, BEHIND vim's plugin. That is why the
+          // completion extensions cannot own their keys with a keymap and use
+          // a Prec.highest domEventHandler instead.)
           // test_editor_vim_glue.mjs pins the position.
           vimComp.of(vimExtensions(opts.vimMode === true)),
-          // After vim in the list, ahead of it in precedence: its keymap is
-          // wrapped in Prec.highest so the popup can own Escape/Enter/Tab
-          // while it is open, without vim losing the first slot above.
+          // Position here is not what makes these heard: the completion key
+          // handler carries its own Prec.highest, which is what puts it ahead
+          // of vim's plugin while the popup is open.
           ...completionExtensions(),
           CM.lineNumbers(),
           CM.highlightActiveLineGutter(),
