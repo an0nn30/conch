@@ -8,8 +8,13 @@
 //! HARD SAFETY CONSTRAINT: install/uninstall must never delete or overwrite a
 //! file at the link path that isn't a TermLab symlink. `classify_link` is the
 //! single place that decides this, and both commands route every existing
-//! file through it before touching anything — there is no "remove first,
-//! classify later" shortcut anywhere below.
+//! file through it before touching anything — in *program order* there is no
+//! "remove first, classify later" shortcut anywhere below. This is not a
+//! claim of atomicity: classify-then-remove has a TOCTOU window (something
+//! else could replace the file between the classify and the `remove_file`
+//! call), which is accepted here rather than guarded against — a concurrent
+//! writer to `/usr/local/bin` is inside the user's own trust boundary, not
+//! an adversary this module defends against.
 
 use std::path::{Path, PathBuf};
 
@@ -38,23 +43,43 @@ pub(crate) enum LinkState {
     Foreign(PathBuf),
 }
 
+/// What's already at the link path, as read directly off the filesystem —
+/// exactly as much detail as `classify_link` needs, and no more. The
+/// symlink/non-symlink distinction is carried explicitly (rather than
+/// folded into "what path do we have") so a non-symlink file can never be
+/// run through the name-based heuristic below: whether something happens to
+/// be *named* `termlab` is never, by itself, evidence that it *is* ours.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LinkProbe {
+    /// Nothing exists at the link path.
+    Missing,
+    /// A symlink exists at the link path, resolving to this target.
+    Symlink(PathBuf),
+    /// Something exists at the link path but is NOT a symlink (a regular
+    /// file, a directory, a hardlink, ...). Always `Foreign` in
+    /// `classify_link` — never inspected further, regardless of its name.
+    Other,
+}
+
 /// Classify the existing entry at the link path, without touching the
-/// filesystem itself.
+/// filesystem itself. `link_path` is used only to name the offending file
+/// in the `Foreign` case for a non-symlink `probe` (there is no "target" to
+/// report for those — the file itself is what's foreign).
 ///
-/// `link_meta` is:
-/// - `None` when nothing exists at the link path.
-/// - `Some(target)` when something exists — `target` is the symlink's
-///   resolved target, or (for a non-symlink file already sitting there) the
-///   link path itself, which guarantees it can never accidentally equal
-///   `current_exe` and always classifies as `Foreign`.
-///
-/// A target classifies as `PointsToOtherTermLab` when it contains a path
-/// component ending in `TermLab.app`, or its final component is exactly
-/// `termlab` — and it isn't already `current_exe`. Anything else is
-/// `Foreign`.
-pub(crate) fn classify_link(link_meta: Option<&Path>, current_exe: &Path) -> LinkState {
-    let Some(target) = link_meta else {
-        return LinkState::Missing;
+/// A symlink's target classifies as `PointsToOtherTermLab` when it contains
+/// a path component ending in `TermLab.app`, or its final component is
+/// exactly `termlab` — and it isn't already `current_exe`. Any other
+/// symlink target is `Foreign`. A non-symlink entry (`LinkProbe::Other`) is
+/// unconditionally `Foreign`, regardless of what the link path is named.
+pub(crate) fn classify_link(
+    probe: &LinkProbe,
+    current_exe: &Path,
+    link_path: &Path,
+) -> LinkState {
+    let target = match probe {
+        LinkProbe::Missing => return LinkState::Missing,
+        LinkProbe::Other => return LinkState::Foreign(link_path.to_path_buf()),
+        LinkProbe::Symlink(target) => target,
     };
 
     if target == current_exe {
@@ -98,18 +123,17 @@ pub(crate) fn admin_shell_command(action: &str) -> String {
 mod unix_impl {
     use super::*;
 
-    /// Read what's at `link_path`, normalized so every case classify_link
-    /// needs is representable:
-    /// - doesn't exist -> `None`
-    /// - a symlink -> `Some(target)`
-    /// - anything else (a regular file, a directory, ...) -> `Some(link_path
-    ///   itself)`, which `classify_link` always reads as `Foreign` since it
-    ///   can never equal `current_exe`.
-    fn read_link_target(link_path: &Path) -> Option<PathBuf> {
+    /// Read what's at `link_path` into a `LinkProbe`. `fs::read_link` fails
+    /// both when nothing exists AND when something exists but isn't a
+    /// symlink, so those two are told apart by error kind: `NotFound` means
+    /// nothing's there, any other error (`InvalidInput` for a non-symlink
+    /// file, on most platforms) means something's there that isn't a
+    /// symlink — `LinkProbe::Other`, never inspected for its name.
+    fn read_link_target(link_path: &Path) -> LinkProbe {
         match std::fs::read_link(link_path) {
-            Ok(target) => Some(target),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => Some(link_path.to_path_buf()),
+            Ok(target) => LinkProbe::Symlink(target),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => LinkProbe::Missing,
+            Err(_) => LinkProbe::Other,
         }
     }
 
@@ -161,9 +185,9 @@ mod unix_impl {
     pub(crate) fn install() -> Result<String, String> {
         let exe = current_exe()?;
         let link_path = Path::new(LINK_PATH);
-        let existing = read_link_target(link_path);
+        let probe = read_link_target(link_path);
 
-        match classify_link(existing.as_deref(), &exe) {
+        match classify_link(&probe, &exe, link_path) {
             LinkState::PointsToUs => {
                 Ok(format!("'termlab' is already installed at {LINK_PATH}"))
             }
@@ -202,9 +226,9 @@ mod unix_impl {
     pub(crate) fn uninstall() -> Result<String, String> {
         let exe = current_exe()?;
         let link_path = Path::new(LINK_PATH);
-        let existing = read_link_target(link_path);
+        let probe = read_link_target(link_path);
 
-        match classify_link(existing.as_deref(), &exe) {
+        match classify_link(&probe, &exe, link_path) {
             LinkState::Missing => Ok(format!("'termlab' was not installed at {LINK_PATH}")),
             LinkState::Foreign(p) => Err(format!(
                 "{LINK_PATH} isn't a TermLab install ({}); refusing to remove it",
@@ -270,32 +294,61 @@ mod tests {
     #[test]
     fn classify_missing_ours_stale_and_foreign() {
         let exe = Path::new("/Applications/TermLab.app/Contents/MacOS/termlab");
-        assert!(matches!(classify_link(None, exe), LinkState::Missing));
+        let link_path = Path::new("/usr/local/bin/termlab");
         assert!(matches!(
-            classify_link(Some(exe), exe),
+            classify_link(&LinkProbe::Missing, exe, link_path),
+            LinkState::Missing
+        ));
+        assert!(matches!(
+            classify_link(&LinkProbe::Symlink(exe.to_path_buf()), exe, link_path),
             LinkState::PointsToUs
         ));
-        let stale = Path::new("/Applications/Old/TermLab.app/Contents/MacOS/termlab");
+        let stale = PathBuf::from("/Applications/Old/TermLab.app/Contents/MacOS/termlab");
         assert!(matches!(
-            classify_link(Some(stale), exe),
+            classify_link(&LinkProbe::Symlink(stale), exe, link_path),
             LinkState::PointsToOtherTermLab(_)
         ));
-        let foreign = Path::new("/usr/local/bin/some-other-tool-target");
+        let foreign = PathBuf::from("/usr/local/bin/some-other-tool-target");
         assert!(matches!(
-            classify_link(Some(foreign), exe),
+            classify_link(&LinkProbe::Symlink(foreign), exe, link_path),
             LinkState::Foreign(_)
         ));
+    }
+
+    #[test]
+    fn classify_non_symlink_file_named_termlab_must_not_be_mistaken_for_ours() {
+        // Regression: a plain (non-symlink) file at the link path must
+        // always be Foreign, regardless of its name. Before this was fixed,
+        // read_link_target's non-symlink fallback handed classify_link the
+        // link path itself as if it were a symlink's "target", and since
+        // LINK_PATH's basename is literally "termlab", the name-based
+        // heuristic matched it and misclassified ANY plain file sitting at
+        // the link path as PointsToOtherTermLab -- which install()/
+        // uninstall() would then delete. LinkProbe::Other now bypasses the
+        // name-based heuristic entirely, structurally, so this can't
+        // regress silently.
+        let exe = Path::new("/Applications/TermLab.app/Contents/MacOS/termlab");
+        let link_path = Path::new("/usr/local/bin/termlab");
+        let state = classify_link(&LinkProbe::Other, exe, link_path);
+        assert!(
+            matches!(state, LinkState::Foreign(_)),
+            "a non-symlink file at the link path must classify Foreign regardless \
+             of its name, got {state:?}"
+        );
     }
 
     #[test]
     fn classify_final_component_termlab_without_dot_app_is_also_ours() {
         // The rule is "final component exactly `termlab`" OR "a component
         // ending in `TermLab.app`" — a bare `termlab` binary dropped
-        // somewhere outside a `.app` bundle (e.g. a dev build) still counts.
+        // somewhere outside a `.app` bundle (e.g. a dev build) still counts,
+        // as long as it's an actual symlink target (not the non-symlink
+        // case covered above).
         let exe = Path::new("/Applications/TermLab.app/Contents/MacOS/termlab");
-        let dev_build = Path::new("/Users/me/conch/target/debug/termlab");
+        let link_path = Path::new("/usr/local/bin/termlab");
+        let dev_build = PathBuf::from("/Users/me/conch/target/debug/termlab");
         assert!(matches!(
-            classify_link(Some(dev_build), exe),
+            classify_link(&LinkProbe::Symlink(dev_build), exe, link_path),
             LinkState::PointsToOtherTermLab(_)
         ));
     }
@@ -303,11 +356,12 @@ mod tests {
     #[test]
     fn classify_similarly_named_foreign_binary_is_not_mistaken_for_ours() {
         let exe = Path::new("/Applications/TermLab.app/Contents/MacOS/termlab");
+        let link_path = Path::new("/usr/local/bin/termlab");
         // "termlab-old" is not an exact match on the final component, and
         // doesn't contain a `TermLab.app` component either.
-        let similar = Path::new("/usr/local/bin/termlab-old");
+        let similar = PathBuf::from("/usr/local/bin/termlab-old");
         assert!(matches!(
-            classify_link(Some(similar), exe),
+            classify_link(&LinkProbe::Symlink(similar), exe, link_path),
             LinkState::Foreign(_)
         ));
     }
