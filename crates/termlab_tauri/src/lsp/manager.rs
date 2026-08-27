@@ -4740,15 +4740,20 @@ impl LspManager {
                     if let Some(progress) = self.session_delivery_progress.get_mut(&key) {
                         progress.record_completed();
                     }
-                    // A close the session still owes for a document already
-                    // let go of comes first: nothing is waiting on it, but the
-                    // server is holding a buffer until it lands.
-                    self.drain_repair_closes(&key);
                     // Preserve the order of work already admitted to the
                     // session, then immediately spend newly freed outbox
                     // credit on the front policy reservation. New batches do
                     // not refill that credit while any policy remains ahead.
                     self.pump_session(&key);
+                    // Only now is the slot this turn freed actually available.
+                    // Draining before the pump would measure the outbox one
+                    // operation fuller than it is about to be, refusing the
+                    // owed close for no reason - and the batch flush below
+                    // would take the slot instead, so under sustained editing
+                    // the repair could be starved turn after turn. Nothing
+                    // waits on it, so it does not need to go first; it only
+                    // needs to go before the flush.
+                    self.drain_repair_closes(&key);
                     self.retry_pending_policy_command();
                     if self.pending_close_groups.is_empty()
                         && self.pending_policy_commands.is_empty()
@@ -11014,6 +11019,97 @@ mod tests {
         assert!(
             actor.state.sessions.contains_key(&session_key),
             "a failed repair close must be logged, not escalated to a session stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_owed_repair_close_uses_the_slot_the_pump_just_freed() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let path = project_root.join("owed.ts");
+        std::fs::write(&path, "owed").unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (_manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let ReserveResult::Reserved { reservation_id, .. } =
+            actor.reserve_document(path, "main".into()).unwrap()
+        else {
+            panic!("expected reservation")
+        };
+        let response = actor
+            .open_document(
+                reservation_id,
+                "owed".into(),
+                "owed".into(),
+                "typescript".into(),
+            )
+            .unwrap();
+        let document =
+            serde_json::from_value::<DocumentId>(serde_json::Value::String(response.document_id))
+                .unwrap();
+        let id_text = super::document_id_text(document);
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        actor
+            .state
+            .documents
+            .get_mut(&document)
+            .unwrap()
+            .session_key = Some(session_key.clone());
+
+        // A worker whose queue holds exactly one operation, so the test can
+        // free precisely one slot the way a real worker does.
+        let (operations, mut operations_rx) = mpsc::channel(1);
+        let (close_deliveries, close_rx) = mpsc::channel(super::SESSION_OPERATION_CAPACITY);
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        std::mem::forget((close_rx, shutdown_rx));
+        let mut session = fake_managed_session("owed-repair", 9, document);
+        session.worker = Some(super::SessionWorkerHandle {
+            operations,
+            close_deliveries,
+            shutdown: Some(shutdown),
+        });
+        actor.state.sessions.insert(session_key.clone(), session);
+
+        while actor
+            .enqueue_session_operations(
+                &session_key,
+                [super::SessionOperation::DidSave("filler".into())],
+            )
+            .is_ok()
+        {}
+        actor
+            .session_delivery_progress
+            .get_mut(&session_key)
+            .unwrap()
+            .open_on_server
+            .insert(id_text.clone());
+        actor
+            .pending_repair_closes
+            .insert(session_key.clone(), vec![id_text.clone()]);
+
+        // The worker finishes one operation: that is the slot the owed repair
+        // is waiting for, and it only exists once the outbox has been pumped.
+        operations_rx.try_recv().unwrap();
+        actor.handle_input(super::ActorInput::WorkerReady {
+            key: session_key.clone(),
+            generation: 9,
+        });
+
+        assert!(
+            !actor.pending_repair_closes.contains_key(&session_key),
+            "the owed repair was refused against an outbox the pump was about to drain"
+        );
+        assert_eq!(
+            queued_transitions(&actor, &session_key, document),
+            vec![super::OpenTransition::Close],
+            "the repair must land on the slot this turn freed"
         );
     }
 
