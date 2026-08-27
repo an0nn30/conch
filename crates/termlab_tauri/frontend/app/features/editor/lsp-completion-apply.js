@@ -125,16 +125,34 @@
 
   // --- snippets -------------------------------------------------------------
 
-  // What a snippet template says when nothing can expand it. `${1:value}`
-  // keeps its default, `$1` and `${1}` are tab stops with no text. Escaped
-  // braces and dollars are left alone and then unescaped, which is why the
-  // placeholder patterns all refuse a preceding backslash.
+  // What an LSP snippet template says when nothing can expand it. `${1:value}`
+  // keeps its default, `$1` and `${1}` are tab stops with no text, and `\$`,
+  // `\}` and `\\` are the literal characters they escape.
+  //
+  // ONE left-to-right pass, deliberately. A pass per construct re-reads text it
+  // has already produced: `$${1}1` is a literal dollar, an empty tab stop and a
+  // literal `1`, but removing the tab stop first leaves `$1` for the next pass
+  // to eat as a tab stop that was never in the template. Alternation in a
+  // single scan also settles the escapes by position instead of by lookbehind
+  // — which matters twice over, because a lookbehind assertion is a parse
+  // error on JavaScriptCore before Safari 16.4 (macOS 13.3) and this app sets
+  // no `minimumSystemVersion`. A regex literal is validated when the FILE is
+  // parsed, so one of them would stop this module loading at all, and every
+  // call site guards on the module being present: the popup would open and
+  // accepting an item would silently do nothing.
+  const SNIPPET_TOKEN = /\\([${}\\])|\$\{\d+:([^}]*)\}|\$\{\d+\}|\$\d+/g;
+  const SNIPPET_ESCAPE = /\\([${}\\])/g;
+
   function snippetPlainText(template) {
-    return String(template)
-      .replace(/(?<!\\)\$\{\d+:([^}]*)\}/g, '$1')
-      .replace(/(?<!\\)\$\{\d+\}/g, '')
-      .replace(/(?<!\\)\$\d+/g, '')
-      .replace(/\\([${}])/g, '$1');
+    return String(template).replace(SNIPPET_TOKEN, (match, escaped, placeholderDefault) => {
+      if (escaped !== undefined) return escaped;
+      // A default carries its own escapes; resolve them rather than leaving a
+      // stray backslash in the buffer.
+      if (placeholderDefault !== undefined) {
+        return placeholderDefault.replace(SNIPPET_ESCAPE, '$1');
+      }
+      return '';
+    });
   }
 
   // CodeMirror's own snippet applier, run against the real state but with its
@@ -157,6 +175,12 @@
       return null;
     }
     if (!captured || !captured.changes) return null;
+    // Rebuilt from the Transaction's public fields, which loses its
+    // `pickedCompletion` annotation. Harmless here: the only thing that reads
+    // it is autocomplete's `activateOnCompletion`, which defaults to false and
+    // is not enabled. A later task that turns it on has to re-attach the
+    // annotation (and therefore export `pickedCompletion` from vendor-entry),
+    // or chained completion will not retrigger after a snippet.
     return {
       changes: captured.changes,
       selection: captured.selection || undefined,

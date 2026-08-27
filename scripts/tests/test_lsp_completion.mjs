@@ -839,6 +839,42 @@ check('snippetPlainText resolves placeholders and respects escapes', () => {
   assert.strictEqual(plain('${1:a}${2:b}'), 'ab');
   assert.strictEqual(plain('cost: \\$5'), 'cost: $5', 'an escaped dollar is money, not a tab stop');
   assert.strictEqual(plain('plain text'), 'plain text');
+  // LSP escapes `$`, `}` and `\` inside snippet text, including inside a
+  // placeholder's default.
+  assert.strictEqual(plain('a\\{b\\}c'), 'a{b}c');
+  assert.strictEqual(
+    plain('\\\\${1:a}'), '\\a',
+    'an escaped BACKSLASH does not escape the placeholder that follows it',
+  );
+  assert.strictEqual(
+    plain('${1:\\$2}'), '$2',
+    'and a default\'s own escapes are resolved rather than left in the buffer',
+  );
+});
+
+// One left-to-right pass, not four. A multi-pass form re-scans text it has
+// already produced: "$${1}1" is a literal dollar, an empty tab stop and a
+// literal "1", but stripping the tab stop first leaves "$1", which the next
+// pass then eats as a tab stop that was never in the template.
+check('snippetPlainText never re-reads its own output', () => {
+  const h = harness({ real: true });
+  assert.strictEqual(h.apply.snippetPlainText('$${1}1'), '$1');
+});
+
+// Lookbehind assertions reached JavaScriptCore only in Safari 16.4 (macOS
+// 13.3); this app declares no minimumSystemVersion, so Tauri's floor applies.
+// A regex literal is validated when the FILE is parsed, so one lookbehind
+// would stop these modules loading at all on an older WKWebView — and because
+// every call site guards on the module being present, the failure would be
+// silent: the popup opens and accepting an item does nothing.
+check('the completion modules use no regex lookbehind', () => {
+  for (const file of [COMPLETION, APPLY]) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.ok(
+      !/\(\?<[=!]/.test(source),
+      `${file} uses a lookbehind — it costs the whole file on an older WKWebView`,
+    );
+  }
 });
 
 check('a cross-document workspace edit is visible and refused, not partially applied', async () => {
