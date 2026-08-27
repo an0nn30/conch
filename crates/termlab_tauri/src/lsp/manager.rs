@@ -1036,18 +1036,123 @@ struct SessionWorkerHandle {
     shutdown: Option<oneshot::Sender<()>>,
 }
 
-/// How far a session's ordered lane has actually got.
+/// Whether an operation changes what the server believes about a document
+/// being open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenTransition {
+    Open,
+    Close,
+}
+
+enum PipelineEntry {
+    /// A reserved-close credit placeholder a deferred policy is waiting on.
+    ReservedCredit,
+    /// Ordinary traffic for one document.
+    Document {
+        document_id: String,
+        transition: Option<OpenTransition>,
+    },
+}
+
+/// A mirror of everything a session has been handed but not yet executed.
 ///
-/// `enqueued` numbers every operation pushed into the outbox and `completed`
-/// counts the ones the worker has finished, so a recorded position is reached
-/// exactly when `completed` catches up with it. `credit_marks` holds the
-/// positions of the reserved-close placeholders that policy work is still
-/// waiting on.
+/// The outbox and the worker's own queue together form one ordered pipeline
+/// that the actor cannot otherwise see into: `pump_session` hands operations
+/// off and only a `WorkerReady` says one finished. Mirroring the pipeline here
+/// is what lets staging answer the two questions it has to get right - does
+/// this document still have ordered traffic in flight, and does the server
+/// actually believe it is open.
 #[derive(Default)]
 struct SessionDeliveryProgress {
-    enqueued: u64,
-    completed: u64,
-    credit_marks: VecDeque<u64>,
+    pipeline: VecDeque<PipelineEntry>,
+    open_on_server: HashSet<String>,
+}
+
+/// The document an operation is ordered against, and how it moves the server's
+/// idea of that document being open.
+fn operation_document(operation: &SessionOperation) -> Option<(&str, Option<OpenTransition>)> {
+    match operation {
+        SessionOperation::DidOpen(document) => {
+            Some((&document.document_id, Some(OpenTransition::Open)))
+        }
+        SessionOperation::DidChange(batch) => Some((&batch.document_id, None)),
+        SessionOperation::DidSave(document_id) => Some((document_id, None)),
+        SessionOperation::DidClose { document_id, .. } => {
+            Some((document_id, Some(OpenTransition::Close)))
+        }
+        SessionOperation::Request { document_id, .. } => Some((document_id, None)),
+        SessionOperation::PullDiagnostics {
+            document_id_text, ..
+        } => Some((document_id_text, None)),
+        SessionOperation::ReservedCloseCredit => None,
+    }
+}
+
+impl SessionDeliveryProgress {
+    fn entry_for(operation: &SessionOperation) -> PipelineEntry {
+        match operation_document(operation) {
+            Some((document_id, transition)) => PipelineEntry::Document {
+                document_id: document_id.to_owned(),
+                transition,
+            },
+            None => PipelineEntry::ReservedCredit,
+        }
+    }
+
+    fn record_enqueued(&mut self, operations: &[SessionOperation]) {
+        for operation in operations {
+            self.pipeline.push_back(Self::entry_for(operation));
+        }
+    }
+
+    /// One operation finished, in pipeline order.
+    fn record_completed(&mut self) {
+        if let Some(PipelineEntry::Document {
+            document_id,
+            transition: Some(transition),
+        }) = self.pipeline.pop_front()
+        {
+            match transition {
+                OpenTransition::Open => {
+                    self.open_on_server.insert(document_id);
+                }
+                OpenTransition::Close => {
+                    self.open_on_server.remove(&document_id);
+                }
+            }
+        }
+    }
+
+    /// Re-mirror the queued tail after operations were dropped from the outbox.
+    /// Everything ahead of the outbox is already inside the worker and cannot
+    /// be taken back.
+    fn rebuild_queued_tail(
+        &mut self,
+        previous_outbox_len: usize,
+        outbox: &VecDeque<SessionOperation>,
+    ) {
+        let inside_worker = self.pipeline.len().saturating_sub(previous_outbox_len);
+        self.pipeline.truncate(inside_worker);
+        for operation in outbox {
+            self.pipeline.push_back(Self::entry_for(operation));
+        }
+    }
+
+    fn credits_outstanding(&self) -> bool {
+        self.pipeline
+            .iter()
+            .any(|entry| matches!(entry, PipelineEntry::ReservedCredit))
+    }
+
+    fn document_in_flight(&self, document_id: &str) -> bool {
+        self.pipeline.iter().any(|entry| {
+            matches!(entry, PipelineEntry::Document { document_id: queued, .. } if queued == document_id)
+        })
+    }
+
+    fn believes_open(&self, document_id: &str) -> bool {
+        self.open_on_server.contains(document_id)
+    }
 }
 
 enum ActorInput {
@@ -1320,6 +1425,11 @@ struct PolicyCapacityReservation {
 struct ReservedCloseDelivery {
     group_id: u64,
     epoch: u64,
+    /// Distinguishes one staging attempt from the next. A group whose staging
+    /// aborted part way through keeps its group id, so without this an
+    /// acknowledgement of the abandoned attempt would discharge the entry the
+    /// retry created for the same document.
+    attempt: u64,
     key: SessionKey,
     session_generation: u64,
     document_id: DocumentId,
@@ -1336,10 +1446,12 @@ enum DeferredClosePhase {
     /// never releases ownership and never advances the policy behind it.
     Delivering {
         outstanding: HashMap<DocumentId, ReservedCloseDelivery>,
-        /// Set once a delivery failed: the manager can no longer prove the
-        /// server closed the document, so it stops that exact generation and
-        /// waits for the stop to finish before settling the group.
-        stopping: Option<(SessionKey, u64)>,
+        /// Non-empty once a delivery failed: the manager can no longer prove
+        /// the server closed the document, so it stops every generation the
+        /// group reached and waits for all of those stops before settling. A
+        /// group that spans two sessions must not report success while the
+        /// other session still holds one of its documents open.
+        stopping: Vec<(SessionKey, u64)>,
     },
 }
 
@@ -1393,6 +1505,7 @@ pub(crate) struct LspManager {
     settling_close_groups: Vec<DeferredCloseGroup>,
     session_delivery_progress: HashMap<SessionKey, SessionDeliveryProgress>,
     next_close_group_id: u64,
+    next_close_delivery_attempt: u64,
     policy_capacity_reservations: HashMap<SessionKey, PolicyCapacityReservation>,
     policy_reservation_epoch: Option<u64>,
     next_policy_reservation_epoch: u64,
@@ -1459,6 +1572,7 @@ impl LspManager {
             settling_close_groups: Vec::new(),
             session_delivery_progress: HashMap::new(),
             next_close_group_id: 1,
+            next_close_delivery_attempt: 1,
             policy_capacity_reservations: HashMap::new(),
             policy_reservation_epoch: None,
             next_policy_reservation_epoch: 1,
@@ -2663,6 +2777,12 @@ impl LspManager {
     }
 
     fn invalidate_policy_epoch(&mut self, error: ManagerError) {
+        // Limitation (M7): a group that is already delivering is dropped here
+        // together with the pending ones. Its documents stay open and owned, so
+        // the caller can retry, but the didClose notifications it already sent
+        // cannot be recalled - the retry will send them a second time. Only the
+        // epoch guard's own conditions get us here, and every one of them means
+        // the session state is no longer trustworthy anyway.
         for group in self.pending_close_groups.drain(..) {
             group.fail(error.clone());
         }
@@ -2685,16 +2805,14 @@ impl LspManager {
             .any(|group| match &group.phase {
                 DeferredClosePhase::Pending => false,
                 DeferredClosePhase::Delivering {
-                    stopping: Some(_), ..
-                } => false,
-                DeferredClosePhase::Delivering {
                     outstanding,
-                    stopping: None,
+                    stopping,
                 } => {
-                    self.policy_reservation_epoch != Some(group.epoch)
-                        || outstanding
-                            .values()
-                            .any(|delivery| !self.delivery_generation_running(delivery))
+                    stopping.is_empty()
+                        && (self.policy_reservation_epoch != Some(group.epoch)
+                            || outstanding
+                                .values()
+                                .any(|delivery| !self.delivery_generation_running(delivery)))
                 }
             })
     }
@@ -2833,7 +2951,7 @@ impl LspManager {
                 let settled = outstanding.is_empty();
                 group.phase = DeferredClosePhase::Delivering {
                     outstanding,
-                    stopping: None,
+                    stopping: Vec::new(),
                 };
                 self.pending_close_groups.push_front(group);
                 if settled {
@@ -2893,24 +3011,50 @@ impl LspManager {
             else {
                 continue;
             };
+            let id_text = document_id_text(document_id);
+            // Nothing still queued for a closing document can matter, and
+            // leaving it queued is exactly what would let an ordered didOpen or
+            // didChange land *after* the close this group is about to deliver -
+            // the server would keep a phantom buffer shadowing the file for the
+            // rest of the session.
+            let dropped_open = self.drop_queued_document_operations(&key, &id_text);
+            let progress = self.session_delivery_progress.get(&key);
+            if dropped_open && !progress.is_some_and(|progress| progress.believes_open(&id_text)) {
+                // The open this close would have been paired with never reached
+                // the server and never will now. Telling the server to close a
+                // buffer it does not have would be a lie, so the delivery is
+                // vacuously satisfied and the group owes nothing for it.
+                self.cancel_document_requests(document_id, ManagerError::Cancelled);
+                continue;
+            }
+            // Anything still ahead of this document inside the worker's own
+            // queue cannot be taken back, so its close has to stay in the
+            // ordered lane to land after it.
+            let in_flight = progress.is_some_and(|progress| progress.document_in_flight(&id_text));
+            self.next_close_delivery_attempt = self.next_close_delivery_attempt.saturating_add(1);
             let delivery = ReservedCloseDelivery {
                 group_id: group.group_id,
                 epoch: group.epoch,
+                attempt: self.next_close_delivery_attempt,
                 key: key.clone(),
                 session_generation,
                 document_id,
             };
-            let id_text = document_id_text(document_id);
             // Reserved closes travel on the delivery lane so a policy
             // transition can prove its closes landed without first outlasting
             // an unrelated document's backlog. Either way one outbox slot is
             // spent, so the credit accounting is identical.
-            let out_of_band = self
-                .state
-                .sessions
-                .get(&key)
-                .and_then(|session| session.worker.as_ref())
-                .is_some_and(|worker| worker.close_deliveries.capacity() > 0);
+            //
+            // Limitation (M8): a lane that is momentarily full silently falls
+            // back to the ordered lane. That is correct but slower, and it is
+            // invisible from the outside - the group simply waits longer.
+            let out_of_band = !in_flight
+                && self
+                    .state
+                    .sessions
+                    .get(&key)
+                    .and_then(|session| session.worker.as_ref())
+                    .is_some_and(|worker| worker.close_deliveries.capacity() > 0);
             let operation = if out_of_band {
                 SessionOperation::ReservedCloseCredit
             } else {
@@ -2939,6 +3083,35 @@ impl LspManager {
             self.cancel_document_requests(document_id, ManagerError::Cancelled);
         }
         Ok(outstanding)
+    }
+
+    /// Drop everything a session still has queued for a document that is being
+    /// closed, and report whether an undelivered didOpen was among it.
+    ///
+    /// Only the outbox can be emptied: operations already handed to the worker
+    /// are beyond recall, which is why the caller keeps such a document's close
+    /// in the ordered lane instead of the delivery lane.
+    fn drop_queued_document_operations(&mut self, key: &SessionKey, document_id: &str) -> bool {
+        let Some(session) = self.state.sessions.get_mut(key) else {
+            return false;
+        };
+        let previous_len = session.outbox.len();
+        let mut dropped_open = false;
+        session
+            .outbox
+            .retain(|operation| match operation_document(operation) {
+                Some((queued_id, transition)) if queued_id == document_id => {
+                    dropped_open |= transition == Some(OpenTransition::Open);
+                    false
+                }
+                _ => true,
+            });
+        if session.outbox.len() != previous_len
+            && let Some(progress) = self.session_delivery_progress.get_mut(key)
+        {
+            progress.rebuild_queued_tail(previous_len, &session.outbox);
+        }
+        dropped_open
     }
 
     /// Release the front group's documents and answer its caller exactly once.
@@ -2980,9 +3153,9 @@ impl LspManager {
         else {
             return;
         };
-        if stopping.is_some() {
-            // The group is already waiting for a controlled stop to prove the
-            // whole generation is gone. Late acknowledgements change nothing.
+        if !stopping.is_empty() {
+            // The group is already waiting for controlled stops to prove the
+            // generations are gone. Late acknowledgements change nothing.
             return;
         }
         if outstanding.get(&delivery.document_id) != Some(&delivery) {
@@ -2996,62 +3169,92 @@ impl LspManager {
 
     /// Handle a reserved close the session could not deliver.
     ///
-    /// Earlier members of the same group may already have been closed for real,
-    /// so the group can neither be abandoned nor completed on the spot. Stop
-    /// the exact generation that failed instead: once it is gone, every
-    /// document it held is closed by construction and the group can settle.
+    /// Two things are true at once here. The delivery lane stops at its first
+    /// failure, so this generation can never acknowledge another reserved close
+    /// - that holds whether or not the token still belongs to a group, and a
+    /// generation left running would strand the next group forever waiting for
+    /// an acknowledgement that cannot come. And earlier members of the token's
+    /// own group may already have been closed for real, so that group can
+    /// neither be abandoned nor completed on the spot.
+    ///
+    /// So: stop every generation involved, then let the stops settle the group.
+    /// A stopped generation is the only honest proof that the documents it held
+    /// are closed, which is why a group spanning two sessions stops both rather
+    /// than reporting success while the other still has a document open.
     fn reserved_close_delivery_failed(&mut self, delivery: ReservedCloseDelivery, message: String) {
         self.push_log(
             &delivery.key,
             "protocol",
             format!("didClose failed ({} bytes redacted)", message.len()),
         );
-        let Some(group) = self.pending_close_groups.front_mut() else {
-            return;
-        };
-        if group.group_id != delivery.group_id {
-            return;
+        let attributable = self.pending_close_groups.front().is_some_and(|group| {
+            group.group_id == delivery.group_id
+                && matches!(
+                    &group.phase,
+                    DeferredClosePhase::Delivering {
+                        outstanding,
+                        stopping,
+                    } if stopping.is_empty()
+                        && outstanding.get(&delivery.document_id) == Some(&delivery)
+                )
+        });
+        let mut generations = vec![(delivery.key.clone(), delivery.session_generation)];
+        if attributable
+            && let Some(DeferredClosePhase::Delivering { outstanding, .. }) =
+                self.pending_close_groups.front().map(|group| &group.phase)
+        {
+            for pending in outstanding.values() {
+                let generation = (pending.key.clone(), pending.session_generation);
+                if !generations.contains(&generation) {
+                    generations.push(generation);
+                }
+            }
         }
-        let DeferredClosePhase::Delivering {
-            outstanding,
-            stopping,
-        } = &mut group.phase
-        else {
-            return;
-        };
-        if stopping.is_some() || outstanding.get(&delivery.document_id) != Some(&delivery) {
-            return;
-        }
-        outstanding.clear();
-        *stopping = Some((delivery.key.clone(), delivery.session_generation));
-        let running = self
-            .state
-            .sessions
-            .get(&delivery.key)
-            .is_some_and(|session| {
-                session.generation == delivery.session_generation && session.worker.is_some()
+        let mut waiting = Vec::new();
+        for (key, generation) in generations {
+            let running = self.state.sessions.get(&key).is_some_and(|session| {
+                session.generation == generation && session.worker.is_some()
             });
-        if running {
-            self.stop_session(&delivery.key);
-        } else {
-            // The generation is already gone, so its documents are closed.
+            if running {
+                self.stop_session(&key);
+                waiting.push((key, generation));
+            }
+        }
+        if !attributable {
+            self.retry_pending_policy_command();
+            return;
+        }
+        if let Some(group) = self.pending_close_groups.front_mut()
+            && let DeferredClosePhase::Delivering {
+                outstanding,
+                stopping,
+            } = &mut group.phase
+        {
+            outstanding.clear();
+            *stopping = waiting.clone();
+        }
+        if waiting.is_empty() {
+            // Every generation the group reached is already gone, so all of its
+            // documents are closed by construction.
             self.settle_front_close_group(Ok(()));
         }
     }
 
-    /// Settle a group that was waiting for the generation it stopped.
+    /// Settle a group once every generation it stopped has finished stopping.
     fn settle_stopped_close_group(&mut self, key: &SessionKey, generation: u64) {
-        let stopped = self
-            .pending_close_groups
-            .front()
-            .is_some_and(|group| match &group.phase {
-                DeferredClosePhase::Delivering {
-                    stopping: Some((stopping_key, stopping_generation)),
-                    ..
-                } => stopping_key == key && *stopping_generation == generation,
-                _ => false,
-            });
-        if stopped {
+        let Some(group) = self.pending_close_groups.front_mut() else {
+            return;
+        };
+        let DeferredClosePhase::Delivering { stopping, .. } = &mut group.phase else {
+            return;
+        };
+        if stopping.is_empty() {
+            return;
+        }
+        stopping.retain(|(stopping_key, stopping_generation)| {
+            stopping_key != key || *stopping_generation != generation
+        });
+        if stopping.is_empty() {
             self.settle_front_close_group(Ok(()));
         }
     }
@@ -3795,16 +3998,10 @@ impl LspManager {
         {
             return Err(ManagerError::Overloaded);
         }
-        let progress = self
-            .session_delivery_progress
+        self.session_delivery_progress
             .entry(key.clone())
-            .or_default();
-        for operation in &operations {
-            progress.enqueued = progress.enqueued.saturating_add(1);
-            if matches!(operation, SessionOperation::ReservedCloseCredit) {
-                progress.credit_marks.push_back(progress.enqueued);
-            }
-        }
+            .or_default()
+            .record_enqueued(&operations);
         let session = self.state.sessions.get_mut(key).expect("checked above");
         session.outbox.extend(operations);
         self.pump_session(key);
@@ -3814,11 +4011,20 @@ impl LspManager {
     /// True while a session still owes the worker slots a policy reserved for
     /// closes that have already been delivered. The group is finished, but the
     /// backpressure the policy paid for has not been spent yet.
+    ///
+    /// Only a session with a live worker can ever spend them. A crashed or
+    /// failed-to-start session drops its outbox on the floor, and waiting on
+    /// credits nobody will consume would wedge every deferred policy command.
     fn reserved_close_credits_outstanding(&self) -> bool {
         self.session_delivery_progress
             .iter()
             .any(|(key, progress)| {
-                !progress.credit_marks.is_empty() && self.state.sessions.contains_key(key)
+                progress.credits_outstanding()
+                    && self
+                        .state
+                        .sessions
+                        .get(key)
+                        .is_some_and(|session| session.worker.is_some())
             })
     }
 
@@ -4244,14 +4450,7 @@ impl LspManager {
                     .is_some_and(|session| session.generation == generation);
                 if current {
                     if let Some(progress) = self.session_delivery_progress.get_mut(&key) {
-                        progress.completed = progress.completed.saturating_add(1);
-                        while progress
-                            .credit_marks
-                            .front()
-                            .is_some_and(|mark| *mark <= progress.completed)
-                        {
-                            progress.credit_marks.pop_front();
-                        }
+                        progress.record_completed();
                     }
                     // Preserve the order of work already admitted to the
                     // session, then immediately spend newly freed outbox
@@ -4400,6 +4599,7 @@ impl LspManager {
                     session.protocol_started = false;
                     session.outbox.clear();
                 }
+                self.session_delivery_progress.remove(&key);
                 for document in documents {
                     if let Some(document) = self.state.documents.get_mut(&document) {
                         document.synchronization_dirty = true;
@@ -4725,6 +4925,9 @@ impl LspManager {
                 backoff,
             )
         };
+        // The outbox went with the crash, so nothing that was queued on this
+        // generation will ever run.
+        self.session_delivery_progress.remove(&key);
         if self.state.diagnostics.clear_session(&session_id) {
             self.emit_diagnostics(Some(session_id.clone()), None, None);
         }
@@ -6489,6 +6692,41 @@ mod tests {
             spin().await;
         }
         panic!("session outbox did not exert bounded backpressure")
+    }
+
+    fn fake_managed_session(
+        session_id: &str,
+        generation: u64,
+        document: DocumentId,
+    ) -> super::ManagedSession {
+        let (operations, operations_rx) = mpsc::channel(super::SESSION_OPERATION_CAPACITY);
+        let (close_deliveries, close_rx) = mpsc::channel(super::SESSION_OPERATION_CAPACITY);
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        // The receivers are never read in these actor-only tests; keeping them
+        // alive stops the senders from reporting a closed channel.
+        std::mem::forget((operations_rx, close_rx, shutdown_rx));
+        super::ManagedSession {
+            session_id: session_id.into(),
+            language: LanguageId::TypeScript,
+            generation,
+            worker: Some(super::SessionWorkerHandle {
+                operations,
+                close_deliveries,
+                shutdown: Some(shutdown),
+            }),
+            startup_cancel: None,
+            outbox: std::collections::VecDeque::new(),
+            restart_after_stop: false,
+            documents: [document].into_iter().collect(),
+            idle_generation: 0,
+            crash_timestamps: std::collections::VecDeque::new(),
+            automatic_restart_blocked: false,
+            exit_observed: false,
+            logs: std::collections::VecDeque::new(),
+            next_log_sequence: 1,
+            capabilities: super::capabilities(false),
+            protocol_started: true,
+        }
     }
 
     struct ReservedCloseFixture {
@@ -10086,6 +10324,448 @@ mod tests {
         shutdown.await.unwrap().unwrap();
         assert_eq!(grouped.await.unwrap(), Err(ManagerError::ActorStopped));
         assert_eq!(policy.await.unwrap(), Err(ManagerError::ActorStopped));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reserved_close_drops_queued_traffic_and_skips_a_never_delivered_open() {
+        let harness = ManagerHarness::new();
+        let pressure_path = harness.file("lane-order-pressure.ts", "pressure");
+        let pressure = harness.open(&pressure_path, "main", "pressure").await;
+        let root = harness.root.clone();
+        let session_key = key("typescript", &root);
+        harness
+            .choose_and_trust(pressure, &root, "typescript")
+            .await;
+        spin().await;
+
+        // Wedge the ordered lane on held didChanges and push enough of them in
+        // to guarantee anything enqueued next lands in the outbox rather than
+        // the worker's own queue.
+        harness.factory.hold_changes();
+        harness.factory.hold_changes_one_at_a_time();
+        let mut version = 1;
+        for next in 2..102 {
+            harness
+                .manager
+                .apply_changes(pressure, batch(pressure, next - 1, next, "pressure"))
+                .await
+                .unwrap();
+            tokio::time::advance(Duration::from_millis(40)).await;
+            spin().await;
+            version = next;
+        }
+
+        // A document attached while the lane is wedged has a didOpen queued
+        // that the server has never seen.
+        let latecomer_path = harness.file("lane-order-latecomer.ts", "late");
+        let latecomer = harness.open(&latecomer_path, "main", "late").await;
+        spin().await;
+        let latecomer_text = super::document_id_text(latecomer);
+        assert!(
+            !harness
+                .factory
+                .observations(&session_key)
+                .iter()
+                .any(|observation| matches!(
+                    observation,
+                    Observation::Open { document_id, .. } if document_id == &latecomer_text
+                )),
+            "the latecomer's didOpen must still be queued behind the wedged lane"
+        );
+
+        for next in (version + 1)..500 {
+            match harness
+                .manager
+                .apply_changes(pressure, batch(pressure, next - 1, next, "pressure"))
+                .await
+            {
+                Ok(_) => {}
+                Err(ManagerError::Overloaded) => break,
+                other => panic!("unexpected saturation result: {other:?}"),
+            }
+            tokio::time::advance(Duration::from_millis(40)).await;
+            spin().await;
+        }
+        let policy = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        assert!(!policy.is_finished(), "the policy must reserve closes");
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_documents(vec![latecomer]).await }
+        });
+        spin().await;
+        assert!(!grouped.is_finished());
+
+        for _ in 0..300 {
+            if grouped.is_finished() {
+                break;
+            }
+            harness.factory.release_one_change();
+            spin().await;
+        }
+        grouped.await.unwrap().unwrap();
+
+        harness.factory.release_all_changes();
+        for _ in 0..300 {
+            if policy.is_finished() {
+                break;
+            }
+            harness.factory.release_one_change();
+            spin().await;
+        }
+        let _ = policy.await.unwrap();
+        spin().await;
+
+        let observations = harness.factory.observations(&session_key);
+        assert!(
+            !observations.iter().any(|observation| matches!(
+                observation,
+                Observation::Close(document_id) if document_id == &latecomer_text
+            )),
+            "a document the server was never told to open must not be closed"
+        );
+        assert!(
+            !observations.iter().any(|observation| matches!(
+                observation,
+                Observation::Open { document_id, .. } if document_id == &latecomer_text
+            )),
+            "the closing document's queued didOpen must be dropped, not delivered"
+        );
+        harness.manager.shutdown().await.unwrap();
+    }
+
+    struct StagedReservedClose {
+        actor: LspManager,
+        session_key: SessionKey,
+        document: DocumentId,
+        group_result: tokio::sync::oneshot::Receiver<Result<(), ManagerError>>,
+        delivery: super::ReservedCloseDelivery,
+        _policy_result: tokio::sync::oneshot::Receiver<Result<(), ManagerError>>,
+    }
+
+    /// One actor with one synthetic session holding a single staged, delivering
+    /// reserved close group.
+    fn staged_reserved_close(temp: &TempDir, name: &str) -> StagedReservedClose {
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let path = project_root.join(format!("{name}.ts"));
+        std::fs::write(&path, name).unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (_manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let ReserveResult::Reserved { reservation_id, .. } =
+            actor.reserve_document(path, "main".into()).unwrap()
+        else {
+            panic!("expected reservation")
+        };
+        let response = actor
+            .open_document(
+                reservation_id,
+                name.into(),
+                name.into(),
+                "typescript".into(),
+            )
+            .unwrap();
+        let document =
+            serde_json::from_value::<DocumentId>(serde_json::Value::String(response.document_id))
+                .unwrap();
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        actor
+            .state
+            .documents
+            .get_mut(&document)
+            .unwrap()
+            .session_key = Some(session_key.clone());
+        actor
+            .state
+            .sessions
+            .insert(session_key.clone(), fake_managed_session(name, 4, document));
+        actor.active_generations.insert((session_key.clone(), 4));
+        let (policy_reply, _policy_result) = tokio::sync::oneshot::channel();
+        actor
+            .pending_policy_commands
+            .push_back(super::ManagerCommand::SetEnablement {
+                enablement: Enablement::none(),
+                reply: policy_reply,
+            });
+        actor.policy_reservation_epoch = Some(19);
+        actor.policy_capacity_reservations.insert(
+            session_key.clone(),
+            super::PolicyCapacityReservation {
+                operations: 1,
+                attachments: 0,
+                close_documents: [document].into_iter().collect(),
+            },
+        );
+        let (group_reply, group_result) = tokio::sync::oneshot::channel();
+        actor.admit_close_group(vec![document], group_reply);
+        assert!(actor.retry_pending_close_group());
+        let delivery = match &actor.pending_close_groups.front().unwrap().phase {
+            super::DeferredClosePhase::Delivering { outstanding, .. } => {
+                outstanding.values().next().unwrap().clone()
+            }
+            super::DeferredClosePhase::Pending => panic!("group was not staged"),
+        };
+        StagedReservedClose {
+            actor,
+            session_key,
+            document,
+            group_result,
+            delivery,
+            _policy_result,
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_close_from_an_abandoned_staging_attempt_is_inert() {
+        let temp = TempDir::new().unwrap();
+        let StagedReservedClose {
+            mut actor,
+            document,
+            mut group_result,
+            delivery,
+            ..
+        } = staged_reserved_close(&temp, "attempt");
+
+        // A staging attempt that aborted part way through keeps the group id,
+        // the epoch and the generation, so only the attempt number tells an
+        // acknowledgement of the abandoned attempt apart from a live one.
+        let mut abandoned = delivery.clone();
+        abandoned.attempt -= 1;
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded {
+            delivery: abandoned,
+        });
+        assert!(matches!(
+            group_result.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(actor.state.documents.contains_key(&document));
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded { delivery });
+        assert_eq!(group_result.try_recv().unwrap(), Ok(()));
+        assert!(!actor.state.documents.contains_key(&document));
+    }
+
+    #[tokio::test]
+    async fn unattributable_reserved_close_failure_stops_the_dead_lane_generation() {
+        let temp = TempDir::new().unwrap();
+        let StagedReservedClose {
+            mut actor,
+            session_key,
+            mut group_result,
+            delivery,
+            ..
+        } = staged_reserved_close(&temp, "orphan");
+
+        // The epoch is invalidated while the close is still in flight, so the
+        // token that comes back has no group left to discharge.
+        actor.invalidate_policy_epoch(ManagerError::PolicyChanged);
+        assert_eq!(
+            group_result.try_recv().unwrap(),
+            Err(ManagerError::PolicyChanged)
+        );
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliveryFailed {
+            delivery,
+            message: "didClose failed".into(),
+        });
+        assert!(
+            !actor.state.sessions.contains_key(&session_key),
+            "the delivery lane stops at its first failure, so the generation that owns it \
+             must be stopped even when the token cannot be attributed to a group"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_close_failure_stops_every_session_the_group_touched() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let first_root = temp.path().join("first-project");
+        let second_root = temp.path().join("second-project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&second_root).unwrap();
+        let first_path = first_root.join("first.ts");
+        let second_path = second_root.join("second.ts");
+        std::fs::write(&first_path, "first").unwrap();
+        std::fs::write(&second_path, "second").unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (_manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let open = |actor: &mut LspManager, path: &Path, pane: &str| {
+            let ReserveResult::Reserved { reservation_id, .. } = actor
+                .reserve_document(path.to_path_buf(), "main".into())
+                .unwrap()
+            else {
+                panic!("expected reservation")
+            };
+            let response = actor
+                .open_document(
+                    reservation_id,
+                    pane.into(),
+                    pane.into(),
+                    "typescript".into(),
+                )
+                .unwrap();
+            serde_json::from_value::<DocumentId>(serde_json::Value::String(response.document_id))
+                .unwrap()
+        };
+        let first = open(&mut actor, &first_path, "first");
+        let second = open(&mut actor, &second_path, "second");
+        let first_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: first_root.canonicalize().unwrap(),
+        };
+        let second_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: second_root.canonicalize().unwrap(),
+        };
+        for (document_id, session_key, generation) in [
+            (first, first_key.clone(), 3),
+            (second, second_key.clone(), 5),
+        ] {
+            actor
+                .state
+                .documents
+                .get_mut(&document_id)
+                .unwrap()
+                .session_key = Some(session_key.clone());
+            actor.state.sessions.insert(
+                session_key.clone(),
+                fake_managed_session(
+                    &format!("cross-session-{generation}"),
+                    generation,
+                    document_id,
+                ),
+            );
+            actor
+                .active_generations
+                .insert((session_key.clone(), generation));
+            actor.policy_capacity_reservations.insert(
+                session_key,
+                super::PolicyCapacityReservation {
+                    operations: 1,
+                    attachments: 0,
+                    close_documents: [document_id].into_iter().collect(),
+                },
+            );
+        }
+        let (policy_reply, _policy_result) = tokio::sync::oneshot::channel();
+        actor
+            .pending_policy_commands
+            .push_back(super::ManagerCommand::SetEnablement {
+                enablement: Enablement::none(),
+                reply: policy_reply,
+            });
+        actor.policy_reservation_epoch = Some(11);
+
+        let (group_reply, mut group_result) = tokio::sync::oneshot::channel();
+        actor.admit_close_group(vec![first, second], group_reply);
+        assert!(actor.retry_pending_close_group());
+        let deliveries = match &actor.pending_close_groups.front().unwrap().phase {
+            super::DeferredClosePhase::Delivering { outstanding, .. } => {
+                outstanding.values().cloned().collect::<Vec<_>>()
+            }
+            super::DeferredClosePhase::Pending => panic!("group was not staged"),
+        };
+        assert_eq!(deliveries.len(), 2, "both sessions owe a close");
+        let failed = deliveries
+            .iter()
+            .find(|delivery| delivery.key == first_key)
+            .unwrap()
+            .clone();
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliveryFailed {
+            delivery: failed,
+            message: "didClose failed".into(),
+        });
+        assert!(
+            !actor.state.sessions.contains_key(&first_key),
+            "the failing session must be stopped"
+        );
+        assert!(
+            !actor.state.sessions.contains_key(&second_key),
+            "a group member's other session still holds its document open"
+        );
+        assert!(matches!(
+            group_result.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(actor.state.documents.contains_key(&second));
+
+        actor.handle_input(super::ActorInput::ShutdownFinished {
+            key: first_key,
+            generation: 3,
+        });
+        assert!(
+            matches!(
+                group_result.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "one stop cannot settle a group that spans two sessions"
+        );
+
+        actor.handle_input(super::ActorInput::ShutdownFinished {
+            key: second_key,
+            generation: 5,
+        });
+        assert_eq!(group_result.try_recv().unwrap(), Ok(()));
+        assert!(!actor.state.documents.contains_key(&first));
+        assert!(!actor.state.documents.contains_key(&second));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn crashed_session_reserved_credits_cannot_wedge_deferred_policy() {
+        let ReservedCloseFixture {
+            harness,
+            documents: [_, first, ..],
+            root,
+            policy,
+            ..
+        } = reserved_close_fixture("delivery-credit-crash").await;
+        let session_key = key("typescript", &root);
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_documents(vec![first]).await }
+        });
+        for _ in 0..300 {
+            if grouped.is_finished() {
+                break;
+            }
+            harness.factory.release_one_change();
+            spin().await;
+        }
+        grouped.await.unwrap().unwrap();
+
+        // The credit placeholder this group left behind is still queued when the
+        // session dies. Nothing will ever spend it, so it must not hold the
+        // deferred policy command hostage.
+        harness
+            .factory
+            .emit(
+                &session_key,
+                ClientEvent::ProcessExited {
+                    success: false,
+                    code: Some(1),
+                },
+            )
+            .await;
+        wait_until_finished(&policy).await;
+        assert!(
+            policy.is_finished(),
+            "a stranded reserved-close credit wedged the deferred policy lane"
+        );
+        let _ = policy.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
