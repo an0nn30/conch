@@ -101,7 +101,7 @@
       }
     }
 
-    // The five built-in tool windows, in registration order (the order is
+    // The six built-in tool windows, in registration order (the order is
     // load-bearing — see the comment on 'notifications'). Shared verbatim
     // between the main window's init() and a panel host's registrationsOnly
     // boot: a host mounts a panel through the SAME renderFn the docked panel
@@ -199,6 +199,29 @@
               panelEl,
             });
           }
+        },
+      });
+
+      // Registered after SFTP and Transfers for the same reason Notifications
+      // is registered after Tunnels: the first registrant activates its zone
+      // on a layout that has never configured one, and Problems must never be
+      // the window a user finds open on first launch. It starts inactive with
+      // a strip button, and F8/Shift-F8 work whether or not it has been
+      // opened — the store and the navigation are wired in
+      // manager-compose-runtime.js, not here.
+      global.toolWindowManager.register('problems', {
+        title: 'Problems',
+        icon: null, // no vendored severity icon yet; the label suffices
+        type: 'built-in',
+        defaultZone: 'bottom',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'problems-panel';
+          container.appendChild(panelEl);
+          if (global.problemsPanel) {
+            return global.problemsPanel.init({ panelEl });
+          }
+          return undefined;
         },
       });
 

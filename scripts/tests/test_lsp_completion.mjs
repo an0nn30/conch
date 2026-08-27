@@ -1231,10 +1231,21 @@ check('vendor-entry exports exactly the completion API the modules need', () => 
     !/\bsnippetCompletion\b/.test(source),
     'snippetCompletion has no consumer — the apply module drives snippet() itself',
   );
-  assert.ok(
-    !/export[^;]*from\s*'@codemirror\/lint'/.test(source),
-    'no lint exports yet — Task 12 adds them',
+  // The lint exports arrived with diagnostics (see test_lsp_diagnostics.mjs).
+  // What is asserted here is that they stayed narrow: CodeMirror's own lint
+  // PANEL and keymap would be a second, competing problems list next to the
+  // Problems tool window. Read off the export lists rather than the whole
+  // file — the same way check-vendor.mjs does — so naming one of these in a
+  // comment that explains why it is absent is not itself a failure.
+  const exported = new Set(
+    [...source.matchAll(/export\s*\{([^}]*)\}/g)]
+      .flatMap((match) => match[1].split(','))
+      .map((name) => name.trim().split(/\s+as\s+/).pop().trim())
+      .filter(Boolean),
   );
+  for (const name of ['lintKeymap', 'openLintPanel', 'closeLintPanel', 'nextDiagnostic']) {
+    assert.ok(!exported.has(name), `${name} has no consumer — Problems owns diagnostic navigation`);
+  }
   // Every name the modules read off CM6 has to be in the built bundle.
   const bundle = path.join(ROOT, 'vendor/codemirror/codemirror.js');
   if (fs.existsSync(bundle)) {

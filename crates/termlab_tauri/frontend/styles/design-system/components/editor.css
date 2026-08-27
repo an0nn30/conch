@@ -102,3 +102,28 @@
 .tl-completion-info-note::before {
   content: "Note · ";
 }
+
+/* Diagnostic tooltip body (features/editor/lsp-diagnostics.js). CodeMirror's
+   lint extension owns the tooltip chrome and the severity colours on the
+   underline itself; these style only what we put inside it. `pre-wrap`
+   matters: rust-analyzer's messages carry their own line breaks, and
+   collapsing them turns a readable type mismatch into one long line. */
+.tl-diagnostic {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-1);
+  max-width: 480px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tl-diagnostic__message {
+  color: var(--tl-fg);
+}
+
+/* Source and code, e.g. `typescript(2304)`. Muted and monospaced: it is an
+   identifier to search for, not prose. */
+.tl-diagnostic__meta {
+  color: var(--tl-fg-muted);
+  font-family: var(--tl-font-mono, monospace);
+}

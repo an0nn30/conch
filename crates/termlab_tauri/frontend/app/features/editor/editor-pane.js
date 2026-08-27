@@ -34,6 +34,17 @@
       : [];
   }
 
+  // LSP diagnostics. Same contract as completionExtensions: [] when the
+  // module or the bundle's lint exports are missing, so a stale vendor bundle
+  // costs squiggles and nothing else. No precedence concerns — these are
+  // decorations and a gutter, not key handlers.
+  function diagnosticsExtensions() {
+    return global.termlabLspDiagnostics
+      && typeof global.termlabLspDiagnostics.extensions === 'function'
+      ? global.termlabLspDiagnostics.extensions()
+      : [];
+  }
+
   function languageExtension(filename) {
     const CM = global.CM6;
     const map = global.termlabEditorLanguageMap;
@@ -100,6 +111,7 @@
           // handler carries its own Prec.highest, which is what puts it ahead
           // of vim's plugin while the popup is open.
           ...completionExtensions(),
+          ...diagnosticsExtensions(),
           CM.lineNumbers(),
           CM.highlightActiveLineGutter(),
           CM.highlightSpecialChars(),

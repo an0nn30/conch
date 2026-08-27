@@ -31,12 +31,29 @@ export { tags } from '@lezer/highlight';
 //
 // `completionKeymap` is NOT re-exported: autocompletion() is configured with
 // `defaultKeymap: false` precisely so that one handler owns these keys.
-// @codemirror/lint is a declared dependency but exports nothing yet — the
-// diagnostics task adds its names.
 export {
   autocompletion, startCompletion, closeCompletion, acceptCompletion,
   moveCompletionSelection, completionStatus, insertCompletionText, snippet,
 } from '@codemirror/autocomplete';
+
+// LSP diagnostics (features/editor/lsp-diagnostics.js). `setDiagnostics` is
+// the whole write path: it returns a transaction spec and appends the lint
+// state field itself the first time, so a pane needs no diagnostics
+// configuration until a server actually publishes something. `linter` is
+// mounted with a null source — this app never lints locally, it only renders
+// what Rust normalized — purely so the lint config (delay, tooltip filter)
+// has somewhere to live; `lintGutter` adds the severity markers next to the
+// line numbers. `diagnosticCount` and `forEachDiagnostic` are the read side,
+// which is how a test can assert what actually landed in a view's state
+// rather than what we believe we dispatched.
+//
+// `lintKeymap`, the panel commands (`openLintPanel`/`closeLintPanel`) and
+// `nextDiagnostic`/`previousDiagnostic` are deliberately NOT re-exported: F8
+// traverses the workspace-wide Problems snapshot, not one document's marks,
+// and CodeMirror's own lint panel would be a second, competing problems list.
+export {
+  linter, setDiagnostics, lintGutter, diagnosticCount, forEachDiagnostic,
+} from '@codemirror/lint';
 
 // Optional vim keybindings ([editor] vim_mode). `vim()` returns the extension,
 // `Vim` is the engine object that owns defineEx (how :w/:q are bound to this

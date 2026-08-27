@@ -9,6 +9,18 @@
   let listenerEpoch = 0;
   const unlisteners = [];
   const reservationFailureRetries = new Map();
+  // Diagnostics have two consumers in one window — the CodeMirror renderer
+  // (features/editor/lsp-diagnostics.js) and the Problems tool window
+  // (features/problems/problems-store.js) — and neither may open a second
+  // Tauri subscription: two listens would deliver the same event twice and
+  // give the two views independent, silently diverging revision counters.
+  // One listen, one fan-out.
+  const diagnosticsSubscribers = new Set();
+  // Session status has the same shape of problem: lsp-state routes it to the
+  // owning PANE, and the Problems window needs it for a reason that has
+  // nothing to do with panes — which project roots exist, and what state
+  // their servers are in.
+  const statusSubscribers = new Set();
 
   function client() {
     return global.termlabServices && global.termlabServices.tauriClient;
@@ -84,6 +96,28 @@
     if (state && typeof state.updateStatus === 'function') state.updateStatus(status);
   }
 
+  // A throwing subscriber is a bug in that subscriber, not a reason for the
+  // other views to miss the publication.
+  function notify(subscribers, payload) {
+    for (const subscriber of Array.from(subscribers)) {
+      try { subscriber(payload); } catch (error) { console.error(error); }
+    }
+  }
+
+  function subscribeTo(subscribers, listener) {
+    if (typeof listener !== 'function') return function () {};
+    subscribers.add(listener);
+    return () => subscribers.delete(listener);
+  }
+
+  function subscribeDiagnostics(listener) {
+    return subscribeTo(diagnosticsSubscribers, listener);
+  }
+
+  function subscribeStatus(listener) {
+    return subscribeTo(statusSubscribers, listener);
+  }
+
   function startListeners() {
     if (listening) return;
     const tauri = client();
@@ -104,12 +138,18 @@
         unlisteners.push(unlisten);
       }).catch(() => {});
     };
-    own(listen('lsp-session-status', (event) => refreshPane(event && event.payload)));
+    own(listen('lsp-session-status', (event) => {
+      const payload = event && event.payload;
+      refreshPane(payload);
+      notify(statusSubscribers, payload);
+    }));
     own(listen('lsp-diagnostics-updated', (event) => {
+      const payload = event && event.payload;
       const state = global.termlabLspState;
       if (state && typeof state.updateDiagnostics === 'function') {
-        state.updateDiagnostics(event && event.payload);
+        state.updateDiagnostics(payload);
       }
+      notify(diagnosticsSubscribers, payload);
     }));
     own(listen('editor-document-owner-focused', (event) => handleOwnershipEvent(event && event.payload)));
   }
@@ -138,6 +178,8 @@
     dispose,
     normalizeError,
     focusOwner,
+    subscribeDiagnostics,
+    subscribeStatus,
     reserveDocument: (path) => invoke('editor_reserve_document', { path, windowLabel }),
     releaseDocument: (reservationId) => invoke('editor_release_document', { reservationId }),
     transferDocument: (documentId, targetReservationId, paneId) => invoke('editor_transfer_document', {

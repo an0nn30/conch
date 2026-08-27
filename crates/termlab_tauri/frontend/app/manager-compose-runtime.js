@@ -376,6 +376,24 @@
           currentPane: () => paneManager.currentPane(),
         });
       }
+      // Diagnostics need the whole pane map rather than one lookup: a
+      // publication is workspace-wide, so every local editor pane in this
+      // window is a candidate owner for the URIs it carries.
+      if (global.termlabLspDiagnostics && typeof global.termlabLspDiagnostics.configure === 'function') {
+        global.termlabLspDiagnostics.configure({ allPanes: () => panes });
+      }
+      // The Problems tool window is registered lazily (its renderFn only runs
+      // when the zone activates), but its store and F8/Shift-F8 navigation are
+      // window-wide and must be live whether or not the panel is on screen.
+      if (global.termlabProblemsStore && typeof global.termlabProblemsStore.configure === 'function') {
+        global.termlabProblemsStore.configure({});
+      }
+      if (global.termlabProblemsNavigation
+        && typeof global.termlabProblemsNavigation.configure === 'function') {
+        global.termlabProblemsNavigation.configure({
+          paneAccess: global.__termlabPaneAccess,
+        });
+      }
     }
 
     // vim's `:w` and `:q` have to mean what Cmd+S and closing the tab mean, and

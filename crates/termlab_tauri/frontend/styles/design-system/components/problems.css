@@ -1,0 +1,230 @@
+/* Problems tool window (app/panels/problems-panel.js).
+
+   Dense by design: this is a work list, not a reading surface, so rows are
+   --tl-row-h tall and everything on a row sits on one line. Colour is never
+   the only signal — the severity dot is paired with the severity word in each
+   row's aria-label and with a shape-free count in the toolbar — so the panel
+   still reads correctly for a colour-blind user and to a screen reader. */
+
+.tl-problems {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  color: var(--tl-fg);
+  background: var(--tl-panel-bg);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+}
+
+.tl-problems__toolbar {
+  flex: 0 0 var(--tl-toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  min-width: 0;
+  padding: 0 var(--tl-space-2);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+/* A severity toggle is a real toggle button (aria-pressed), so the unpressed
+   state has to be legible on its own rather than merely "less bright". */
+.tl-problems__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--tl-radius);
+  font: 500 var(--tl-font-size-ui) var(--tl-font-ui);
+  cursor: default;
+}
+
+.tl-problems__toggle:hover {
+  background: var(--tl-row-hover);
+}
+
+.tl-problems__toggle[aria-pressed="false"] {
+  color: var(--tl-fg-muted);
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+
+.tl-problems__toggle:focus-visible {
+  outline: none;
+  border-color: var(--tl-accent);
+}
+
+.tl-problems__toggle-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-problems__filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg);
+  background: var(--tl-control-bg);
+  border: 1px solid var(--tl-control-border);
+  border-radius: var(--tl-radius);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+}
+
+.tl-problems__filter:focus-visible {
+  outline: none;
+  border-color: var(--tl-accent);
+}
+
+/* Empty / indexing / disconnected / failed. One line, always in the same
+   place, so the panel never looks broken when it simply has nothing to say. */
+.tl-problems__status-host:empty {
+  display: none;
+}
+
+.tl-problems__status {
+  padding: var(--tl-space-2);
+  color: var(--tl-fg-muted);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+.tl-problems__status[data-state="failed"] {
+  color: var(--tl-danger);
+}
+
+.tl-problems__status[data-state="indexing"],
+.tl-problems__status[data-state="loading"] {
+  font-style: italic;
+}
+
+.tl-problems__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tl-problems__row {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tl-problems__row:hover {
+  background: var(--tl-row-hover);
+}
+
+.tl-problems__row.is-selected {
+  background: var(--tl-selection-bg);
+  color: var(--tl-selection-fg);
+}
+
+/* The roving-tabindex row. Inset rather than outline so the ring is not
+   clipped by the scroll container's edge. */
+.tl-problems__row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--tl-accent);
+}
+
+.tl-problems__row--group {
+  font-weight: 600;
+}
+
+.tl-problems__row--file {
+  padding-left: var(--tl-space-4);
+}
+
+.tl-problems__row--item {
+  padding-left: calc(var(--tl-space-4) + var(--tl-space-3));
+}
+
+.tl-problems__twisty {
+  flex: 0 0 auto;
+  width: var(--tl-space-3);
+  color: var(--tl-fg-muted);
+}
+
+/* The severity dot. Never the only carrier of severity — see the file
+   header — but it is what makes a long list scannable. */
+.tl-problems__severity {
+  flex: 0 0 auto;
+  width: var(--tl-space-2);
+  height: var(--tl-space-2);
+  border-radius: 50%;
+  background: var(--tl-fg-muted);
+}
+
+.tl-problems__severity[data-severity="error"] {
+  background: var(--tl-danger);
+}
+
+.tl-problems__severity[data-severity="warning"] {
+  background: var(--tl-Component-warningFocusColor);
+}
+
+.tl-problems__severity[data-severity="information"] {
+  background: var(--tl-accent);
+}
+
+.tl-problems__severity[data-severity="hint"] {
+  background: var(--tl-fg-muted);
+}
+
+.tl-problems__label,
+.tl-problems__message {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tl-problems__message {
+  flex: 1 1 auto;
+}
+
+.tl-problems__position,
+.tl-problems__meta,
+.tl-problems__state {
+  flex: 0 0 auto;
+  color: var(--tl-fg-muted);
+  font-family: var(--tl-font-mono, monospace);
+}
+
+.tl-problems__row.is-selected .tl-problems__position,
+.tl-problems__row.is-selected .tl-problems__meta {
+  color: var(--tl-selection-fg);
+}
+
+.tl-problems__state[data-state="failed"],
+.tl-problems__state[data-state="unavailable"] {
+  color: var(--tl-danger);
+  font-family: var(--tl-font-ui);
+}
+
+.tl-problems__count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--tl-fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The F8 announcement target (features/problems/problems-navigation.js).
+   Off-screen rather than `display: none`, which assistive technology skips. */
+.tl-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
