@@ -1101,19 +1101,41 @@ fn operation_document(operation: &SessionOperation) -> Option<(&str, Option<Open
 }
 
 impl SessionDeliveryProgress {
+    /// Matched on the operation itself, exhaustively and without a wildcard, so
+    /// that a new `SessionOperation` variant is a compile error here rather
+    /// than something the mirror silently misfiles.
     fn entry_for(operation: &SessionOperation) -> PipelineEntry {
-        if let SessionOperation::ReservedCloseCredit { document_id } = operation {
-            return PipelineEntry::ReservedCredit {
-                document_id: document_id.clone(),
-            };
-        }
-        match operation_document(operation) {
-            Some((document_id, transition)) => PipelineEntry::Document {
-                document_id: document_id.to_owned(),
-                transition,
+        match operation {
+            SessionOperation::ReservedCloseCredit { document_id } => {
+                PipelineEntry::ReservedCredit {
+                    document_id: document_id.clone(),
+                }
+            }
+            SessionOperation::DidOpen(document) => PipelineEntry::Document {
+                document_id: document.document_id.clone(),
+                transition: Some(OpenTransition::Open),
             },
-            None => PipelineEntry::ReservedCredit {
-                document_id: String::new(),
+            SessionOperation::DidClose { document_id, .. } => PipelineEntry::Document {
+                document_id: document_id.clone(),
+                transition: Some(OpenTransition::Close),
+            },
+            SessionOperation::DidChange(batch) => PipelineEntry::Document {
+                document_id: batch.document_id.clone(),
+                transition: None,
+            },
+            SessionOperation::DidSave(document_id) => PipelineEntry::Document {
+                document_id: document_id.clone(),
+                transition: None,
+            },
+            SessionOperation::Request { document_id, .. } => PipelineEntry::Document {
+                document_id: document_id.clone(),
+                transition: None,
+            },
+            SessionOperation::PullDiagnostics {
+                document_id_text, ..
+            } => PipelineEntry::Document {
+                document_id: document_id_text.clone(),
+                transition: None,
             },
         }
     }
@@ -1197,6 +1219,30 @@ impl SessionDeliveryProgress {
 
     fn believes_open(&self, document_id: &str) -> bool {
         self.open_on_server.contains(document_id)
+    }
+
+    /// Whether the server will still be holding this document open once
+    /// everything the session has already been handed has run.
+    ///
+    /// `believes_open` answers for the operations that have executed; this
+    /// answers for the ones that are going to. Settlement needs the second
+    /// question, because a document can be re-opened after its group's close
+    /// was staged and before the group lets go of it.
+    fn will_be_open(&self, document_id: &str) -> bool {
+        let mut open = self.open_on_server.contains(document_id);
+        for entry in &self.pipeline {
+            match entry {
+                PipelineEntry::ReservedCredit {
+                    document_id: credited,
+                } if credited == document_id => open = false,
+                PipelineEntry::Document {
+                    document_id: queued,
+                    transition: Some(transition),
+                } if queued == document_id => open = *transition == OpenTransition::Open,
+                _ => {}
+            }
+        }
+        open
     }
 }
 
@@ -1510,6 +1556,14 @@ struct DeferredCloseGroup {
     /// visible once, in the staging attempt that did the throwing away: a
     /// later attempt would find nothing queued and would send a real didClose
     /// for a buffer the server never opened.
+    ///
+    /// The memo is group-scoped, which is only safe because a *different* group
+    /// can never inherit a stale verdict: every route that destroys a staged
+    /// group also destroys or restarts its session. The lost-ground guard fires
+    /// only on a dead or restarted generation, and a restart re-enqueues a
+    /// didOpen for every attached document - which either flips `believes_open`
+    /// or clears the mirror outright. The re-check against `believes_open` at
+    /// the use site is what turns that argument into an enforced one.
     discarded_opens: HashSet<DocumentId>,
     phase: DeferredClosePhase,
     reply: oneshot::Sender<Result<(), ManagerError>>,
@@ -3178,14 +3232,14 @@ impl LspManager {
     /// are beyond recall, which is why the caller keeps such a document's close
     /// in the ordered lane instead of the delivery lane.
     ///
-    /// Everything that depended on the discarded traffic is settled here rather
-    /// than by the caller's happy path. Requests are cancelled so no reply can
-    /// hang on work that will never run, and a document that lost operations
-    /// the server needed is marked out of sync so `apply_changes` asks the
-    /// client to resynchronise it. Normally the document is removed moments
-    /// later when the group settles and neither matters; they matter precisely
-    /// when it is not, and tying them to the discard is what makes that case
-    /// safe instead of silent.
+    /// Two loose ends are tied off here rather than on the caller's happy path,
+    /// which a mid-loop failure would never reach. Requests are cancelled for
+    /// every document this is called for, discard or not - the caller is closing
+    /// it either way, so no reply may be left hanging on work that will never
+    /// run. A document that actually lost queued operations the server needed is
+    /// additionally marked out of sync, so `apply_changes` asks the client to
+    /// resynchronise it. Normally the document is removed moments later when the
+    /// group settles and neither matters; they matter precisely when it is not.
     fn discard_queued_document_traffic(
         &mut self,
         key: &SessionKey,
@@ -3220,12 +3274,29 @@ impl LspManager {
     }
 
     /// Release the front group's documents and answer its caller exactly once.
+    ///
+    /// A member can be re-opened between staging and settlement. The resync a
+    /// client sends in answer to `ResyncRequired` is not a policy command, so it
+    /// runs immediately - while the group is still delivering - and enqueues a
+    /// didClose/didOpen pair of its own. Staging deliberately leaves document
+    /// state alone, so nothing stops it. Releasing the document on the strength
+    /// of the group's own close alone would then leave the server holding a
+    /// buffer for a file the manager has forgotten, with nothing left that could
+    /// ever close it. Settlement therefore asks what the wire will actually look
+    /// like and closes the document again if the answer is "still open".
     fn settle_front_close_group(&mut self, result: Result<(), ManagerError>) {
         let Some(group) = self.pending_close_groups.pop_front() else {
             return;
         };
         for document_id in &group.document_ids {
-            let _ = self.detach_document(*document_id, true, false);
+            let reopened = self.server_will_hold_open(*document_id);
+            if let Err(error) = self.detach_document(*document_id, true, reopened) {
+                // The repair close could not be queued, so the server keeps a
+                // buffer this manager can no longer address. Nothing here can
+                // put that right without stopping the session, which would take
+                // unrelated documents down with it.
+                log::warn!("LSP could not close a re-opened document on settlement: {error:?}");
+            }
             self.state.documents.remove(document_id);
             self.state.ownership.close(*document_id);
         }
@@ -3236,6 +3307,24 @@ impl LspManager {
         // group is the only thing that frees the front of the policy lane, and
         // no worker event is guaranteed to follow it.
         self.retry_pending_policy_command();
+    }
+
+    /// True when everything the document's session has already been handed
+    /// still leaves the server holding it open.
+    fn server_will_hold_open(&self, document_id: DocumentId) -> bool {
+        let Some(key) = self
+            .state
+            .documents
+            .get(&document_id)
+            .and_then(|document| document.session_key.clone())
+        else {
+            // No session means no server-side buffer to worry about: either it
+            // never had one or the generation that held it is gone.
+            return false;
+        };
+        self.session_delivery_progress
+            .get(&key)
+            .is_some_and(|progress| progress.will_be_open(&document_id_text(document_id)))
     }
 
     /// Accept one acknowledged reserved close.
@@ -10630,6 +10719,184 @@ mod tests {
         }
     }
 
+    /// The open/close transitions a session's outbox still holds for one
+    /// document, in the order the server will see them.
+    fn queued_transitions(
+        actor: &LspManager,
+        session_key: &SessionKey,
+        document_id: DocumentId,
+    ) -> Vec<super::OpenTransition> {
+        let id_text = super::document_id_text(document_id);
+        actor.state.sessions[session_key]
+            .outbox
+            .iter()
+            .filter_map(|operation| match super::operation_document(operation) {
+                Some((queued_id, Some(transition))) if queued_id == id_text => Some(transition),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_resync_during_delivery_cannot_leave_the_server_holding_a_closed_document() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let path = project_root.join("resynced.ts");
+        std::fs::write(&path, "resynced").unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (_manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let ReserveResult::Reserved { reservation_id, .. } =
+            actor.reserve_document(path, "main".into()).unwrap()
+        else {
+            panic!("expected reservation")
+        };
+        let response = actor
+            .open_document(
+                reservation_id,
+                "resync".into(),
+                "resync".into(),
+                "typescript".into(),
+            )
+            .unwrap();
+        let document =
+            serde_json::from_value::<DocumentId>(serde_json::Value::String(response.document_id))
+                .unwrap();
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        actor
+            .state
+            .documents
+            .get_mut(&document)
+            .unwrap()
+            .session_key = Some(session_key.clone());
+        actor.state.sessions.insert(
+            session_key.clone(),
+            fake_managed_session("resync-window", 6, document),
+        );
+        actor.active_generations.insert((session_key.clone(), 6));
+
+        // The document's didOpen is already inside the worker, so the close has
+        // to travel the ordered lane, and a didChange is still queued behind it
+        // so the discard fires and marks the document out of sync.
+        let uri = actor.state.documents.get(&document).unwrap().uri.clone();
+        actor
+            .enqueue_session_operations(
+                &session_key,
+                [super::SessionOperation::DidOpen(super::SessionDocument {
+                    document_id: super::document_id_text(document),
+                    uri: lsp::Url::parse(&uri).unwrap(),
+                    language_id: "typescript".into(),
+                    version: 1,
+                    text: "resynced".into(),
+                })],
+            )
+            .unwrap();
+        for _ in 0..super::SESSION_OPERATION_CAPACITY {
+            actor
+                .enqueue_session_operations(
+                    &session_key,
+                    [super::SessionOperation::DidSave("filler".into())],
+                )
+                .unwrap();
+        }
+        actor
+            .enqueue_session_operations(
+                &session_key,
+                [super::SessionOperation::DidChange(batch(
+                    document, 1, 2, "edit",
+                ))],
+            )
+            .unwrap();
+        actor
+            .session_delivery_progress
+            .get_mut(&session_key)
+            .unwrap()
+            .open_on_server
+            .insert(super::document_id_text(document));
+
+        // A policy has to be queued for a reserved close group to exist at all.
+        // This one leaves the session alive so the wire state stays inspectable
+        // after the group settles.
+        let (policy_reply, _policy_result) = tokio::sync::oneshot::channel();
+        actor
+            .pending_policy_commands
+            .push_back(super::ManagerCommand::SetEnablement {
+                enablement: Enablement::all(),
+                reply: policy_reply,
+            });
+        actor.policy_reservation_epoch = Some(31);
+        actor.policy_capacity_reservations.insert(
+            session_key.clone(),
+            super::PolicyCapacityReservation {
+                operations: 1,
+                attachments: 0,
+                close_documents: [document].into_iter().collect(),
+            },
+        );
+        let (group_reply, mut group_result) = tokio::sync::oneshot::channel();
+        actor.admit_close_group(vec![document], group_reply);
+        assert!(actor.retry_pending_close_group());
+        let delivery = match &actor.pending_close_groups.front().unwrap().phase {
+            super::DeferredClosePhase::Delivering { outstanding, .. } => {
+                outstanding.values().next().unwrap().clone()
+            }
+            super::DeferredClosePhase::Pending => panic!("group was not staged"),
+        };
+        assert!(
+            actor
+                .state
+                .documents
+                .get(&document)
+                .unwrap()
+                .synchronization_dirty,
+            "the discard must have marked the document out of sync"
+        );
+        assert_eq!(
+            queued_transitions(&actor, &session_key, document),
+            vec![super::OpenTransition::Close],
+            "the staged close is queued in the ordered lane"
+        );
+
+        // The client answers the resync the dirty flag asked for. It is not a
+        // policy command, so it runs immediately - while the group is still
+        // delivering - and re-opens the document the group is closing.
+        actor
+            .resync_document(document, 2, "resynced again".into())
+            .unwrap();
+        assert_eq!(
+            queued_transitions(&actor, &session_key, document),
+            vec![
+                super::OpenTransition::Close,
+                super::OpenTransition::Close,
+                super::OpenTransition::Open,
+            ],
+            "the resync re-opened a document the group is closing"
+        );
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded { delivery });
+        assert_eq!(group_result.try_recv().unwrap(), Ok(()));
+        assert!(!actor.state.documents.contains_key(&document));
+        assert!(
+            actor.state.sessions.contains_key(&session_key),
+            "the session must outlive the group for this assertion to mean anything"
+        );
+
+        assert_eq!(
+            queued_transitions(&actor, &session_key, document)
+                .last()
+                .copied(),
+            Some(super::OpenTransition::Close),
+            "the manager dropped a document the server is still holding open"
+        );
+    }
+
     #[tokio::test]
     async fn reserved_close_staging_survives_an_abandoned_attempt() {
         let temp = TempDir::new().unwrap();
@@ -10859,6 +11126,53 @@ mod tests {
         assert!(
             progress.open_on_server.is_empty(),
             "an out-of-band close must not leave its document believed open forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn discarding_a_document_leaves_reserved_credits_alone() {
+        let temp = TempDir::new().unwrap();
+        let StagedReservedClose {
+            mut actor,
+            session_key,
+            document,
+            ..
+        } = staged_reserved_close(&temp, "credit-survives");
+        let id_text = super::document_id_text(document);
+        actor.state.sessions.get_mut(&session_key).unwrap().worker = None;
+        actor
+            .enqueue_session_operations(
+                &session_key,
+                [
+                    super::SessionOperation::ReservedCloseCredit {
+                        document_id: id_text.clone(),
+                    },
+                    super::SessionOperation::DidChange(batch(document, 1, 2, "edit")),
+                ],
+            )
+            .unwrap();
+
+        actor.discard_queued_document_traffic(&session_key, document);
+
+        let outbox = &actor.state.sessions[&session_key].outbox;
+        assert!(
+            !outbox.iter().any(|operation| matches!(
+                operation,
+                super::SessionOperation::DidChange(batch) if batch.document_id == id_text
+            )),
+            "the closing document's queued traffic must be discarded"
+        );
+        assert!(
+            outbox.iter().any(|operation| matches!(
+                operation,
+                super::SessionOperation::ReservedCloseCredit { document_id }
+                    if document_id == &id_text
+            )),
+            "a credit is another group's reserved worker slot, not traffic to discard"
+        );
+        assert!(
+            actor.session_delivery_progress[&session_key].credits_outstanding(),
+            "discarding a document must not spend a credit the policy is waiting on"
         );
     }
 
