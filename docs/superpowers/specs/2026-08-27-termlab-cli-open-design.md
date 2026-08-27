@@ -1,7 +1,7 @@
 # `termlab` CLI Open + Install-to-PATH — Design
 
 **Date:** 2026-08-27
-**Status:** Approved in chat (spec pending user review)
+**Status:** Implemented (manual verification pending)
 **Owner request:** `termlab ~/file.txt` from a shell opens a text editor in a
 new TermLab window. A command-palette entry installs `termlab` into PATH the
 way VS Code's "Install 'code' command" does. Directories will be supported
@@ -170,3 +170,18 @@ finishes wiring `termlabEditorService`), call
   with app closed (app launches into the file); relative path from a deep
   cwd; nonexistent path toast; directory toast; uninstall; `termlab` with
   no args from PATH launches the app.
+
+## Manual verification
+
+- [ ] Install command: admin prompt appears once, `which termlab` resolves
+- [ ] `termlab ~/file.txt` with app running: opens a new window with the
+      editor
+- [ ] `termlab ~/file.txt` with app closed: app launches into the file
+- [ ] Relative path from a deep cwd resolves correctly
+- [ ] Nonexistent path shows an error toast
+- [ ] Directory path shows the "not yet supported" toast
+- [ ] Uninstall command removes the symlink
+- [ ] `termlab` with no args from PATH launches the app normally
+- [ ] `termlab msg new-window` behaves exactly as before this branch (the
+      sender is unimplemented in-tree; the invocation boots the app with the
+      argument ignored)
