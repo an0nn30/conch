@@ -1609,6 +1609,10 @@ pub(crate) struct LspManager {
     /// Their replies are owed exactly once, after the generations stop.
     settling_close_groups: Vec<DeferredCloseGroup>,
     session_delivery_progress: HashMap<SessionKey, SessionDeliveryProgress>,
+    /// Closes owed for documents that were re-opened between a group staging
+    /// them and settling them, and which the session had no room for at
+    /// settlement. They are retried as the session drains.
+    pending_repair_closes: HashMap<SessionKey, Vec<String>>,
     next_close_group_id: u64,
     next_close_delivery_attempt: u64,
     policy_capacity_reservations: HashMap<SessionKey, PolicyCapacityReservation>,
@@ -1676,6 +1680,7 @@ impl LspManager {
             pending_close_groups: VecDeque::new(),
             settling_close_groups: Vec::new(),
             session_delivery_progress: HashMap::new(),
+            pending_repair_closes: HashMap::new(),
             next_close_group_id: 1,
             next_close_delivery_attempt: 1,
             policy_capacity_reservations: HashMap::new(),
@@ -3289,14 +3294,17 @@ impl LspManager {
             return;
         };
         for document_id in &group.document_ids {
-            let reopened = self.server_will_hold_open(*document_id);
-            if let Err(error) = self.detach_document(*document_id, true, reopened) {
-                // The repair close could not be queued, so the server keeps a
-                // buffer this manager can no longer address. Nothing here can
-                // put that right without stopping the session, which would take
-                // unrelated documents down with it.
-                log::warn!("LSP could not close a re-opened document on settlement: {error:?}");
+            // The repair is attempted first and separately, because it must not
+            // be able to abort the detach. `detach_document` bails on a refused
+            // enqueue before it cancels requests, clears diagnostics, drops the
+            // document from its session and arms idle shutdown - so a refused
+            // repair would leave the session holding a member that exists
+            // nowhere else, one that can never be removed and therefore never
+            // lets the session go idle.
+            if self.server_will_hold_open(*document_id) {
+                self.owe_repair_close(*document_id);
             }
+            let _ = self.detach_document(*document_id, true, false);
             self.state.documents.remove(document_id);
             self.state.ownership.close(*document_id);
         }
@@ -3307,6 +3315,91 @@ impl LspManager {
         // group is the only thing that frees the front of the policy lane, and
         // no worker event is guaranteed to follow it.
         self.retry_pending_policy_command();
+    }
+
+    /// Queue the didClose that puts the server back in step for a document the
+    /// manager is letting go of, or record that it is still owed.
+    ///
+    /// The repair travels the ordered lane on purpose. It exists to counteract
+    /// operations that are themselves queued there - a resync's didOpen, most
+    /// of the time - so it is only correct once it lands behind them. The
+    /// delivery lane, which exists precisely to overtake that backlog, would
+    /// race the very thing this is repairing.
+    ///
+    /// A refused enqueue is normal, not exceptional: settlement is driven by an
+    /// out-of-band acknowledgement that is by design independent of the ordered
+    /// backlog, so the outbox can be at capacity at exactly this moment. The
+    /// close is parked and retried as the session drains rather than dropped.
+    fn owe_repair_close(&mut self, document_id: DocumentId) {
+        let Some(key) = self
+            .state
+            .documents
+            .get(&document_id)
+            .and_then(|document| document.session_key.clone())
+        else {
+            return;
+        };
+        if !self
+            .state
+            .sessions
+            .get(&key)
+            .is_some_and(|session| session.protocol_started)
+        {
+            return;
+        }
+        let id_text = document_id_text(document_id);
+        if self
+            .enqueue_session_operations(
+                &key,
+                [SessionOperation::DidClose {
+                    document_id: id_text.clone(),
+                    delivery: None,
+                }],
+            )
+            .is_err()
+        {
+            self.pending_repair_closes
+                .entry(key)
+                .or_default()
+                .push(id_text);
+        }
+    }
+
+    /// Retry the closes a session owes, as its outbox frees up.
+    ///
+    /// Each is re-checked against the mirror first: something else may have
+    /// closed the document in the meantime, and a second didClose for an
+    /// already-closed buffer is exactly the kind of noise this whole path
+    /// exists to avoid.
+    fn drain_repair_closes(&mut self, key: &SessionKey) {
+        let Some(owed) = self.pending_repair_closes.remove(key) else {
+            return;
+        };
+        let mut still_owed = Vec::new();
+        for id_text in owed {
+            let outstanding = self
+                .session_delivery_progress
+                .get(key)
+                .is_some_and(|progress| progress.will_be_open(&id_text));
+            if !outstanding {
+                continue;
+            }
+            if self
+                .enqueue_session_operations(
+                    key,
+                    [SessionOperation::DidClose {
+                        document_id: id_text.clone(),
+                        delivery: None,
+                    }],
+                )
+                .is_err()
+            {
+                still_owed.push(id_text);
+            }
+        }
+        if !still_owed.is_empty() {
+            self.pending_repair_closes.insert(key.clone(), still_owed);
+        }
     }
 
     /// True when everything the document's session has already been handed
@@ -4046,6 +4139,7 @@ impl LspManager {
         session.protocol_started = false;
         session.outbox.clear();
         self.session_delivery_progress.remove(&key);
+        self.pending_repair_closes.remove(&key);
         let session = self.state.sessions.get_mut(&key).expect("checked above");
         let generation = session.generation;
         self.active_generations.insert((key.clone(), generation));
@@ -4646,6 +4740,10 @@ impl LspManager {
                     if let Some(progress) = self.session_delivery_progress.get_mut(&key) {
                         progress.record_completed();
                     }
+                    // A close the session still owes for a document already
+                    // let go of comes first: nothing is waiting on it, but the
+                    // server is holding a buffer until it lands.
+                    self.drain_repair_closes(&key);
                     // Preserve the order of work already admitted to the
                     // session, then immediately spend newly freed outbox
                     // credit on the front policy reservation. New batches do
@@ -4794,6 +4892,7 @@ impl LspManager {
                     session.outbox.clear();
                 }
                 self.session_delivery_progress.remove(&key);
+                self.pending_repair_closes.remove(&key);
                 for document in documents {
                     if let Some(document) = self.state.documents.get_mut(&document) {
                         document.synchronization_dirty = true;
@@ -5120,8 +5219,11 @@ impl LspManager {
             )
         };
         // The outbox went with the crash, so nothing that was queued on this
-        // generation will ever run.
+        // generation will ever run - including any close still owed for a
+        // document the manager already let go of. The generation that held the
+        // buffer is gone, so the debt is gone with it.
         self.session_delivery_progress.remove(&key);
+        self.pending_repair_closes.remove(&key);
         if self.state.diagnostics.clear_session(&session_id) {
             self.emit_diagnostics(Some(session_id.clone()), None, None);
         }
@@ -5254,6 +5356,7 @@ impl LspManager {
             return;
         };
         self.session_delivery_progress.remove(key);
+        self.pending_repair_closes.remove(key);
         if let Some(mut worker) = session.worker.take()
             && let Some(shutdown) = worker.shutdown.take()
         {
@@ -10738,6 +10841,224 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_repair_close_cannot_abort_the_detach() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let path = project_root.join("refused.ts");
+        std::fs::write(&path, "refused").unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (_manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let ReserveResult::Reserved { reservation_id, .. } =
+            actor.reserve_document(path, "main".into()).unwrap()
+        else {
+            panic!("expected reservation")
+        };
+        let response = actor
+            .open_document(
+                reservation_id,
+                "refused".into(),
+                "refused".into(),
+                "typescript".into(),
+            )
+            .unwrap();
+        let document =
+            serde_json::from_value::<DocumentId>(serde_json::Value::String(response.document_id))
+                .unwrap();
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        actor
+            .state
+            .documents
+            .get_mut(&document)
+            .unwrap()
+            .session_key = Some(session_key.clone());
+        actor.state.sessions.insert(
+            session_key.clone(),
+            fake_managed_session("refused-repair", 8, document),
+        );
+        actor.active_generations.insert((session_key.clone(), 8));
+
+        // A request is outstanding for the document when the group settles.
+        let (hover_reply, mut hover_result) = tokio::sync::oneshot::channel();
+        actor.start_request(
+            document,
+            crate::lsp::types::EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            super::RequestKind::Hover,
+            super::PendingReply::Hover(hover_reply),
+        );
+        // From here nothing drains, so everything enqueued stays in the outbox.
+        actor.state.sessions.get_mut(&session_key).unwrap().worker = None;
+        actor
+            .session_delivery_progress
+            .get_mut(&session_key)
+            .unwrap()
+            .open_on_server
+            .insert(super::document_id_text(document));
+
+        let (policy_reply, _policy_result) = tokio::sync::oneshot::channel();
+        actor
+            .pending_policy_commands
+            .push_back(super::ManagerCommand::SetEnablement {
+                enablement: Enablement::all(),
+                reply: policy_reply,
+            });
+        actor.policy_reservation_epoch = Some(37);
+        actor.policy_capacity_reservations.insert(
+            session_key.clone(),
+            super::PolicyCapacityReservation {
+                operations: 1,
+                attachments: 0,
+                close_documents: [document].into_iter().collect(),
+            },
+        );
+        let (group_reply, mut group_result) = tokio::sync::oneshot::channel();
+        actor.admit_close_group(vec![document], group_reply);
+        assert!(actor.retry_pending_close_group());
+        let delivery = match &actor.pending_close_groups.front().unwrap().phase {
+            super::DeferredClosePhase::Delivering { outstanding, .. } => {
+                outstanding.values().next().unwrap().clone()
+            }
+            super::DeferredClosePhase::Pending => panic!("group was not staged"),
+        };
+
+        // The client answers with a resync, re-opening the closing document,
+        // and then keeps typing until the outbox is full again - which is the
+        // regime this whole machinery exists for.
+        actor
+            .resync_document(document, 2, "refused again".into())
+            .unwrap();
+        while actor
+            .enqueue_session_operations(
+                &session_key,
+                [super::SessionOperation::DidSave("filler".into())],
+            )
+            .is_ok()
+        {}
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded { delivery });
+        assert_eq!(group_result.try_recv().unwrap(), Ok(()));
+        assert!(!actor.state.documents.contains_key(&document));
+
+        // The repair close could not be queued. That must not cost the detach.
+        let session = &actor.state.sessions[&session_key];
+        assert!(
+            !session.documents.contains(&document),
+            "a refused repair close left the session holding a document that exists nowhere else"
+        );
+        assert_eq!(
+            session.idle_generation, 1,
+            "the session lost its last document, so idle shutdown must be armed"
+        );
+        assert_eq!(
+            hover_result.try_recv().unwrap(),
+            Err(ManagerError::Cancelled),
+            "a request on a detached document must not be left hanging"
+        );
+
+        // The repair is owed, not forgotten: it lands as soon as the session
+        // has room for it.
+        let session = actor.state.sessions.get_mut(&session_key).unwrap();
+        for _ in 0..4 {
+            session.outbox.pop_back();
+        }
+        let progress = actor
+            .session_delivery_progress
+            .get_mut(&session_key)
+            .unwrap();
+        for _ in 0..4 {
+            progress.pipeline.pop_back();
+        }
+        actor.handle_input(super::ActorInput::WorkerReady {
+            key: session_key.clone(),
+            generation: 8,
+        });
+        assert_eq!(
+            queued_transitions(&actor, &session_key, document),
+            vec![
+                super::OpenTransition::Close,
+                super::OpenTransition::Close,
+                super::OpenTransition::Open,
+                super::OpenTransition::Close,
+            ],
+            "the owed repair close must land exactly once, after the resync's didOpen"
+        );
+        assert!(
+            !actor.session_delivery_progress[&session_key]
+                .will_be_open(&super::document_id_text(document)),
+            "the wire must end with the document closed"
+        );
+        assert!(
+            actor.state.sessions.contains_key(&session_key),
+            "a repair close must never take the session down with it"
+        );
+
+        // A repair carries no delivery token, so a failed one reports through
+        // the ordinary operation-failure path. It must not reach the
+        // unconditional stop that a failed *reserved* close triggers.
+        actor.handle_input(super::ActorInput::SessionOperationFailed {
+            key: session_key.clone(),
+            generation: 8,
+            operation: "didClose",
+            message: "repair close failed".into(),
+        });
+        assert!(
+            actor.state.sessions.contains_key(&session_key),
+            "a failed repair close must be logged, not escalated to a session stop"
+        );
+    }
+
+    #[test]
+    fn the_wire_projection_reads_every_kind_of_pending_close() {
+        let mut progress = super::SessionDeliveryProgress::default();
+        let out_of_band = "out-of-band".to_owned();
+        let vacuous = "vacuous".to_owned();
+        let reopened = "reopened".to_owned();
+        progress.open_on_server.insert(out_of_band.clone());
+        progress.open_on_server.insert(reopened.clone());
+
+        // A credit stands for a close already sent on the delivery lane.
+        progress
+            .pipeline
+            .push_back(super::PipelineEntry::ReservedCredit {
+                document_id: out_of_band.clone(),
+            });
+        // A document whose didOpen was discarded was never opened at all.
+        // A re-opened document ends the queue open and still owes a close.
+        for (document_id, transition) in [
+            (reopened.clone(), super::OpenTransition::Close),
+            (reopened.clone(), super::OpenTransition::Open),
+        ] {
+            progress.pipeline.push_back(super::PipelineEntry::Document {
+                document_id,
+                transition: Some(transition),
+            });
+        }
+
+        assert!(
+            !progress.will_be_open(&out_of_band),
+            "an out-of-band close is settled by its queued credit"
+        );
+        assert!(
+            !progress.will_be_open(&vacuous),
+            "a document the server was never told to open is not open"
+        );
+        assert!(
+            progress.will_be_open(&reopened),
+            "a queued didOpen leaves the document open however it got there"
+        );
+    }
+
+    #[tokio::test]
     async fn a_resync_during_delivery_cannot_leave_the_server_holding_a_closed_document() {
         let temp = TempDir::new().unwrap();
         let config_root = temp.path().join("config");
@@ -10889,11 +11210,14 @@ mod tests {
         );
 
         assert_eq!(
-            queued_transitions(&actor, &session_key, document)
-                .last()
-                .copied(),
-            Some(super::OpenTransition::Close),
-            "the manager dropped a document the server is still holding open"
+            queued_transitions(&actor, &session_key, document),
+            vec![
+                super::OpenTransition::Close,
+                super::OpenTransition::Close,
+                super::OpenTransition::Open,
+                super::OpenTransition::Close,
+            ],
+            "settlement must add exactly one repair close, after the resync's didOpen"
         );
     }
 
