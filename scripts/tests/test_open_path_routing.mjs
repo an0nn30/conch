@@ -108,4 +108,24 @@ function load({ pending, statMap }) {
   assert.strictEqual(calls.infos[0], sandbox.termlabOpenPathRouting.DIRECTORY_COMING_SOON);
 }
 
+// routePaths routes a pre-pulled list (no queue pull) and reports how many
+// FILES actually opened — the boot path uses the count to decide whether the
+// window earned its editor-only layout or must fall back to a terminal tab.
+{
+  const { routing, calls } = load({
+    pending: [],
+    statMap: {
+      '/tmp/a.txt': { name: 'a.txt', is_dir: false, size: 1, modified: null, permissions: null },
+      '/tmp/dir': { name: 'dir', is_dir: true, size: 0, modified: null, permissions: null },
+    },
+  });
+  const opened = await routing.routePaths(['/tmp/a.txt', '/tmp/dir', '/tmp/gone.txt']);
+  assert.strictEqual(opened, 1, 'only the regular file counts as opened');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(calls.opened)), ['/tmp/a.txt']);
+  assert.strictEqual(calls.infos.length, 1, 'directory still toasts');
+  assert.strictEqual(calls.errors.length, 1, 'missing path still toasts');
+  const none = await routing.routePaths([]);
+  assert.strictEqual(none, 0, 'empty list opens nothing');
+}
+
 console.log('test_open_path_routing: all assertions passed');

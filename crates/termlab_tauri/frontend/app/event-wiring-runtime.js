@@ -326,6 +326,11 @@
         drainPendingOpens: pendingOpenDrain
           ? () => pendingOpenDrain.drainPendingOpens()
           : null,
+        // Routes an already-pulled path list; main-runtime pulls the queue
+        // itself, early, to decide the window layout before any tab exists.
+        routePendingPaths: pendingOpenDrain
+          ? (paths) => pendingOpenDrain.routePaths(paths)
+          : null,
       };
     }
 

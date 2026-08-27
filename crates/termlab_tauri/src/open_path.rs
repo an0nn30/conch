@@ -15,6 +15,17 @@ impl PendingOpens {
         self.0.lock().unwrap().remove(label).unwrap_or_default()
     }
 
+    /// Non-destructive: does this label have queued paths? The boot path asks
+    /// this early (to decide the editor-window layout) before the destructive
+    /// take runs later in startup.
+    pub(crate) fn has(&self, label: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .get(label)
+            .is_some_and(|paths| !paths.is_empty())
+    }
+
     #[cfg(test)]
     fn peek(&self, label: &str) -> Vec<String> {
         self.0.lock().unwrap().get(label).cloned().unwrap_or_default()
@@ -92,6 +103,14 @@ pub(crate) fn open_in_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, p
 }
 
 #[tauri::command]
+pub(crate) fn has_pending_open_paths(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, PendingOpens>,
+) -> bool {
+    state.has(window.label())
+}
+
+#[tauri::command]
 pub(crate) fn take_pending_open_paths(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, PendingOpens>,
@@ -101,6 +120,17 @@ pub(crate) fn take_pending_open_paths(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn has_reports_without_draining() {
+        use super::*;
+        let pending = PendingOpens::default();
+        assert!(!pending.has("main"), "empty map has nothing");
+        seed_for_label(&pending, "main", vec!["/a.txt".into()]);
+        assert!(pending.has("main"));
+        assert_eq!(pending.take("main").len(), 1, "has() must not drain");
+        assert!(!pending.has("main"), "drained label reports empty");
+    }
+
     use super::*;
 
     #[test]

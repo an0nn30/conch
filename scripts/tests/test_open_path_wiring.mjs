@@ -139,22 +139,24 @@ function loadRuntime() {
   );
 }
 
-// The drain must be sequenced AFTER the first tab is created, not fired off
-// during event wiring to race it. `createEditorTab` activates its own tab
-// synchronously, so whichever tab is created last wins — a drain racing
-// `createTab()` lands the opened file in the background about as often as
-// not.
+// The boot order inverted when editor windows arrived: main-runtime now
+// pulls the queue (take_pending_open_paths) and routes it BEFORE creating
+// any tab — a window with CLI paths gets ONLY editor tabs (no terminal to
+// race), and a window without them creates the terminal tab as always.
+// These source assertions pin that ordering and the fallback wiring.
 {
   const src = fs.readFileSync(path.join(APP, 'main-runtime.js'), 'utf8');
-  const firstTab = src.indexOf('await firstTabPromise');
-  const drainCall = src.indexOf('drainPendingOpens(');
-  assert.ok(firstTab !== -1, 'main-runtime still awaits the first tab');
-  assert.ok(drainCall !== -1, 'main-runtime must drive the pending-open drain itself');
-  assert.ok(
-    drainCall > firstTab,
-    'the pending-open drain must run after the first tab is created, or the '
-    + 'editor tab it opens gets pushed into the background by createTab',
-  );
+  const pull = src.indexOf("take_pending_open_paths");
+  const route = src.indexOf('routePendingPaths(');
+  const firstTab = src.indexOf('createTab().catch');
+  assert.ok(pull !== -1, 'main-runtime pulls the queue itself');
+  assert.ok(route !== -1, 'main-runtime routes the pulled paths');
+  assert.ok(firstTab !== -1, 'the default terminal tab still exists for normal windows');
+  assert.ok(pull < firstTab && route < firstTab,
+    'the pull+route must precede default-tab creation: an editor window '
+    + 'skips the terminal tab entirely, so nothing may race the editor tab');
+  assert.ok(src.indexOf('__termlabEditorWindow') !== -1,
+    'the editor-window flag wires the close-all terminal fallback');
 }
 
 console.log('test_open_path_wiring: all assertions passed');

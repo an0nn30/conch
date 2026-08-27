@@ -489,10 +489,25 @@
       updateWindowTitle();
 
       if (tabs.size === 0 && closeWindowWhenLast) {
-        try {
-          await destroyCurrentWindow();
-        } catch (error) {
-          showStatus('Failed to close window: ' + String(error));
+        // A CLI-opened editor window (main-runtime skipped its terminal tab)
+        // falls back to a plain terminal instead of dying with its last tab.
+        // One-shot: the flag is consumed here, so closing the fallback tab
+        // closes the window like any other. Guarded by closeWindowWhenLast so
+        // the window-teardown path (which closes every tab with it false)
+        // can never spawn a terminal into a dying window.
+        if (global.__termlabEditorWindow === true) {
+          delete global.__termlabEditorWindow;
+          try {
+            await createTab();
+          } catch (error) {
+            showStatus('Failed to open terminal tab: ' + String(error));
+          }
+        } else {
+          try {
+            await destroyCurrentWindow();
+          } catch (error) {
+            showStatus('Failed to close window: ' + String(error));
+          }
         }
       }
 

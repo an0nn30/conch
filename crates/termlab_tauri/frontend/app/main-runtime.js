@@ -304,9 +304,10 @@
       const rebuildTreeDOM = (tab) => bridgeRuntime && bridgeRuntime.rebuildTreeDOM ? bridgeRuntime.rebuildTreeDOM(tab) : undefined;
 
       let debouncedSaveLayout = () => {};
-      // Set by the event-wiring runtime when this window has a CLI/IPC
-      // pending-open queue to drain. Run below, after the first tab exists.
-      let drainPendingOpens = null;
+      // Set by the event-wiring runtime when this window can route CLI/IPC
+      // open paths. main-runtime pulls the queue itself (below, before any
+      // tab exists) and hands the list to this.
+      let routePendingPaths = null;
 
       const isTextInputTarget = (el) => bridgeRuntime && bridgeRuntime.isTextInputTarget ? bridgeRuntime.isTextInputTarget(el) : inputRuntime.isTextInputTarget(el);
       const writeTextToCurrentPane = (text) => bridgeRuntime && bridgeRuntime.writeTextToCurrentPane ? bridgeRuntime.writeTextToCurrentPane(text) : false;
@@ -384,8 +385,8 @@
           if (typeof eventWiringResult.showUpdateAvailableToast === 'function') {
             showUpdateAvailableToast = eventWiringResult.showUpdateAvailableToast;
           }
-          if (typeof eventWiringResult.drainPendingOpens === 'function') {
-            drainPendingOpens = eventWiringResult.drainPendingOpens;
+          if (typeof eventWiringResult.routePendingPaths === 'function') {
+            routePendingPaths = eventWiringResult.routePendingPaths;
           }
         }
       }
@@ -442,24 +443,34 @@
         }
       }
 
-      const firstTabPromise = createTab().catch((e) => {
-        showStatus('Failed to initialize first tab: ' + String(e));
-      });
-      await firstTabPromise;
-
-      // Now — and only now — drain any paths Rust queued for this window
-      // (`termlab notes.md`, or a second-instance IPC arrival). It has to
-      // come after the first tab: createEditorTab activates the tab it
-      // makes, and so does createTab, so whichever finishes last is the one
-      // the user sees. Draining during event wiring raced createTab and
-      // dropped the requested file behind an empty terminal.
-      //
-      // Awaited but never fatal: a slow or failing drain must not hold up
-      // the window's reveal below, and its rejection is swallowed.
-      if (typeof drainPendingOpens === 'function') {
+      // A window whose Rust queue holds CLI paths boots as an EDITOR window:
+      // no default terminal tab, just the editor(s) — `termlab notes.md`
+      // should read as a small editor app. (startup-runtime already switched
+      // this window into session-only zen via the non-destructive
+      // has_pending_open_paths peek.) The destructive take happens here,
+      // before any tab exists, so nothing races the editor tab. If nothing in
+      // the queue actually opens — every path missing or a directory — fall
+      // back to the normal terminal tab rather than presenting an empty
+      // window. Awaited but never fatal: a failing route must not hold up the
+      // window's reveal below.
+      let cliOpenedEditors = 0;
+      if (typeof routePendingPaths === 'function') {
         try {
-          await drainPendingOpens();
+          const pendingOpenPaths = (await invoke('take_pending_open_paths')) || [];
+          if (pendingOpenPaths.length > 0) {
+            cliOpenedEditors = await routePendingPaths(pendingOpenPaths);
+          }
         } catch (_) {}
+      }
+      if (cliOpenedEditors > 0) {
+        // Closing this window's last tab opens a terminal tab instead of
+        // closing the window; tab-manager.js consumes the flag once.
+        window.__termlabEditorWindow = true;
+      } else {
+        const firstTabPromise = createTab().catch((e) => {
+          showStatus('Failed to initialize first tab: ' + String(e));
+        });
+        await firstTabPromise;
       }
 
       // Show the window (secondary windows are created hidden). This runs as

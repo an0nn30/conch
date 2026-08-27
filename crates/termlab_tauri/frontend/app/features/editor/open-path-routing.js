@@ -28,30 +28,43 @@
     const toastError = deps.toastError;
     const toastInfo = deps.toastInfo;
 
+    // True only when a regular file actually reached the editor: the boot
+    // path counts these to decide whether the window earned its editor-only
+    // layout or must fall back to a terminal tab.
     async function routeOne(pathStr) {
       let entry;
       try {
         entry = await invoke('local_stat', { path: pathStr });
       } catch (error) {
         toastError('Cannot Open Path', pathStr + ': ' + String(error));
-        return;
+        return false;
       }
       if (entry && entry.is_dir) {
         toastInfo('Folder', DIRECTORY_COMING_SOON);
-        return;
+        return false;
       }
       openLocalFile(pathStr);
+      return true;
+    }
+
+    // Route an already-pulled list (the boot path takes the queue itself,
+    // early, to decide the window layout before any tab exists). Returns the
+    // number of files opened.
+    async function routePaths(paths) {
+      let opened = 0;
+      for (const pathStr of paths || []) {
+        if (await routeOne(pathStr)) opened += 1;
+      }
+      return opened;
     }
 
     async function drainPendingOpens() {
       const pending = await invoke('take_pending_open_paths');
       if (!pending || !pending.length) return;
-      for (const pathStr of pending) {
-        await routeOne(pathStr);
-      }
+      await routePaths(pending);
     }
 
-    return { drainPendingOpens };
+    return { drainPendingOpens, routePaths };
   }
 
   global.termlabOpenPathRouting = { create, DIRECTORY_COMING_SOON };

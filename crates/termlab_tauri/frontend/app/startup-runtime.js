@@ -174,6 +174,20 @@
             // No window label: treat it as the main window and honour the
             // saved layout.
           }
+          // A window with queued CLI open paths (`termlab notes.md`) boots in
+          // zen regardless of the saved layout or window kind: it is about to
+          // become an editor-only window (main-runtime skips the terminal
+          // tab), and should read as a small editor app, not a terminal with
+          // chrome. `has_pending_open_paths` is a non-destructive peek — the
+          // destructive take happens later in main-runtime, after the editor
+          // service exists. Session-only, same as the new-window default:
+          // this window must never teach the shared layout to open in zen.
+          try {
+            if (await invoke('has_pending_open_paths')) {
+              zenOn = true;
+              window.__termlabZenIsSessionDefault = true;
+            }
+          } catch (_) {}
           if (zenOn) {
             document.getElementById('app').classList.add('zen-mode');
           } else {
