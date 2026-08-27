@@ -995,7 +995,13 @@ enum SessionOperation {
     DidOpen(SessionDocument),
     DidChange(LspChangeBatch),
     DidSave(String),
-    DidClose(String),
+    DidClose {
+        document_id: String,
+        /// Present only for a close that a deferred close group staged. The
+        /// token is the group's proof of delivery: nothing else the session
+        /// sends for the same document may discharge the group.
+        delivery: Option<ReservedCloseDelivery>,
+    },
     Request {
         request_id: u64,
         kind: RequestKind,
@@ -1012,11 +1018,36 @@ enum SessionOperation {
         previous_result_id: Option<String>,
         pull_generation: u64,
     },
+    /// Placeholder for a reserved close that was delivered ahead of this queue.
+    /// It carries no protocol traffic; it only holds the worker slot the policy
+    /// reserved so later groups keep queueing behind the same backpressure.
+    ReservedCloseCredit,
 }
 
 struct SessionWorkerHandle {
     operations: mpsc::Sender<SessionOperation>,
+    /// Lane for policy-reserved closes, delivered one at a time. A policy
+    /// transition has to prove its closes reached the server before it may
+    /// release the documents, and the ordered lane can be arbitrarily deep with
+    /// edits for unrelated documents. Each close still spends one ordered slot
+    /// (a `ReservedCloseCredit`), so the backpressure the policy reserved is
+    /// unchanged - only the acknowledgement stops waiting behind that backlog.
+    close_deliveries: mpsc::Sender<(String, ReservedCloseDelivery)>,
     shutdown: Option<oneshot::Sender<()>>,
+}
+
+/// How far a session's ordered lane has actually got.
+///
+/// `enqueued` numbers every operation pushed into the outbox and `completed`
+/// counts the ones the worker has finished, so a recorded position is reached
+/// exactly when `completed` catches up with it. `credit_marks` holds the
+/// positions of the reserved-close placeholders that policy work is still
+/// waiting on.
+#[derive(Default)]
+struct SessionDeliveryProgress {
+    enqueued: u64,
+    completed: u64,
+    credit_marks: VecDeque<u64>,
 }
 
 enum ActorInput {
@@ -1072,7 +1103,13 @@ enum ActorInput {
     WorkerReady {
         key: SessionKey,
         generation: u64,
-        completed_close: Option<String>,
+    },
+    ReservedCloseDeliverySucceeded {
+        delivery: ReservedCloseDelivery,
+    },
+    ReservedCloseDeliveryFailed {
+        delivery: ReservedCloseDelivery,
+        message: String,
     },
     CacheDeletionFinished {
         reply: oneshot::Sender<Result<(), ManagerError>>,
@@ -1271,16 +1308,57 @@ struct PolicyCapacityReservation {
     close_documents: HashSet<DocumentId>,
 }
 
+/// Identity of one didClose notification a deferred close group still owes.
+///
+/// The token binds the notification to the exact group invocation, policy
+/// epoch, session and session generation that staged it. Every field is part
+/// of the identity on purpose: an ordinary resync close for the same document
+/// carries no token at all, a token replayed after its group settled names a
+/// group that is no longer in flight, and a token minted for an older
+/// generation cannot speak for the generation that is running now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReservedCloseDelivery {
+    group_id: u64,
+    epoch: u64,
+    key: SessionKey,
+    session_generation: u64,
+    document_id: DocumentId,
+}
+
+/// Where an admitted close group sits between admission and its reply.
+enum DeferredClosePhase {
+    /// Admitted and holding reserved policy credits, but nothing has been
+    /// handed to a session yet. A pending group may still be retried, cancelled
+    /// or failed without the server ever having heard about it.
+    Pending,
+    /// didClose notifications are in flight. The group owns its documents until
+    /// every outstanding delivery is acknowledged, so a half-delivered group
+    /// never releases ownership and never advances the policy behind it.
+    Delivering {
+        outstanding: HashMap<DocumentId, ReservedCloseDelivery>,
+        /// Set once a delivery failed: the manager can no longer prove the
+        /// server closed the document, so it stops that exact generation and
+        /// waits for the stop to finish before settling the group.
+        stopping: Option<(SessionKey, u64)>,
+    },
+}
+
 struct DeferredCloseGroup {
+    group_id: u64,
     epoch: u64,
     document_ids: Vec<DocumentId>,
     required_session_closes: HashMap<SessionKey, HashSet<DocumentId>>,
+    phase: DeferredClosePhase,
     reply: oneshot::Sender<Result<(), ManagerError>>,
 }
 
 impl DeferredCloseGroup {
     fn reply_closed(&self) -> bool {
         self.reply.is_closed()
+    }
+
+    fn is_pending(&self) -> bool {
+        matches!(self.phase, DeferredClosePhase::Pending)
     }
 
     fn fail(self, error: ManagerError) {
@@ -1310,7 +1388,11 @@ pub(crate) struct LspManager {
     next_request_id: u64,
     pending_policy_commands: VecDeque<ManagerCommand>,
     pending_close_groups: VecDeque<DeferredCloseGroup>,
-    pending_group_close_deliveries: HashMap<String, (u64, SessionKey)>,
+    /// Groups that were still delivering when a priority shutdown arrived.
+    /// Their replies are owed exactly once, after the generations stop.
+    settling_close_groups: Vec<DeferredCloseGroup>,
+    session_delivery_progress: HashMap<SessionKey, SessionDeliveryProgress>,
+    next_close_group_id: u64,
     policy_capacity_reservations: HashMap<SessionKey, PolicyCapacityReservation>,
     policy_reservation_epoch: Option<u64>,
     next_policy_reservation_epoch: u64,
@@ -1374,7 +1456,9 @@ impl LspManager {
             next_request_id: 1,
             pending_policy_commands: VecDeque::new(),
             pending_close_groups: VecDeque::new(),
-            pending_group_close_deliveries: HashMap::new(),
+            settling_close_groups: Vec::new(),
+            session_delivery_progress: HashMap::new(),
+            next_close_group_id: 1,
             policy_capacity_reservations: HashMap::new(),
             policy_reservation_epoch: None,
             next_policy_reservation_epoch: 1,
@@ -2122,7 +2206,10 @@ impl LspManager {
             self.enqueue_session_operations(
                 &key,
                 [
-                    SessionOperation::DidClose(document_id_text(document_id)),
+                    SessionOperation::DidClose {
+                        document_id: document_id_text(document_id),
+                        delivery: None,
+                    },
                     SessionOperation::DidOpen(open),
                 ],
             )?;
@@ -2203,8 +2290,21 @@ impl LspManager {
             // untouched until the final all-or-none preflight below succeeds.
             self.advance_reserved_close_group_batches(&document_ids)?;
         }
+        self.ensure_close_documents_capacity(&document_ids)?;
+        for document_id in document_ids {
+            self.close_document(document_id)?;
+        }
+        Ok(())
+    }
+
+    /// All-or-none preflight: every listed document must fit its session outbox
+    /// together with the batches it still owes and any policy reservation.
+    fn ensure_close_documents_capacity(
+        &self,
+        document_ids: &[DocumentId],
+    ) -> Result<(), ManagerError> {
         let mut required = HashMap::<SessionKey, usize>::new();
-        for document_id in &document_ids {
+        for document_id in document_ids {
             let Some(document) = self.state.documents.get(document_id) else {
                 continue;
             };
@@ -2235,9 +2335,6 @@ impl LspManager {
             {
                 return Err(ManagerError::Overloaded);
             }
-        }
-        for document_id in document_ids {
-            self.close_document(document_id)?;
         }
         Ok(())
     }
@@ -2482,18 +2579,7 @@ impl LspManager {
         }
         self.discard_cancelled_close_groups();
         self.discard_cancelled_policy_front();
-        if self
-            .pending_group_close_deliveries
-            .iter()
-            .any(|(_, (epoch, key))| {
-                self.policy_reservation_epoch != Some(*epoch)
-                    || !self
-                        .state
-                        .sessions
-                        .get(key)
-                        .is_some_and(|session| session.protocol_started)
-            })
-        {
+        if self.delivering_close_group_lost_its_ground() {
             self.invalidate_policy_epoch(ManagerError::PolicyChanged);
             self.retry_policy_requested = !self.pending_policy_commands.is_empty();
             return;
@@ -2501,7 +2587,10 @@ impl LspManager {
         if self.retry_pending_close_group() {
             return;
         }
-        if !self.pending_group_close_deliveries.is_empty() {
+        // Every group is settled, but the policy still may not run until the
+        // worker has spent the slots those groups reserved: that backpressure
+        // is exactly what the policy reserved them for.
+        if self.reserved_close_credits_outstanding() {
             return;
         }
         let queued_before = self.pending_policy_commands.len();
@@ -2577,15 +2666,57 @@ impl LspManager {
         for group in self.pending_close_groups.drain(..) {
             group.fail(error.clone());
         }
-        self.pending_group_close_deliveries.clear();
         self.policy_capacity_reservations.clear();
         self.policy_reservation_epoch = None;
+    }
+
+    /// True when a group that already handed didClose notifications to a
+    /// session can no longer stand behind them.
+    ///
+    /// Those notifications cannot be taken back or replayed, so the group is
+    /// only meaningful while the epoch it was admitted under is still current
+    /// and the exact generation it addressed is still running. When either is
+    /// gone the whole epoch is untrustworthy and every group in it has to be
+    /// retried by its caller. A group that is already waiting for the
+    /// controlled stop it asked for is exempt: that stop is the proof it wants.
+    fn delivering_close_group_lost_its_ground(&self) -> bool {
+        self.pending_close_groups
+            .iter()
+            .any(|group| match &group.phase {
+                DeferredClosePhase::Pending => false,
+                DeferredClosePhase::Delivering {
+                    stopping: Some(_), ..
+                } => false,
+                DeferredClosePhase::Delivering {
+                    outstanding,
+                    stopping: None,
+                } => {
+                    self.policy_reservation_epoch != Some(group.epoch)
+                        || outstanding
+                            .values()
+                            .any(|delivery| !self.delivery_generation_running(delivery))
+                }
+            })
+    }
+
+    fn delivery_generation_running(&self, delivery: &ReservedCloseDelivery) -> bool {
+        self.state
+            .sessions
+            .get(&delivery.key)
+            .is_some_and(|session| {
+                session.protocol_started && session.generation == delivery.session_generation
+            })
     }
 
     fn discard_cancelled_close_groups(&mut self) {
         let mut index = 0;
         while index < self.pending_close_groups.len() {
-            if self.pending_close_groups[index].reply_closed() {
+            // A delivering group is kept even when its caller went away: its
+            // didClose notifications are already on the wire, so the manager
+            // still has to release the documents when they are acknowledged.
+            if self.pending_close_groups[index].reply_closed()
+                && self.pending_close_groups[index].is_pending()
+            {
                 self.pending_close_groups.remove(index);
             } else {
                 index += 1;
@@ -2654,10 +2785,14 @@ impl LspManager {
             let _ = reply.send(Err(ManagerError::Overloaded));
             return;
         };
+        let group_id = self.next_close_group_id;
+        self.next_close_group_id = self.next_close_group_id.saturating_add(1);
         self.pending_close_groups.push_back(DeferredCloseGroup {
+            group_id,
             epoch,
             document_ids,
             required_session_closes,
+            phase: DeferredClosePhase::Pending,
             reply,
         });
         if self.pending_close_groups.len() == 1 {
@@ -2665,10 +2800,23 @@ impl LspManager {
         }
     }
 
+    /// Advance the front close group by one turn.
+    ///
+    /// Returns true whenever a close group still owns the front of the policy
+    /// lane, whether this turn staged it, retried it, or found it already
+    /// delivering. Only a false answer lets the deferred policy command behind
+    /// it run.
     fn retry_pending_close_group(&mut self) -> bool {
-        let Some(group) = self.pending_close_groups.pop_front() else {
+        let Some(front) = self.pending_close_groups.front() else {
             return false;
         };
+        if !front.is_pending() {
+            // The front group already handed its didClose notifications to a
+            // session. Nothing else may be staged, and the policy may not run,
+            // until every one of them is acknowledged.
+            return true;
+        }
+        let mut group = self.pending_close_groups.pop_front().expect("front exists");
         if !self.close_group_matches_epoch(&group) {
             group.fail(ManagerError::PolicyChanged);
             self.invalidate_policy_epoch(ManagerError::PolicyChanged);
@@ -2676,22 +2824,25 @@ impl LspManager {
             return true;
         }
         self.retrying_policy = true;
-        let result = self.close_documents(group.document_ids.clone());
+        let result = self.stage_close_group(&group);
         self.retrying_policy = false;
         match result {
             Err(ManagerError::Overloaded) => self.pending_close_groups.push_front(group),
-            Ok(()) => {
-                for (key, documents) in &group.required_session_closes {
-                    for document_id in documents {
-                        self.pending_group_close_deliveries
-                            .insert(document_id_text(*document_id), (group.epoch, key.clone()));
-                    }
-                }
+            Ok(outstanding) => {
                 self.consume_close_group_credits(&group);
-                let _ = group.reply.send(Ok(()));
-                self.retry_policy_requested = self.pending_group_close_deliveries.is_empty()
-                    && (!self.pending_close_groups.is_empty()
-                        || !self.pending_policy_commands.is_empty());
+                let settled = outstanding.is_empty();
+                group.phase = DeferredClosePhase::Delivering {
+                    outstanding,
+                    stopping: None,
+                };
+                self.pending_close_groups.push_front(group);
+                if settled {
+                    // Nothing needed a notification, so the group is already
+                    // proven complete.
+                    self.settle_front_close_group(Ok(()));
+                } else {
+                    self.retry_policy_requested = false;
+                }
             }
             Err(error) => {
                 group.fail(error);
@@ -2700,6 +2851,209 @@ impl LspManager {
             }
         }
         true
+    }
+
+    /// Hand a matching group's didClose notifications to their sessions.
+    ///
+    /// Ownership, document state and the group's reply are deliberately left
+    /// untouched: until the session acknowledges every notification the
+    /// manager cannot honestly claim the documents are closed, so they stay
+    /// open and owned exactly as they were.
+    fn stage_close_group(
+        &mut self,
+        group: &DeferredCloseGroup,
+    ) -> Result<HashMap<DocumentId, ReservedCloseDelivery>, ManagerError> {
+        let document_ids = group.document_ids.clone();
+        // A matching reserved group may contain more already-admitted didChange
+        // batches than one outbox can hold together with every didClose. Spend
+        // each WorkerReady turn moving only a safe prefix while preserving
+        // slots for the whole close group.
+        self.advance_reserved_close_group_batches(&document_ids)?;
+        self.ensure_close_documents_capacity(&document_ids)?;
+        let mut outstanding = HashMap::new();
+        for document_id in document_ids {
+            if !self.state.documents.contains_key(&document_id) {
+                continue;
+            }
+            self.flush_document(document_id)?;
+            let key = self
+                .state
+                .documents
+                .get(&document_id)
+                .and_then(|document| document.session_key.clone());
+            let Some(key) = key else {
+                continue;
+            };
+            let Some(session_generation) = self
+                .state
+                .sessions
+                .get(&key)
+                .filter(|session| session.protocol_started)
+                .map(|session| session.generation)
+            else {
+                continue;
+            };
+            let delivery = ReservedCloseDelivery {
+                group_id: group.group_id,
+                epoch: group.epoch,
+                key: key.clone(),
+                session_generation,
+                document_id,
+            };
+            let id_text = document_id_text(document_id);
+            // Reserved closes travel on the delivery lane so a policy
+            // transition can prove its closes landed without first outlasting
+            // an unrelated document's backlog. Either way one outbox slot is
+            // spent, so the credit accounting is identical.
+            let out_of_band = self
+                .state
+                .sessions
+                .get(&key)
+                .and_then(|session| session.worker.as_ref())
+                .is_some_and(|worker| worker.close_deliveries.capacity() > 0);
+            let operation = if out_of_band {
+                SessionOperation::ReservedCloseCredit
+            } else {
+                SessionOperation::DidClose {
+                    document_id: id_text.clone(),
+                    delivery: Some(delivery.clone()),
+                }
+            };
+            self.enqueue_session_operations(&key, [operation])?;
+            if out_of_band
+                && let Some(worker) = self
+                    .state
+                    .sessions
+                    .get(&key)
+                    .and_then(|session| session.worker.as_ref())
+                && let Err(error) = worker
+                    .close_deliveries
+                    .try_send((id_text, delivery.clone()))
+            {
+                // The lane was checked for room a moment ago on this same turn,
+                // so this only happens when the worker is already gone. The
+                // group is then failed by the staleness guard on the next turn.
+                log::warn!("LSP reserved close delivery lane rejected a close: {error}");
+            }
+            outstanding.insert(document_id, delivery);
+            self.cancel_document_requests(document_id, ManagerError::Cancelled);
+        }
+        Ok(outstanding)
+    }
+
+    /// Release the front group's documents and answer its caller exactly once.
+    fn settle_front_close_group(&mut self, result: Result<(), ManagerError>) {
+        let Some(group) = self.pending_close_groups.pop_front() else {
+            return;
+        };
+        for document_id in &group.document_ids {
+            let _ = self.detach_document(*document_id, true, false);
+            self.state.documents.remove(document_id);
+            self.state.ownership.close(*document_id);
+        }
+        let _ = group.reply.send(result);
+        self.retry_policy_requested =
+            !self.pending_close_groups.is_empty() || !self.pending_policy_commands.is_empty();
+        // The next group must be able to start on this same turn: a settled
+        // group is the only thing that frees the front of the policy lane, and
+        // no worker event is guaranteed to follow it.
+        self.retry_pending_policy_command();
+    }
+
+    /// Accept one acknowledged reserved close.
+    ///
+    /// Only the front group can be delivering, and only a token that matches
+    /// one of its outstanding entries in every field may discharge it. A stale
+    /// generation, a replayed token from an already-settled group, and an
+    /// ordinary close carrying no token at all are all inert here.
+    fn reserved_close_delivered(&mut self, delivery: ReservedCloseDelivery) {
+        let Some(group) = self.pending_close_groups.front_mut() else {
+            return;
+        };
+        if group.group_id != delivery.group_id {
+            return;
+        }
+        let DeferredClosePhase::Delivering {
+            outstanding,
+            stopping,
+        } = &mut group.phase
+        else {
+            return;
+        };
+        if stopping.is_some() {
+            // The group is already waiting for a controlled stop to prove the
+            // whole generation is gone. Late acknowledgements change nothing.
+            return;
+        }
+        if outstanding.get(&delivery.document_id) != Some(&delivery) {
+            return;
+        }
+        outstanding.remove(&delivery.document_id);
+        if outstanding.is_empty() {
+            self.settle_front_close_group(Ok(()));
+        }
+    }
+
+    /// Handle a reserved close the session could not deliver.
+    ///
+    /// Earlier members of the same group may already have been closed for real,
+    /// so the group can neither be abandoned nor completed on the spot. Stop
+    /// the exact generation that failed instead: once it is gone, every
+    /// document it held is closed by construction and the group can settle.
+    fn reserved_close_delivery_failed(&mut self, delivery: ReservedCloseDelivery, message: String) {
+        self.push_log(
+            &delivery.key,
+            "protocol",
+            format!("didClose failed ({} bytes redacted)", message.len()),
+        );
+        let Some(group) = self.pending_close_groups.front_mut() else {
+            return;
+        };
+        if group.group_id != delivery.group_id {
+            return;
+        }
+        let DeferredClosePhase::Delivering {
+            outstanding,
+            stopping,
+        } = &mut group.phase
+        else {
+            return;
+        };
+        if stopping.is_some() || outstanding.get(&delivery.document_id) != Some(&delivery) {
+            return;
+        }
+        outstanding.clear();
+        *stopping = Some((delivery.key.clone(), delivery.session_generation));
+        let running = self
+            .state
+            .sessions
+            .get(&delivery.key)
+            .is_some_and(|session| {
+                session.generation == delivery.session_generation && session.worker.is_some()
+            });
+        if running {
+            self.stop_session(&delivery.key);
+        } else {
+            // The generation is already gone, so its documents are closed.
+            self.settle_front_close_group(Ok(()));
+        }
+    }
+
+    /// Settle a group that was waiting for the generation it stopped.
+    fn settle_stopped_close_group(&mut self, key: &SessionKey, generation: u64) {
+        let stopped = self
+            .pending_close_groups
+            .front()
+            .is_some_and(|group| match &group.phase {
+                DeferredClosePhase::Delivering {
+                    stopping: Some((stopping_key, stopping_generation)),
+                    ..
+                } => stopping_key == key && *stopping_generation == generation,
+                _ => false,
+            });
+        if stopped {
+            self.settle_front_close_group(Ok(()));
+        }
     }
 
     fn reserved_close_credits(
@@ -3198,7 +3552,10 @@ impl LspManager {
         {
             self.enqueue_session_operations(
                 &key,
-                [SessionOperation::DidClose(document_id_text(document_id))],
+                [SessionOperation::DidClose {
+                    document_id: document_id_text(document_id),
+                    delivery: None,
+                }],
             )?;
         }
         self.cancel_document_requests(document_id, ManagerError::Cancelled);
@@ -3259,7 +3616,10 @@ impl LspManager {
             {
                 self.enqueue_session_operations(
                     &key,
-                    [SessionOperation::DidClose(document_id_text(document_id))],
+                    [SessionOperation::DidClose {
+                        document_id: document_id_text(document_id),
+                        delivery: None,
+                    }],
                 )?;
             }
         }
@@ -3288,6 +3648,8 @@ impl LspManager {
         session.worker = None;
         session.protocol_started = false;
         session.outbox.clear();
+        self.session_delivery_progress.remove(&key);
+        let session = self.state.sessions.get_mut(&key).expect("checked above");
         let generation = session.generation;
         self.active_generations.insert((key.clone(), generation));
         let start = SessionStart {
@@ -3422,7 +3784,7 @@ impl LspManager {
         let session = self
             .state
             .sessions
-            .get_mut(key)
+            .get(key)
             .ok_or(ManagerError::SessionUnavailable)?;
         if session
             .outbox
@@ -3433,9 +3795,31 @@ impl LspManager {
         {
             return Err(ManagerError::Overloaded);
         }
+        let progress = self
+            .session_delivery_progress
+            .entry(key.clone())
+            .or_default();
+        for operation in &operations {
+            progress.enqueued = progress.enqueued.saturating_add(1);
+            if matches!(operation, SessionOperation::ReservedCloseCredit) {
+                progress.credit_marks.push_back(progress.enqueued);
+            }
+        }
+        let session = self.state.sessions.get_mut(key).expect("checked above");
         session.outbox.extend(operations);
         self.pump_session(key);
         Ok(())
+    }
+
+    /// True while a session still owes the worker slots a policy reserved for
+    /// closes that have already been delivered. The group is finished, but the
+    /// backpressure the policy paid for has not been spent yet.
+    fn reserved_close_credits_outstanding(&self) -> bool {
+        self.session_delivery_progress
+            .iter()
+            .any(|(key, progress)| {
+                !progress.credit_marks.is_empty() && self.state.sessions.contains_key(key)
+            })
     }
 
     fn pump_session(&mut self, key: &SessionKey) {
@@ -3842,22 +4226,32 @@ impl LspManager {
                 }
             }
             ActorInput::ShutdownFinished { key, generation } => {
-                self.generation_finished(key, generation);
+                self.generation_finished(key.clone(), generation);
+                self.settle_stopped_close_group(&key, generation);
                 self.retry_pending_policy_command();
             }
-            ActorInput::WorkerReady {
-                key,
-                generation,
-                completed_close,
-            } => {
+            ActorInput::ReservedCloseDeliverySucceeded { delivery } => {
+                self.reserved_close_delivered(delivery)
+            }
+            ActorInput::ReservedCloseDeliveryFailed { delivery, message } => {
+                self.reserved_close_delivery_failed(delivery, message)
+            }
+            ActorInput::WorkerReady { key, generation } => {
                 let current = self
                     .state
                     .sessions
                     .get(&key)
                     .is_some_and(|session| session.generation == generation);
                 if current {
-                    if let Some(document_id) = completed_close {
-                        self.pending_group_close_deliveries.remove(&document_id);
+                    if let Some(progress) = self.session_delivery_progress.get_mut(&key) {
+                        progress.completed = progress.completed.saturating_add(1);
+                        while progress
+                            .credit_marks
+                            .front()
+                            .is_some_and(|mark| *mark <= progress.completed)
+                        {
+                            progress.credit_marks.pop_front();
+                        }
                     }
                     // Preserve the order of work already admitted to the
                     // session, then immediately spend newly freed outbox
@@ -4155,6 +4549,7 @@ impl LspManager {
             shutdown.pending.remove(&(key, generation));
             if shutdown.pending.is_empty() {
                 self.state.sessions.clear();
+                self.fail_settling_close_groups();
                 if let Some(shutdown) = self.shutdown_reply.take() {
                     for reply in shutdown.replies {
                         let _ = reply.send(Ok(()));
@@ -4162,6 +4557,12 @@ impl LspManager {
                 }
                 self.terminated = true;
             }
+        }
+    }
+
+    fn fail_settling_close_groups(&mut self) {
+        for group in std::mem::take(&mut self.settling_close_groups) {
+            group.fail(ManagerError::ActorStopped);
         }
     }
 
@@ -4455,6 +4856,7 @@ impl LspManager {
         let Some(mut session) = self.state.sessions.remove(key) else {
             return;
         };
+        self.session_delivery_progress.remove(key);
         if let Some(mut worker) = session.worker.take()
             && let Some(shutdown) = worker.shutdown.take()
         {
@@ -4590,9 +4992,15 @@ impl LspManager {
         }
         self.shutting_down = true;
         for group in self.pending_close_groups.drain(..) {
-            group.fail(ManagerError::ActorStopped);
+            // A pending group never reached a session, so it can be failed at
+            // once. A delivering group has notifications on the wire: its
+            // caller is answered once, after the generations have stopped.
+            if group.is_pending() {
+                group.fail(ManagerError::ActorStopped);
+            } else {
+                self.settling_close_groups.push(group);
+            }
         }
-        self.pending_group_close_deliveries.clear();
         for command in self.pending_policy_commands.drain(..) {
             command.fail_deferred(ManagerError::ActorStopped);
         }
@@ -4619,6 +5027,7 @@ impl LspManager {
         }
         if pending.is_empty() {
             self.state.sessions.clear();
+            self.fail_settling_close_groups();
             let _ = reply.send(Ok(()));
             self.terminated = true;
             return;
@@ -5175,6 +5584,8 @@ fn spawn_session_worker(
     input: mpsc::Sender<ActorInput>,
 ) -> SessionWorkerHandle {
     let (operations, mut receiver) = mpsc::channel(SESSION_OPERATION_CAPACITY);
+    let (close_deliveries, mut close_delivery_rx) =
+        mpsc::channel::<(String, ReservedCloseDelivery)>(SESSION_OPERATION_CAPACITY);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let stopping = CancellationToken::new();
     let shutdown_client = client.clone();
@@ -5192,6 +5603,40 @@ fn spawn_session_worker(
             })
             .await;
     });
+    let delivery_client = client.clone();
+    let delivery_input = input.clone();
+    let delivery_stopping = stopping.clone();
+    tokio::spawn(async move {
+        // One close at a time, so a group observes its members settle in the
+        // order it staged them and stops at the first failure.
+        loop {
+            let (document_id, delivery) = tokio::select! {
+                biased;
+                _ = delivery_stopping.cancelled() => break,
+                next = close_delivery_rx.recv() => {
+                    let Some(next) = next else { break };
+                    next
+                }
+            };
+            let result = tokio::select! {
+                _ = delivery_stopping.cancelled() => break,
+                result = delivery_client.did_close(&document_id) => result,
+            };
+            match result {
+                Ok(()) => {
+                    let _ = delivery_input
+                        .send(ActorInput::ReservedCloseDeliverySucceeded { delivery })
+                        .await;
+                }
+                Err(message) => {
+                    let _ = delivery_input
+                        .send(ActorInput::ReservedCloseDeliveryFailed { delivery, message })
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
     tokio::spawn(async move {
         loop {
             let operation = tokio::select! {
@@ -5201,10 +5646,6 @@ fn spawn_session_worker(
                     let Some(operation) = operation else { break };
                     operation
                 }
-            };
-            let completed_close = match &operation {
-                SessionOperation::DidClose(document_id) => Some(document_id.clone()),
-                _ => None,
             };
             match operation {
                 SessionOperation::DidOpen(document) => {
@@ -5234,13 +5675,34 @@ fn spawn_session_worker(
                         send_operation_error(&input, &key, generation, "didSave", message).await;
                     }
                 }
-                SessionOperation::DidClose(document_id) => {
+                SessionOperation::ReservedCloseCredit => {}
+                SessionOperation::DidClose {
+                    document_id,
+                    delivery,
+                } => {
                     let result = tokio::select! {
                         _ = stopping.cancelled() => break,
                         result = client.did_close(&document_id) => result,
                     };
-                    if let Err(message) = result {
-                        send_operation_error(&input, &key, generation, "didClose", message).await;
+                    // A close that a deferred group staged reports through its
+                    // own delivery token so the actor can tell it apart from
+                    // every other close of the same document.
+                    match (result, delivery) {
+                        (Ok(()), None) => {}
+                        (Ok(()), Some(delivery)) => {
+                            let _ = input
+                                .send(ActorInput::ReservedCloseDeliverySucceeded { delivery })
+                                .await;
+                        }
+                        (Err(message), None) => {
+                            send_operation_error(&input, &key, generation, "didClose", message)
+                                .await;
+                        }
+                        (Err(message), Some(delivery)) => {
+                            let _ = input
+                                .send(ActorInput::ReservedCloseDeliveryFailed { delivery, message })
+                                .await;
+                        }
                     }
                 }
                 SessionOperation::Request {
@@ -5322,13 +5784,13 @@ fn spawn_session_worker(
                 .send(ActorInput::WorkerReady {
                     key: key.clone(),
                     generation,
-                    completed_close,
                 })
                 .await;
         }
     });
     SessionWorkerHandle {
         operations,
+        close_deliveries,
         shutdown: Some(shutdown_tx),
     }
 }
@@ -5413,6 +5875,9 @@ mod tests {
         step_changes: AtomicBool,
         change_steps: OnceLock<Semaphore>,
         completed_changes: AtomicUsize,
+        step_closes: AtomicBool,
+        close_steps: OnceLock<Semaphore>,
+        fail_next_close: AtomicBool,
         block_starts: AtomicBool,
         starts_released: Notify,
         block_first_pull: AtomicBool,
@@ -5506,6 +5971,28 @@ mod tests {
             self.change_steps
                 .get_or_init(|| Semaphore::new(0))
                 .add_permits(1);
+        }
+
+        fn release_all_changes(&self) {
+            self.step_changes.store(false, Ordering::SeqCst);
+            self.change_steps
+                .get_or_init(|| Semaphore::new(0))
+                .add_permits(super::SESSION_OUTBOX_CAPACITY * 2);
+            self.release_changes();
+        }
+
+        fn hold_closes_one_at_a_time(&self) {
+            self.step_closes.store(true, Ordering::SeqCst);
+        }
+
+        fn release_one_close(&self) {
+            self.close_steps
+                .get_or_init(|| Semaphore::new(0))
+                .add_permits(1);
+        }
+
+        fn fail_next_close(&self) {
+            self.fail_next_close.store(true, Ordering::SeqCst);
         }
 
         fn hold_starts(&self) {
@@ -5633,6 +6120,18 @@ mod tests {
         async fn did_close(&self, document_id: &str) -> Result<(), String> {
             self.factory
                 .record(&self.key, Observation::Close(document_id.into()));
+            if self.factory.step_closes.load(Ordering::SeqCst) {
+                self.factory
+                    .close_steps
+                    .get_or_init(|| Semaphore::new(0))
+                    .acquire()
+                    .await
+                    .expect("close-step semaphore remains open")
+                    .forget();
+            }
+            if self.factory.fail_next_close.swap(false, Ordering::SeqCst) {
+                return Err("didClose failed with source text: secret".into());
+            }
             Ok(())
         }
 
@@ -6053,6 +6552,30 @@ mod tests {
                 return;
             }
         }
+    }
+
+    async fn wait_for_observation_count(
+        factory: &FakeFactory,
+        session_key: &SessionKey,
+        expected: usize,
+        matches_observation: impl Fn(&Observation) -> bool,
+    ) {
+        for _ in 0..300 {
+            if factory
+                .observations(session_key)
+                .iter()
+                .filter(|observation| matches_observation(observation))
+                .count()
+                >= expected
+            {
+                return;
+            }
+            spin().await;
+        }
+        panic!(
+            "expected {expected} matching observations, got {:?}",
+            factory.observations(session_key)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -9096,7 +9619,6 @@ mod tests {
             .try_send(super::ActorInput::WorkerReady {
                 key: session_key,
                 generation: 1,
-                completed_close: None,
             })
             .unwrap();
         tokio::spawn(actor.run());
@@ -9119,6 +9641,141 @@ mod tests {
             normal_turns_before_policy <= 1,
             "front policy waited behind {normal_turns_before_policy} normal actor turns even though WorkerReady was already queued"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_and_duplicate_exact_close_success_cannot_advance_another_group() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let first_path = project_root.join("first.ts");
+        let second_path = project_root.join("second.ts");
+        std::fs::write(&first_path, "first").unwrap();
+        std::fs::write(&second_path, "second").unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (_manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let open = |actor: &mut LspManager, path: &Path, pane: &str| {
+            let ReserveResult::Reserved { reservation_id, .. } = actor
+                .reserve_document(path.to_path_buf(), "main".into())
+                .unwrap()
+            else {
+                panic!("expected reservation")
+            };
+            let response = actor
+                .open_document(
+                    reservation_id,
+                    pane.into(),
+                    pane.into(),
+                    "typescript".into(),
+                )
+                .unwrap();
+            serde_json::from_value::<DocumentId>(serde_json::Value::String(response.document_id))
+                .unwrap()
+        };
+        let first = open(&mut actor, &first_path, "first");
+        let second = open(&mut actor, &second_path, "second");
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        for document_id in [first, second] {
+            actor
+                .state
+                .documents
+                .get_mut(&document_id)
+                .unwrap()
+                .session_key = Some(session_key.clone());
+        }
+        actor.state.sessions.insert(
+            session_key.clone(),
+            super::ManagedSession {
+                session_id: "exact-close-generation".into(),
+                language: LanguageId::TypeScript,
+                generation: 7,
+                worker: None,
+                startup_cancel: None,
+                outbox: std::collections::VecDeque::new(),
+                restart_after_stop: false,
+                documents: [first, second].into_iter().collect(),
+                idle_generation: 0,
+                crash_timestamps: std::collections::VecDeque::new(),
+                automatic_restart_blocked: false,
+                exit_observed: false,
+                logs: std::collections::VecDeque::new(),
+                next_log_sequence: 1,
+                capabilities: super::capabilities(false),
+                protocol_started: true,
+            },
+        );
+        let (policy_reply, _policy_result) = tokio::sync::oneshot::channel();
+        actor
+            .pending_policy_commands
+            .push_back(super::ManagerCommand::SetEnablement {
+                enablement: Enablement::none(),
+                reply: policy_reply,
+            });
+        actor.policy_reservation_epoch = Some(41);
+        actor.policy_capacity_reservations.insert(
+            session_key,
+            super::PolicyCapacityReservation {
+                operations: 2,
+                attachments: 0,
+                close_documents: [first, second].into_iter().collect(),
+            },
+        );
+        let (first_reply, mut first_result) = tokio::sync::oneshot::channel();
+        actor.admit_close_group(vec![first], first_reply);
+        let (second_reply, mut second_result) = tokio::sync::oneshot::channel();
+        actor.admit_close_group(vec![second], second_reply);
+        assert!(actor.retry_pending_close_group());
+        let first_delivery = match &actor.pending_close_groups.front().unwrap().phase {
+            super::DeferredClosePhase::Delivering { outstanding, .. } => {
+                outstanding.values().next().unwrap().clone()
+            }
+            super::DeferredClosePhase::Pending => panic!("front group was not staged"),
+        };
+
+        let mut stale_delivery = first_delivery.clone();
+        stale_delivery.session_generation -= 1;
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded {
+            delivery: stale_delivery,
+        });
+        assert!(matches!(
+            first_result.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(actor.state.documents.contains_key(&first));
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded {
+            delivery: first_delivery.clone(),
+        });
+        assert_eq!(first_result.try_recv().unwrap(), Ok(()));
+        assert!(actor.state.documents.contains_key(&second));
+        let second_delivery = match &actor.pending_close_groups.front().unwrap().phase {
+            super::DeferredClosePhase::Delivering { outstanding, .. } => {
+                outstanding.values().next().unwrap().clone()
+            }
+            super::DeferredClosePhase::Pending => panic!("second group was not staged"),
+        };
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded {
+            delivery: first_delivery,
+        });
+        assert!(matches!(
+            second_result.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(actor.state.documents.contains_key(&second));
+
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded {
+            delivery: second_delivery,
+        });
+        assert_eq!(second_result.try_recv().unwrap(), Ok(()));
+        assert!(!actor.state.documents.contains_key(&second));
     }
 
     #[tokio::test(start_paused = true)]
@@ -9230,6 +9887,205 @@ mod tests {
                 .unwrap(),
             ReserveResult::Reserved { .. }
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_resync_close_cannot_complete_a_later_reserved_close_delivery() {
+        let harness = ManagerHarness::new();
+        let pressure_path = harness.file("reserved-identity-pressure.ts", "pressure");
+        let closing_path = harness.file("reserved-identity-close.ts", "close");
+        let pressure = harness.open(&pressure_path, "main", "pressure").await;
+        let closing = harness.open(&closing_path, "main", "closing").await;
+        let root = harness.root.clone();
+        let session_key = key("typescript", &root);
+        harness
+            .choose_and_trust(pressure, &root, "typescript")
+            .await;
+        harness.factory.hold_closes_one_at_a_time();
+
+        harness
+            .manager
+            .resync_document(closing, 2, "let resynced = true;".into())
+            .await
+            .unwrap();
+        wait_for_observation_count(&harness.factory, &session_key, 1, |observation| {
+            matches!(observation, Observation::Close(document) if document == &super::document_id_text(closing))
+        })
+        .await;
+
+        saturate_session_outbox(&harness, pressure).await;
+        let policy = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.set_enablement(Enablement::none()).await }
+        });
+        spin().await;
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_document(closing).await }
+        });
+        spin().await;
+        assert!(!grouped.is_finished());
+
+        // This releases only the older resync didClose. Its document string is
+        // identical to the reserved close, but it has no group delivery ID.
+        harness.factory.release_one_close();
+        harness.factory.release_all_changes();
+        wait_for_observation_count(&harness.factory, &session_key, 2, |observation| {
+            matches!(observation, Observation::Close(document) if document == &super::document_id_text(closing))
+        })
+        .await;
+        spin().await;
+        assert!(
+            !grouped.is_finished(),
+            "the ordinary resync close discharged the reserved group"
+        );
+        assert_document_owner(&harness, &closing_path, closing).await;
+
+        harness.factory.release_one_close();
+        wait_until_finished(&grouped).await;
+        grouped.await.unwrap().unwrap();
+        assert!(matches!(
+            harness
+                .manager
+                .reserve_document(closing_path, "reopen".into())
+                .await
+                .unwrap(),
+            ReserveResult::Reserved { .. }
+        ));
+
+        let _ = policy.await.unwrap();
+        harness.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reserved_close_failure_after_prior_success_waits_for_controlled_session_stop() {
+        let ReservedCloseFixture {
+            harness,
+            paths,
+            documents: [_, first, second, _],
+            root,
+            policy,
+        } = reserved_close_fixture("group-delivery-failure").await;
+        let session_key = key("typescript", &root);
+        harness.factory.hold_closes_one_at_a_time();
+        harness.factory.hold_shutdowns();
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_documents(vec![first, second]).await }
+        });
+        harness.factory.release_all_changes();
+
+        wait_for_observation_count(&harness.factory, &session_key, 1, |observation| {
+            matches!(observation, Observation::Close(_))
+        })
+        .await;
+        assert!(!grouped.is_finished());
+        assert_document_owner(&harness, &paths[1], first).await;
+        assert_document_owner(&harness, &paths[2], second).await;
+
+        harness.factory.release_one_close();
+        wait_for_observation_count(&harness.factory, &session_key, 2, |observation| {
+            matches!(observation, Observation::Close(_))
+        })
+        .await;
+        spin().await;
+        assert!(
+            !grouped.is_finished(),
+            "one successful member cannot partially finalize the group"
+        );
+        assert_document_owner(&harness, &paths[1], first).await;
+        assert_document_owner(&harness, &paths[2], second).await;
+
+        harness.factory.fail_next_close();
+        harness.factory.release_one_close();
+        wait_for_observation_count(&harness.factory, &session_key, 1, |observation| {
+            matches!(observation, Observation::Shutdown)
+        })
+        .await;
+        spin().await;
+        assert!(
+            !grouped.is_finished(),
+            "failed didClose must wait for truthful generation shutdown"
+        );
+        assert_document_owner(&harness, &paths[1], first).await;
+        assert_document_owner(&harness, &paths[2], second).await;
+
+        harness.factory.release_shutdowns();
+        wait_until_finished(&grouped).await;
+        grouped.await.unwrap().unwrap();
+        policy.await.unwrap().unwrap();
+        for path in [paths[1].clone(), paths[2].clone()] {
+            assert!(matches!(
+                harness
+                    .manager
+                    .reserve_document(path, "reopen".into())
+                    .await
+                    .unwrap(),
+                ReserveResult::Reserved { .. }
+            ));
+        }
+        let observations = harness.factory.observations(&session_key);
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| matches!(observation, Observation::Close(_)))
+                .count(),
+            2,
+            "controlled recovery must not resend an already-attempted close"
+        );
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| matches!(observation, Observation::Shutdown))
+                .count(),
+            1,
+            "the affected generation must be stopped exactly once"
+        );
+        assert_eq!(harness.factory.launch_count("typescript", &root), 1);
+        harness.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn priority_shutdown_waits_to_settle_an_inflight_reserved_close_group_once() {
+        let ReservedCloseFixture {
+            harness,
+            paths,
+            documents: [_, first, second, _],
+            root,
+            policy,
+        } = reserved_close_fixture("group-delivery-priority-shutdown").await;
+        let session_key = key("typescript", &root);
+        harness.factory.hold_closes_one_at_a_time();
+        harness.factory.hold_shutdowns();
+        let grouped = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.close_documents(vec![first, second]).await }
+        });
+        harness.factory.release_all_changes();
+        wait_for_observation_count(&harness.factory, &session_key, 1, |observation| {
+            matches!(observation, Observation::Close(_))
+        })
+        .await;
+        assert!(!grouped.is_finished());
+        assert_document_owner(&harness, &paths[1], first).await;
+        assert_document_owner(&harness, &paths[2], second).await;
+
+        let shutdown = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move { manager.shutdown().await }
+        });
+        spin().await;
+        assert!(!shutdown.is_finished());
+        assert!(
+            !grouped.is_finished(),
+            "priority shutdown must not report a staged group before generation stop"
+        );
+
+        harness.factory.release_shutdowns();
+        wait_until_finished(&shutdown).await;
+        shutdown.await.unwrap().unwrap();
+        assert_eq!(grouped.await.unwrap(), Err(ManagerError::ActorStopped));
+        assert_eq!(policy.await.unwrap(), Err(ManagerError::ActorStopped));
     }
 
     #[tokio::test(start_paused = true)]
