@@ -102,6 +102,79 @@ pub(crate) fn classify_link(
     }
 }
 
+/// Should a failed `symlink()` at the link path be retried with elevated
+/// privileges?
+///
+/// The naive answer is "only `PermissionDenied`", and that is wrong: the two
+/// most common real-world failures against a root-owned `/usr/local/bin`
+/// surface as a *different* errno.
+///
+/// - `PermissionDenied` (EACCES): the directory isn't writable by this user.
+/// - `AlreadyExists` (EEXIST): a stale root-owned TermLab symlink is sitting
+///   there. `install()` classified it as safe to replace and called
+///   `remove_file`, which failed EACCES and was deliberately discarded (it's
+///   best-effort), so `symlink()` then failed EEXIST. Escalated `ln -sf`
+///   replaces it in one step.
+/// - `NotFound` (ENOENT): `/usr/local/bin` doesn't exist at all — common on
+///   a clean macOS install that has never had Homebrew. The escalated
+///   command creates it first (see [`install_escalation_command`]).
+///
+/// Everything else is a genuine error the user should see, not something an
+/// admin password fixes.
+#[cfg(unix)]
+pub(crate) fn should_escalate(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::AlreadyExists
+            | std::io::ErrorKind::NotFound
+    )
+}
+
+/// The same question for the uninstall path's `remove_file`, where the
+/// answer really is "only `PermissionDenied`".
+///
+/// `remove_file` cannot fail `AlreadyExists`, and its `NotFound` is
+/// uninstall's *success* condition, not a failure: it means the link is
+/// already gone (something removed it in the window between `classify_link`
+/// and here). Escalating there would pop an admin prompt to delete a file
+/// that does not exist. `unlink` handles it as success instead.
+#[cfg(unix)]
+pub(crate) fn should_escalate_unlink(kind: std::io::ErrorKind) -> bool {
+    matches!(kind, std::io::ErrorKind::PermissionDenied)
+}
+
+/// Single-quote `path` for use as one argument in a shell command line,
+/// escaping any embedded single quotes with the standard
+/// close-quote/escaped-quote/reopen-quote trick.
+#[cfg(unix)]
+pub(crate) fn shell_quote(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    format!("'{}'", raw.replace('\'', "'\\''"))
+}
+
+/// The privileged shell command that repairs the install, given why the
+/// unprivileged `symlink()` failed.
+///
+/// `ln -sf` covers both `PermissionDenied` and `AlreadyExists`: `-f` removes
+/// an existing entry at the destination, and running as root makes the
+/// directory writable. `NotFound` additionally needs the parent directory
+/// created, since `ln` alone would fail ENOENT again even as root.
+#[cfg(unix)]
+pub(crate) fn install_escalation_command(
+    kind: std::io::ErrorKind,
+    exe: &Path,
+    link_path: &Path,
+) -> String {
+    let link = format!("ln -sf {} {}", shell_quote(exe), shell_quote(link_path));
+    match (kind, link_path.parent()) {
+        (std::io::ErrorKind::NotFound, Some(parent)) => {
+            format!("mkdir -p {} && {link}", shell_quote(parent))
+        }
+        _ => link,
+    }
+}
+
 /// Escape `action` (a fully-formed shell command line, already
 /// single-quoted per-argument by the caller) for use as the string literal
 /// inside an AppleScript `do shell script "..." with administrator
@@ -135,14 +208,6 @@ mod unix_impl {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => LinkProbe::Missing,
             Err(_) => LinkProbe::Other,
         }
-    }
-
-    /// Single-quote `path` for use as one argument in a shell command line,
-    /// escaping any embedded single quotes with the standard
-    /// close-quote/escaped-quote/reopen-quote trick.
-    fn shell_quote(path: &Path) -> String {
-        let raw = path.to_string_lossy();
-        format!("'{}'", raw.replace('\'', "'\\''"))
     }
 
     fn current_exe() -> Result<PathBuf, String> {
@@ -208,8 +273,8 @@ mod unix_impl {
     fn link(exe: &Path, link_path: &Path) -> Result<String, String> {
         match std::os::unix::fs::symlink(exe, link_path) {
             Ok(()) => Ok(format!("Installed 'termlab' to {}", link_path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                let action = format!("ln -sf {} {}", shell_quote(exe), shell_quote(link_path));
+            Err(e) if should_escalate(e.kind()) => {
+                let action = install_escalation_command(e.kind(), exe, link_path);
                 escalate("Installing 'termlab'", action)?;
                 Ok(format!(
                     "Installed 'termlab' to {} (with administrator privileges)",
@@ -241,7 +306,13 @@ mod unix_impl {
     fn unlink(link_path: &Path) -> Result<String, String> {
         match std::fs::remove_file(link_path) {
             Ok(()) => Ok(format!("Removed 'termlab' from {}", link_path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            // Already gone — something removed it between classify_link and
+            // here. That is the outcome uninstall wanted, so report success
+            // rather than escalating (see `should_escalate_unlink`).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(format!("'termlab' was not installed at {}", link_path.display()))
+            }
+            Err(e) if should_escalate_unlink(e.kind()) => {
                 let action = format!("rm -f {}", shell_quote(link_path));
                 escalate("Uninstalling 'termlab'", action)?;
                 Ok(format!(
@@ -364,6 +435,75 @@ mod tests {
             classify_link(&LinkProbe::Symlink(similar), exe, link_path),
             LinkState::Foreign(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escalate_table_for_symlink_creation() {
+        use std::io::ErrorKind::*;
+        // The three failures that actually happen against a root-owned
+        // /usr/local/bin, and which `ln -sf` (as root) fixes:
+        //   PermissionDenied — the directory isn't writable by this user
+        //   AlreadyExists    — a root-owned stale link is there; our
+        //                      best-effort remove_file failed EACCES and was
+        //                      discarded, so symlink() then failed EEXIST
+        //   NotFound         — /usr/local/bin doesn't exist at all
+        for kind in [PermissionDenied, AlreadyExists, NotFound] {
+            assert!(
+                should_escalate(kind),
+                "{kind:?} must escalate — it's a permission problem wearing a \
+                 different errno"
+            );
+        }
+        // Anything else is a real error to report, not something a prompt
+        // for the admin password would fix.
+        for kind in [InvalidInput, Interrupted, Unsupported, InvalidData] {
+            assert!(!should_escalate(kind), "{kind:?} must not escalate");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escalate_table_for_unlink_is_narrower() {
+        use std::io::ErrorKind::*;
+        assert!(should_escalate_unlink(PermissionDenied));
+        // `rm` has nothing to do if the file is already gone: NotFound is
+        // uninstall's *success* condition (something removed the link
+        // between classify_link and remove_file), so prompting for an admin
+        // password to remove a file that no longer exists would be absurd.
+        assert!(!should_escalate_unlink(NotFound));
+        assert!(!should_escalate_unlink(AlreadyExists));
+        assert!(!should_escalate_unlink(InvalidInput));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_escalation_command_creates_the_directory_only_when_missing() {
+        use std::io::ErrorKind::*;
+        let exe = Path::new("/Applications/TermLab.app/Contents/MacOS/termlab");
+        let link = Path::new("/usr/local/bin/termlab");
+
+        let denied = install_escalation_command(PermissionDenied, exe, link);
+        assert_eq!(
+            denied,
+            "ln -sf '/Applications/TermLab.app/Contents/MacOS/termlab' '/usr/local/bin/termlab'"
+        );
+        // `-f` is what makes the AlreadyExists case work at all.
+        assert_eq!(install_escalation_command(AlreadyExists, exe, link), denied);
+
+        // NotFound means the parent directory itself is absent, so `ln`
+        // alone would fail again even as root.
+        assert_eq!(
+            install_escalation_command(NotFound, exe, link),
+            "mkdir -p '/usr/local/bin' && ln -sf \
+             '/Applications/TermLab.app/Contents/MacOS/termlab' '/usr/local/bin/termlab'"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote(Path::new("/Apps/it's here/termlab")), "'/Apps/it'\\''s here/termlab'");
     }
 
     #[cfg(target_os = "macos")]

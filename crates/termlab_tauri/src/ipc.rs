@@ -64,6 +64,23 @@ pub fn start(app_handle: tauri::AppHandle) -> Option<IpcGuard> {
         }
     };
 
+    // Owner-only. The socket accepts `open_path`, which makes any peer that
+    // can connect able to display any file this uid can read in a window on
+    // this user's screen — so the socket must not be reachable by other
+    // local users. `bind` honours the process umask, which is not something
+    // to rely on for this, so the mode is set explicitly right after.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        {
+            log::warn!(
+                "Failed to restrict IPC socket permissions at {}: {e}",
+                socket_path.display()
+            );
+        }
+    }
+
     if let Err(e) = listener.set_nonblocking(true) {
         log::error!("Failed to set non-blocking on IPC socket: {e}");
         return None;

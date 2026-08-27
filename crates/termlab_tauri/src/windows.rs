@@ -97,17 +97,31 @@ fn create_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri
     Ok(())
 }
 
-pub(crate) fn create_new_window<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> tauri::Result<String> {
-    let label = loop {
+/// Reserve the next free `window-N` label without building anything.
+///
+/// Split out from [`create_new_window`] so a caller that has to hand the new
+/// window something *before* it can boot — see `open_path::open_in_new_window`
+/// and its per-label pending-open queue — can learn the label first and seed
+/// against it, rather than racing the window's own frontend.
+pub(crate) fn allocate_window_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    loop {
         let id = NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed);
         let candidate = format!("window-{id}");
         if app.get_webview_window(&candidate).is_none() {
-            break candidate;
+            return candidate;
         }
-    };
+    }
+}
 
+/// Build a window under an already-allocated `label`.
+///
+/// Must run on the main thread (see [`open_new_window`]'s note): the
+/// builder's `build()` posts to the main thread and waits.
+pub(crate) fn create_window_with_label<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+) -> tauri::Result<()> {
+    let label = label.to_string();
     let user_cfg = config::load_user_config().unwrap_or_default();
     // Same rule as the first window: the configured columns x lines decide the
     // size, not the previous session's pixels and not the parent window's.
@@ -133,7 +147,7 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(
     let theme = appearance_to_theme(&user_cfg.colors.appearance_mode);
 
     let new_win =
-        WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::App("index.html".into()))
+        WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
             .title("TermLab")
             .inner_size(w, h)
             .resizable(true)
@@ -149,5 +163,15 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(
     if zoom > 0.0 && (zoom - 1.0).abs() > f32::EPSILON {
         let _ = new_win.set_zoom(zoom as f64);
     }
+    Ok(())
+}
+
+/// Allocate a label and build the window under it — the composition every
+/// caller that has nothing to hand the new window still wants.
+pub(crate) fn create_new_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<String> {
+    let label = allocate_window_label(app);
+    create_window_with_label(app, &label)?;
     Ok(label)
 }

@@ -277,6 +277,14 @@ pub(crate) struct SavedLayout {
 #[tauri::command]
 pub(crate) fn app_ready(window: tauri::WebviewWindow) {
     let _ = window.show();
+    // Windows are built hidden and revealed here, which on macOS is not
+    // enough to bring them forward: a window created by a *background* app
+    // (the CLI/IPC "open this path" case — the user is in their terminal,
+    // not in TermLab) shows up behind whatever they were looking at. Each
+    // window is only ever ready once, so this focuses a genuinely new window
+    // and is a no-op-ish nudge for the boot window, which is being presented
+    // to the user at this exact moment anyway.
+    let _ = window.set_focus();
 }
 
 #[tauri::command]

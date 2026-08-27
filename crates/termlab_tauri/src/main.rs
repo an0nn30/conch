@@ -19,6 +19,13 @@ fn main() {
         termlab_tauri::cli::CliAction::RunApp { pending_paths } => pending_paths,
     };
 
+    // We are past CLI dispatch and committed to booting the app, and nothing
+    // else is running yet. Mark the environment so that if Tauri later
+    // re-execs us for a restart, that re-exec (which inherits the original
+    // argv, paths and all) comes back as a plain app instead of re-running
+    // the CLI open flow.
+    termlab_tauri::mark_app_running();
+
     // Platform init fixes locale, PATH, and SSH_AUTH_SOCK when launched from
     // Finder/desktop (not a terminal). It must run before any child process is
     // spawned, and it spawns environment probes of its own.

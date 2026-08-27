@@ -304,6 +304,9 @@
       const rebuildTreeDOM = (tab) => bridgeRuntime && bridgeRuntime.rebuildTreeDOM ? bridgeRuntime.rebuildTreeDOM(tab) : undefined;
 
       let debouncedSaveLayout = () => {};
+      // Set by the event-wiring runtime when this window has a CLI/IPC
+      // pending-open queue to drain. Run below, after the first tab exists.
+      let drainPendingOpens = null;
 
       const isTextInputTarget = (el) => bridgeRuntime && bridgeRuntime.isTextInputTarget ? bridgeRuntime.isTextInputTarget(el) : inputRuntime.isTextInputTarget(el);
       const writeTextToCurrentPane = (text) => bridgeRuntime && bridgeRuntime.writeTextToCurrentPane ? bridgeRuntime.writeTextToCurrentPane(text) : false;
@@ -381,6 +384,9 @@
           if (typeof eventWiringResult.showUpdateAvailableToast === 'function') {
             showUpdateAvailableToast = eventWiringResult.showUpdateAvailableToast;
           }
+          if (typeof eventWiringResult.drainPendingOpens === 'function') {
+            drainPendingOpens = eventWiringResult.drainPendingOpens;
+          }
         }
       }
 
@@ -440,6 +446,22 @@
         showStatus('Failed to initialize first tab: ' + String(e));
       });
       await firstTabPromise;
+
+      // Now — and only now — drain any paths Rust queued for this window
+      // (`termlab notes.md`, or a second-instance IPC arrival). It has to
+      // come after the first tab: createEditorTab activates the tab it
+      // makes, and so does createTab, so whichever finishes last is the one
+      // the user sees. Draining during event wiring raced createTab and
+      // dropped the requested file behind an empty terminal.
+      //
+      // Awaited but never fatal: a slow or failing drain must not hold up
+      // the window's reveal below, and its rejection is swallowed.
+      if (typeof drainPendingOpens === 'function') {
+        try {
+          await drainPendingOpens();
+        } catch (_) {}
+      }
+
       // Show the window (secondary windows are created hidden). This runs as
       // early as possible: the window already opened at the exact size for the
       // configured columns x lines, computed in Rust from the cell metrics

@@ -255,6 +255,29 @@ mod window_px_tests {
     }
 }
 
+/// Mark this process as "the app is actually booting" for any *later*
+/// re-exec of it. Tauri's restart-required flow (see `close_guard.rs`)
+/// re-execs with the original argv, which on this branch may still carry the
+/// paths the user passed on the command line — a restart would then re-open
+/// phantom files, or try to forward them into the instance that is in the
+/// middle of exiting. The re-exec inherits this environment, and
+/// `cli::run_cli_if_requested` checks the marker before anything else and
+/// comes back as a plain app.
+///
+/// Called from `main` immediately after CLI dispatch has already decided to
+/// boot, and deliberately BEFORE any of the app's background threads exist:
+/// `set_var` is only unsound when it races another thread reading the
+/// environment, and at this point in startup there is nothing else running.
+pub fn mark_app_running() {
+    // SAFETY: single-threaded at this point in startup — this runs on the
+    // main thread before platform probes, watchers, the IPC listener, or
+    // Tauri's own thread pool are spawned, so no concurrent getenv can race
+    // it. See the doc comment above for why the marker has to exist at all.
+    unsafe {
+        std::env::set_var(cli::APP_RUNNING_ENV, "1");
+    }
+}
+
 pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()> {
     // Use the user's home directory as a stable "workspace" label rather than
     // the process's actual cwd (current_dir() titled the window after the
@@ -456,7 +479,12 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             // Start IPC socket listener.
             let _ipc_guard = ipc::start(app.handle().clone());
             // Keep the guard alive for the app's lifetime by leaking it.
-            // The socket file is cleaned up on process exit.
+            // Leaking means its Drop never runs, so the socket file is NOT
+            // removed on exit — it is left behind and unlinked by the next
+            // boot's `remove_file` in `ipc::start` before rebinding. A stale
+            // socket file is inert (nothing is listening, so `connect`
+            // fails), which is exactly what the CLI's not-connected branch
+            // already handles.
             if let Some(guard) = _ipc_guard {
                 std::mem::forget(guard);
             }

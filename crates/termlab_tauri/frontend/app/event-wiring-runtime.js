@@ -1,4 +1,34 @@
 (function initTermLabEventWiringRuntime(global) {
+  // Wire the CLI/second-instance "open this path" drain for THIS window (see
+  // src/open_path.rs's per-window pending-open queue and the
+  // `take_pending_open_paths` command).
+  //
+  // Extracted from init() and exported so this seam is testable on its own:
+  // it is a guard clause over two globals composed by completely different
+  // modules, and a rename on either side would silently turn `termlab
+  // notes.md` into a no-op with every routing test still passing.
+  //
+  // Returns null — meaning "nothing to drain here" — when either global is
+  // absent. That is the normal state for a panel-host window: main-runtime.js
+  // branches to panelHostRuntime.boot() before ever constructing this
+  // runtime, so a popped-out tool window (no editor, no tabs) never attempts
+  // to drain a queue it was never given anything on.
+  //
+  // `g` is passed in rather than closed over so the globals can be swapped
+  // per test case.
+  function wirePendingOpenDrain(g, deps) {
+    const routing = g.termlabOpenPathRouting;
+    const editor = g.termlabEditorService;
+    if (!routing || typeof routing.create !== 'function') return null;
+    if (!editor || typeof editor.openLocalFile !== 'function') return null;
+    return routing.create({
+      invoke: deps.invoke,
+      openLocalFile: (filePath) => g.termlabEditorService.openLocalFile(filePath),
+      toastError: (title, body) => { if (g.toast) g.toast.error(title, body); },
+      toastInfo: (title, body) => { if (g.toast) g.toast.info(title, body); },
+    });
+  }
+
   function create(deps) {
     const invoke = deps.invoke;
     const listen = deps.listen;
@@ -277,33 +307,25 @@
         configRuntime.init();
       }
 
-      // Drain any CLI/second-instance paths Rust queued for THIS window
-      // (see src/open_path.rs's per-window pending-open queue and the
-      // `take_pending_open_paths` command). This code path is unreachable
-      // for a panel-host window: main-runtime.js branches to
-      // panelHostRuntime.boot() and returns before ever constructing this
-      // runtime, so a popped-out tool window (no editor, no tabs) never
-      // attempts to drain a queue it was never given anything on. Editor
-      // service composition (manager-compose-runtime's __termlabPaneAccess)
-      // has already run by this point in main-runtime.js's boot sequence, so
-      // termlabEditorService.openLocalFile is safe to call here.
+      // Build (but do NOT run) the pending-open drain. Editor service
+      // composition (manager-compose-runtime's __termlabPaneAccess) has
+      // already run by this point in main-runtime.js's boot sequence, so
+      // termlabEditorService.openLocalFile is safe to bind here.
       //
-      // Fire-and-forget: a slow or failing drain must never hold up the rest
-      // of boot, so its rejection is swallowed rather than awaited.
-      if (global.termlabOpenPathRouting && global.termlabOpenPathRouting.create
-          && global.termlabEditorService && typeof global.termlabEditorService.openLocalFile === 'function') {
-        const openPathRouting = global.termlabOpenPathRouting.create({
-          invoke,
-          openLocalFile: (filePath) => global.termlabEditorService.openLocalFile(filePath),
-          toastError: (title, body) => { if (global.toast) global.toast.error(title, body); },
-          toastInfo: (title, body) => { if (global.toast) global.toast.info(title, body); },
-        });
-        openPathRouting.drainPendingOpens().catch(() => {});
-      }
+      // Running it is main-runtime.js's job, and it must happen AFTER the
+      // first tab is created: createEditorTab activates its own tab
+      // synchronously, so a drain racing createTab() lands the file the user
+      // asked for behind an empty terminal roughly half the time.
+      const pendingOpenDrain = wirePendingOpenDrain(global, { invoke });
 
       return {
         handleMenuAction,
         showUpdateAvailableToast,
+        // Null when this window has nothing to drain (see
+        // wirePendingOpenDrain).
+        drainPendingOpens: pendingOpenDrain
+          ? () => pendingOpenDrain.drainPendingOpens()
+          : null,
       };
     }
 
@@ -314,5 +336,6 @@
 
   global.termlabEventWiringRuntime = {
     create,
+    wirePendingOpenDrain,
   };
 })(window);
