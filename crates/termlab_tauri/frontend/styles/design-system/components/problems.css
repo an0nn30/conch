@@ -152,30 +152,54 @@
   color: var(--tl-fg-muted);
 }
 
-/* The severity dot. Never the only carrier of severity — see the file
-   header — but it is what makes a long list scannable. */
+/* The severity badge: a coloured glyph, never a coloured dot. Four hues is
+   precisely the case colour-alone fails — a screen reader gets the severity
+   word from each row's aria-label, but a colour-blind sighted user reads
+   this, so the SHAPE has to carry the meaning on its own and the colour is
+   only reinforcement. Same "the mark itself says what it is" reasoning as
+   editor.css's .tl-completion-info-note::before. */
 .tl-problems__severity {
   flex: 0 0 auto;
-  width: var(--tl-space-2);
-  height: var(--tl-space-2);
-  border-radius: 50%;
-  background: var(--tl-fg-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--tl-space-3);
+  color: var(--tl-fg-muted);
+  font-family: var(--tl-font-ui);
+  font-weight: 700;
+  line-height: 1;
 }
 
 .tl-problems__severity[data-severity="error"] {
-  background: var(--tl-danger);
+  color: var(--tl-danger);
+}
+
+.tl-problems__severity[data-severity="error"]::before {
+  content: "✕";
 }
 
 .tl-problems__severity[data-severity="warning"] {
-  background: var(--tl-Component-warningFocusColor);
+  color: var(--tl-Component-warningFocusColor);
+}
+
+.tl-problems__severity[data-severity="warning"]::before {
+  content: "▲";
 }
 
 .tl-problems__severity[data-severity="information"] {
-  background: var(--tl-accent);
+  color: var(--tl-accent);
+}
+
+.tl-problems__severity[data-severity="information"]::before {
+  content: "ℹ";
 }
 
 .tl-problems__severity[data-severity="hint"] {
-  background: var(--tl-fg-muted);
+  color: var(--tl-fg-muted);
+}
+
+.tl-problems__severity[data-severity="hint"]::before {
+  content: "•";
 }
 
 .tl-problems__label,

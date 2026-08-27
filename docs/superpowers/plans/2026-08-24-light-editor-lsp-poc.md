@@ -1138,6 +1138,11 @@ In a Cargo workspace with multiple member crates:
 
 Verify untrusted, denied, disabled, server-missing, startup-timeout, crash, malformed response, and unsupported curated-language states. In every case confirm local open/save/close, dirty guards, Vim mode, and remote editor behavior still work.
 
+- [ ] **Step 5a: Close the two Problems-window items recorded during Task 12 review**
+
+- Verify popped-out Problems activation focuses the owner and opens the file; range reveal is a recorded degradation pending a `HOST_ACTION_EVENTS` protocol extension. A panel host owns no editor, so `app/features/problems/problems-navigation.js` falls back to the existing `open-in-editor` host action (the same escape hatch `app/panels/files-panel.js` uses), which carries a path and no range. Widening that closed action list is a panel-host protocol change, deliberately out of Task 12's scope.
+- I-2 ghost project groups: a session whose last status was `failed`/`unavailable` keeps its group after stop, because no session-level terminal status is emitted (`crates/termlab_tauri/src/lsp/manager.rs:4511` emits per-document only) while `docs/superpowers/specs/2026-08-24-light-editor-lsp-design.md:620` requires the group to disappear. Needs either a session-level status event on stop (Rust) or a frontend prune in `problems-store.js`.
+
 - [ ] **Step 6: Record evidence in the checklist**
 
 For each automated command and manual scenario, record date, machine architecture, app build identifier, result, and any follow-up issue. The checklist is acceptance evidence, not a substitute for tests.

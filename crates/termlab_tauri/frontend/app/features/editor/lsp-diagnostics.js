@@ -27,7 +27,9 @@
 
   let allPanesHook = null;
   let unsubscribe = null;
-  // Pane -> the revision whose marks that pane is currently showing.
+  // Pane -> { revision, signature } for the marks that pane is currently
+  // showing. The revision is the staleness guard; the signature is what makes
+  // a re-delivery of unchanged marks free (see applyToPane).
   const appliedRevisions = new WeakMap();
 
   function cm() {
@@ -124,11 +126,31 @@
     return out;
   }
 
+  // Everything a rendered mark actually shows, in one comparable string. Not
+  // the CodeMirror diagnostics themselves: each carries a fresh renderMessage
+  // closure, so two identical publications are never deep-equal as objects.
+  function signatureOf(diagnostics, items) {
+    const parts = [];
+    for (let i = 0; i < diagnostics.length; i += 1) {
+      const rendered = diagnostics[i];
+      const source = items[i];
+      parts.push([
+        rendered.from,
+        rendered.to,
+        rendered.severity,
+        rendered.message,
+        source.source || '',
+        source.code === null || source.code === undefined ? '' : source.code,
+      ].join('␟'));
+    }
+    return parts.join('␞');
+  }
+
   function applyToPane(pane, update, revision) {
     const CM = cm();
     if (!CM || typeof CM.setDiagnostics !== 'function') return false;
     const applied = appliedRevisions.get(pane);
-    if (applied !== undefined && revision <= applied) return false;
+    if (applied !== undefined && revision <= applied.revision) return false;
     const filePath = String(pane.filePath);
     const items = (update.snapshot && update.snapshot.items) || [];
     const mine = items.filter((item) => item && uriToPath(item.uri) === filePath);
@@ -137,11 +159,19 @@
     // transaction and, worse, claim this pane is up to date at that revision
     // when the next event for it may still be older.
     if (!mine.length && update.uri && uriToPath(update.uri) !== filePath) return false;
-    appliedRevisions.set(pane, revision);
-    pane.view.dispatch(CM.setDiagnostics(
-      pane.view.state,
-      toCodeMirrorDiagnostics(pane.view.state.doc, mine),
-    ));
+    const diagnostics = toCodeMirrorDiagnostics(pane.view.state.doc, mine);
+    const signature = signatureOf(diagnostics, mine);
+    // Rust publishes the WHOLE workspace snapshot every time, so a keystroke
+    // in one file re-delivers every other open file's marks unchanged. Those
+    // panes are up to date at the new revision — they just have nothing to
+    // redraw, and a setDiagnostics transaction would rebuild the whole
+    // decoration set to arrive back where it started.
+    if (applied !== undefined && applied.signature === signature) {
+      appliedRevisions.set(pane, { revision, signature });
+      return false;
+    }
+    appliedRevisions.set(pane, { revision, signature });
+    pane.view.dispatch(CM.setDiagnostics(pane.view.state, diagnostics));
     return true;
   }
 
@@ -204,6 +234,9 @@
     applyUpdate,
     toCodeMirrorDiagnostics,
     severityFor: (severity) => SEVERITY[severity] || 'error',
-    appliedRevision: (pane) => appliedRevisions.get(pane),
+    appliedRevision: (pane) => {
+      const applied = appliedRevisions.get(pane);
+      return applied ? applied.revision : undefined;
+    },
   };
 })(window);

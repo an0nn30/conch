@@ -1243,7 +1243,9 @@ check('vendor-entry exports exactly the completion API the modules need', () => 
       .map((name) => name.trim().split(/\s+as\s+/).pop().trim())
       .filter(Boolean),
   );
-  for (const name of ['lintKeymap', 'openLintPanel', 'closeLintPanel', 'nextDiagnostic']) {
+  for (const name of [
+    'lintKeymap', 'openLintPanel', 'closeLintPanel', 'nextDiagnostic', 'previousDiagnostic',
+  ]) {
     assert.ok(!exported.has(name), `${name} has no consumer — Problems owns diagnostic navigation`);
   }
   // Every name the modules read off CM6 has to be in the built bundle.

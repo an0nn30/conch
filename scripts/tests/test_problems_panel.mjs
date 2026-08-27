@@ -1186,8 +1186,9 @@ check('Problems registers last in the bottom zone so it never steals the active 
   );
 });
 
-check('registering Problems does not auto-activate it in a configured bottom zone', () => {
-  // The real manager, against the same rule tool-window-runtime relies on.
+// The real manager, against the same rule tool-window-runtime relies on.
+// Deliberately NO sandbox.global — see the file header.
+function loadManager() {
   const body = makeElement('body');
   const sandbox = {
     console,
@@ -1203,17 +1204,48 @@ check('registering Problems does not auto-activate it in a configured bottom zon
     },
   };
   sandbox.window = sandbox;
-  // Deliberately NO sandbox.global — see the file header.
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(TOOL_WINDOW_MANAGER, 'utf8'), sandbox, {
     filename: TOOL_WINDOW_MANAGER,
   });
-  const twm = sandbox.toolWindowManager;
+  return sandbox.toolWindowManager;
+}
+
+check('registering Problems does not auto-activate it in a configured bottom zone', () => {
+  const twm = loadManager();
   twm.setPersistedActiveZoneWindows({ 'bottom-left': 'file-explorer' });
   twm.register('file-explorer', { title: 'SFTP', type: 'built-in', defaultZone: 'bottom', renderFn() {} });
   twm.register('problems', { title: 'Problems', type: 'built-in', defaultZone: 'bottom', renderFn() {} });
   deepEq(twm.getActiveZoneAssignments()['bottom-left'], 'file-explorer');
   assert.strictEqual(twm.isVisible('problems'), false, 'a saved layout keeps its own active window');
+});
+
+// The case the registration-order source scan above can only argue about: a
+// FRESH profile, where nothing is persisted and register()'s
+// "first registrant activates the zone" rule is live. Behavioural, so
+// reordering the two register() calls in tool-window-runtime.js fails here
+// rather than merely looking different.
+check('on a fresh profile the bottom zone opens on SFTP, not on Problems', () => {
+  const twm = loadManager();
+  // What init() does on a layout with no `bottom_panel_visible` key: the
+  // manager's own default is `false`, and register()'s auto-activation is
+  // gated on the side being visible, so without this the zone would look
+  // "correct" for the wrong reason.
+  twm.setPanelVisibility('bottom', true, { save: false });
+  twm.register('file-explorer', { title: 'SFTP', type: 'built-in', defaultZone: 'bottom', renderFn() {} });
+  twm.register('problems', { title: 'Problems', type: 'built-in', defaultZone: 'bottom', renderFn() {} });
+  assert.strictEqual(twm.isVisible('problems'), false, 'Problems must not be what a new user finds open');
+  assert.strictEqual(twm.isVisible('file-explorer'), true);
+});
+
+check('registered first on a fresh profile, Problems WOULD take the zone', () => {
+  // Proves the check above is testing the rule and not an unconditional
+  // "Problems never activates" — the guarantee comes from the order.
+  const twm = loadManager();
+  twm.setPanelVisibility('bottom', true, { save: false });
+  twm.register('problems', { title: 'Problems', type: 'built-in', defaultZone: 'bottom', renderFn() {} });
+  twm.register('file-explorer', { title: 'SFTP', type: 'built-in', defaultZone: 'bottom', renderFn() {} });
+  assert.strictEqual(twm.isVisible('problems'), true);
 });
 
 check('index.html loads the problems modules in dependency order', () => {
@@ -1246,6 +1278,23 @@ check('problems.css styles every class the panel renders, with tokens only', () 
   assert.ok(/focus-visible/.test(css), 'rows and groups need a strong focus state');
 });
 
+// Colour cannot be the only carrier of severity: the aria-label covers a
+// screen reader, but a colour-blind sighted user reads the dots, and four
+// hues is exactly the case that fails. Each severity gets a distinct glyph.
+check('severity is signalled by shape as well as colour', () => {
+  const css = fs.readFileSync(CSS, 'utf8');
+  const glyphs = new Set();
+  for (const severity of ['error', 'warning', 'information', 'hint']) {
+    const rule = new RegExp(
+      `\\.tl-problems__severity\\[data-severity="${severity}"\\]::before\\s*\\{[^}]*content:\\s*"([^"]+)"`,
+    );
+    const match = rule.exec(css);
+    assert.ok(match, `${severity} has no ::before glyph — colour is its only signal`);
+    glyphs.add(match[1]);
+  }
+  assert.strictEqual(glyphs.size, 4, 'four severities need four distinguishable glyphs');
+});
+
 check('the problems modules use no regex lookbehind', () => {
   for (const file of [MODEL, STORE, NAVIGATION, PANEL]) {
     const source = fs.readFileSync(file, 'utf8');
@@ -1254,6 +1303,30 @@ check('the problems modules use no regex lookbehind', () => {
       `${file} uses a lookbehind — it costs the whole file on an older WKWebView`,
     );
   }
+});
+
+// A raw control byte anywhere in a source file makes git call the whole file
+// BINARY: no diff, no blame, no review on a public repo, and grep-based
+// tooling skips it silently. This panel shipped one for exactly the reason
+// it usually happens — a "collision-proof" sentinel string, invisible in
+// every editor. The group key now comes from the model instead.
+check('the problems modules contain no control bytes', () => {
+  for (const file of [MODEL, STORE, NAVIGATION, PANEL, CSS]) {
+    const bytes = fs.readFileSync(file);
+    for (let i = 0; i < bytes.length; i += 1) {
+      const byte = bytes[i];
+      assert.ok(
+        byte >= 0x20 || byte === 0x0a || byte === 0x09,
+        `${file}: control byte 0x${byte.toString(16)} at offset ${i} — git treats the file as binary`,
+      );
+    }
+  }
+});
+
+check('the panel takes the group identity from the model rather than minting one', () => {
+  const source = fs.readFileSync(PANEL, 'utf8');
+  assert.ok(!/groupKey/.test(source), 'a second spelling of one identity is how the two drift');
+  assert.ok(/group\.key/.test(source));
 });
 
 for (const { name, fn } of queued) {

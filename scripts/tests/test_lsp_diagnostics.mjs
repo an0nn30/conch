@@ -455,6 +455,48 @@ check('a terminal pane in the same window is skipped', () => {
   assert.strictEqual(h.view.dispatches, 1, 'the editor pane still renders');
 });
 
+// Rust ships the whole workspace snapshot with every publication, so a
+// diagnostic appearing in ANY file re-delivers every other file's marks
+// unchanged. Without this guard, one keystroke in a large project costs a
+// CodeMirror transaction (and a full decoration rebuild) in every open pane
+// whose file happens to appear in the snapshot.
+check('a publication that changes only another file does not touch this pane', () => {
+  const h = harness({ real: true, text: 'alpha\nbravo\n' });
+  const mine = diag({ id: 'mine', uri: 'file:///repo/main.ts', message: 'mine' });
+  h.diagnostics.applyUpdate(update(
+    [mine, diag({ id: 'a', uri: 'file:///repo/other.ts', message: 'was' })],
+    { revision: 4, uri: 'file:///repo/other.ts' },
+  ));
+  assert.strictEqual(h.view.dispatches, 1);
+  h.diagnostics.applyUpdate(update(
+    [mine, diag({ id: 'a', uri: 'file:///repo/other.ts', message: 'now' })],
+    { revision: 5, uri: 'file:///repo/other.ts' },
+  ));
+  assert.strictEqual(h.view.dispatches, 1, 'this pane\'s marks are identical — nothing to dispatch');
+  assert.deepStrictEqual(marks(h.view).map((m) => m.message), ['mine'], 'and they are still shown');
+});
+
+check('the skipped pane still counts as up to date at that revision', () => {
+  const h = harness({ real: true, text: 'alpha\nbravo\n' });
+  const mine = diag({ id: 'mine', uri: 'file:///repo/main.ts', message: 'mine' });
+  h.diagnostics.applyUpdate(update([mine], { revision: 4 }));
+  h.diagnostics.applyUpdate(update([mine], { revision: 5 }));
+  assert.strictEqual(h.view.dispatches, 1);
+  // A revision BELOW the skipped one must still be rejected: skipping the
+  // transaction may not quietly rewind what this pane claims to know.
+  h.diagnostics.applyUpdate(update([], { revision: 5 }));
+  assert.deepStrictEqual(marks(h.view).map((m) => m.message), ['mine']);
+  h.diagnostics.applyUpdate(update([], { revision: 6 }));
+  assert.deepStrictEqual(marks(h.view), [], 'a genuine change still lands');
+});
+
+check('a change confined to source or code still re-renders the tooltip', () => {
+  const h = harness();
+  h.diagnostics.applyUpdate(update([diag({ source: 'ts', code: '1' })], { revision: 2 }));
+  h.diagnostics.applyUpdate(update([diag({ source: 'ts', code: '2' })], { revision: 3 }));
+  assert.strictEqual(h.view.dispatches, 2, 'the tooltip text changed even though the range did not');
+});
+
 check('a malformed update is ignored rather than thrown on', () => {
   const h = harness();
   for (const bad of [null, {}, { revision: 'x' }, { revision: 1 }]) {
@@ -646,6 +688,23 @@ check('the module registers no window or document key handlers', () => {
   const source = fs.readFileSync(DIAGNOSTICS, 'utf8');
   assert.ok(!/addEventListener\(\s*['"]key(down|up|press)['"]/.test(source));
   assert.ok(!/\bdocument\.addEventListener\b/.test(source));
+});
+
+// A raw control byte anywhere in a source file makes git call the whole file
+// BINARY: no diff, no blame, no review on a public repo, and grep-based
+// tooling skips it silently. Easy to introduce (a "collision-proof" sentinel
+// string is the classic way) and invisible in every editor.
+check('the editor LSP modules contain no control bytes', () => {
+  for (const file of [DIAGNOSTICS, LSP_URI]) {
+    const bytes = fs.readFileSync(file);
+    for (let i = 0; i < bytes.length; i += 1) {
+      const byte = bytes[i];
+      assert.ok(
+        byte >= 0x20 || byte === 0x0a || byte === 0x09,
+        `${file}: control byte 0x${byte.toString(16)} at offset ${i} — git treats the file as binary`,
+      );
+    }
+  }
 });
 
 check('the diagnostic surface classes it renders are styled with tokens', () => {
