@@ -277,6 +277,30 @@
         configRuntime.init();
       }
 
+      // Drain any CLI/second-instance paths Rust queued for THIS window
+      // (see src/open_path.rs's per-window pending-open queue and the
+      // `take_pending_open_paths` command). This code path is unreachable
+      // for a panel-host window: main-runtime.js branches to
+      // panelHostRuntime.boot() and returns before ever constructing this
+      // runtime, so a popped-out tool window (no editor, no tabs) never
+      // attempts to drain a queue it was never given anything on. Editor
+      // service composition (manager-compose-runtime's __termlabPaneAccess)
+      // has already run by this point in main-runtime.js's boot sequence, so
+      // termlabEditorService.openLocalFile is safe to call here.
+      //
+      // Fire-and-forget: a slow or failing drain must never hold up the rest
+      // of boot, so its rejection is swallowed rather than awaited.
+      if (global.termlabOpenPathRouting && global.termlabOpenPathRouting.create
+          && global.termlabEditorService && typeof global.termlabEditorService.openLocalFile === 'function') {
+        const openPathRouting = global.termlabOpenPathRouting.create({
+          invoke,
+          openLocalFile: (filePath) => global.termlabEditorService.openLocalFile(filePath),
+          toastError: (title, body) => { if (global.toast) global.toast.error(title, body); },
+          toastInfo: (title, body) => { if (global.toast) global.toast.info(title, body); },
+        });
+        openPathRouting.drainPendingOpens().catch(() => {});
+      }
+
       return {
         handleMenuAction,
         showUpdateAvailableToast,
