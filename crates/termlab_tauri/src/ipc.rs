@@ -19,6 +19,9 @@ enum IpcMessage {
         #[serde(default)]
         working_directory: Option<String>,
     },
+    OpenPath {
+        path: String,
+    },
 }
 
 /// Determine the IPC socket path (same logic as termlab_app).
@@ -125,6 +128,9 @@ fn ipc_listen_loop(listener: std::os::unix::net::UnixListener, app: tauri::AppHa
                                 crate::menu::MENU_ACTION_NEW_TAB,
                             );
                         }
+                        Ok(IpcMessage::OpenPath { path }) => {
+                            crate::open_path::open_in_new_window(&app, &path);
+                        }
                         Err(e) => {
                             log::warn!("Invalid IPC message: {e}");
                         }
@@ -139,5 +145,23 @@ fn ipc_listen_loop(listener: std::os::unix::net::UnixListener, app: tauri::AppHa
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_path_message_parses() {
+        let msg: IpcMessage =
+            serde_json::from_str(r#"{"type":"open_path","path":"/tmp/a.txt"}"#).unwrap();
+        assert!(matches!(msg, IpcMessage::OpenPath { path } if path == "/tmp/a.txt"));
+    }
+
+    #[test]
+    fn legacy_messages_still_parse() {
+        assert!(serde_json::from_str::<IpcMessage>(r#"{"type":"create_window"}"#).is_ok());
+        assert!(serde_json::from_str::<IpcMessage>(r#"{"type":"create_tab"}"#).is_ok());
     }
 }

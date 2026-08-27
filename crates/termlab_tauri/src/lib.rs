@@ -7,6 +7,7 @@
 pub(crate) mod bundled_themes;
 pub(crate) mod chooser_window;
 pub(crate) mod cleanup;
+pub mod cli;
 pub(crate) mod close_guard;
 mod commands;
 mod editor_fs;
@@ -253,7 +254,7 @@ mod window_px_tests {
     }
 }
 
-pub fn run(config: UserConfig) -> anyhow::Result<()> {
+pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()> {
     // Use the user's home directory as a stable "workspace" label rather than
     // the process's actual cwd (current_dir() titled the window after the
     // build directory) or a PTY's shell cwd (pty_backend spawns shells with
@@ -359,6 +360,19 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 app.handle()
                     .set_menu(the_menu)
                     .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
+            }
+
+            // Seed the CLI/IPC "open this path" queue for the "main" window
+            // before its frontend has any chance to load and pull it via
+            // `take_pending_open_paths` — this runs synchronously in setup(),
+            // well before the webview's JS finishes booting and issues that
+            // request-pull invoke.
+            if !pending_paths.is_empty() {
+                open_path::seed_for_label(
+                    &app.state::<open_path::PendingOpens>(),
+                    "main",
+                    pending_paths,
+                );
             }
 
             // Apply persisted window size, decorations, theme, and zoom.
