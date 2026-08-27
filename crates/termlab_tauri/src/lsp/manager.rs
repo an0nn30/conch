@@ -1020,8 +1020,12 @@ enum SessionOperation {
     },
     /// Placeholder for a reserved close that was delivered ahead of this queue.
     /// It carries no protocol traffic; it only holds the worker slot the policy
-    /// reserved so later groups keep queueing behind the same backpressure.
-    ReservedCloseCredit,
+    /// reserved so later groups keep queueing behind the same backpressure. It
+    /// still names its document, because reaching it is what tells the mirror
+    /// the server has stopped believing that document is open.
+    ReservedCloseCredit {
+        document_id: String,
+    },
 }
 
 struct SessionWorkerHandle {
@@ -1046,7 +1050,12 @@ enum OpenTransition {
 
 enum PipelineEntry {
     /// A reserved-close credit placeholder a deferred policy is waiting on.
-    ReservedCredit,
+    /// Its document's close went out on the delivery lane, so reaching this
+    /// entry is when the mirror stops believing that document is open. Keeping
+    /// it believed-open until then is the conservative direction: it can only
+    /// make a later close be sent that was not strictly needed, never suppress
+    /// one that was.
+    ReservedCredit { document_id: String },
     /// Ordinary traffic for one document.
     Document {
         document_id: String,
@@ -1084,18 +1093,28 @@ fn operation_document(operation: &SessionOperation) -> Option<(&str, Option<Open
         SessionOperation::PullDiagnostics {
             document_id_text, ..
         } => Some((document_id_text, None)),
-        SessionOperation::ReservedCloseCredit => None,
+        // Deliberately not the credit placeholder's document: a credit is not
+        // traffic to order against, and it must never be swept up by the purge
+        // that discards a closing document's queued operations.
+        SessionOperation::ReservedCloseCredit { .. } => None,
     }
 }
 
 impl SessionDeliveryProgress {
     fn entry_for(operation: &SessionOperation) -> PipelineEntry {
+        if let SessionOperation::ReservedCloseCredit { document_id } = operation {
+            return PipelineEntry::ReservedCredit {
+                document_id: document_id.clone(),
+            };
+        }
         match operation_document(operation) {
             Some((document_id, transition)) => PipelineEntry::Document {
                 document_id: document_id.to_owned(),
                 transition,
             },
-            None => PipelineEntry::ReservedCredit,
+            None => PipelineEntry::ReservedCredit {
+                document_id: String::new(),
+            },
         }
     }
 
@@ -1107,19 +1126,35 @@ impl SessionDeliveryProgress {
 
     /// One operation finished, in pipeline order.
     fn record_completed(&mut self) {
-        if let Some(PipelineEntry::Document {
-            document_id,
-            transition: Some(transition),
-        }) = self.pipeline.pop_front()
-        {
-            match transition {
-                OpenTransition::Open => {
-                    self.open_on_server.insert(document_id);
-                }
-                OpenTransition::Close => {
-                    self.open_on_server.remove(&document_id);
-                }
+        let Some(entry) = self.pipeline.pop_front() else {
+            // The mirror is one-to-one with what the session was handed, so an
+            // empty pipeline here means it has desynchronised - and a
+            // desynchronised mirror can report a closing document as having
+            // nothing in flight when it does, which is exactly the reordering
+            // the purge exists to prevent.
+            debug_assert!(false, "session delivery mirror ran dry before its session");
+            log::warn!("LSP session delivery mirror ran dry before its session");
+            return;
+        };
+        match entry {
+            PipelineEntry::ReservedCredit { document_id } => {
+                self.open_on_server.remove(&document_id);
             }
+            PipelineEntry::Document {
+                document_id,
+                transition: Some(OpenTransition::Open),
+            } => {
+                self.open_on_server.insert(document_id);
+            }
+            PipelineEntry::Document {
+                document_id,
+                transition: Some(OpenTransition::Close),
+            } => {
+                self.open_on_server.remove(&document_id);
+            }
+            PipelineEntry::Document {
+                transition: None, ..
+            } => {}
         }
     }
 
@@ -1131,6 +1166,16 @@ impl SessionDeliveryProgress {
         previous_outbox_len: usize,
         outbox: &VecDeque<SessionOperation>,
     ) {
+        // Invariant: pipeline.len() == (operations inside the worker) +
+        // outbox.len(). If it ever slips, the tail rebuilt below would keep
+        // entries that are no longer queued or drop entries that still are.
+        debug_assert!(
+            self.pipeline.len() >= previous_outbox_len,
+            "session delivery mirror is shorter than the outbox it mirrors"
+        );
+        if self.pipeline.len() < previous_outbox_len {
+            log::warn!("LSP session delivery mirror is shorter than the outbox it mirrors");
+        }
         let inside_worker = self.pipeline.len().saturating_sub(previous_outbox_len);
         self.pipeline.truncate(inside_worker);
         for operation in outbox {
@@ -1141,7 +1186,7 @@ impl SessionDeliveryProgress {
     fn credits_outstanding(&self) -> bool {
         self.pipeline
             .iter()
-            .any(|entry| matches!(entry, PipelineEntry::ReservedCredit))
+            .any(|entry| matches!(entry, PipelineEntry::ReservedCredit { .. }))
     }
 
     fn document_in_flight(&self, document_id: &str) -> bool {
@@ -1460,6 +1505,12 @@ struct DeferredCloseGroup {
     epoch: u64,
     document_ids: Vec<DocumentId>,
     required_session_closes: HashMap<SessionKey, HashSet<DocumentId>>,
+    /// Members whose undelivered didOpen this group already threw away. The
+    /// decision is remembered rather than re-derived because it is only
+    /// visible once, in the staging attempt that did the throwing away: a
+    /// later attempt would find nothing queued and would send a real didClose
+    /// for a buffer the server never opened.
+    discarded_opens: HashSet<DocumentId>,
     phase: DeferredClosePhase,
     reply: oneshot::Sender<Result<(), ManagerError>>,
 }
@@ -2910,6 +2961,7 @@ impl LspManager {
             epoch,
             document_ids,
             required_session_closes,
+            discarded_opens: HashSet::new(),
             phase: DeferredClosePhase::Pending,
             reply,
         });
@@ -2942,7 +2994,7 @@ impl LspManager {
             return true;
         }
         self.retrying_policy = true;
-        let result = self.stage_close_group(&group);
+        let result = self.stage_close_group(&mut group);
         self.retrying_policy = false;
         match result {
             Err(ManagerError::Overloaded) => self.pending_close_groups.push_front(group),
@@ -2979,7 +3031,7 @@ impl LspManager {
     /// open and owned exactly as they were.
     fn stage_close_group(
         &mut self,
-        group: &DeferredCloseGroup,
+        group: &mut DeferredCloseGroup,
     ) -> Result<HashMap<DocumentId, ReservedCloseDelivery>, ManagerError> {
         let document_ids = group.document_ids.clone();
         // A matching reserved group may contain more already-admitted didChange
@@ -2988,12 +3040,15 @@ impl LspManager {
         // slots for the whole close group.
         self.advance_reserved_close_group_batches(&document_ids)?;
         self.ensure_close_documents_capacity(&document_ids)?;
-        let mut outstanding = HashMap::new();
+
+        // Phase one resolves and flushes every member. It is the only fallible
+        // part, and it runs to completion before anything is discarded, so a
+        // failure here leaves the group exactly as retryable as it was.
+        let mut members = Vec::new();
         for document_id in document_ids {
             if !self.state.documents.contains_key(&document_id) {
                 continue;
             }
-            self.flush_document(document_id)?;
             let key = self
                 .state
                 .documents
@@ -3002,6 +3057,13 @@ impl LspManager {
             let Some(key) = key else {
                 continue;
             };
+            // Checked before flushing rather than after: `flush_document` is
+            // itself fallible on a missing session, and the whole point of this
+            // phase is that nothing fails once phase two starts discarding.
+            if !self.state.sessions.contains_key(&key) {
+                return Err(ManagerError::SessionUnavailable);
+            }
+            self.flush_document(document_id)?;
             let Some(session_generation) = self
                 .state
                 .sessions
@@ -3011,20 +3073,42 @@ impl LspManager {
             else {
                 continue;
             };
+            members.push((document_id, key, session_generation));
+        }
+
+        // Phase two commits. `ensure_close_documents_capacity` above reserved
+        // one outbox slot per member on top of the batches phase one flushed,
+        // and the discards below only ever free more, so the enqueues here
+        // cannot overflow. Should that reasoning ever stop holding, the
+        // discard is still self-repairing: it marks the document out of sync
+        // and cancels its requests, so an abandoned attempt leaves a document
+        // the resync machinery knows how to fix rather than a silent phantom.
+        let mut outstanding = HashMap::new();
+        for (document_id, key, session_generation) in members {
             let id_text = document_id_text(document_id);
             // Nothing still queued for a closing document can matter, and
             // leaving it queued is exactly what would let an ordered didOpen or
-            // didChange land *after* the close this group is about to deliver -
+            // didChange land *after* the close this group is about to deliver:
             // the server would keep a phantom buffer shadowing the file for the
             // rest of the session.
-            let dropped_open = self.drop_queued_document_operations(&key, &id_text);
+            let dropped_open = self.discard_queued_document_traffic(&key, document_id);
             let progress = self.session_delivery_progress.get(&key);
-            if dropped_open && !progress.is_some_and(|progress| progress.believes_open(&id_text)) {
+            let believes_open = progress.is_some_and(|progress| progress.believes_open(&id_text));
+            if dropped_open && !believes_open {
+                group.discarded_opens.insert(document_id);
+            }
+            if !believes_open && group.discarded_opens.contains(&document_id) {
                 // The open this close would have been paired with never reached
                 // the server and never will now. Telling the server to close a
                 // buffer it does not have would be a lie, so the delivery is
                 // vacuously satisfied and the group owes nothing for it.
-                self.cancel_document_requests(document_id, ManagerError::Cancelled);
+                //
+                // The verdict has to be remembered: it is only visible in the
+                // attempt that did the discarding, and a retried attempt would
+                // find nothing queued and send a real close. It is also
+                // re-checked against the server's current belief rather than
+                // trusted blindly, so a session that restarted and re-opened
+                // the document in between still gets its close.
                 continue;
             }
             // Anything still ahead of this document inside the worker's own
@@ -3056,7 +3140,9 @@ impl LspManager {
                     .and_then(|session| session.worker.as_ref())
                     .is_some_and(|worker| worker.close_deliveries.capacity() > 0);
             let operation = if out_of_band {
-                SessionOperation::ReservedCloseCredit
+                SessionOperation::ReservedCloseCredit {
+                    document_id: id_text.clone(),
+                }
             } else {
                 SessionOperation::DidClose {
                     document_id: id_text.clone(),
@@ -3080,18 +3166,33 @@ impl LspManager {
                 log::warn!("LSP reserved close delivery lane rejected a close: {error}");
             }
             outstanding.insert(document_id, delivery);
-            self.cancel_document_requests(document_id, ManagerError::Cancelled);
         }
         Ok(outstanding)
     }
 
-    /// Drop everything a session still has queued for a document that is being
-    /// closed, and report whether an undelivered didOpen was among it.
+    /// Discard everything a session still has queued for a document this
+    /// manager is closing, and report whether an undelivered didOpen was
+    /// among it.
     ///
     /// Only the outbox can be emptied: operations already handed to the worker
     /// are beyond recall, which is why the caller keeps such a document's close
     /// in the ordered lane instead of the delivery lane.
-    fn drop_queued_document_operations(&mut self, key: &SessionKey, document_id: &str) -> bool {
+    ///
+    /// Everything that depended on the discarded traffic is settled here rather
+    /// than by the caller's happy path. Requests are cancelled so no reply can
+    /// hang on work that will never run, and a document that lost operations
+    /// the server needed is marked out of sync so `apply_changes` asks the
+    /// client to resynchronise it. Normally the document is removed moments
+    /// later when the group settles and neither matters; they matter precisely
+    /// when it is not, and tying them to the discard is what makes that case
+    /// safe instead of silent.
+    fn discard_queued_document_traffic(
+        &mut self,
+        key: &SessionKey,
+        document_id: DocumentId,
+    ) -> bool {
+        self.cancel_document_requests(document_id, ManagerError::Cancelled);
+        let id_text = document_id_text(document_id);
         let Some(session) = self.state.sessions.get_mut(key) else {
             return false;
         };
@@ -3100,16 +3201,20 @@ impl LspManager {
         session
             .outbox
             .retain(|operation| match operation_document(operation) {
-                Some((queued_id, transition)) if queued_id == document_id => {
+                Some((queued_id, transition)) if queued_id == id_text => {
                     dropped_open |= transition == Some(OpenTransition::Open);
                     false
                 }
                 _ => true,
             });
-        if session.outbox.len() != previous_len
-            && let Some(progress) = self.session_delivery_progress.get_mut(key)
-        {
+        if session.outbox.len() == previous_len {
+            return false;
+        }
+        if let Some(progress) = self.session_delivery_progress.get_mut(key) {
             progress.rebuild_queued_tail(previous_len, &session.outbox);
+        }
+        if let Some(document) = self.state.documents.get_mut(&document_id) {
+            document.synchronization_dirty = true;
         }
         dropped_open
     }
@@ -3170,12 +3275,12 @@ impl LspManager {
     /// Handle a reserved close the session could not deliver.
     ///
     /// Two things are true at once here. The delivery lane stops at its first
-    /// failure, so this generation can never acknowledge another reserved close
-    /// - that holds whether or not the token still belongs to a group, and a
-    /// generation left running would strand the next group forever waiting for
-    /// an acknowledgement that cannot come. And earlier members of the token's
-    /// own group may already have been closed for real, so that group can
-    /// neither be abandoned nor completed on the spot.
+    /// failure, so this generation can never acknowledge another reserved
+    /// close; that holds whether or not the token still belongs to a group, and
+    /// a generation left running would strand the next group forever waiting
+    /// for an acknowledgement that cannot come. And earlier members of the
+    /// token's own group may already have been closed for real, so that group
+    /// can neither be abandoned nor completed on the spot.
     ///
     /// So: stop every generation involved, then let the stops settle the group.
     /// A stopped generation is the only honest proof that the documents it held
@@ -5878,7 +5983,7 @@ fn spawn_session_worker(
                         send_operation_error(&input, &key, generation, "didSave", message).await;
                     }
                 }
-                SessionOperation::ReservedCloseCredit => {}
+                SessionOperation::ReservedCloseCredit { .. } => {}
                 SessionOperation::DidClose {
                     document_id,
                     delivery,
@@ -10523,6 +10628,267 @@ mod tests {
             delivery,
             _policy_result,
         }
+    }
+
+    #[tokio::test]
+    async fn reserved_close_staging_survives_an_abandoned_attempt() {
+        let temp = TempDir::new().unwrap();
+        let config_root = temp.path().join("config");
+        let cache_root = temp.path().join("cache");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let phantom_path = project_root.join("phantom.ts");
+        let live_path = project_root.join("live.ts");
+        std::fs::write(&phantom_path, "phantom").unwrap();
+        std::fs::write(&live_path, "live").unwrap();
+        let factory = Arc::new(FakeFactory::default());
+        let (_manager, mut actor, _events) =
+            LspManager::new(factory, config_root, cache_root, Enablement::all());
+        let open = |actor: &mut LspManager, path: &Path, pane: &str| {
+            let ReserveResult::Reserved { reservation_id, .. } = actor
+                .reserve_document(path.to_path_buf(), "main".into())
+                .unwrap()
+            else {
+                panic!("expected reservation")
+            };
+            let response = actor
+                .open_document(
+                    reservation_id,
+                    pane.into(),
+                    pane.into(),
+                    "typescript".into(),
+                )
+                .unwrap();
+            serde_json::from_value::<DocumentId>(serde_json::Value::String(response.document_id))
+                .unwrap()
+        };
+        let phantom = open(&mut actor, &phantom_path, "phantom");
+        let live = open(&mut actor, &live_path, "live");
+        let session_key = SessionKey {
+            adapter_id: "typescript".into(),
+            root: project_root.canonicalize().unwrap(),
+        };
+        for document_id in [phantom, live] {
+            actor
+                .state
+                .documents
+                .get_mut(&document_id)
+                .unwrap()
+                .session_key = Some(session_key.clone());
+        }
+        let mut session = fake_managed_session("abandoned-attempt", 2, phantom);
+        session.documents.insert(live);
+        actor.state.sessions.insert(session_key.clone(), session);
+
+        // Fill the worker's own queue so the outbox keeps everything enqueued
+        // from here on: that is what puts an undelivered didOpen and a pending
+        // request in front of the staging attempt.
+        for _ in 0..super::SESSION_OPERATION_CAPACITY {
+            actor
+                .enqueue_session_operations(
+                    &session_key,
+                    [super::SessionOperation::DidSave("filler".into())],
+                )
+                .unwrap();
+        }
+
+        // The server has `live` open and has never heard of `phantom`, whose
+        // didOpen is still sitting in the outbox.
+        let phantom_uri = actor.state.documents.get(&phantom).unwrap().uri.clone();
+        actor
+            .enqueue_session_operations(
+                &session_key,
+                [super::SessionOperation::DidOpen(super::SessionDocument {
+                    document_id: super::document_id_text(phantom),
+                    uri: lsp::Url::parse(&phantom_uri).unwrap(),
+                    language_id: "typescript".into(),
+                    version: 1,
+                    text: "phantom".into(),
+                })],
+            )
+            .unwrap();
+        actor
+            .session_delivery_progress
+            .get_mut(&session_key)
+            .unwrap()
+            .open_on_server
+            .insert(super::document_id_text(live));
+
+        let (policy_reply, _policy_result) = tokio::sync::oneshot::channel();
+        actor
+            .pending_policy_commands
+            .push_back(super::ManagerCommand::SetEnablement {
+                enablement: Enablement::none(),
+                reply: policy_reply,
+            });
+        actor.policy_reservation_epoch = Some(23);
+        actor.policy_capacity_reservations.insert(
+            session_key.clone(),
+            super::PolicyCapacityReservation {
+                operations: 2,
+                attachments: 0,
+                close_documents: [phantom, live].into_iter().collect(),
+            },
+        );
+        let (hover_reply, mut hover_result) = tokio::sync::oneshot::channel();
+        actor.start_request(
+            phantom,
+            crate::lsp::types::EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            super::RequestKind::Hover,
+            super::PendingReply::Hover(hover_reply),
+        );
+        assert!(
+            matches!(
+                hover_result.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the request must be pending before staging discards its document"
+        );
+
+        let (group_reply, mut group_result) = tokio::sync::oneshot::channel();
+        actor.admit_close_group(vec![phantom, live], group_reply);
+        let mut group = actor.pending_close_groups.pop_front().unwrap();
+
+        actor.retrying_policy = true;
+        let first = actor.stage_close_group(&mut group).unwrap();
+        assert!(
+            !first.contains_key(&phantom),
+            "a document whose didOpen was discarded owes no close"
+        );
+        assert!(first.contains_key(&live));
+        assert!(
+            actor
+                .state
+                .documents
+                .get(&phantom)
+                .unwrap()
+                .synchronization_dirty,
+            "discarding queued traffic must mark the document out of sync so an \
+             abandoned attempt is repairable"
+        );
+        assert_eq!(
+            hover_result.try_recv().unwrap(),
+            Err(ManagerError::Cancelled),
+            "a request whose queued work was discarded must not be left to hang"
+        );
+        let abandoned = first.get(&live).unwrap().clone();
+
+        // The attempt is abandoned and the group retried unchanged. Nothing is
+        // left queued for `phantom`, so this attempt can only get the verdict
+        // right by remembering it.
+        let second = actor.stage_close_group(&mut group).unwrap();
+        actor.retrying_policy = false;
+        assert!(
+            !second.contains_key(&phantom),
+            "a retried attempt resurrected a close for a buffer the server never opened"
+        );
+        let phantom_text = super::document_id_text(phantom);
+        assert!(
+            !actor.state.sessions[&session_key]
+                .outbox
+                .iter()
+                .any(|operation| matches!(
+                    operation,
+                    super::SessionOperation::DidClose { document_id, .. }
+                        if document_id == &phantom_text
+                )),
+            "no didClose may be queued for a document the server never opened"
+        );
+        let live_delivery = second.get(&live).unwrap().clone();
+        assert!(
+            live_delivery.attempt > abandoned.attempt,
+            "the retry must mint a fresh attempt"
+        );
+
+        group.phase = super::DeferredClosePhase::Delivering {
+            outstanding: second,
+            stopping: Vec::new(),
+        };
+        actor.pending_close_groups.push_front(group);
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded {
+            delivery: abandoned,
+        });
+        assert!(
+            matches!(
+                group_result.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the abandoned attempt's acknowledgement discharged the retry"
+        );
+        actor.handle_input(super::ActorInput::ReservedCloseDeliverySucceeded {
+            delivery: live_delivery,
+        });
+        assert_eq!(group_result.try_recv().unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_spent_reserved_credit_stops_the_mirror_believing_its_document_is_open() {
+        let temp = TempDir::new().unwrap();
+        let StagedReservedClose {
+            mut actor,
+            session_key,
+            document,
+            ..
+        } = staged_reserved_close(&temp, "credit-transition");
+        let id_text = super::document_id_text(document);
+        let progress = actor
+            .session_delivery_progress
+            .entry(session_key.clone())
+            .or_default();
+        progress.open_on_server.insert(id_text.clone());
+        progress
+            .pipeline
+            .push_back(super::PipelineEntry::ReservedCredit {
+                document_id: id_text.clone(),
+            });
+        assert!(
+            progress.believes_open(&id_text),
+            "the close travelled on the delivery lane, so the ordered lane has \
+             not reached its credit yet"
+        );
+
+        progress.record_completed();
+        assert!(
+            !progress.believes_open(&id_text),
+            "spending the credit is when the mirror learns the document was closed"
+        );
+        assert!(
+            progress.open_on_server.is_empty(),
+            "an out-of-band close must not leave its document believed open forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_credits_only_count_while_a_worker_can_spend_them() {
+        let temp = TempDir::new().unwrap();
+        let StagedReservedClose {
+            mut actor,
+            session_key,
+            document,
+            ..
+        } = staged_reserved_close(&temp, "credit-predicate");
+        actor
+            .session_delivery_progress
+            .entry(session_key.clone())
+            .or_default()
+            .pipeline
+            .push_back(super::PipelineEntry::ReservedCredit {
+                document_id: super::document_id_text(document),
+            });
+        assert!(
+            actor.reserved_close_credits_outstanding(),
+            "a live worker still owes the slot the policy reserved"
+        );
+
+        actor.state.sessions.get_mut(&session_key).unwrap().worker = None;
+        assert!(
+            !actor.reserved_close_credits_outstanding(),
+            "a session with no worker can never spend a reserved credit"
+        );
     }
 
     #[tokio::test]
