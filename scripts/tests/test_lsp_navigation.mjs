@@ -47,6 +47,11 @@ const INDEX_HTML = path.join(ROOT, 'index.html');
 const COMPOSE = path.join(APP, 'manager-compose-runtime.js');
 const EDITOR_CSS = path.join(ROOT, 'styles/design-system/components/editor.css');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
+const INPUT_RUNTIME = path.join(APP, 'input-runtime.js');
+const SHORTCUT_RUNTIME = path.join(APP, 'shortcut-runtime.js');
+const KEYBOARD_DEFAULTS = path.resolve(
+  import.meta.dirname, '../../crates/termlab_core/src/config/termlab.rs',
+);
 const LSP_CLIENT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/lsp/client.rs');
 const LSP_TYPES = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/lsp/types.rs');
 
@@ -899,6 +904,109 @@ check('an open chooser stands down the hover dwell, so only one overlay is on sc
   assert.strictEqual(hoverRequests.length, 1, 'and hover is available again the moment it closes');
 });
 
+// --- the keys that reach this module ------------------------------------------
+//
+// The controller listens for `termlab:editor-*` window events, which is only
+// half an answer: something has to DISPATCH them. This drives the real
+// shortcut runtime with the real shipped defaults, so "what do I press today"
+// has a test rather than an assumption.
+
+function keyboardDefault(field) {
+  const source = fs.readFileSync(KEYBOARD_DEFAULTS, 'utf8');
+  const match = new RegExp(`${field}: "([^"]+)"`).exec(source);
+  return match ? match[1] : null;
+}
+
+function shortcutHarness(pane) {
+  const sandbox = { console, document: { activeElement: null } };
+  sandbox.window = sandbox;
+  const dispatched = [];
+  sandbox.CustomEvent = class CustomEvent {
+    constructor(type, init) { this.type = type; this.detail = init && init.detail; }
+  };
+  sandbox.dispatchEvent = (event) => { dispatched.push(event.type); return true; };
+  vm.createContext(sandbox);
+  for (const file of [INPUT_RUNTIME, SHORTCUT_RUNTIME]) {
+    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
+  }
+  const keyboard = {
+    editor_go_to_definition: keyboardDefault('editor_go_to_definition'),
+    editor_navigate_back: keyboardDefault('editor_navigate_back'),
+    editor_navigate_forward: keyboardDefault('editor_navigate_forward'),
+  };
+  const handlers = new Map();
+  sandbox.termlabKeyboardRouter = { register: (handler) => handlers.set(handler.name, handler) };
+  const runtime = sandbox.termlabShortcutRuntime.create({
+    invoke: async (command) => {
+      if (command === 'get_all_settings') return { termlab: { keyboard } };
+      if (command === 'get_plugin_menu_items') return [];
+      return null;
+    },
+    isMacPlatform: true,
+    isTextInputTarget: sandbox.termlabInputRuntime.create().isTextInputTarget,
+    handleMenuAction: () => {},
+    shouldDebugKeyEvent: () => false,
+    formatKeyEventForDebug: () => '',
+    shortcutDebugEnabled: false,
+    openCommandPalette: () => {},
+    closeCommandPalette: () => {},
+    isCommandPaletteOpen: () => false,
+    getTabIds: () => [],
+    activateTab: () => {},
+    getCurrentPane: () => pane,
+    writeTextToCurrentPane: () => {},
+    getActiveTab: () => null,
+    getFocusedPaneId: () => null,
+    setFocusedPane: () => {},
+    findAdjacentPane: () => null,
+  });
+  return {
+    runtime,
+    keyboard,
+    dispatched,
+    press: (event) => handlers.get('shortcut-fallbacks').onKeyDown({
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      target: { tagName: 'DIV', className: 'cm-content' },
+      ...event,
+    }),
+  };
+}
+
+check('the shipped defaults bind F12, Ctrl-minus and Ctrl-Shift-minus', () => {
+  assert.strictEqual(keyboardDefault('editor_go_to_definition'), 'f12');
+  assert.strictEqual(keyboardDefault('editor_navigate_back'), 'ctrl+-');
+  assert.strictEqual(keyboardDefault('editor_navigate_forward'), 'ctrl+shift+-');
+});
+
+check('F12 in an editor pane dispatches the event this module listens for', async () => {
+  const h = shortcutHarness({ kind: 'editor' });
+  await h.runtime.init();
+  const consumed = h.press({ code: 'F12', key: 'F12' });
+  assert.strictEqual(consumed, true, 'the keystroke is claimed');
+  assert.deepStrictEqual(h.dispatched, ['termlab:editor-go-to-definition']);
+});
+
+check('Ctrl-minus and Ctrl-Shift-minus dispatch back and forward', async () => {
+  const h = shortcutHarness({ kind: 'editor' });
+  await h.runtime.init();
+  h.press({ code: 'Minus', key: '-', ctrlKey: true });
+  h.press({ code: 'Minus', key: '-', ctrlKey: true, shiftKey: true });
+  assert.deepStrictEqual(h.dispatched, [
+    'termlab:editor-navigate-back', 'termlab:editor-navigate-forward',
+  ]);
+});
+
+check('the same keys in a terminal pane are left to the shell', async () => {
+  const h = shortcutHarness({ kind: 'terminal' });
+  await h.runtime.init();
+  h.press({ code: 'F12', key: 'F12' });
+  h.press({ code: 'Minus', key: '-', ctrlKey: true });
+  assert.deepStrictEqual(h.dispatched, [], 'editor-scoped bindings are dropped, not consumed');
+});
+
 // --- the SERVICE half ----------------------------------------------------------------
 //
 // The real editor-service over a stubbed Tauri client: the navigator's promise
@@ -1093,6 +1201,63 @@ check('openLocalFileAt on an owner elsewhere reveals nothing and reports it', as
 });
 
 // --- the payload the frontend reads -----------------------------------------------
+
+// A definition in the standard library or a cargo registry crate is a `file:`
+// URI outside every session root. The owner's `gd` lands there constantly, so
+// it has to open like any other local file: a new tab, read-write, and NO
+// project-root chooser or trust prompt on the way — "editing is immediate
+// before any project choice" is the spec's rule, and a std source is exactly
+// the file nobody wants to be asked about.
+const OUT_OF_PROJECT = '/Users/dev/.rustup/toolchains/stable/lib/rustlib/src/rust/library/std/src/vec.rs';
+
+check('a definition outside every project root opens in a new tab', async () => {
+  const h = serviceHarness();
+  const before = h.panes.size;
+  const result = await h.service.openLocalFileAt(OUT_OF_PROJECT, {
+    start: { line: 0, character: 7 }, end: { line: 0, character: 15 },
+  });
+  assert.strictEqual(result.status, 'opened', 'not focused: no pane held it before');
+  assert.strictEqual(h.panes.size, before + 1, 'a new editor tab was created for it');
+  assert.strictEqual(result.pane.filePath, OUT_OF_PROJECT);
+  assert.strictEqual(result.revealed, true, 'and the caret is on the definition');
+  assert.strictEqual(
+    result.pane.view.state.readOnly === true, false,
+    'it opens read-write, like any other local file',
+  );
+});
+
+check('opening one asks for no project choice and no trust decision', async () => {
+  const h = serviceHarness();
+  await h.service.openLocalFileAt(OUT_OF_PROJECT, {
+    start: { line: 0, character: 0 }, end: { line: 0, character: 1 },
+  });
+  const commands = h.calls.map((entry) => entry.command);
+  for (const nagging of ['lsp_set_project_context', 'lsp_set_project_trust', 'lsp_project_candidates']) {
+    assert.ok(
+      commands.indexOf(nagging) < 0,
+      `${nagging} fired while merely opening a file outside every root`,
+    );
+  }
+  assert.deepStrictEqual(
+    commands.filter((name) => name.indexOf('editor_') === 0 || name.indexOf('lsp_') === 0),
+    ['editor_reserve_document', 'editor_read_file', 'lsp_open_document'],
+    'reserve, read, commit — the same three calls any local open makes',
+  );
+});
+
+check('a second gd to the same out-of-project file focuses the tab it already opened', async () => {
+  const h = serviceHarness();
+  await h.service.openLocalFileAt(OUT_OF_PROJECT, {
+    start: { line: 0, character: 0 }, end: { line: 0, character: 1 },
+  });
+  const opened = h.panes.size;
+  const again = await h.service.openLocalFileAt(OUT_OF_PROJECT, {
+    start: { line: 2, character: 2 }, end: { line: 2, character: 6 },
+  });
+  assert.strictEqual(again.status, 'focused');
+  assert.strictEqual(h.panes.size, opened, 'no second view of the same bytes');
+  assert.strictEqual(again.revealed, true, 'the new range is revealed in the tab that exists');
+});
 
 check('Rust normalizes LocationLink to a Location on its target selection range', () => {
   const source = fs.readFileSync(LSP_CLIENT, 'utf8');

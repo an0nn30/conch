@@ -465,6 +465,25 @@
       });
     }
 
+    // `gd`/`gD` -> Go to Definition. Registered against the vim engine rather
+    // than as a key handler, because in normal mode vim owns the keystroke —
+    // and unconditionally, like the ex commands, because the binding lives on
+    // the engine and must be in place before the first editor pane exists and
+    // stay correct when the vim_mode setting is toggled later. The view comes
+    // from vim's own adapter, so no pane map is needed here.
+    if (
+      global.termlabVimMode
+      && typeof global.termlabVimMode.registerNavigationCommands === 'function'
+    ) {
+      global.termlabVimMode.registerNavigationCommands({
+        goToDefinition: (view) => {
+          const navigation = global.termlabLspNavigation;
+          if (!navigation || typeof navigation.goToDefinition !== 'function') return null;
+          return navigation.goToDefinition(view);
+        },
+      });
+    }
+
     return {
       paneManager,
       tabManager,

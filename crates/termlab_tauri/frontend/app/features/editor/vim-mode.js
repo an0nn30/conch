@@ -138,8 +138,55 @@
     return true;
   }
 
+  // `gd` / `gD` — Go to Definition, the way a vim user actually asks for it.
+  //
+  // This has to be a vim COMMAND, not a DOM handler. In normal mode vim's
+  // ViewPlugin owns the keystroke, and the Prec.highest handlers the LSP
+  // surfaces install deliberately fall through when nothing of theirs is open,
+  // so `g` and `d` never reach them as a pair. The engine's own command table
+  // is the only correct hook, and it is also the only one that understands
+  // that `gd` is two keys.
+  //
+  // Nothing is taken away: @replit/codemirror-vim binds gg/gj/gk/ge/gE/gi/gI/
+  // gv/gu/gU/gn/gN/gq/gw/gc/gJ/g~/g?/g*/g# and neither `gd` nor `gD`. `gD`
+  // (declaration in vim) maps to the same action because the LSP payload folds
+  // declaration into definition.
+  //
+  // The action runs inside vim's own operation, and the jump dispatches
+  // transactions into this very view — and may build a whole new tab — so it
+  // is deferred to a microtask exactly as the ex commands are.
+  let registeredNavigation = false;
+  function registerNavigationCommands(deps) {
+    const CM = global.CM6;
+    const Vim = CM && CM.Vim;
+    if (
+      !Vim || typeof Vim.defineAction !== 'function' || typeof Vim.mapCommand !== 'function'
+    ) return false;
+    const goToDefinition = deps && typeof deps.goToDefinition === 'function'
+      ? deps.goToDefinition
+      : null;
+    if (!goToDefinition) return false;
+    if (registeredNavigation) return true;
+    registeredNavigation = true;
+    // The adapter hands the action its CodeMirror 6 view as `cm6` (the CM5
+    // adapter calls it `cm`); the caret is read off the view by the navigator
+    // itself, which is what keeps this seam to one line.
+    Vim.defineAction('termlabGoToDefinition', (cm) => {
+      const view = cm && (cm.cm6 || cm.cm || null);
+      if (!view) return;
+      defer(() => goToDefinition(view));
+    });
+    // `<C-]>` is vim's tag-jump idiom and the package binds only `<C-t>`, so
+    // it comes along for free through the same mechanism.
+    for (const keys of ['gd', 'gD', '<C-]>']) {
+      Vim.mapCommand(keys, 'action', 'termlabGoToDefinition', {}, { context: 'normal' });
+    }
+    return true;
+  }
+
   global.termlabVimMode = {
     vimExtensions,
     registerExCommands,
+    registerNavigationCommands,
   };
 })(window);
