@@ -475,12 +475,48 @@
       global.termlabVimMode
       && typeof global.termlabVimMode.registerNavigationCommands === 'function'
     ) {
+      const navigator = () => global.termlabLspNavigation || null;
+      // Diagnostics travel as the app's own shortcut events rather than as a
+      // direct call, so `]d` and F8 end up in exactly the same place —
+      // problems-navigation listens for these and owns the traversal.
+      const problemEvent = (name) => {
+        if (typeof global.dispatchEvent !== 'function' || typeof global.CustomEvent !== 'function') {
+          return;
+        }
+        global.dispatchEvent(new global.CustomEvent(name));
+      };
       global.termlabVimMode.registerNavigationCommands({
         goToDefinition: (view) => {
-          const navigation = global.termlabLspNavigation;
+          const navigation = navigator();
           if (!navigation || typeof navigation.goToDefinition !== 'function') return null;
           return navigation.goToDefinition(view);
         },
+        // Ctrl-O / Ctrl-I. vim's own jumplist holds per-document bookmarks and
+        // cannot cross files, so these walk the window's history instead — and
+        // recordJump keeps that history fed with vim's in-file jump motions,
+        // so the trail stays single and coherent.
+        navigateBack: () => {
+          const navigation = navigator();
+          return navigation ? navigation.navigateBack() : null;
+        },
+        navigateForward: () => {
+          const navigation = navigator();
+          return navigation ? navigation.navigateForward() : null;
+        },
+        recordJump: (view, position) => {
+          const navigation = navigator();
+          return navigation && typeof navigation.recordJump === 'function'
+            ? navigation.recordJump(view, position)
+            : false;
+        },
+        showHover: (view) => {
+          const tooltips = global.termlabLspTooltips;
+          return tooltips && typeof tooltips.showHover === 'function'
+            ? tooltips.showHover(view)
+            : null;
+        },
+        nextDiagnostic: () => problemEvent('termlab:editor-next-problem'),
+        previousDiagnostic: () => problemEvent('termlab:editor-previous-problem'),
       });
     }
 

@@ -1206,3 +1206,10 @@ These are intentionally outside this POC and must not be smuggled into its imple
 1. Bundle and validate JSON, Python, Go, C/C++, and Java adapters, including their runtime/JDK/toolchain footprints and language-specific initialization behavior.
 2. Produce universal macOS resources and signing/notarization strategy for both arm64 and x86_64, including per-architecture native servers and Node runtimes.
 3. Add remote-file/project LSP transports and remote process lifecycle after the local ownership and trust model has production evidence.
+4. Vim parity blocked on backend features. The vim vocabulary a normal-mode user reaches for is mapped only where the feature actually ships (`gd`/`gD`/`<C-]>` definition, `K` hover, `]d`/`[d` diagnostics, `<C-o>`/`<C-i>` history). These stay unmapped, deliberately, until the request exists in `crates/termlab_tauri/src/lsp/` — mapping a key to nothing is worse than leaving it to vim:
+   - `gr` — `textDocument/references`, plus a results list surface to show them in.
+   - `<leader>rn` — `textDocument/rename`, which needs the cross-document `WorkspaceEdit` application the POC explicitly does not do (completion already preserves-but-refuses cross-document edits for the same reason).
+   - `ga` / `<leader>ca` — `textDocument/codeAction` and command execution.
+   - `=` / `<leader>f` — `textDocument/formatting` and `rangeFormatting`.
+   - `gi` / `gy` — implementation and type-definition requests (note `gi` is already vim's "insert at last edit"; overriding it needs a decision, not just a mapping).
+5. The vim in-file jump absorption (`app/features/editor/vim-mode.js`, `absorbJumpList`) wraps `jumpList.add` reached through `@replit/codemirror-vim`'s `Vim.getVimGlobalState_()`, which the package labels a testing hook. It is guarded end to end — if a future version moves it, the in-file half of the history is lost and the LSP half keeps working — but a package upgrade should re-check `scripts/tests/test_editor_vim_glue.mjs`'s absorption checks. The upstream alternative is a real jumplist event, which the package does not expose today.

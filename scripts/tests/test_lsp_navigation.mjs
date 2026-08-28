@@ -37,6 +37,7 @@ const TOOLTIPS = path.join(MODULES, 'lsp-tooltips.js');
 // Position conversion lives in its own module now (lsp-position.js); every
 // harness that loads a converting module loads it too, the way index.html does.
 const POSITION = path.join(MODULES, 'lsp-position.js');
+const VIM_MODE = path.join(MODULES, 'vim-mode.js');
 const EDITOR_SERVICE = path.join(MODULES, 'editor-service.js');
 const LSP_STATE = path.join(MODULES, 'lsp-state.js');
 const LSP_BRIDGE = path.join(MODULES, 'lsp-bridge.js');
@@ -902,6 +903,131 @@ check('an open chooser stands down the hover dwell, so only one overlay is on sc
   tooltips.handlePointerMove({ clientX: 16, clientY: 0 }, view);
   await sleep(30);
   assert.strictEqual(hoverRequests.length, 1, 'and hover is available again the moment it closes');
+});
+
+// --- the vim keys, end to end -------------------------------------------------
+//
+// The owner's case: `gd` into another file, then Ctrl-O back to exactly where
+// the cursor was. Driven through the REAL vim engine and the REAL history
+// module, because the bug this replaces was precisely that vim's own jumplist
+// cannot cross files.
+
+function vimAdapter(view) {
+  let cursor = { line: 0, ch: 0 };
+  return {
+    cm6: view,
+    state: {},
+    curOp: null,
+    getCursor: () => ({ line: cursor.line, ch: cursor.ch }),
+    listSelections: () => [{ anchor: cursor, head: cursor }],
+    setCursor(line, ch) {
+      cursor = typeof line === 'object' && line !== null
+        ? { line: line.line, ch: line.ch || 0 }
+        : { line, ch: ch || 0 };
+    },
+    getOption: () => undefined,
+    setOption() {},
+    operation(fn) {
+      this.curOp = this.curOp || {};
+      try { return fn(); } finally { this.curOp = null; }
+    },
+    getLine: () => 'const value = format(1);',
+    lineCount: () => 40,
+    firstLine: () => 0,
+    lastLine: () => 39,
+    getRange: () => '',
+    getSelection: () => '',
+    replaceRange() {},
+    focus() {},
+    scrollIntoView() {},
+    on() {},
+    off() {},
+    setBookmark: (pos) => ({ find: () => pos, clear() {} }),
+  };
+}
+
+// Load vim-mode into an existing navigation harness and wire it to the real
+// navigator, the way manager-compose-runtime does.
+function withVim(h) {
+  h.sandbox.CM6.Vim = REAL.vim.Vim;
+  vm.runInContext(fs.readFileSync(VIM_MODE, 'utf8'), h.sandbox, { filename: VIM_MODE });
+  h.sandbox.termlabVimMode.registerNavigationCommands({
+    goToDefinition: (view) => h.navigation.goToDefinition(view),
+    navigateBack: () => h.navigation.navigateBack(),
+    navigateForward: () => h.navigation.navigateForward(),
+    recordJump: (view, position) => h.navigation.recordJump(view, position),
+  });
+  return (keys, view) => {
+    const adapter = vimAdapter(view);
+    let command;
+    for (const key of keys) command = REAL.vim.Vim.findKey(adapter, key, 'test');
+    if (typeof command === 'function') command();
+    return adapter;
+  };
+}
+
+check('gd into another file, then Ctrl-O, returns to the exact pre-jump position', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen((filePath) => ({
+    status: 'focused',
+    pane: filePath === '/repo/src/fmt.ts' ? target : h.origin,
+    revealed: true,
+  }));
+  const press = withVim(h);
+  // The caret sits inside `format(1)` on line 2 of the origin file.
+  h.origin.view.dispatch({ selection: { anchor: 45 } });
+
+  press(['g', 'd'], h.origin.view);
+  await sleep(10);
+  assert.deepStrictEqual(
+    h.opens.map((entry) => entry.filePath), ['/repo/src/fmt.ts'],
+    'gd opened the definition\'s file',
+  );
+
+  press(['<C-o>'], target.view);
+  await sleep(10);
+  assert.strictEqual(h.opens.length, 2, 'Ctrl-O went somewhere');
+  assert.strictEqual(h.opens[1].filePath, '/repo/src/main.ts', 'back to the file gd left');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.opens[1].range)),
+    { start: { line: 1, character: 13 }, end: { line: 1, character: 13 } },
+    'and to the exact cursor position it left from',
+  );
+
+  press(['<C-i>'], h.origin.view);
+  await sleep(10);
+  assert.strictEqual(h.opens[2].filePath, '/repo/src/fmt.ts', 'Ctrl-I re-jumps');
+});
+
+check('a vim jump motion inside a file joins the same trail', async () => {
+  const h = harness();
+  const press = withVim(h);
+  h.setOpen(() => ({ status: 'focused', pane: h.origin, revealed: true }));
+  press(['G'], h.origin.view);
+  const back = h.history().back;
+  assert.strictEqual(back.length, 1, 'G recorded where it jumped from');
+  assert.strictEqual(back[0].uri, 'file:///repo/src/main.ts');
+
+  await h.navigation.navigateBack();
+  assert.strictEqual(h.opens.length, 1, 'Ctrl-O has something in-file to return to');
+  assert.strictEqual(h.opens[0].filePath, '/repo/src/main.ts');
+});
+
+check('recordJump collapses on the position vim reported, not the live selection', () => {
+  const h = harness();
+  assert.strictEqual(h.navigation.recordJump(h.origin.view, { line: 1, character: 13 }), true);
+  const entry = h.history().back[0];
+  assert.deepStrictEqual(entry.position, { line: 1, character: 13 });
+  assert.deepStrictEqual(entry.range, {
+    start: { line: 1, character: 13 }, end: { line: 1, character: 13 },
+  });
+});
+
+check('a jump recorded from an untitled buffer is not history', () => {
+  const h = harness({ originPath: null });
+  assert.strictEqual(h.navigation.recordJump(h.origin.view, { line: 0, character: 0 }), false);
+  assert.deepStrictEqual(h.history().back, [], 'there is no URI to come back to');
 });
 
 // --- the keys that reach this module ------------------------------------------

@@ -51,23 +51,31 @@ const REAL_VIM = await import(
 // that gives the engine a `curOp` to tag. `cm6` is where the adapter puts the
 // EditorView, which is the one field the action reads.
 function vimAdapter(view) {
+  // The cursor is real enough to move: the engine skips recording a jump that
+  // did not go anywhere, so `G` only reaches the jumplist if the position
+  // actually changes.
+  let cursor = { line: 0, ch: 0 };
   return {
     cm6: view,
     state: {},
     curOp: null,
-    getCursor: () => ({ line: 0, ch: 0 }),
-    listSelections: () => [{ anchor: { line: 0, ch: 0 }, head: { line: 0, ch: 0 } }],
-    setCursor() {},
+    getCursor: () => ({ line: cursor.line, ch: cursor.ch }),
+    listSelections: () => [{ anchor: cursor, head: cursor }],
+    setCursor(line, ch) {
+      cursor = typeof line === 'object' && line !== null
+        ? { line: line.line, ch: line.ch || 0 }
+        : { line, ch: ch || 0 };
+    },
     getOption: () => undefined,
     setOption() {},
     operation(fn) {
       this.curOp = this.curOp || {};
       try { return fn(); } finally { this.curOp = null; }
     },
-    getLine: () => '',
-    lineCount: () => 1,
+    getLine: () => 'const value = 1;',
+    lineCount: () => 40,
     firstLine: () => 0,
-    lastLine: () => 0,
+    lastLine: () => 39,
     getRange: () => '',
     getSelection: () => '',
     replaceRange() {},
@@ -75,6 +83,9 @@ function vimAdapter(view) {
     scrollIntoView() {},
     on() {},
     off() {},
+    // vim's own jumplist stores bookmarks; the real adapter makes them from
+    // the document, and this is enough for the engine to run its half.
+    setBookmark: (pos) => ({ find: () => pos, clear() {} }),
   };
 }
 
@@ -578,14 +589,27 @@ check('setLanguage on a view it does not know is a no-op', () => {
 // fall through when nothing of theirs is open.
 
 // A sandbox whose CM6 carries the real Vim engine, plus the real vim-mode.js.
-function makeNavHarness() {
+function makeNavHarness(options = {}) {
   const { sandbox, cm } = loadModules([VIM_MODE]);
   cm.CM.Vim = REAL_VIM.Vim;
   const jumps = [];
-  const registered = sandbox.termlabVimMode.registerNavigationCommands({
+  const calls = {
+    back: 0, forward: 0, hovers: [], nextProblem: 0, previousProblem: 0, recorded: [],
+  };
+  const deps = {
     goToDefinition: (view) => { jumps.push(view); return Promise.resolve('navigated'); },
-  });
-  return { sandbox, cm, registered, jumps };
+    navigateBack: () => { calls.back += 1; return Promise.resolve('navigated'); },
+    navigateForward: () => { calls.forward += 1; return Promise.resolve('navigated'); },
+    showHover: (view) => { calls.hovers.push(view); return Promise.resolve(true); },
+    nextDiagnostic: () => { calls.nextProblem += 1; },
+    previousDiagnostic: () => { calls.previousProblem += 1; },
+    recordJump: (view, position) => { calls.recorded.push({ view, position }); return true; },
+  };
+  for (const omitted of options.omit || []) delete deps[omitted];
+  const registered = sandbox.termlabVimMode.registerNavigationCommands(deps);
+  return {
+    sandbox, cm, registered, jumps, calls,
+  };
 }
 
 check('the shipped vim keymap binds neither gd nor gD, so nothing is taken away', () => {
@@ -651,6 +675,102 @@ check('the jump is deferred, so it never runs inside vim\'s own operation', asyn
   assert.strictEqual(h.jumps.length, 1);
 });
 
+// --- Ctrl-O / Ctrl-I: one history, vim semantics ----------------------------
+//
+// vim's own <C-o>/<C-i> walk a jumplist whose entries are per-DOCUMENT
+// bookmarks, fed only by vim motions — it can neither see a gd into another
+// file nor switch tabs, which is exactly why the owner pressed Ctrl-O after a
+// gd and nothing happened. These keys are remapped onto the window's own
+// cross-file history instead.
+
+check('Ctrl-O and Ctrl-I walk the window history, not vim\'s per-document one', async () => {
+  const h = makeNavHarness();
+  const adapter = vimAdapter({ id: 'view' });
+  typeKeys(adapter, ['<C-o>'])();
+  typeKeys(adapter, ['<C-i>'])();
+  await tick();
+  assert.strictEqual(h.calls.back, 1, 'Ctrl-O went back');
+  assert.strictEqual(h.calls.forward, 1, 'Ctrl-I went forward');
+});
+
+check('a vim jump motion is absorbed into that same history', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'jump-view' };
+  const adapter = vimAdapter(view);
+  // The engine's own hook, called by every `toJumplist` motion — G, gg, {, },
+  // /search, n/N, marks, %, H/M/L.
+  REAL_VIM.Vim.getVimGlobalState_().jumpList.add(
+    adapter, { line: 3, ch: 2 }, { line: 41, ch: 0 },
+  );
+  assert.strictEqual(h.calls.recorded.length, 1, 'the pre-motion position was recorded');
+  assert.strictEqual(h.calls.recorded[0].view, view);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.calls.recorded[0].position)), { line: 3, character: 2 },
+    'vim reports ch; the history speaks LSP characters',
+  );
+});
+
+check('absorbing does not break vim\'s own jumplist bookkeeping', () => {
+  makeNavHarness();
+  const adapter = vimAdapter({ id: 'native' });
+  const jumpList = REAL_VIM.Vim.getVimGlobalState_().jumpList;
+  jumpList.add(adapter, { line: 1, ch: 0 }, { line: 9, ch: 0 });
+  const mark = jumpList.find(adapter, -1);
+  assert.ok(mark, 'the engine still recorded its own entry underneath');
+});
+
+check('a real G motion feeds the history through the engine', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'motion-view' };
+  const adapter = vimAdapter(view);
+  const command = typeKeys(adapter, ['G']);
+  assert.strictEqual(typeof command, 'function', 'the engine matched G');
+  command();
+  assert.ok(h.calls.recorded.length >= 1, 'G is a jump, and jumps are remembered');
+  assert.strictEqual(h.calls.recorded[0].view, view);
+});
+
+// --- the parity keys --------------------------------------------------------
+
+check('K asks for hover at the cursor', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'hover-view' };
+  typeKeys(vimAdapter(view), ['K'])();
+  await tick();
+  assert.deepStrictEqual(h.calls.hovers, [view]);
+});
+
+check(']d and [d step through diagnostics', async () => {
+  const h = makeNavHarness();
+  const adapter = vimAdapter({ id: 'diag-view' });
+  const next = typeKeys(adapter, [']', 'd']);
+  assert.strictEqual(typeof next, 'function', 'our ]d wins over the package\'s ]<character>');
+  next();
+  typeKeys(adapter, ['[', 'd'])();
+  await tick();
+  assert.strictEqual(h.calls.nextProblem, 1);
+  assert.strictEqual(h.calls.previousProblem, 1);
+});
+
+check('a key whose feature was not wired stays out of this window', async () => {
+  const h = makeNavHarness({ omit: ['showHover'] });
+  typeKeys(vimAdapter({ id: 'no-hover' }), ['K'])();
+  await tick();
+  assert.deepStrictEqual(h.calls.hovers, [], 'no hover was requested from this registration');
+});
+
+check('Ctrl-I is not Tab in a webview, so insert-mode Tab is untouched', () => {
+  const key = (event) => REAL_VIM.Vim.vimKeyFromEvent(event, {});
+  assert.strictEqual(key({ key: 'i', ctrlKey: true }), '<C-i>');
+  assert.strictEqual(key({ key: 'Tab' }), '<Tab>', 'a Tab keydown is its own key, not ^I');
+  const source = fs.readFileSync(VIM_MODE, 'utf8');
+  assert.ok(!/'<Tab>'/.test(source), 'nothing here claims Tab');
+  assert.ok(
+    !/context: 'insert'/.test(source),
+    'every mapping is normal-mode, so insert-mode completion and indent are untouched',
+  );
+});
+
 check('registerNavigationCommands reports false with no engine and with no dependency', () => {
   const withoutEngine = loadModules([VIM_MODE]);
   withoutEngine.cm.CM.Vim = undefined;
@@ -663,13 +783,23 @@ check('registerNavigationCommands reports false with no engine and with no depen
   assert.strictEqual(withoutDep.sandbox.termlabVimMode.registerNavigationCommands({}), false);
 });
 
-check('the compose runtime hands vim the navigator, not a view or a pane map', () => {
+check('the compose runtime hands vim every feature it maps, and no view or pane map', () => {
   const source = fs.readFileSync(COMPOSE, 'utf8');
   assert.ok(/registerNavigationCommands/.test(source), 'the binding is wired at composition');
   const at = source.indexOf('registerNavigationCommands');
-  const block = source.slice(at, at + 500);
-  assert.ok(/termlabLspNavigation/.test(block));
-  assert.ok(/goToDefinition/.test(block));
+  const block = source.slice(at, at + 2600);
+  for (const dep of [
+    'goToDefinition', 'navigateBack', 'navigateForward', 'recordJump',
+    'showHover', 'nextDiagnostic', 'previousDiagnostic',
+  ]) {
+    assert.ok(new RegExp(`${dep}:`).test(block), `${dep} is not wired`);
+  }
+  assert.ok(/termlabLspNavigation/.test(block), 'navigation comes from the navigator');
+  assert.ok(/termlabLspTooltips/.test(block), 'K goes to the hover controller');
+  assert.ok(
+    /termlab:editor-next-problem/.test(block) && /termlab:editor-previous-problem/.test(block),
+    ']d and [d ride the same events F8 does, so both reach problems-navigation',
+  );
 });
 
 let failed = 0;

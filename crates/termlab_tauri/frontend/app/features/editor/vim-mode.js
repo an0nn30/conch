@@ -138,23 +138,29 @@
     return true;
   }
 
-  // `gd` / `gD` — Go to Definition, the way a vim user actually asks for it.
+  // The vim keys for the IDE features this app actually ships.
   //
-  // This has to be a vim COMMAND, not a DOM handler. In normal mode vim's
+  // These have to be vim COMMANDS, not DOM handlers. In normal mode vim's
   // ViewPlugin owns the keystroke, and the Prec.highest handlers the LSP
   // surfaces install deliberately fall through when nothing of theirs is open,
-  // so `g` and `d` never reach them as a pair. The engine's own command table
-  // is the only correct hook, and it is also the only one that understands
-  // that `gd` is two keys.
+  // so `g` then `d` never reach them as a pair. The engine's own command table
+  // is the only correct hook, and the only one that understands multi-key
+  // sequences.
   //
-  // Nothing is taken away: @replit/codemirror-vim binds gg/gj/gk/ge/gE/gi/gI/
-  // gv/gu/gU/gn/gN/gq/gw/gc/gJ/g~/g?/g*/g# and neither `gd` nor `gD`. `gD`
-  // (declaration in vim) maps to the same action because the LSP payload folds
-  // declaration into definition.
+  //   gd, gD, <C-]>  go to definition   (nothing in the package binds these)
+  //   <C-o>, <C-i>   back / forward     (remapped, see absorbJumpList below)
+  //   K              hover              (the package binds no K)
+  //   ]d, [d         next/prev problem  (mapCommand unshifts, so these beat
+  //                                      the package's ]<character> motion)
   //
-  // The action runs inside vim's own operation, and the jump dispatches
-  // transactions into this very view — and may build a whole new tab — so it
-  // is deferred to a microtask exactly as the ex commands are.
+  // Everything is normal-mode only, so insert-mode Tab, Ctrl-Space and
+  // Ctrl-O ("one normal command") keep their meanings. A key is mapped only
+  // when its feature was actually wired, so a window without one gets no dead
+  // key.
+  //
+  // Each action defers to a microtask for the same reason the ex commands do:
+  // it runs inside vim's own operation, and the work dispatches transactions
+  // into that very view — and may build a whole new tab.
   let registeredNavigation = false;
   function registerNavigationCommands(deps) {
     const CM = global.CM6;
@@ -162,25 +168,102 @@
     if (
       !Vim || typeof Vim.defineAction !== 'function' || typeof Vim.mapCommand !== 'function'
     ) return false;
-    const goToDefinition = deps && typeof deps.goToDefinition === 'function'
-      ? deps.goToDefinition
-      : null;
-    if (!goToDefinition) return false;
+    const d = deps || {};
+    if (typeof d.goToDefinition !== 'function') return false;
     if (registeredNavigation) return true;
     registeredNavigation = true;
-    // The adapter hands the action its CodeMirror 6 view as `cm6` (the CM5
-    // adapter calls it `cm`); the caret is read off the view by the navigator
-    // itself, which is what keeps this seam to one line.
-    Vim.defineAction('termlabGoToDefinition', (cm) => {
-      const view = cm && (cm.cm6 || cm.cm || null);
-      if (!view) return;
-      defer(() => goToDefinition(view));
-    });
-    // `<C-]>` is vim's tag-jump idiom and the package binds only `<C-t>`, so
-    // it comes along for free through the same mechanism.
-    for (const keys of ['gd', 'gD', '<C-]>']) {
-      Vim.mapCommand(keys, 'action', 'termlabGoToDefinition', {}, { context: 'normal' });
+
+    // The adapter hands an action its CodeMirror 6 view as `cm6` (the CM5
+    // adapter calls it `cm`); the caret is read off the view by the feature
+    // itself, which is what keeps this seam to one line per key.
+    const viewOf = (cm) => (cm && (cm.cm6 || cm.cm)) || null;
+
+    function map(keys, name, run, needsView) {
+      Vim.defineAction(name, (cm) => {
+        const view = viewOf(cm);
+        if (needsView && !view) return;
+        defer(() => run(view));
+      });
+      for (const spelling of keys) {
+        Vim.mapCommand(spelling, 'action', name, {}, { context: 'normal' });
+      }
     }
+
+    // `gD` (declaration) and `<C-]>` (tag jump) are the same action here: the
+    // definition payload folds declaration into definition, and the package
+    // binds neither.
+    map(['gd', 'gD', '<C-]>'], 'termlabGoToDefinition', d.goToDefinition, true);
+    if (typeof d.navigateBack === 'function') {
+      map(['<C-o>'], 'termlabJumpBack', () => d.navigateBack(), false);
+    }
+    if (typeof d.navigateForward === 'function') {
+      map(['<C-i>'], 'termlabJumpForward', () => d.navigateForward(), false);
+    }
+    if (typeof d.showHover === 'function') {
+      map(['K'], 'termlabShowHover', d.showHover, true);
+    }
+    if (typeof d.nextDiagnostic === 'function') {
+      map([']d'], 'termlabNextDiagnostic', () => d.nextDiagnostic(), false);
+    }
+    if (typeof d.previousDiagnostic === 'function') {
+      map(['[d'], 'termlabPreviousDiagnostic', () => d.previousDiagnostic(), false);
+    }
+    if (typeof d.recordJump === 'function') absorbJumpList(Vim, d.recordJump);
+    return true;
+  }
+
+  // One history, not two.
+  //
+  // vim keeps its own jumplist, and it cannot serve this app: its entries are
+  // CodeMirror BOOKMARKS belonging to one document, so a jump that changed
+  // file has nothing to come back to, and walking an entry recorded in another
+  // view would put the caret at a line number borrowed from a different file.
+  // That is exactly why Ctrl-O did nothing after a cross-file `gd`.
+  //
+  // So <C-o>/<C-i> consult the window's own cross-file history and ONLY that —
+  // no fall-through to vim's native walk, which could never be right here —
+  // and this wrapper feeds that history from the same event vim feeds its own
+  // list from: `jumpList.add(cm, oldCur, newCur)`, called by every motion the
+  // keymap marks `toJumplist` (G, gg, {, }, /search, n/N, marks, %, H/M/L).
+  // The engine keeps its own list underneath, untouched and now unread.
+  //
+  // `getVimGlobalState_` is the package's own accessor for that state. It is
+  // labelled a testing hook, so this is guarded end to end: if a future
+  // version moves it, the in-file half of the history is lost and the LSP
+  // half still works, rather than the editor breaking.
+  function absorbJumpList(Vim, recordJump) {
+    if (typeof Vim.getVimGlobalState_ !== 'function') return false;
+    let jumpList = null;
+    try {
+      const state = Vim.getVimGlobalState_();
+      jumpList = state && state.jumpList;
+    } catch (_) {
+      return false;
+    }
+    if (!jumpList || typeof jumpList.add !== 'function') return false;
+    // The recorder lives ON the list, and the wrapper reads it at call time.
+    // The engine's state object outlives any one registration (it is created
+    // when the package is first imported), so a second window — or a reload —
+    // must be able to take the recording over rather than wrap a wrapper and
+    // leave the first, now-dead recorder in the chain.
+    jumpList.termlabRecordJump = recordJump;
+    if (jumpList.termlabAbsorbed) return true;
+    const original = jumpList.add;
+    jumpList.termlabAbsorbed = true;
+    jumpList.add = function absorbedAdd(cm, oldCur) {
+      try {
+        const view = cm && (cm.cm6 || cm.cm);
+        const record = jumpList.termlabRecordJump;
+        // vim counts columns in `ch`; the history speaks LSP characters, which
+        // is the same unit under a different name.
+        if (view && oldCur && typeof record === 'function') {
+          record(view, { line: oldCur.line, character: oldCur.ch });
+        }
+      } catch (error) {
+        console.error('vim jump was not recorded in the navigation history', error);
+      }
+      return original.apply(this, arguments);
+    };
     return true;
   }
 

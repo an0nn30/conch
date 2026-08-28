@@ -353,6 +353,28 @@
     if (store) store.record(origin);
   }
 
+  // A vim jump-class motion (G, gg, {, }, /search, n/N, marks, %, H/M/L) told
+  // to us by vim-mode's jumplist hook. It means the same thing to Ctrl-O as a
+  // definition jump does — "where I was before that" — so it goes on the same
+  // trail rather than into a second, per-file one.
+  //
+  // `position` is vim's PRE-motion cursor. The caret has usually already moved
+  // by the time we hear about it, so the entry is collapsed on that position
+  // rather than on whatever the live selection now is.
+  function recordJump(view, position) {
+    const helper = global.termlabLspPosition;
+    const pane = paneForView(view) || currentPane();
+    if (!helper || !pane || !pane.view || !pane.view.state) return false;
+    const origin = captureLocation(pane, helper.offsetAt(pane.view.state.doc, position));
+    if (!origin) return false;
+    origin.range = {
+      start: { line: origin.position.line, character: origin.position.character },
+      end: { line: origin.position.line, character: origin.position.character },
+    };
+    record(origin);
+    return true;
+  }
+
   function viewOrCurrent(view) {
     if (view) return view;
     const pane = currentPane();
@@ -546,6 +568,7 @@
     goToDefinition,
     navigateBack,
     navigateForward,
+    recordJump,
     historyState,
     chooserState,
     chooserOpen,
