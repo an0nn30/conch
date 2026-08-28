@@ -233,13 +233,22 @@
     return Promise.resolve(service.openLocalFileAt(filePath, range, { focus: true }));
   }
 
+  // Non-zero while this module is taking the user somewhere. The focus change
+  // that follows is OUR doing — gd has already recorded its origin, and a walk
+  // with Ctrl-O/Ctrl-I must neither append an entry nor truncate the way
+  // forward — so the switch recorder stands down for the duration.
+  let jumping = 0;
+
   async function jumpTo(target) {
     let result = null;
+    jumping += 1;
     try {
       result = await openLocalFileAt(target.path, target.range);
     } catch (error) {
       status('Cannot Navigate', String(error));
       return 'failed';
+    } finally {
+      jumping -= 1;
     }
     const outcome = result && result.status;
     if (outcome === 'ownerElsewhere') return 'elsewhere';
@@ -371,6 +380,44 @@
       start: { line: origin.position.line, character: origin.position.character },
       end: { line: origin.position.line, character: origin.position.character },
     };
+    record(origin);
+    return true;
+  }
+
+  // The document the window's active editor was last showing. Not "the
+  // previously focused pane": a detour through a terminal, the Problems list
+  // or a plugin view is not a jump, and must not lose the one that follows it.
+  let lastEditorPane = null;
+
+  function editorDocumentPane(pane) {
+    return pane && pane.kind === 'editor' && !pane.remote ? pane : null;
+  }
+
+  // Called for every focus change in the window (pane-manager's
+  // onFocusedPaneChanged — the one place a tab click, an explorer open, a
+  // palette open, a CLI open and a split-pane focus all cross).
+  //
+  // Opening a file by hand is a jump in vim's sense: `:e` and `:b` go on the
+  // jumplist, so Ctrl-O comes back from them. Only a change of DOCUMENT counts
+  // — two panes on one file are one document, and same-document cursor motion
+  // belongs to the vim-motion recorder.
+  function noteFocusedPaneChanged(previousPane, nextPane) {
+    const next = editorDocumentPane(nextPane);
+    if (!next) return false;
+    const from = lastEditorPane;
+    lastEditorPane = next;
+    // Tracked even while we are jumping — the destination is where the NEXT
+    // manual switch will be leaving from — but not recorded.
+    if (jumping) return false;
+    if (!from || from === next || from.filePath === next.filePath) return false;
+    const origin = captureLocation(from, null);
+    if (!origin) return false;
+    const store = history();
+    // Defensive: a focus change that lands after a jump has already resolved
+    // would otherwise stack the same location twice.
+    if (store && typeof store.equals === 'function' && store.equals(store.peek('back'), origin)) {
+      return false;
+    }
     record(origin);
     return true;
   }
@@ -569,6 +616,7 @@
     navigateBack,
     navigateForward,
     recordJump,
+    noteFocusedPaneChanged,
     historyState,
     chooserState,
     chooserOpen,

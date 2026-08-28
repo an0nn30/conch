@@ -38,6 +38,7 @@ const TOOLTIPS = path.join(MODULES, 'lsp-tooltips.js');
 // harness that loads a converting module loads it too, the way index.html does.
 const POSITION = path.join(MODULES, 'lsp-position.js');
 const VIM_MODE = path.join(MODULES, 'vim-mode.js');
+const PANE_MANAGER = path.join(APP, 'pane-manager.js');
 const EDITOR_SERVICE = path.join(MODULES, 'editor-service.js');
 const LSP_STATE = path.join(MODULES, 'lsp-state.js');
 const LSP_BRIDGE = path.join(MODULES, 'lsp-bridge.js');
@@ -266,10 +267,21 @@ function harness(options = {}) {
     },
   });
 
+  // What pane-manager does on every focus change: the focused pane moves, and
+  // the navigator is told. Tests drive switches through this rather than
+  // poking the module, so `currentPane()` and the notification cannot drift
+  // apart the way they never do in the app.
+  function focus(pane) {
+    const previous = focusedPane;
+    focusedPane = pane;
+    return navigation.noteFocusedPaneChanged(previous, pane);
+  }
+
   return {
     sandbox,
     navigation,
     extensions,
+    focus,
     panes,
     states,
     origin,
@@ -1030,6 +1042,178 @@ check('a jump recorded from an untitled buffer is not history', () => {
   assert.deepStrictEqual(h.history().back, [], 'there is no URI to come back to');
 });
 
+// --- plain file switches ------------------------------------------------------
+//
+// Opening a file by hand — the explorer, the palette, a tab click, `termlab
+// msg` from the CLI — is a jump in vim's sense (`:e` and `:b` go on the
+// jumplist), so Ctrl-O has to come back from it. Only a change of DOCUMENT
+// counts, and a switch this module caused itself must not be recorded twice
+// nor truncate the forward stack.
+
+check('switching to another file records where the last editor was left', async () => {
+  const h = harness();
+  const other = h.addPane('/repo/src/other.ts', 'export const other = 1;\n');
+  h.setOpen((filePath) => ({
+    status: 'focused',
+    pane: filePath === '/repo/src/other.ts' ? other : h.origin,
+    revealed: true,
+  }));
+  h.origin.view.dispatch({ selection: { anchor: 45 } });
+  h.focus(h.origin);
+  h.focus(other);
+
+  const back = h.history().back;
+  assert.strictEqual(back.length, 1, 'the switch is a jump');
+  assert.strictEqual(back[0].uri, 'file:///repo/src/main.ts');
+  assert.deepStrictEqual(back[0].position, { line: 1, character: 13 }, 'at the caret it left');
+
+  assert.strictEqual(await h.navigation.navigateBack(), 'navigated');
+  assert.strictEqual(h.opens[0].filePath, '/repo/src/main.ts');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.opens[0].range)),
+    { start: { line: 1, character: 13 }, end: { line: 1, character: 13 } },
+  );
+  assert.strictEqual(await h.navigation.navigateForward(), 'navigated');
+  assert.strictEqual(h.opens[1].filePath, '/repo/src/other.ts', 'Ctrl-I returns to the file left');
+});
+
+check('walking the trail neither appends entries nor truncates the way forward', async () => {
+  const h = harness();
+  const other = h.addPane('/repo/src/other.ts', 'export const other = 1;\n');
+  const paneFor = (filePath) => (filePath === '/repo/src/other.ts' ? other : h.origin);
+  // The service focuses the pane it opened, exactly as the app does — which is
+  // what would feed a second entry back in if walking recorded switches.
+  h.setOpen((filePath) => {
+    const pane = paneFor(filePath);
+    h.focus(pane);
+    return { status: 'focused', pane, revealed: true };
+  });
+  h.focus(h.origin);
+  h.focus(other);
+  assert.strictEqual(h.history().back.length, 1);
+
+  await h.navigation.navigateBack();
+  let state = h.history();
+  assert.strictEqual(state.back.length, 0, 'the walk consumed the entry and added none');
+  assert.strictEqual(state.forward.length, 1, 'and Ctrl-I still has somewhere to go');
+
+  await h.navigation.navigateForward();
+  state = h.history();
+  assert.strictEqual(state.back.length, 1);
+  assert.strictEqual(state.forward.length, 0);
+});
+
+check('a definition jump records exactly one entry, not one per surface', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => {
+    // The open focuses the target pane; the switch listener sees it too.
+    h.focus(target);
+    return { status: 'focused', pane: target, revealed: true };
+  });
+  h.focus(h.origin);
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(h.history().back.length, 1, 'gd records its origin once');
+});
+
+check('a reveal inside the same document is not a jump', () => {
+  const h = harness();
+  const twin = h.addPane('/repo/src/main.ts', ORIGIN_TEXT);
+  h.focus(h.origin);
+  assert.strictEqual(h.focus(twin), false);
+  assert.deepStrictEqual(h.history().back, [], 'two panes on one file are one document');
+});
+
+check('a detour through a terminal does not lose the jump', () => {
+  const h = harness();
+  const terminal = { paneId: 99, tabId: 199, kind: 'terminal' };
+  const other = h.addPane('/repo/src/other.ts', 'export const other = 1;\n');
+  h.focus(h.origin);
+  assert.strictEqual(h.focus(terminal), false);
+  assert.strictEqual(h.focus(other), true);
+  const back = h.history().back;
+  assert.strictEqual(back.length, 1, 'the jump is editor-to-editor, whatever was focused between');
+  assert.strictEqual(back[0].uri, 'file:///repo/src/main.ts');
+});
+
+check('an untitled or remote buffer contributes no entry', () => {
+  const h = harness();
+  const untitled = h.addPane(null, '');
+  const other = h.addPane('/repo/src/other.ts', 'export const other = 1;\n');
+  h.focus(untitled);
+  assert.strictEqual(h.focus(other), false);
+  assert.deepStrictEqual(h.history().back, [], 'there is no URI to come back to');
+});
+
+check('the same switch notified twice records once', () => {
+  const h = harness();
+  const other = h.addPane('/repo/src/other.ts', 'export const other = 1;');
+  h.focus(h.origin);
+  assert.strictEqual(h.focus(other), true);
+  assert.strictEqual(h.focus(other), false, 'the second notification is not a second jump');
+  assert.strictEqual(h.history().back.length, 1);
+});
+
+check('a focus notification that lands after a jump does not stack it twice', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'focused', pane: target, revealed: true }));
+  h.focus(h.origin);
+  h.origin.view.dispatch({ selection: { anchor: 45 } });
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(h.history().back.length, 1, 'the jump recorded its origin');
+  // The focus change arrives late, after the jump has already resolved.
+  assert.strictEqual(
+    h.navigation.noteFocusedPaneChanged(h.origin, target), false,
+    'the trail already holds that exact location',
+  );
+  assert.strictEqual(h.history().back.length, 1);
+});
+
+check('pane-manager notifies on every focus change, which is the one choke point', () => {
+  const { sandbox } = load([], null, null);
+  vm.runInContext(fs.readFileSync(PANE_MANAGER, 'utf8'), sandbox, { filename: PANE_MANAGER });
+  const panes = new Map();
+  const tabs = new Map();
+  const make = (paneId) => {
+    const pane = {
+      paneId,
+      tabId: 1,
+      kind: 'editor',
+      root: { classList: { add() {}, remove() {} } },
+      view: { focus() {} },
+    };
+    panes.set(paneId, pane);
+    return pane;
+  };
+  const first = make(1);
+  const second = make(2);
+  tabs.set(1, { id: 1, focusedPaneId: 1 });
+  let focusedPaneId = null;
+  const changes = [];
+  const manager = sandbox.termlabPaneManager.create({
+    getPanes: () => panes,
+    getTabs: () => tabs,
+    getFocusedPaneId: () => focusedPaneId,
+    setFocusedPaneId: (id) => { focusedPaneId = id; },
+    onFocusedPaneChanged: (previous, next) => { changes.push([previous, next]); },
+  });
+  manager.setFocusedPane(1);
+  manager.setFocusedPane(2);
+  manager.setFocusedPane(2);
+  assert.strictEqual(changes.length, 2, 'refocusing the same pane is not a change');
+  assert.deepStrictEqual(changes[0], [null, first]);
+  assert.deepStrictEqual(changes[1], [first, second]);
+});
+
+check('the compose runtime feeds that notification to the navigator', () => {
+  const source = fs.readFileSync(COMPOSE, 'utf8');
+  assert.ok(/onFocusedPaneChanged/.test(source), 'the hook is wired at composition');
+  const at = source.indexOf('onFocusedPaneChanged');
+  const block = source.slice(at, at + 600);
+  assert.ok(/noteFocusedPaneChanged/.test(block), 'and lands on the navigator');
+});
+
 // --- the keys that reach this module ------------------------------------------
 //
 // The controller listens for `termlab:editor-*` window events, which is only
@@ -1431,7 +1615,10 @@ check('editor-pane mounts the navigation extensions defensively', () => {
 check('the compose runtime configures the navigator with the lookups only it has', () => {
   const source = fs.readFileSync(COMPOSE, 'utf8');
   assert.ok(/termlabLspNavigation/.test(source));
-  const at = source.indexOf('termlabLspNavigation');
+  // The configure() call specifically — the module is now named in more than
+  // one place in this file (the focus hook is wired separately).
+  const at = source.indexOf('termlabLspNavigation.configure');
+  assert.ok(at > 0, 'the navigator is configured at composition');
   const block = source.slice(at, at + 900);
   assert.ok(/paneForView/.test(block));
   assert.ok(/currentPane/.test(block));

@@ -112,6 +112,15 @@
     return true;
   }
 
+  // Whether two entries name the same place. The switch recorder uses it to
+  // avoid stacking a location the top of the trail already holds.
+  function equals(a, b) {
+    if (!a || !b) return false;
+    return a.uri === b.uri
+      && a.position.line === b.position.line
+      && a.position.character === b.position.character;
+  }
+
   function state() {
     return { back: backStack.slice(), forward: forwardStack.slice() };
   }
@@ -128,6 +137,7 @@
     record,
     peek,
     advance,
+    equals,
     state,
     reset,
   };

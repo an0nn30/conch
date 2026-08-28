@@ -82,6 +82,16 @@
             if (layoutRuntime && layoutRuntime.rebuildTreeDOM) return layoutRuntime.rebuildTreeDOM(tab);
             return rebuildTreeDOM(tab);
           },
+          // Every focus change in the window, whatever caused it — a tab
+          // click, an open from the explorer, the palette or the CLI, a
+          // split-pane focus. The navigator turns a change of DOCUMENT into a
+          // jump-trail entry, so Ctrl-O comes back from a file you opened by
+          // hand; it ignores the ones it caused itself.
+          onFocusedPaneChanged: (previousPane, nextPane) => {
+            const navigation = global.termlabLspNavigation;
+            if (!navigation || typeof navigation.noteFocusedPaneChanged !== 'function') return;
+            navigation.noteFocusedPaneChanged(previousPane, nextPane);
+          },
           onTerminalFocused: (paneId, pane) => {
             if (global.filesPanel) global.filesPanel.onTabChanged(pane);
             publishActivePaneChanged(pane);

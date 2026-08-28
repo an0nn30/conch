@@ -8,6 +8,12 @@
     const setPluginViewSize = deps.setPluginViewSize;
     const rebuildTreeDOM = deps.rebuildTreeDOM;
     const onTerminalFocused = deps.onTerminalFocused;
+    // Every focus change in the window passes through setFocusedPane below —
+    // a tab click (tab-manager's activateTab calls it), a split-pane focus, a
+    // freshly opened file. It is therefore the one place that can tell the
+    // navigation history "the active document changed", without instrumenting
+    // each UI entry point separately.
+    const onFocusedPaneChanged = deps.onFocusedPaneChanged;
     const unregisterPaneDnd = deps.unregisterPaneDnd;
     const notifyTerminalClosed = deps.notifyTerminalClosed;
     const refreshSshSessions = deps.refreshSshSessions;
@@ -80,6 +86,7 @@
       const focusedPaneId = getFocusedPaneId();
       if (focusedPaneId === paneId) return false;
 
+      const previousPane = focusedPaneId == null ? null : panes.get(focusedPaneId) || null;
       if (focusedPaneId != null) {
         const oldPane = panes.get(focusedPaneId);
         if (oldPane && oldPane.root) oldPane.root.classList.remove('focused');
@@ -100,6 +107,17 @@
         if (tab) tab.focusedPaneId = paneId;
         if (pane.kind === 'terminal' && typeof onTerminalFocused === 'function') {
           onTerminalFocused(paneId, pane);
+        }
+      }
+
+      // After the focus work, so a listener that reads either pane sees the
+      // settled state. A throwing listener must not cost the focus change
+      // itself — the pane is already focused by the time we get here.
+      if (typeof onFocusedPaneChanged === 'function') {
+        try {
+          onFocusedPaneChanged(previousPane, panes.get(paneId) || null);
+        } catch (error) {
+          console.error('focused pane listener failed', error);
         }
       }
 
