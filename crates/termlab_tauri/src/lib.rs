@@ -22,6 +22,7 @@ pub(crate) mod open_path;
 pub(crate) mod panel_host;
 pub mod platform;
 pub(crate) mod plugins;
+pub(crate) mod project;
 pub(crate) mod pty;
 mod pty_backend;
 pub(crate) mod remote;
@@ -361,6 +362,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
         .manage(Mutex::new(chooser_window::ChooserRegistry::default()))
         .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
         .manage(open_path::PendingOpens::default())
+        .manage(Mutex::new(project::ProjectRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
 
@@ -835,6 +837,11 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 // (OS kill / crash) — see panel_host::on_window_destroyed.
                 panel_host::on_window_destroyed(window);
 
+                // A project belongs to the window that opened it and to
+                // nothing else: dropping the entry here is what lets the same
+                // root be opened again in a fresh window.
+                project::on_window_destroyed(window);
+
                 // When the main window closes, also close child windows
                 // (settings, etc.) so they don't linger as orphans.
                 if label == "main" {
@@ -913,6 +920,10 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 panel_host::abort_panel_host,
                 panel_host::panel_host_broadcast,
                 panel_host::panel_host_action,
+                project::project_open,
+                project::project_info,
+                project::project_pick_folder,
+                project::project_reveal_path,
                 commands::rebuild_menu,
                 cli_install::install_cli_symlink,
                 cli_install::uninstall_cli_symlink,
