@@ -129,6 +129,7 @@ pub struct KeyboardConfig {
     pub editor_navigate_forward: String,
     pub editor_next_problem: String,
     pub editor_previous_problem: String,
+    pub search_in_project: String,
     pub tool_window_shortcuts: HashMap<String, String>,
     pub plugin_shortcuts: HashMap<String, String>,
 }
@@ -167,6 +168,7 @@ impl Default for KeyboardConfig {
             editor_navigate_forward: "ctrl+shift+-".into(),
             editor_next_problem: "f8".into(),
             editor_previous_problem: "shift+f8".into(),
+            search_in_project: "cmd+shift+f".into(),
             tool_window_shortcuts: HashMap::new(),
             plugin_shortcuts: HashMap::new(),
         }

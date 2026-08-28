@@ -141,6 +141,17 @@
           });
         return;
       }
+      if (action === 'search-in-project') {
+        // A no-op outside a project window: the tool window is only
+        // registered when the window has a project, and toggle/activate on an
+        // unregistered id is already a no-op in the manager.
+        const twm = global.toolWindowManager;
+        if (twm && typeof twm.activate === 'function') twm.activate('project-search');
+        const panel = document.getElementById('project-search-panel');
+        const field = panel ? panel.querySelector('.tl-project-search__input') : null;
+        if (field && typeof field.focus === 'function') field.focus();
+        return;
+      }
       if (action === 'new-plain-shell-tab') {
         createPlainShellTab().catch((error) => showStatus('Failed to create plain shell tab: ' + String(error)));
         return;

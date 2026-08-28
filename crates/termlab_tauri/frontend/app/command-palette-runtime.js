@@ -117,6 +117,7 @@
       add('core:new-file', 'New File', 'Editor', 'new file editor untitled note', () => handleMenuAction('new-file'));
       add('core:open-file', 'Open File…', 'Editor', 'open file editor browse local remote sftp host chooser', () => handleMenuAction('open-file'));
       add('core:open-folder', 'Open Folder as Project…', 'Project', 'open folder project directory workspace tree search git', () => handleMenuAction('open-folder'), 'Project');
+      add('core:search-in-project', 'Search in Project', 'Project', 'search find text grep project files contents', () => handleMenuAction('search-in-project'), 'Project');
       // Editor-only, like the keybinding: handleMenuAction('save-file-as')
       // returns without acting when the focused pane is not an editor.
       add('core:save-file-as', 'Save File As…', 'Editor', 'save as file editor copy rename local remote sftp host upload', () => handleMenuAction('save-file-as'));

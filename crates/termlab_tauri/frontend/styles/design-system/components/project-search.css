@@ -1,0 +1,136 @@
+/* Project search (app/panels/project-search-panel.js).
+
+   The same density and structure as the Problems panel — a toolbar that is
+   built once (re-creating the field on every keystroke would take the caret
+   with it), a fixed status slot so the empty/searching/capped/no-results line
+   can come and go without reordering the panel, and a scrolling list below. */
+
+.tl-project-search {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  color: var(--tl-fg);
+  background: var(--tl-panel-bg);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+}
+
+.tl-project-search__toolbar {
+  flex: 0 0 var(--tl-toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  min-width: 0;
+  padding: 0 var(--tl-space-2);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+.tl-project-search__input {
+  flex: 1;
+  min-width: 0;
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg);
+  background: var(--tl-control-bg);
+  border: 1px solid var(--tl-control-border);
+  border-radius: var(--tl-radius);
+}
+
+.tl-project-search__input:focus-visible {
+  outline: 2px solid var(--tl-accent);
+  outline-offset: 1px;
+}
+
+.tl-project-search__toggle {
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg);
+  background: var(--tl-control-bg);
+  border: 1px solid var(--tl-control-border);
+  border-radius: var(--tl-radius);
+  cursor: pointer;
+}
+
+.tl-project-search__toggle[aria-pressed="true"] {
+  border-color: var(--tl-accent);
+  background: var(--tl-row-hover);
+}
+
+.tl-project-search__toggle:focus-visible {
+  outline: 2px solid var(--tl-accent);
+  outline-offset: 1px;
+}
+
+.tl-project-search__status-host {
+  flex: 0 0 auto;
+}
+
+.tl-project-search__status {
+  padding: var(--tl-space-1) var(--tl-space-2);
+  color: var(--tl-fg-muted);
+}
+
+/* Capped is its own visual state, distinct from a plain "done": the query
+   matched more than the server will stream, so the count on screen is a
+   floor, not the whole answer. */
+.tl-project-search__status[data-state="capped"] {
+  color: var(--tl-warning-fg);
+}
+
+.tl-project-search__list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tl-project-search__row {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tl-project-search__row:hover {
+  background: var(--tl-row-hover);
+}
+
+.tl-project-search__row:focus-visible {
+  outline: 2px solid var(--tl-accent);
+  outline-offset: -2px;
+}
+
+.tl-project-search__row--match {
+  padding-left: var(--tl-space-4);
+}
+
+.tl-project-search__where {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tl-project-search__count {
+  color: var(--tl-fg-muted);
+}
+
+.tl-project-search__line {
+  min-width: 3ch;
+  text-align: right;
+  color: var(--tl-fg-muted);
+  font-family: var(--tl-font-mono);
+}
+
+.tl-project-search__preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--tl-font-mono);
+}

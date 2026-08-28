@@ -63,6 +63,7 @@
       editor_navigate_forward: 'editor-navigate-forward',
       editor_next_problem: 'editor-next-problem',
       editor_previous_problem: 'editor-previous-problem',
+      search_in_project: 'search-in-project',
     };
 
     // Core actions that mean something only inside a focused editor pane. A

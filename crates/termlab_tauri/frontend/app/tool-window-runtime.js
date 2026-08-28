@@ -231,6 +231,33 @@
         },
       });
 
+      // Project windows only, and registered after every existing bottom-zone
+      // registrant for the reason Problems is: the first registrant activates
+      // its zone on a layout that has never configured one, and Search must
+      // never be the panel a user finds open. It starts inactive with a strip
+      // button; cmd+shift+f activates it.
+      if (projectRoot) {
+        global.toolWindowManager.register('project-search', {
+          title: 'Search',
+          icon: null,
+          type: 'built-in',
+          defaultZone: 'bottom',
+          renderFn: (container) => {
+            const panelEl = document.createElement('div');
+            panelEl.id = 'project-search-panel';
+            container.appendChild(panelEl);
+            if (global.projectSearchPanel) {
+              return global.projectSearchPanel.init({
+                panelEl,
+                invoke,
+                listen: listenOnCurrentWindow,
+              });
+            }
+            return undefined;
+          },
+        });
+      }
+
       // Registered after 'tunnels' so tunnels stays the right-bottom zone's
       // auto-activated window on first boot; notifications starts inactive
       // with a strip button (per tool-window-manager.js's first-registrant-

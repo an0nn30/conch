@@ -676,6 +676,20 @@ mod tests {
     }
 
     #[test]
+    fn search_in_project_defaults_to_cmd_shift_f_and_survives_an_override() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.termlab.keyboard.search_in_project, "cmd+shift+f");
+        let overridden: UserConfig =
+            toml::from_str("[termlab.keyboard]\nsearch_in_project = \"ctrl+alt+f\"\n")
+                .expect("parse");
+        assert_eq!(overridden.termlab.keyboard.search_in_project, "ctrl+alt+f");
+        // Back-compat: a config written before this key existed still parses.
+        let legacy: UserConfig =
+            toml::from_str("[termlab.keyboard]\nnew_tab = \"cmd+t\"\n").expect("parse");
+        assert_eq!(legacy.termlab.keyboard.search_in_project, "cmd+shift+f");
+    }
+
+    #[test]
     fn ui_font_from_full_config() {
         let toml_str = r#"
             [termlab.ui.font]
