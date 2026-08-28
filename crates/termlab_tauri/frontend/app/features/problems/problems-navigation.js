@@ -109,32 +109,14 @@
     return null;
   }
 
-  function offsetAt(doc, position) {
-    const line = Number(position && position.line);
-    const character = Number(position && position.character);
-    const wanted = Number.isFinite(line) ? line + 1 : 1;
-    const entry = doc.line(Math.min(Math.max(wanted, 1), doc.lines));
-    const column = Number.isFinite(character) && character > 0 ? character : 0;
-    return Math.min(entry.from + column, entry.to);
-  }
-
+  // Selecting a server range in a pane is editor-service's `revealRange` — the
+  // same call Go to Definition makes, over the same position conversion
+  // (lsp-position.js). This used to be a private copy here; two copies of
+  // "where does this range land" is exactly the kind of thing that drifts.
   function reveal(pane, item, options) {
-    const CM = global.CM6;
-    if (!pane || !pane.view || !pane.view.state || !item.range) return false;
-    const doc = pane.view.state.doc;
-    const anchor = offsetAt(doc, item.range.start);
-    const head = Math.max(offsetAt(doc, item.range.end), anchor);
-    const spec = { selection: { anchor, head } };
-    if (CM && CM.EditorView && typeof CM.EditorView.scrollIntoView === 'function') {
-      spec.effects = CM.EditorView.scrollIntoView(anchor, { y: 'center' });
-    } else {
-      spec.scrollIntoView = true;
-    }
-    pane.view.dispatch(spec);
-    if (!options || options.focus !== false) {
-      if (typeof pane.view.focus === 'function') pane.view.focus();
-    }
-    return true;
+    const service = editorService();
+    if (!service || typeof service.revealRange !== 'function') return false;
+    return service.revealRange(pane, item.range, options);
   }
 
   // --- activation -------------------------------------------------------------

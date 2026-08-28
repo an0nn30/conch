@@ -135,6 +135,17 @@
     const key = sessionKey(status);
     const previous = state.sessions.get(key);
     if (previous && Number(status.revision) < Number(previous.revision)) return false;
+    // `stopped` is the session-level terminal status Rust emits when a session
+    // ends (app-wide, `documentId` null). It is the ONLY thing that can retire
+    // a group whose session died while failed: that session publishes no
+    // further per-document status, so its group would otherwise sit on screen
+    // explaining a failure nothing is still trying to recover from.
+    if (status.state === 'stopped') {
+      if (!previous) return false;
+      state.sessions.delete(key);
+      changed();
+      return true;
+    }
     state.sessions.set(key, status);
     changed();
     return true;
@@ -143,7 +154,10 @@
   function applyStatuses(statuses) {
     let any = false;
     for (const status of statuses || []) {
-      if (!status || !status.projectRootUri) continue;
+      // A hydration snapshot lists live sessions only; a `stopped` record in
+      // one would be a contradiction, and seeding it would resurrect the group
+      // the event just retired.
+      if (!status || !status.projectRootUri || status.state === 'stopped') continue;
       const key = sessionKey(status);
       const previous = state.sessions.get(key);
       if (previous && Number(status.revision) < Number(previous.revision)) continue;

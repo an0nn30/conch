@@ -23,6 +23,8 @@ const STORE = path.join(PROBLEMS, 'problems-store.js');
 const NAVIGATION = path.join(PROBLEMS, 'problems-navigation.js');
 const PANEL = path.join(APP, 'panels/problems-panel.js');
 const LSP_URI = path.join(APP, 'features/editor/lsp-uri.js');
+const LSP_POSITION = path.join(APP, 'features/editor/lsp-position.js');
+const EDITOR_SERVICE = path.join(APP, 'features/editor/editor-service.js');
 const TOOL_WINDOW_RUNTIME = path.join(APP, 'tool-window-runtime.js');
 const TOOL_WINDOW_MANAGER = path.join(APP, 'layout/tool-window-manager.js');
 const SHORTCUT_RUNTIME = path.join(APP, 'shortcut-runtime.js');
@@ -338,8 +340,11 @@ function modelOnly() {
 // A store wired to a fake bridge, plus optional navigation and panel.
 function storeHarness(options = {}) {
   const opts = options || {};
-  const files = [LSP_URI, MODEL, STORE];
-  if (opts.navigation) files.push(NAVIGATION);
+  const files = [LSP_URI, LSP_POSITION, MODEL, STORE];
+  // Navigation reveals a range through editor-service's real revealRange (over
+  // lsp-position.js), so the module under test is the real one here too — only
+  // the OPEN half is stubbed below.
+  if (opts.navigation) files.push(EDITOR_SERVICE, NAVIGATION);
   if (opts.panel) files.push(PANEL);
   const { sandbox, body, documentStub, windowListeners } = load(files);
 
@@ -733,6 +738,47 @@ check('a newer status revision for the same session replaces the older one', asy
   assert.strictEqual(h.store.getState().sessions[0].state, 'ready');
 });
 
+// The ghost-group case: a session that ended while FAILED. Its group exists
+// only to explain the failure, and no further per-document status is ever
+// emitted for it — so without the session-level terminal status the group
+// stayed on screen for the rest of the session.
+check('a stopped session is dropped from the store, taking its failed group with it', async () => {
+  const h = storeHarness({ initialSnapshot: snapshot([], 1) });
+  await h.store.hydrate();
+  h.publishStatus(session({ revision: 5, state: 'failed', message: 'server exited' }));
+  assert.strictEqual(h.store.getState().sessions.length, 1);
+  assert.strictEqual(h.store.view().groups.length, 1, 'the failure is explained somewhere');
+
+  const dropped = h.store.applyStatus(session({ revision: 6, state: 'stopped', documentId: null }));
+  assert.strictEqual(dropped, true, 'the terminal status is accepted');
+  deepEq(h.store.getState().sessions, [], 'the session record is gone');
+  deepEq(h.store.view().groups, [], 'and so is its group');
+});
+
+check('a stopped status for a session this window never saw changes nothing', async () => {
+  const h = storeHarness({ initialSnapshot: snapshot([], 1) });
+  await h.store.hydrate();
+  h.publishStatus(session({ revision: 5, state: 'ready' }));
+  const before = h.store.getState().sessions.length;
+  assert.strictEqual(
+    h.store.applyStatus(session({ revision: 6, state: 'stopped', sessionId: 'session-other' })),
+    false,
+    'nothing to drop, so nothing changed',
+  );
+  assert.strictEqual(h.store.getState().sessions.length, before);
+});
+
+check('a stale stopped status does not remove a session that has already restarted', async () => {
+  const h = storeHarness({ initialSnapshot: snapshot([], 1) });
+  await h.store.hydrate();
+  h.publishStatus(session({ revision: 9, state: 'ready' }));
+  assert.strictEqual(
+    h.store.applyStatus(session({ revision: 4, state: 'stopped' })), false,
+    'an out-of-order stop must not delete the live session',
+  );
+  assert.strictEqual(h.store.getState().sessions.length, 1);
+});
+
 check('filters live in the store so the panel and F8 traverse the same list', async () => {
   const h = storeHarness({
     initialSnapshot: snapshot([
@@ -796,8 +842,12 @@ function navHarness(options = {}) {
   h.sandbox.CM6 = {
     EditorView: { scrollIntoView: (pos, config) => ({ ext: 'scrollIntoView', pos, config }) },
   };
+  const realService = h.sandbox.termlabEditorService;
   h.sandbox.termlabEditorService = {
     openLocalFile: (filePath) => { opened.push(filePath); return Promise.resolve(); },
+    // Deliberately NOT a stub: the reveal these checks assert on is
+    // editor-service's own implementation, shared with Go to Definition.
+    revealRange: realService.revealRange,
   };
   // The signal a real window has an editor of its own — the same one
   // files-panel.js's openInEditor gates on. Absent in a panel host.

@@ -117,10 +117,12 @@
   }
 
   // --- position conversion --------------------------------------------------
+  //
+  // In lsp-position.js, with every other LSP<->CodeMirror conversion.
 
   function lspPositionAt(doc, offset) {
-    const line = doc.lineAt(offset);
-    return { line: line.number - 1, character: offset - line.from };
+    const helper = global.termlabLspPosition;
+    return helper ? helper.positionAt(doc, offset) : { line: 0, character: 0 };
   }
 
   function textBeforeCaret(context) {

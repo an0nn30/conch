@@ -205,27 +205,18 @@
     }
   }
 
-  // Where an LSP range lands in a live document. Both clamps matter: a server
-  // that has raced ahead of the document can name a line past the end, and
-  // CodeMirror throws on an out-of-range line rather than saturating.
-  function offsetAtPosition(document, position) {
-    const line = Number(position && position.line);
-    const character = Number(position && position.character);
-    const wanted = Number.isFinite(line) ? line + 1 : 1;
-    const entry = document.line(Math.min(Math.max(wanted, 1), document.lines));
-    const column = Number.isFinite(character) && character > 0 ? character : 0;
-    return Math.min(entry.from + column, entry.to);
-  }
-
   // Select `range` in an open pane, centred, and (by default) put the keyboard
   // back in the editor. Lives here rather than in a caller because the panes
-  // and their views are this module's to drive.
+  // and their views are this module's to drive; where the range LANDS is
+  // lsp-position.js's answer, shared with every other surface that places one.
   function revealRange(pane, range, options) {
     const CM = global.CM6;
+    const positions = global.termlabLspPosition;
     if (!pane || !pane.view || !pane.view.state || !range || !range.start) return false;
-    const document = pane.view.state.doc;
-    const anchor = offsetAtPosition(document, range.start);
-    const head = Math.max(offsetAtPosition(document, range.end || range.start), anchor);
+    if (!positions) return false;
+    const span = positions.spanOf(pane.view.state.doc, range);
+    const anchor = span.from;
+    const head = span.to;
     const spec = { selection: { anchor, head } };
     if (CM && CM.EditorView && typeof CM.EditorView.scrollIntoView === 'function') {
       spec.effects = CM.EditorView.scrollIntoView(anchor, { y: 'center' });

@@ -43,20 +43,17 @@
 
   // --- position conversion ----------------------------------------------------
   //
-  // LSP positions from Rust are already UTF-16 code units within a line, which
-  // is the same unit a CodeMirror offset counts in, so this is addition and
-  // clamping and nothing more. Both clamps matter: a server that has raced
-  // ahead of the document can name a line past the end, and CodeMirror throws
-  // on an out-of-range line rather than saturating.
+  // One implementation, in lsp-position.js: the clamping rules for a line past
+  // the end of the document (CodeMirror throws rather than saturating) are the
+  // kind of thing that must not exist in two versions.
 
-  function offsetAt(doc, position) {
-    const line = Number(position && position.line);
-    const character = Number(position && position.character);
-    const wanted = Number.isFinite(line) ? line + 1 : 1;
-    const clampedLine = Math.min(Math.max(wanted, 1), doc.lines);
-    const entry = doc.line(clampedLine);
-    const column = Number.isFinite(character) && character > 0 ? character : 0;
-    return Math.min(entry.from + column, entry.to);
+  function positions() {
+    return global.termlabLspPosition || null;
+  }
+
+  function spanOf(doc, range) {
+    const helper = positions();
+    return helper ? helper.spanOf(doc, range) : { from: 0, to: 0 };
   }
 
   // --- tooltip ----------------------------------------------------------------
@@ -93,13 +90,12 @@
     const out = [];
     for (const item of items || []) {
       if (!item || !item.range) continue;
-      const from = offsetAt(doc, item.range.start);
-      // A server may report end before start after a race; a negative-length
-      // range is not something CodeMirror can place.
-      const to = Math.max(offsetAt(doc, item.range.end), from);
+      // A server may report end before start after a race; spanOf collapses
+      // such a range rather than handing CodeMirror a negative length.
+      const span = spanOf(doc, item.range);
       const diagnostic = {
-        from,
-        to,
+        from: span.from,
+        to: span.to,
         severity: SEVERITY[item.severity] || 'error',
         message: String(item.message || ''),
         renderMessage: () => renderMessage(item),

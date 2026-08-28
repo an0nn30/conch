@@ -34,14 +34,13 @@
   // --- position conversion --------------------------------------------------
   //
   // CodeMirror columns are already UTF-16 code units, which is what LSP
-  // positions count, so this is pure arithmetic.
+  // positions count, so this is pure arithmetic — and it lives in
+  // lsp-position.js, because the clamping rules around it must be identical
+  // wherever a server range is placed.
 
   function offsetAt(doc, position) {
-    if (!position) return null;
-    const lineNumber = Math.min(Math.max(Number(position.line) + 1, 1), doc.lines);
-    const line = doc.line(lineNumber);
-    const character = Math.max(Number(position.character) || 0, 0);
-    return Math.min(line.from + character, line.to);
+    const helper = global.termlabLspPosition;
+    return helper ? helper.offsetAt(doc, position) : 0;
   }
 
   // --- the primary edit -----------------------------------------------------

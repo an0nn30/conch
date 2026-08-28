@@ -23,6 +23,9 @@ import { pathToFileURL } from 'node:url';
 const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
 const APP = path.join(ROOT, 'app');
 const MODULES = path.join(APP, 'features/editor');
+// Position conversion lives in its own module now (lsp-position.js); every
+// harness that loads a converting module loads it too, the way index.html does.
+const POSITION = path.join(MODULES, 'lsp-position.js');
 const APPLY = path.join(MODULES, 'lsp-completion-apply.js');
 const COMPLETION = path.join(MODULES, 'lsp-completion.js');
 const BRIDGE = path.join(MODULES, 'lsp-bridge.js');
@@ -309,7 +312,7 @@ function harness(options = {}) {
       };
     }
     : undefined;
-  const { sandbox, cm, windowListeners } = load([APPLY, COMPLETION], null, cmFactory);
+  const { sandbox, cm, windowListeners } = load([POSITION, APPLY, COMPLETION], null, cmFactory);
 
   const view = opts.real
     ? realView(docText)
@@ -1313,7 +1316,7 @@ check('the suggestions-while-typing setting is carried from Rust and hot-reloade
 });
 
 check('editor-pane mounts the completion extensions without displacing vim', () => {
-  const { sandbox } = load([VIM_MODE, APPLY, COMPLETION, EDITOR_PANE]);
+  const { sandbox } = load([VIM_MODE, POSITION, APPLY, COMPLETION, EDITOR_PANE]);
   const host = sandbox.document.createElement('div');
   const view = sandbox.termlabEditorPane.createEditorView(host, { doc: 'x', vimMode: true });
   const extensions = view.state.spec.extensions;

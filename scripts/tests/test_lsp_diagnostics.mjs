@@ -23,6 +23,9 @@ const APP = path.join(ROOT, 'app');
 const MODULES = path.join(APP, 'features/editor');
 const DIAGNOSTICS = path.join(MODULES, 'lsp-diagnostics.js');
 const LSP_URI = path.join(MODULES, 'lsp-uri.js');
+// Position conversion moved to its own module; the renderer reads it the same
+// way it reads lsp-uri.js, so the harness loads it alongside.
+const LSP_POSITION = path.join(MODULES, 'lsp-position.js');
 const BRIDGE = path.join(MODULES, 'lsp-bridge.js');
 const EDITOR_PANE = path.join(MODULES, 'editor-pane.js');
 const VIM_MODE = path.join(MODULES, 'vim-mode.js');
@@ -279,7 +282,7 @@ function harness(options = {}) {
     sandbox.CM6 = CM;
     return { CM, dispatched: [] };
   } : undefined;
-  const { sandbox, cm, windowListeners } = load([LSP_URI, DIAGNOSTICS], null, cmFactory);
+  const { sandbox, cm, windowListeners } = load([LSP_URI, LSP_POSITION, DIAGNOSTICS], null, cmFactory);
 
   const view = opts.real ? realView(docText) : {
     state: { doc: makeDoc(docText) },
@@ -585,7 +588,7 @@ check('the built bundle really carries them', () => {
 });
 
 check('editor-pane mounts the diagnostics extensions behind vim', () => {
-  const { sandbox } = load([VIM_MODE, LSP_URI, DIAGNOSTICS, EDITOR_PANE]);
+  const { sandbox } = load([VIM_MODE, LSP_URI, LSP_POSITION, DIAGNOSTICS, EDITOR_PANE]);
   const host = sandbox.document.createElement('div');
   const view = sandbox.termlabEditorPane.createEditorView(host, { doc: 'x', vimMode: true });
   const extensions = view.state.spec.extensions;

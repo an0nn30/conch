@@ -12,9 +12,10 @@
 // every scroll. Only one overlay is ever visible: starting a request of the
 // other kind closes what is on screen.
 //
-// Server text is NEVER injected as markup. Markdown is normalized to plain
-// text and fenced-code segments here and inserted with textContent — the same
-// rule lsp-completion.js and lsp-diagnostics.js follow, for the same reason.
+// Server text is NEVER injected as markup: Markdown is normalized to plain
+// text and fenced-code segments by lsp-markdown.js and inserted with
+// textContent — the same rule lsp-completion.js and lsp-diagnostics.js follow,
+// for the same reason.
 //
 // It reaches the backend only through editor-service's requestFeature, which
 // owns the flush/barrier/staleness protocol, and from there through
@@ -25,11 +26,6 @@
   'use strict';
 
   const DEFAULT_HOVER_DELAY_MS = 320;
-
-  // A markdown heading marker, and nothing cleverer. Lookbehind is banned
-  // repo-wide: a regex literal is validated when the FILE is parsed, so one
-  // would stop this module loading at all on an older WKWebView.
-  const HEADING_PREFIX = /^\s{0,3}#{1,6}\s+/;
 
   let paneForViewHook = null;
   let currentPaneHook = null;
@@ -125,90 +121,49 @@
   }
 
   // --- position conversion ---------------------------------------------------
+  //
+  // LSP positions and CodeMirror offsets both count UTF-16 code units, so the
+  // conversion is arithmetic — and the clamping around it (a server that has
+  // raced ahead can name a line past the end, where CodeMirror throws rather
+  // than saturating) lives in lsp-position.js so that every surface places a
+  // server range the same way.
 
   function lspPositionAt(document, offset) {
-    const line = document.lineAt(offset);
-    return { line: line.number - 1, character: offset - line.from };
-  }
-
-  // LSP positions from Rust are already UTF-16 code units within a line, the
-  // same unit a CodeMirror offset counts in. Both clamps matter: a server that
-  // has raced ahead of the document can name a line past the end, and
-  // CodeMirror throws on an out-of-range line rather than saturating.
-  function offsetAt(document, position) {
-    const line = Number(position && position.line);
-    const character = Number(position && position.character);
-    const wanted = Number.isFinite(line) ? line + 1 : 1;
-    const clamped = Math.min(Math.max(wanted, 1), document.lines);
-    const entry = document.line(clamped);
-    const column = Number.isFinite(character) && character > 0 ? character : 0;
-    return Math.min(entry.from + column, entry.to);
+    const helper = global.termlabLspPosition;
+    return helper ? helper.positionAt(document, offset) : { line: 0, character: 0 };
   }
 
   function anchorFor(view, range, fallback) {
-    if (!range || !range.start || !range.end) return { from: fallback, to: fallback };
-    const document = view.state.doc;
-    const from = offsetAt(document, range.start);
-    return { from, to: Math.max(offsetAt(document, range.end), from) };
+    const helper = global.termlabLspPosition;
+    if (!range || !range.start || !range.end || !helper) {
+      return { from: fallback, to: fallback };
+    }
+    return helper.spanOf(view.state.doc, range);
   }
 
   // --- Markdown --------------------------------------------------------------
   //
-  // Not a renderer: a normalizer. Fenced blocks become `code` segments kept
-  // verbatim, everything else becomes `text` segments with the handful of
-  // inline markers that would otherwise read as noise removed. Nothing here
-  // ever produces markup, so a server that sends `<script>` gets a segment
-  // whose value is the literal characters `<script>`.
+  // Normalizing server Markdown to safe segments, and rendering those segments
+  // as text nodes, is lsp-markdown.js's job. It is pure and has nothing to do
+  // with the overlay state machine this file exists for.
 
-  function isFence(line) {
-    return line.trim().indexOf('```') === 0;
-  }
-
-  // `__` is deliberately left alone: stripping it would mangle Python dunders,
-  // which appear in hover text far more often than underscore emphasis does.
-  function plainLine(line) {
-    return line.replace(HEADING_PREFIX, '').split('`').join('').split('**').join('');
-  }
-
-  function pushText(out, value) {
-    const text = String(value).trim();
-    if (text) out.push({ type: 'text', value: text });
-  }
-
-  function pushCode(out, value) {
-    const text = String(value).replace(/\s+$/, '');
-    if (text.trim()) out.push({ type: 'code', value: text });
+  function markdown() {
+    return global.termlabLspMarkdown || null;
   }
 
   function markdownSegments(blocks) {
-    const out = [];
-    for (const block of blocks || []) {
-      if (!block || typeof block.value !== 'string') continue;
-      if (block.markdown !== true) {
-        pushText(out, block.value);
-        continue;
-      }
-      let code = null;
-      let text = [];
-      for (const line of block.value.split('\n')) {
-        if (isFence(line)) {
-          if (code === null) {
-            pushText(out, text.join('\n'));
-            text = [];
-            code = [];
-          } else {
-            pushCode(out, code.join('\n'));
-            code = null;
-          }
-          continue;
-        }
-        if (code) code.push(line);
-        else text.push(plainLine(line));
-      }
-      if (code) pushCode(out, code.join('\n'));
-      pushText(out, text.join('\n'));
-    }
-    return out;
+    const module = markdown();
+    return module ? module.markdownSegments(blocks) : [];
+  }
+
+  function appendSegments(root, segments, textClass, codeClass) {
+    const module = markdown();
+    if (module) module.appendSegments(root, segments, textClass, codeClass);
+  }
+
+  function block(className, text) {
+    const module = markdown();
+    return module ? module.block(className, text) : doc().createElement('div');
   }
 
   // --- payload normalization --------------------------------------------------
@@ -250,27 +205,6 @@
   }
 
   // --- rendering ---------------------------------------------------------------
-
-  function block(className, text) {
-    const node = doc().createElement('div');
-    node.className = className;
-    node.textContent = String(text);
-    return node;
-  }
-
-  function appendSegments(root, segments, textClass, codeClass) {
-    for (const segment of segments || []) {
-      if (!segment) continue;
-      if (segment.type === 'code') {
-        const pre = doc().createElement('pre');
-        pre.className = codeClass;
-        pre.textContent = String(segment.value);
-        root.appendChild(pre);
-      } else {
-        root.appendChild(block(textClass, segment.value));
-      }
-    }
-  }
 
   function renderHover(payload) {
     const root = doc().createElement('div');
@@ -344,6 +278,26 @@
 
   // --- the CodeMirror field -----------------------------------------------------
 
+  // True when the transaction deleted text spanning the overlay's anchor — the
+  // call the hints describe was removed, rather than edited. An insertion
+  // (`toA === fromA`) is never this, and neither is a backspace that stops AT
+  // the anchor: only a deletion that strictly crosses it counts, so editing
+  // arguments keeps the hints and deleting the call closes them.
+  function deletedAcross(changes, anchor) {
+    // Signature help anchors on the caret, so its anchor is zero-width and the
+    // test has to be strict on BOTH sides: a deletion that merely ends at the
+    // anchor is a backspace inside the call.
+    const wide = anchor.to > anchor.from;
+    let removed = false;
+    changes.iterChanges((fromA, toA) => {
+      if (toA <= fromA) return;
+      removed = removed || (wide
+        ? fromA < anchor.to && toA > anchor.from
+        : fromA < anchor.from && toA > anchor.from);
+    });
+    return removed;
+  }
+
   function ensureField() {
     if (overlayField) return overlayField;
     const CM = cm();
@@ -370,6 +324,11 @@
           // a call is exactly when it should stay — so it is carried forward
           // with its anchor mapped through the change.
           if (value.kind !== 'signatureHelp') return null;
+          // Unless the edit REMOVED the call. A mapped anchor survives a
+          // deletion that swallowed it (it collapses onto the deletion point),
+          // which used to leave the hints for a call that no longer exists,
+          // up until Escape, blur or scroll.
+          if (deletedAcross(tr.changes, value.anchor)) return null;
           value = {
             ...value,
             anchor: {
@@ -630,6 +589,15 @@
       return;
     }
     const visible = visibleOf(view);
+    // Signature help outranks the automatic dwell. The pointer wandering over
+    // the code while the user types arguments is not a request for anything,
+    // and letting the dwell fire would swap the parameter hints for a hover
+    // through the one-overlay rule. An explicit Show Hover still wins — that is
+    // a gesture, not a side effect of where the mouse happens to rest.
+    if (visible && visible.kind === 'signatureHelp') {
+      clearTimer(entry);
+      return;
+    }
     // Still over the text the tooltip describes: leave it alone and do not
     // restart the dwell. Anywhere else invalidates it.
     if (visible && visible.kind === 'hover') {

@@ -27,8 +27,16 @@ const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/front
 const APP = path.join(ROOT, 'app');
 const MODULES = path.join(APP, 'features/editor');
 const NAVIGATION = path.join(MODULES, 'lsp-navigation.js');
+// The history stacks and the chooser's field/DOM are siblings of the
+// controller; index.html loads all three, and so does every harness here.
+const HISTORY = path.join(MODULES, 'lsp-navigation-history.js');
+const CHOOSER = path.join(MODULES, 'lsp-navigation-chooser.js');
+const NAVIGATION_MODULES = [HISTORY, CHOOSER, NAVIGATION];
 const URI = path.join(MODULES, 'lsp-uri.js');
 const TOOLTIPS = path.join(MODULES, 'lsp-tooltips.js');
+// Position conversion lives in its own module now (lsp-position.js); every
+// harness that loads a converting module loads it too, the way index.html does.
+const POSITION = path.join(MODULES, 'lsp-position.js');
 const EDITOR_SERVICE = path.join(MODULES, 'editor-service.js');
 const LSP_STATE = path.join(MODULES, 'lsp-state.js');
 const LSP_BRIDGE = path.join(MODULES, 'lsp-bridge.js');
@@ -180,7 +188,7 @@ const TARGET_TEXT = 'export function format(value: number): string {\n  return S
 // editor-service, wired the way manager-compose-runtime wires them.
 function harness(options = {}) {
   const opts = options || {};
-  const { sandbox, windowListeners, toasts } = load([URI, NAVIGATION]);
+  const { sandbox, windowListeners, toasts } = load([URI, POSITION].concat(NAVIGATION_MODULES));
   const navigation = sandbox.termlabLspNavigation;
   const extensions = navigation.extensions();
 
@@ -811,7 +819,7 @@ check('extensions() is stable, so mounting twice does not install two fields', (
 });
 
 check('extensions() is empty when the bundle lacks the tooltip exports', () => {
-  const { sandbox } = load([URI, NAVIGATION], null, { EditorState: REAL.state.EditorState });
+  const { sandbox } = load([URI, POSITION].concat(NAVIGATION_MODULES), null, { EditorState: REAL.state.EditorState });
   assert.strictEqual(sandbox.termlabLspNavigation.extensions().length, 0);
 });
 
@@ -819,7 +827,7 @@ check('extensions() is empty when the bundle lacks the tooltip exports', () => {
 // dismisses hover and signature help; this is the other half — while the
 // chooser is up, the pointer dwell must not render a hover box on top of it.
 check('an open chooser stands down the hover dwell, so only one overlay is on screen', async () => {
-  const { sandbox } = load([URI, TOOLTIPS, NAVIGATION]);
+  const { sandbox } = load([URI, POSITION, TOOLTIPS].concat(NAVIGATION_MODULES));
   const navigation = sandbox.termlabLspNavigation;
   const tooltips = sandbox.termlabLspTooltips;
   const view = {
@@ -970,6 +978,7 @@ function serviceHarness(options = {}) {
     if (typeof opts.onPaneCreated === 'function') opts.onPaneCreated(created);
     return created.tabId;
   };
+  vm.runInContext(fs.readFileSync(POSITION, 'utf8'), sandbox, { filename: POSITION });
   vm.runInContext(fs.readFileSync(LANGUAGE_MAP, 'utf8'), sandbox, { filename: LANGUAGE_MAP });
   vm.runInContext(fs.readFileSync(TAB_LABEL, 'utf8'), sandbox, { filename: TAB_LABEL });
   vm.runInContext(fs.readFileSync(LSP_STATE, 'utf8'), sandbox, { filename: LSP_STATE });
@@ -1140,7 +1149,7 @@ check('the compose runtime configures the navigator with the lookups only it has
 });
 
 check('the module reaches the backend only through editor-service', () => {
-  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  const source = NAVIGATION_MODULES.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
   assert.ok(!/\binvoke\(/.test(source), 'never calls invoke() directly');
   assert.ok(!/listenOnCurrentWindow|__TAURI__/.test(source));
   assert.ok(/requestFeature/.test(source), 'requests use the flush/version barrier');
@@ -1148,23 +1157,23 @@ check('the module reaches the backend only through editor-service', () => {
 });
 
 check('the module registers no window or document key handlers', () => {
-  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  const source = NAVIGATION_MODULES.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
   assert.ok(!/addEventListener\(\s*['"]key(down|up|press)['"]/.test(source));
   assert.ok(!/\bdocument\.addEventListener\b/.test(source));
 });
 
 check('the module never uses alert or confirm', () => {
-  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  const source = NAVIGATION_MODULES.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
   assert.ok(!/\balert\(|\bconfirm\(/.test(source));
 });
 
 check('the module never sets innerHTML', () => {
-  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  const source = NAVIGATION_MODULES.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
   assert.ok(!/innerHTML/.test(source), 'paths go in as textContent, always');
 });
 
 check('the navigation module uses no regex lookbehind', () => {
-  for (const file of [NAVIGATION, EDITOR_SERVICE]) {
+  for (const file of NAVIGATION_MODULES.concat([EDITOR_SERVICE])) {
     const source = fs.readFileSync(file, 'utf8');
     assert.ok(
       !/\(\?<[=!]/.test(source),
@@ -1173,15 +1182,39 @@ check('the navigation module uses no regex lookbehind', () => {
   }
 });
 
-check('the navigation module contains no control bytes', () => {
-  const bytes = fs.readFileSync(NAVIGATION);
-  for (let i = 0; i < bytes.length; i += 1) {
-    const byte = bytes[i];
-    assert.ok(
-      byte >= 0x20 || byte === 0x0a || byte === 0x09,
-      `control byte 0x${byte.toString(16)} at offset ${i} — git treats the file as binary`,
-    );
+check('the navigation modules contain no control bytes', () => {
+  for (const file of NAVIGATION_MODULES) {
+    const bytes = fs.readFileSync(file);
+    for (let i = 0; i < bytes.length; i += 1) {
+      const byte = bytes[i];
+      assert.ok(
+        byte >= 0x20 || byte === 0x0a || byte === 0x09,
+        `control byte 0x${byte.toString(16)} at ${file}:${i} — git treats the file as binary`,
+      );
+    }
   }
+});
+
+check('index.html loads the history and chooser modules before the controller', () => {
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = (name) => html.indexOf(`app/features/editor/${name}`);
+  for (const name of ['lsp-navigation-history.js', 'lsp-navigation-chooser.js']) {
+    assert.ok(at(name) > 0, `${name} is loaded at all`);
+    assert.ok(at(name) < at('lsp-navigation.js'), `${name} is read by the controller`);
+  }
+});
+
+check('the split modules stay in their lanes', () => {
+  const historySource = fs.readFileSync(HISTORY, 'utf8');
+  assert.ok(
+    !/termlabEditorService|requestFeature|CM6/.test(historySource),
+    'the history keeps stacks; it opens nothing and requests nothing',
+  );
+  const chooserSource = fs.readFileSync(CHOOSER, 'utf8');
+  assert.ok(
+    !/termlabEditorService|requestFeature/.test(chooserSource),
+    'the chooser shows candidates; deciding what a pick means is the controller\'s job',
+  );
 });
 
 check('the chooser classes it renders are styled with tokens', () => {

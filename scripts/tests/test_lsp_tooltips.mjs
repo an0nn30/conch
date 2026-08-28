@@ -22,6 +22,12 @@ import { pathToFileURL } from 'node:url';
 const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
 const APP = path.join(ROOT, 'app');
 const MODULES = path.join(APP, 'features/editor');
+// Position conversion lives in its own module now (lsp-position.js); every
+// harness that loads a converting module loads it too, the way index.html does.
+const POSITION = path.join(MODULES, 'lsp-position.js');
+// The Markdown normalizer/renderer is its own module; the overlay controller
+// delegates to it, so every harness that renders loads it too.
+const MARKDOWN = path.join(MODULES, 'lsp-markdown.js');
 const TOOLTIPS = path.join(MODULES, 'lsp-tooltips.js');
 const COMPLETION = path.join(MODULES, 'lsp-completion.js');
 const VENDOR_ENTRY = path.join(ROOT, 'vendor-entry.mjs');
@@ -182,7 +188,7 @@ const READY_STATUS = {
 function harness(options = {}) {
   const opts = options || {};
   const docText = opts.text === undefined ? 'const value = format(1);' : opts.text;
-  const { sandbox, cm, windowListeners } = load([TOOLTIPS]);
+  const { sandbox, cm, windowListeners } = load([POSITION, MARKDOWN, TOOLTIPS]);
   const tooltips = sandbox.termlabLspTooltips;
 
   const state = {
@@ -788,6 +794,61 @@ check('an edit carries an open signature overlay forward with a mapped anchor', 
   assert.deepStrictEqual(anchor(), { from: 17, to: 17 }, 'anchor mapped, not stale');
 });
 
+// The other side of "signature help survives edits": it must not survive the
+// disappearance of the call it describes. Typing inside the parentheses keeps
+// the hints; deleting across the anchor takes the call with it.
+check('deleting across the anchor closes the signature overlay', async () => {
+  const h = harness({ respond: () => SIGNATURE_RESPONSE, text: 'const x = format(1);' });
+  await h.tooltips.showSignatureHelp(h.view, 17);
+  assert.strictEqual(h.phase(), 'visible');
+  h.view.dispatch({ changes: { from: 10, to: 20, insert: '' }, userEvent: 'delete.selection' });
+  assert.strictEqual(h.phase(), 'closed', 'the call it described is gone');
+  assert.strictEqual(h.view.state.facet(REAL.view.showTooltip).filter(Boolean).length, 0);
+});
+
+check('backspacing an argument keeps the hints up', async () => {
+  const h = harness({ respond: () => SIGNATURE_RESPONSE, text: 'format(12)' });
+  await h.tooltips.showSignatureHelp(h.view, 9);
+  h.view.dispatch({ changes: { from: 8, to: 9, insert: '' }, userEvent: 'delete.backward' });
+  assert.strictEqual(h.phase(), 'visible', 'editing arguments is exactly when they are wanted');
+});
+
+check('a deletion elsewhere in the document leaves the overlay alone', async () => {
+  const h = harness({ respond: () => SIGNATURE_RESPONSE, text: 'const x = format(1);' });
+  await h.tooltips.showSignatureHelp(h.view, 17);
+  h.view.dispatch({ changes: { from: 0, to: 5, insert: '' }, userEvent: 'delete.selection' });
+  assert.strictEqual(h.phase(), 'visible');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.snapshot().anchor)), { from: 12, to: 12 },
+    'and its anchor is mapped through the change',
+  );
+});
+
+// VS Code keeps the parameter hints while the pointer wanders. Our one-overlay
+// rule would otherwise let a 320ms dwell replace them with a hover.
+check('a pointer dwell does not take the surface from visible signature help', async () => {
+  const h = harness({
+    respond: (kind) => (kind === 'hover' ? HOVER_RESPONSE : SIGNATURE_RESPONSE),
+    hoverDelayMs: 5,
+  });
+  await h.tooltips.showSignatureHelp(h.view);
+  const before = h.requests.length;
+  h.tooltips.handlePointerMove({ clientX: 16, clientY: 0 }, h.view);
+  await sleep(30);
+  assert.strictEqual(h.requests.length, before, 'no automatic hover request was made');
+  assert.strictEqual(h.snapshot().kind, 'signatureHelp', 'and the hints are still up');
+});
+
+check('an explicit Show Hover still replaces signature help', async () => {
+  const h = harness({
+    respond: (kind) => (kind === 'hover' ? HOVER_RESPONSE : SIGNATURE_RESPONSE),
+    hoverDelayMs: 5,
+  });
+  await h.tooltips.showSignatureHelp(h.view);
+  await h.tooltips.showHover(h.view);
+  assert.strictEqual(h.snapshot().kind, 'hover', 'an explicit gesture wins');
+});
+
 check('an edit cancels an in-flight request', async () => {
   let resolveIt = null;
   const h = harness({ respond: () => new Promise((resolve) => { resolveIt = resolve; }) });
@@ -877,7 +938,7 @@ check('extensions() is stable, so mounting twice does not install two fields', (
 });
 
 check('extensions() is empty when the bundle lacks the tooltip exports', () => {
-  const { sandbox } = load([TOOLTIPS], null, (box) => {
+  const { sandbox } = load([POSITION, MARKDOWN, TOOLTIPS], null, (box) => {
     box.CM6 = { EditorState: REAL.state.EditorState };
     return { CM: box.CM6, setPopup: () => {} };
   });
@@ -962,7 +1023,7 @@ check('the tooltip modules use no regex lookbehind', () => {
   // would stop the module loading at all on an older WKWebView — and because
   // every call site guards on the module being present, the failure would be
   // silent: hover would simply never appear.
-  for (const file of [TOOLTIPS, COMPLETION]) {
+  for (const file of [TOOLTIPS, MARKDOWN, COMPLETION]) {
     const source = fs.readFileSync(file, 'utf8');
     assert.ok(
       !/\(\?<[=!]/.test(source),
@@ -971,15 +1032,34 @@ check('the tooltip modules use no regex lookbehind', () => {
   }
 });
 
-check('the tooltip module contains no control bytes', () => {
-  const bytes = fs.readFileSync(TOOLTIPS);
-  for (let i = 0; i < bytes.length; i += 1) {
-    const byte = bytes[i];
-    assert.ok(
-      byte >= 0x20 || byte === 0x0a || byte === 0x09,
-      `control byte 0x${byte.toString(16)} at offset ${i} — git treats the file as binary`,
-    );
+check('the tooltip modules contain no control bytes', () => {
+  for (const file of [TOOLTIPS, MARKDOWN]) {
+    const bytes = fs.readFileSync(file);
+    for (let i = 0; i < bytes.length; i += 1) {
+      const byte = bytes[i];
+      assert.ok(
+        byte >= 0x20 || byte === 0x0a || byte === 0x09,
+        `control byte 0x${byte.toString(16)} at ${file}:${i} — git treats the file as binary`,
+      );
+    }
   }
+});
+
+check('the Markdown module renders text, never markup, and knows nothing else', () => {
+  const source = fs.readFileSync(MARKDOWN, 'utf8');
+  assert.ok(!/innerHTML/.test(source), 'server text goes in as textContent, always');
+  assert.ok(!/\binvoke\(|__TAURI__|\bCM6\b/.test(source), 'it is pure: no backend, no CodeMirror');
+  assert.ok(!/\balert\(|\bconfirm\(/.test(source));
+});
+
+check('index.html loads lsp-markdown.js before lsp-tooltips.js', () => {
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  assert.ok(
+    html.indexOf('app/features/editor/lsp-markdown.js') > 0
+    && html.indexOf('app/features/editor/lsp-markdown.js')
+      < html.indexOf('app/features/editor/lsp-tooltips.js'),
+    'the overlay controller delegates its rendering to it',
+  );
 });
 
 check('the overlay classes it renders are styled with tokens', () => {
