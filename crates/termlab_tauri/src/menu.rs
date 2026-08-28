@@ -41,6 +41,7 @@ pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
 pub(crate) const MENU_NEW_FILE_ID: &str = "file.new_file";
 pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
+pub(crate) const MENU_OPEN_FOLDER_ID: &str = "file.open_folder";
 pub(crate) const MENU_SAVE_FILE_AS_ID: &str = "file.save_file_as";
 /// Quit is a custom item, not `PredefinedMenuItem::quit`. The predefined one
 /// sends `[NSApp terminate:]`, which tao does not intercept
@@ -78,6 +79,7 @@ pub(crate) const MENU_ACTION_CLOSE_PANE: &str = "close-pane";
 pub(crate) const MENU_ACTION_RENAME_TAB: &str = "rename-tab";
 pub(crate) const MENU_ACTION_NEW_FILE: &str = "new-file";
 pub(crate) const MENU_ACTION_OPEN_FILE: &str = "open-file";
+pub(crate) const MENU_ACTION_OPEN_FOLDER: &str = "open-folder";
 pub(crate) const MENU_ACTION_SAVE_FILE_AS: &str = "save-file-as";
 pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
 pub(crate) const MENU_ACTION_CHECK_UPDATES: &str = "check-for-updates";
@@ -191,6 +193,16 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         Some(&open_file_accel),
     )?;
+    // No accelerator: opening a project is a deliberate, infrequent act, and a
+    // native accelerator here would be consumed by AppKit before the webview
+    // saw the key (see the note on save_file_as).
+    let open_folder = MenuItem::with_id(
+        app,
+        MENU_OPEN_FOLDER_ID,
+        "Open Folder\u{2026}",
+        true,
+        None::<&str>,
+    )?;
     // Deliberately NO accelerator, unlike New File/Open File… above. A native menu
     // accelerator is consumed by AppKit before the webview sees the key, which
     // is exactly why `save_file` has never had a menu item: Save As is scoped
@@ -245,6 +257,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             &new_window,
             &new_file,
             &open_file,
+            &open_folder,
             &save_file_as,
             &separator,
             &ssh_manager_menu,
@@ -721,6 +734,14 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             true,
             Some(&open_file_accel),
         )?;
+        // No accelerator — see MENU_OPEN_FOLDER_ID definition in build_app_menu above.
+        let open_folder = MenuItem::with_id(
+            app,
+            MENU_OPEN_FOLDER_ID,
+            "Open Folder\u{2026}",
+            true,
+            None::<&str>,
+        )?;
         // No accelerator — see build_app_menu above.
         let save_file_as = MenuItem::with_id(
             app,
@@ -760,6 +781,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 &new_window,
                 &new_file,
                 &open_file,
+                &open_folder,
                 &save_file_as,
                 &separator,
                 &ssh_manager_menu,

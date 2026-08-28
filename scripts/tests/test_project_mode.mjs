@@ -363,6 +363,25 @@ check('the project modules contain no control bytes', () => {
   }
 });
 
+check('Open Folder is reachable from the menu, the palette and Rust', () => {
+  const actions = fs.readFileSync(path.join(APP, 'menu-actions.js'), 'utf8');
+  assert.ok(actions.includes("action === 'open-folder'"), 'menu-actions handles open-folder');
+  assert.ok(actions.includes("invoke('project_pick_folder')"), 'it uses the native directory picker');
+  assert.ok(actions.includes("invoke('project_open'"), 'the picked folder is opened as a project');
+
+  const palette = fs.readFileSync(path.join(APP, 'command-palette-runtime.js'), 'utf8');
+  assert.ok(palette.includes("'core:open-folder'"), 'the palette exposes Open Folder as a Project');
+  assert.ok(palette.includes("handleMenuAction('open-folder')"), 'the palette routes through the one handler');
+
+  const menuRs = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/menu.rs'), 'utf8');
+  assert.ok(menuRs.includes('MENU_OPEN_FOLDER_ID'), 'the File menu has an Open Folder id');
+  assert.ok(menuRs.includes('"open-folder"'), 'the menu action string exists');
+  // Both builders: the plugin-aware rebuild must not silently drop the item.
+  const occurrences = menuRs.split('MENU_OPEN_FOLDER_ID').length - 1;
+  assert.ok(occurrences >= 4, `Open Folder must appear in both menu builders, saw ${occurrences} references`);
+});
+
 for (const { name, fn } of queued) {
   ran += 1;
   try {

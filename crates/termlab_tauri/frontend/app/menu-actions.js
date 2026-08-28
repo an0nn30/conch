@@ -126,6 +126,21 @@
         });
         return;
       }
+      if (action === 'open-folder') {
+        // Always a NEW window, even from inside a project window: a project
+        // owns its window, so re-targeting the current one would evict a
+        // project the user is still working in. project_open focuses an
+        // existing window when it already holds the same canonical root.
+        Promise.resolve(invoke('project_pick_folder'))
+          .then((picked) => {
+            if (!picked) return null;
+            return invoke('project_open', { path: picked });
+          })
+          .catch((error) => {
+            if (global.toast) global.toast.error('Cannot Open Folder', String(error));
+          });
+        return;
+      }
       if (action === 'new-plain-shell-tab') {
         createPlainShellTab().catch((error) => showStatus('Failed to create plain shell tab: ' + String(error)));
         return;

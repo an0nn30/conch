@@ -621,6 +621,9 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             menu::MENU_OPEN_FILE_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_OPEN_FILE)
             }
+            menu::MENU_OPEN_FOLDER_ID => {
+                menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_OPEN_FOLDER)
+            }
             menu::MENU_SAVE_FILE_AS_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_SAVE_FILE_AS)
             }
