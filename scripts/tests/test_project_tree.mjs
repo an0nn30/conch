@@ -415,6 +415,297 @@ check('setMissing renders the vanished-root state with a reopen action', async (
   assert.strictEqual(h.handle.element.querySelector('.tl-project-tree__missing'), null);
 });
 
+check('the missing-root reopen button invokes onReopen', async () => {
+  const seen = [];
+  const { sandbox, body } = load([TREE]);
+  const handle = sandbox.termlabProjectTree.create({
+    invoke: async () => [],
+    root: '/repo',
+    showHidden: false,
+    onOpenFile: () => {},
+    onContextMenu: () => {},
+    toastError: () => {},
+    onReopen: () => { seen.push('reopen'); },
+  });
+  body.appendChild(handle.element);
+  handle.setMissing(true);
+  const reopenButton = handle.element.querySelector('[data-tree-action="reopen"]');
+  assert.ok(reopenButton, 'the reopen action is rendered');
+  reopenButton.dispatchEvent({ type: 'click', target: reopenButton });
+  deepEq(seen, ['reopen']);
+});
+
+check('the Hidden toggle button shows/hides dotfiles and reflects state in aria-pressed', async () => {
+  const h = treeHarness({ dirs: { '/repo': [entry('.env', false), entry('a.rs', false)] } });
+  await h.handle.refreshAll();
+  deepEq(h.handle.rows().map((n) => n.name), ['a.rs'], 'dotfiles hidden by default');
+  const hiddenButton = h.handle.element.querySelectorAll('.tl-project-tree__button')
+    .find((b) => b.textContent === 'Hidden');
+  assert.ok(hiddenButton, 'the Hidden button is rendered');
+  assert.strictEqual(hiddenButton.getAttribute('aria-pressed'), 'false');
+  hiddenButton.dispatchEvent({ type: 'click', target: hiddenButton });
+  assert.strictEqual(hiddenButton.getAttribute('aria-pressed'), 'true');
+  deepEq(h.handle.rows().map((n) => n.name), ['.env', 'a.rs']);
+});
+
+check('Home and End jump to the first and last visible rows', async () => {
+  const h = treeHarness({
+    dirs: { '/repo': [entry('a.rs', false), entry('b.rs', false), entry('c.rs', false)] },
+  });
+  await h.handle.refreshAll();
+  const list = h.handle.element.querySelector('.tl-project-tree__list');
+  const key = (k) => list.dispatchEvent({ type: 'keydown', key: k, preventDefault() {}, target: list });
+  key('End');
+  assert.strictEqual(h.handle.activePath(), '/repo/c.rs');
+  key('Home');
+  assert.strictEqual(h.handle.activePath(), '/repo/a.rs');
+});
+
+// --- F1: render() must never touch siblings mounted in noticeHost ------------
+
+check('render() never disturbs a sibling notice mounted in noticeHost (e.g. a trust banner)', async () => {
+  const h = treeHarness({
+    dirs: { '/repo': [entry('src', true)], '/repo/src': [entry('a.rs', false)] },
+  });
+  const banner = h.sandbox.document.createElement('div');
+  banner.className = 'tl-trust-banner';
+  h.handle.noticeHost.appendChild(banner);
+  await h.handle.refreshAll();
+  await h.handle.expand('/repo/src');
+  h.handle.collapse('/repo/src');
+  h.handle.setShowHidden(true);
+  h.handle.setMissing(true);
+  h.handle.setMissing(false);
+  assert.ok(h.handle.noticeHost.children.includes(banner),
+    'a sibling notice must survive repeated renders, not just be re-appended');
+});
+
+// --- F2: focus must follow the active row across a DOM replace ---------------
+
+check('a keyboard expand keeps focus on the (new) active row rather than dropping it', async () => {
+  const h = treeHarness({
+    dirs: {
+      '/repo': [entry('src', true), entry('a.rs', false)],
+      '/repo/src': [entry('m.rs', false)],
+    },
+  });
+  await h.handle.refreshAll();
+  const list = h.handle.element.querySelector('.tl-project-tree__list');
+  const key = (k) => list.dispatchEvent({ type: 'keydown', key: k, preventDefault() {}, target: list });
+  key('ArrowDown');
+  const beforeRow = h.documentStub.activeElement;
+  assert.strictEqual(beforeRow.getAttribute('data-tree-path'), '/repo/src');
+  key('ArrowRight');
+  await h.handle.settled();
+  const afterRow = h.documentStub.activeElement;
+  assert.notStrictEqual(afterRow, beforeRow, 'the row element was replaced by render()');
+  assert.strictEqual(afterRow.getAttribute('data-tree-path'), '/repo/src',
+    'focus followed the same node onto its replacement element');
+  assert.strictEqual(afterRow.getAttribute('tabindex'), '0',
+    'the refocused row is also the roving-tabindex stop');
+});
+
+// --- F3: a failed listing must not be cached, and must render distinctly -----
+
+check('a failed expand does not cache the empty listing, so a retry can succeed', async () => {
+  const dirs = { '/repo': [entry('flaky', true)] };
+  let attempt = 0;
+  const { sandbox, body } = load([TREE]);
+  const invoke = async (cmd, args) => {
+    if (args.path === '/repo') return dirs['/repo'];
+    if (args.path === '/repo/flaky') {
+      attempt += 1;
+      if (attempt === 1) throw new Error('permission denied');
+      return [entry('ok.rs', false)];
+    }
+    throw new Error('unexpected path ' + args.path);
+  };
+  const errors = [];
+  const handle = sandbox.termlabProjectTree.create({
+    invoke, root: '/repo', showHidden: false,
+    onOpenFile: () => {}, onContextMenu: () => {},
+    toastError: (title, msg) => { errors.push(msg); },
+  });
+  body.appendChild(handle.element);
+  await handle.refreshAll();
+  await handle.expand('/repo/flaky');
+  assert.strictEqual(errors.length, 1, 'the failure is reported');
+  let row = handle.element.querySelector('[data-tree-path="/repo/flaky"]');
+  assert.strictEqual(row.getAttribute('data-state'), 'error',
+    'a failed directory must be visibly distinct from an empty one');
+  assert.strictEqual(row.getAttribute('aria-expanded'), 'false');
+  await handle.expand('/repo/flaky');
+  assert.strictEqual(attempt, 2, 'the retry re-invoked local_list_dir rather than reusing a cached empty result');
+  deepEq(handle.rows().map((n) => n.path), ['/repo/flaky', '/repo/flaky/ok.rs'],
+    'the retry succeeded and the directory is now expanded');
+  row = handle.element.querySelector('[data-tree-path="/repo/flaky"]');
+  assert.strictEqual(row.getAttribute('data-state'), null, 'success clears the error state');
+});
+
+// --- F4: keyboard navigation must never build a selector from a file name ----
+
+check('arrow navigation copes with quote and bracket characters in file names', async () => {
+  const h = treeHarness({
+    dirs: { '/repo': [entry('a"b.rs', false), entry('c]d.rs', false)] },
+  });
+  await h.handle.refreshAll();
+  const list = h.handle.element.querySelector('.tl-project-tree__list');
+  const key = (k) => list.dispatchEvent({ type: 'keydown', key: k, preventDefault() {}, target: list });
+  assert.doesNotThrow(() => key('ArrowDown'), 'a `"` in a file name must not throw out of the keydown handler');
+  assert.strictEqual(h.handle.activePath(), '/repo/a"b.rs');
+  assert.doesNotThrow(() => key('ArrowDown'), 'a `]` in a file name must not throw either');
+  assert.strictEqual(h.handle.activePath(), '/repo/c]d.rs');
+});
+
+// --- F5: activating a row (click or context-menu) must highlight it ----------
+
+check('click highlights the row and moves the roving tabindex, even for a file', async () => {
+  const h = treeHarness({ dirs: { '/repo': [entry('a.rs', false), entry('b.rs', false)] } });
+  await h.handle.refreshAll();
+  const rowA = h.handle.element.querySelector('[data-tree-path="/repo/a.rs"]');
+  const rowB = h.handle.element.querySelector('[data-tree-path="/repo/b.rs"]');
+  rowA.dispatchEvent({ type: 'click', target: rowA });
+  assert.ok(rowA.classList.contains('is-active'), 'the clicked row is visually active');
+  assert.strictEqual(rowA.getAttribute('tabindex'), '0', 'the clicked row becomes the roving-tabindex stop');
+  assert.strictEqual(rowB.getAttribute('tabindex'), '-1', 'only one row is ever tabbable at a time');
+});
+
+check('a right-click also highlights the row and moves the roving tabindex', async () => {
+  const h = treeHarness({ dirs: { '/repo': [entry('a.rs', false), entry('b.rs', false)] } });
+  await h.handle.refreshAll();
+  const rowA = h.handle.element.querySelector('[data-tree-path="/repo/a.rs"]');
+  rowA.dispatchEvent({ type: 'contextmenu', target: rowA, preventDefault() {}, clientX: 1, clientY: 2 });
+  assert.ok(rowA.classList.contains('is-active'), 'a right-clicked row is visually active');
+  assert.strictEqual(rowA.getAttribute('tabindex'), '0');
+});
+
+// --- F6: concurrent expands of one directory share one listing call ----------
+
+check('three same-tick expands of one directory issue a single local_list_dir call', async () => {
+  const dirs = { '/repo': [entry('src', true)], '/repo/src': [entry('m.rs', false)] };
+  const listed = [];
+  const { sandbox, body } = load([TREE]);
+  const invoke = async (cmd, args) => {
+    listed.push(args.path);
+    return dirs[args.path] || [];
+  };
+  const handle = sandbox.termlabProjectTree.create({
+    invoke, root: '/repo', showHidden: false,
+    onOpenFile: () => {}, onContextMenu: () => {}, toastError: () => {},
+  });
+  body.appendChild(handle.element);
+  await handle.refreshAll();
+  const before = listed.length;
+  const p1 = handle.expand('/repo/src');
+  const p2 = handle.expand('/repo/src');
+  const p3 = handle.expand('/repo/src');
+  await Promise.all([p1, p2, p3]);
+  deepEq(listed.slice(before), ['/repo/src'],
+    'concurrent expands of the same directory must share one in-flight listing');
+});
+
+// --- F7: the toolbar Refresh button must go through the tracked path ---------
+
+check('the toolbar Refresh button routes through the tracked path so settled() covers it', async () => {
+  const dirs = { '/repo': [entry('a.rs', false)] };
+  const { sandbox, body } = load([TREE]);
+  let releaseSecond = null;
+  let calls = 0;
+  const invoke = async (cmd, args) => {
+    calls += 1;
+    if (calls === 1) return dirs['/repo'];
+    return new Promise((resolve) => { releaseSecond = () => resolve(dirs['/repo']); });
+  };
+  const handle = sandbox.termlabProjectTree.create({
+    invoke, root: '/repo', showHidden: false,
+    onOpenFile: () => {}, onContextMenu: () => {}, toastError: () => {},
+  });
+  body.appendChild(handle.element);
+  await handle.refreshAll();
+  const refreshButton = handle.element.querySelectorAll('.tl-project-tree__button')
+    .find((b) => b.textContent === 'Refresh');
+  assert.ok(refreshButton, 'the refresh button is rendered');
+  refreshButton.dispatchEvent({ type: 'click', target: refreshButton });
+  await Promise.resolve();
+  let settledAlready = false;
+  handle.settled().then(() => { settledAlready = true; });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.strictEqual(settledAlready, false, 'settled() must still be waiting on the button-triggered refresh');
+  assert.ok(typeof releaseSecond === 'function', 'the refresh reached local_list_dir a second time');
+  releaseSecond();
+  await handle.settled();
+  assert.strictEqual(settledAlready, true, 'settled() resolved once the button-triggered refresh finished');
+});
+
+// --- F8: destroy() must be terminal -------------------------------------------
+
+check('destroy() is terminal: a refreshAll issued after destroy touches neither IPC nor the DOM', async () => {
+  const dirs = { '/repo': [entry('a.rs', false)] };
+  const listed = [];
+  const { sandbox, body } = load([TREE]);
+  const invoke = async (cmd, args) => { listed.push(args.path); return dirs[args.path] || []; };
+  const handle = sandbox.termlabProjectTree.create({
+    invoke, root: '/repo', showHidden: false,
+    onOpenFile: () => {}, onContextMenu: () => {}, toastError: () => {},
+  });
+  body.appendChild(handle.element);
+  await handle.refreshAll();
+  const callsBeforeDestroy = listed.length;
+  handle.destroy();
+  await handle.refreshAll();
+  assert.strictEqual(listed.length, callsBeforeDestroy, 'no local_list_dir call may happen after destroy');
+  deepEq(handle.rows(), [], 'rows must not be repopulated after destroy');
+});
+
+// --- F9: sort order must match pane-store.js's localeCompare form ------------
+
+check('sortEntries orders names the same way pane-store.js\'s localeCompare form does', () => {
+  const { sandbox } = treeHarness({ dirs: { '/repo': [] } });
+  const raw = ['École', 'Ecole', 'Zebra', 'apple'];
+  const names = sandbox.termlabProjectTree.sortEntries(raw.map((n) => entry(n, false)), true)
+    .map((e) => e.name);
+  const expected = raw.slice().sort(
+    (a, b) => String(a).toLowerCase().localeCompare(String(b).toLowerCase()),
+  );
+  deepEq(names, expected, 'the tree must collate file names exactly like the dual-pane explorer does');
+});
+
+// --- F10: ArrowLeft on a collapsed/leaf node moves to its PARENT row ---------
+
+check('ArrowLeft on a leaf moves focus to its parent row, not merely the previous visible row', async () => {
+  const h = treeHarness({
+    dirs: {
+      '/repo': [entry('src', true)],
+      '/repo/src': [entry('a.rs', false), entry('b.rs', false)],
+    },
+  });
+  await h.handle.refreshAll();
+  const list = h.handle.element.querySelector('.tl-project-tree__list');
+  const key = (k) => list.dispatchEvent({ type: 'keydown', key: k, preventDefault() {}, target: list });
+  key('ArrowDown');
+  key('ArrowRight');
+  await h.handle.settled();
+  key('ArrowDown');
+  key('ArrowDown');
+  assert.strictEqual(h.handle.activePath(), '/repo/src/b.rs');
+  key('ArrowLeft');
+  assert.strictEqual(h.handle.activePath(), '/repo/src',
+    'Left on a leaf must move to its parent per the ARIA tree pattern, not to the previous sibling');
+});
+
+check('ArrowLeft at a top-level row (no visible parent) does not move', async () => {
+  const h = treeHarness({ dirs: { '/repo': [entry('a.rs', false), entry('b.rs', false)] } });
+  await h.handle.refreshAll();
+  const list = h.handle.element.querySelector('.tl-project-tree__list');
+  const key = (k) => list.dispatchEvent({ type: 'keydown', key: k, preventDefault() {}, target: list });
+  key('ArrowDown');
+  key('ArrowDown');
+  assert.strictEqual(h.handle.activePath(), '/repo/b.rs');
+  key('ArrowLeft');
+  assert.strictEqual(h.handle.activePath(), '/repo/b.rs', 'there is no parent row to move to at the root level');
+});
+
 check('project-tree.css styles every class the tree renders, with tokens only', () => {
   const css = fs.readFileSync(CSS, 'utf8');
   for (const name of [

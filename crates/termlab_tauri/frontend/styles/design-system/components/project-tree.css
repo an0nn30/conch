@@ -66,6 +66,15 @@
   flex: 0 0 auto;
 }
 
+/* Permanent wrapper for the missing-root notice only (see project-tree.js's
+   render()). display: contents keeps it invisible in the box model so a
+   sibling notice mounted directly in .tl-project-tree__notice-host — the
+   Task 7 trust banner — is unaffected by whether this slot is empty or
+   holds the missing-root banner. */
+.tl-project-tree__missing-slot {
+  display: contents;
+}
+
 .tl-project-tree__missing {
   display: flex;
   align-items: center;
@@ -114,6 +123,18 @@
 .tl-project-tree__row:focus-visible {
   outline: 2px solid var(--tl-accent);
   outline-offset: -2px;
+}
+
+/* A directory whose last listing attempt failed: visually distinct from a
+   directory that is merely empty, and always paired with aria-expanded set
+   back to false (see renderRow in project-tree.js), so the failure is never
+   colour-only. */
+.tl-project-tree__row[data-state="error"] {
+  color: var(--tl-danger);
+}
+
+.tl-project-tree__row[data-state="error"] .tl-project-tree__twisty {
+  color: var(--tl-danger);
 }
 
 .tl-project-tree__twisty {

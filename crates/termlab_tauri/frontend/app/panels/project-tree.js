@@ -27,20 +27,18 @@
     return base.endsWith('/') ? base + name : base + '/' + name;
   }
 
-  // Directories first, then alphabetical, case-insensitive — the same rule
-  // local_fs.rs::sort_entries applies server-side, restated here because the
-  // hidden-files filter runs in the same pass.
+  // Directories first, then alphabetical, case-insensitive. Uses the same
+  // toLowerCase()+localeCompare() form as features/files/pane-store.js's
+  // sortEntries so an accented file name orders identically in the project
+  // tree and in the dual-pane explorer, rather than drifting because one
+  // pane used code-unit comparison and the other used locale collation.
   function sortEntries(entries, showHidden) {
     const visible = (entries || []).filter(
       (item) => showHidden || !String((item && item.name) || '').startsWith('.'),
     );
     return visible.slice().sort((a, b) => {
       if (!!a.is_dir !== !!b.is_dir) return a.is_dir ? -1 : 1;
-      const an = String(a.name || '').toLowerCase();
-      const bn = String(b.name || '').toLowerCase();
-      if (an < bn) return -1;
-      if (an > bn) return 1;
-      return 0;
+      return String(a.name || '').toLowerCase().localeCompare(String(b.name || '').toLowerCase());
     });
   }
 
@@ -48,6 +46,19 @@
     return global.fileIcons && typeof global.fileIcons.iconFor === 'function'
       ? global.fileIcons.iconFor(name, isDir, false)
       : '';
+  }
+
+  // Whether `node` is `ancestor` or is nested inside it — used to tell
+  // whether keyboard focus currently lives inside the tree's list, since a
+  // DOM replace (see render()) would otherwise silently drop focus to
+  // <body> and keyboard navigation would stop reaching the container.
+  function isWithin(node, ancestor) {
+    let current = node;
+    while (current) {
+      if (current === ancestor) return true;
+      current = current.parentNode;
+    }
+    return false;
   }
 
   function create(options) {
@@ -70,12 +81,22 @@
     let gitStatus = null;
     let activePath = null;
     let pending = Promise.resolve();
+    let destroyed = false;
 
-    // path -> FileEntry[] for every directory ever listed, and the set of
-    // directories currently open. Two maps rather than one node graph: the
-    // flat pair is what makes refreshAll a loop over `listings.keys()`.
+    // path -> FileEntry[] for every directory currently known-good, the set
+    // of directories currently open, and the set of directories whose most
+    // recent listing attempt failed (rendered distinctly so an error is
+    // never confused with a genuinely empty folder). A failed listing is
+    // deliberately NOT cached in `listings` — the next expand retries
+    // instead of being stuck on a permanently-empty directory.
     const listings = new Map();
     const expanded = new Set();
+    const errored = new Set();
+    // dirPath -> in-flight listDir() promise, so that several expands of the
+    // same directory issued in the same tick (e.g. a fast double-click, or
+    // expand() called from both a click and a keyboard handler) share one
+    // `local_list_dir` call instead of each firing its own.
+    const inFlight = new Map();
     let rowNodes = [];
 
     const element = el('div', 'tl-project-tree');
@@ -87,7 +108,7 @@
     refreshButton.type = 'button';
     refreshButton.textContent = 'Refresh';
     refreshButton.setAttribute('aria-label', 'Refresh the project tree');
-    refreshButton.addEventListener('click', () => { refreshAll(); });
+    refreshButton.addEventListener('click', () => { refreshAllTracked(); });
     const hiddenButton = el('button', 'tl-project-tree__button');
     hiddenButton.type = 'button';
     hiddenButton.textContent = 'Hidden';
@@ -103,7 +124,13 @@
 
     // A fixed slot above the list so the banner (Task 7) and the missing-root
     // state can appear and disappear without the tree reordering anything.
+    // `missingHost` is a permanent child of `noticeHost`, mounted once here:
+    // render() only ever replaces missingHost's OWN children, never touches
+    // noticeHost directly, so whatever Task 7 mounts alongside it (e.g. a
+    // trust banner) survives every expand/collapse/refresh/toggle.
     const noticeHost = el('div', 'tl-project-tree__notice-host');
+    const missingHost = el('div', 'tl-project-tree__missing-slot');
+    noticeHost.appendChild(missingHost);
 
     const list = el('div', 'tl-project-tree__list tl-scroll');
     list.setAttribute('role', 'tree');
@@ -114,22 +141,43 @@
     element.appendChild(noticeHost);
     element.appendChild(list);
 
-    async function listDir(dirPath) {
-      try {
-        const entries = await invoke('local_list_dir', { path: dirPath });
-        listings.set(dirPath, Array.isArray(entries) ? entries : []);
-        return true;
-      } catch (error) {
-        // Toast and collapse: the rest of the tree keeps working, which is the
-        // whole point of listing lazily and per-directory.
-        toastError('Cannot Read Folder', dirPath + ': ' + String(error));
-        listings.set(dirPath, []);
-        expanded.delete(dirPath);
-        return false;
-      }
+    // Fetches one directory's listing, de-duplicating concurrent callers and
+    // never caching a failure. Returns a Promise<boolean> rather than being
+    // declared `async` so a same-tick second caller can be handed the exact
+    // in-flight promise from `inFlight` before the first `invoke` call has
+    // even resolved.
+    function listDir(dirPath) {
+      if (destroyed) return Promise.resolve(false);
+      if (inFlight.has(dirPath)) return inFlight.get(dirPath);
+      const attempt = (async () => {
+        try {
+          const entries = await invoke('local_list_dir', { path: dirPath });
+          listings.set(dirPath, Array.isArray(entries) ? entries : []);
+          errored.delete(dirPath);
+          return true;
+        } catch (error) {
+          // Toast, collapse, and do not cache the empty result: the rest of
+          // the tree keeps working, and the next expand of this directory
+          // retries rather than being stuck showing "empty" forever.
+          toastError('Cannot Read Folder', dirPath + ': ' + String(error));
+          listings.delete(dirPath);
+          expanded.delete(dirPath);
+          errored.add(dirPath);
+          return false;
+        } finally {
+          inFlight.delete(dirPath);
+        }
+      })();
+      inFlight.set(dirPath, attempt);
+      return attempt;
     }
 
+    // Queues `promise` onto the tree's single settled()-observable chain.
+    // Once destroy() has run there is nothing left to observe or act on, so
+    // a post-destroy caller is handed its promise back unqueued rather than
+    // reviving `pending`.
     function track(promise) {
+      if (destroyed) return promise;
       pending = pending.then(() => promise).catch(() => {});
       return promise;
     }
@@ -149,7 +197,7 @@
     }
 
     async function refresh(dirPath) {
-      if (!listings.has(dirPath)) return;
+      if (!listings.has(dirPath) && !errored.has(dirPath)) return;
       await listDir(dirPath);
       render();
     }
@@ -160,6 +208,14 @@
         await listDir(dirPath);
       }
       render();
+    }
+
+    // The toolbar button and the public handle share this one path so that
+    // settled() actually covers a user-initiated refresh (rather than the
+    // button firing an untracked, unobserved refreshAll() whose rejection
+    // would go unhandled).
+    function refreshAllTracked() {
+      return track(refreshAll());
     }
 
     // The flattened, currently-visible rows, depth-first in display order.
@@ -202,6 +258,7 @@
         const open = expanded.has(node.path);
         twisty.textContent = open ? '▾' : '▸';
         row.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (errored.has(node.path)) row.setAttribute('data-state', 'error');
       } else {
         twisty.textContent = '';
       }
@@ -245,9 +302,15 @@
     }
 
     function render() {
-      const notices = [];
-      if (missing) notices.push(renderMissing());
-      noticeHost.replaceChildren(...notices);
+      if (destroyed) return;
+      // A real DOM drops focus to <body> when the focused node is removed;
+      // list.replaceChildren() below removes every row, so a row that
+      // currently holds focus must be tracked here and re-focused on its
+      // replacement afterward, or one keyboard-triggered expand would kill
+      // further arrow-key navigation.
+      const hadFocus = isWithin(global.document.activeElement, list);
+
+      missingHost.replaceChildren(...(missing ? [renderMissing()] : []));
 
       const nodes = missing ? [] : buildNodes();
       const built = nodes.map(renderRow);
@@ -255,6 +318,12 @@
       rowNodes = nodes;
       if (activePath && !nodes.some((n) => n.path === activePath)) activePath = null;
       applyActive(built);
+
+      if (hadFocus) {
+        const idx = rowNodes.findIndex((n) => n.path === activePath);
+        const target = idx >= 0 ? built[idx] : list;
+        if (target && typeof target.focus === 'function') target.focus();
+      }
     }
 
     function applyActive(built) {
@@ -266,12 +335,18 @@
       });
     }
 
+    // Moves by row INDEX rather than building a `[data-tree-path="..."]`
+    // selector from the (untrusted) file name: a name containing `"` would
+    // both mismatch and throw a DOMException out of the keydown handler in
+    // a real browser. `list.children` is rebuilt in the same order as
+    // `rowNodes` on every render(), so indexing is exact and never touches
+    // a selector string built from file-system data.
     function moveTo(index) {
       if (!rowNodes.length) return;
       const clamped = Math.min(Math.max(index, 0), rowNodes.length - 1);
       activePath = rowNodes[clamped].path;
       applyActive();
-      const row = list.querySelector('[data-tree-path="' + activePath + '"]');
+      const row = list.children[clamped];
       if (row && typeof row.focus === 'function') row.focus();
     }
 
@@ -282,6 +357,10 @@
     function activate(node) {
       if (!node) return;
       activePath = node.path;
+      // Applied here (not left to render()) so a click on a plain FILE row
+      // — which never triggers a render() — still highlights and becomes
+      // the roving tabindex stop.
+      applyActive();
       if (node.isDir) {
         if (expanded.has(node.path)) collapse(node.path);
         else track(expand(node.path));
@@ -308,8 +387,16 @@
       }
       if (key === 'ArrowLeft') {
         const node = rowNodes[at < 0 ? 0 : at];
-        if (node && node.isDir && expanded.has(node.path)) { activePath = node.path; collapse(node.path); }
-        else moveTo(at < 0 ? 0 : at - 1);
+        if (node && node.isDir && expanded.has(node.path)) {
+          activePath = node.path;
+          collapse(node.path);
+        } else if (node && node.parentPath && node.parentPath !== root) {
+          // ARIA tree pattern: Left on a collapsed directory or a leaf moves
+          // to its PARENT row, not merely the previous visible row (which,
+          // for anything past a folder's first child, is a sibling).
+          const parentIndex = rowNodes.findIndex((n) => n.path === node.parentPath);
+          if (parentIndex >= 0) moveTo(parentIndex);
+        }
         event.preventDefault();
         return;
       }
@@ -334,6 +421,7 @@
       if (!row || !row._node) return;
       if (typeof event.preventDefault === 'function') event.preventDefault();
       activePath = row._node.path;
+      applyActive();
       const node = row._node;
       onContextMenu(event, {
         path: node.path, name: node.name, isDir: node.isDir, parentPath: node.parentPath,
@@ -345,7 +433,7 @@
       expand: (p) => track(expand(p)),
       collapse,
       refresh: (p) => track(refresh(p)),
-      refreshAll: () => track(refreshAll()),
+      refreshAll: refreshAllTracked,
       settled: () => pending,
       activePath: () => activePath,
       rows: () => rowNodes.slice(),
@@ -358,9 +446,16 @@
       },
       focus() { if (typeof list.focus === 'function') list.focus(); },
       noticeHost,
+      // Terminal: once destroyed, render()/listDir()/track() all become
+      // no-ops (or hand back an unqueued promise), so a stray reference held
+      // by a caller (e.g. a pane switch that raced a window close) cannot
+      // reach into IPC or repaint a detached tree.
       destroy() {
+        destroyed = true;
         listings.clear();
         expanded.clear();
+        errored.clear();
+        inFlight.clear();
         rowNodes = [];
         if (element.parentNode) element.remove();
       },
