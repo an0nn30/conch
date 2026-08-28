@@ -197,3 +197,49 @@
   color: var(--tl-fg);
   white-space: pre-wrap;
 }
+
+/* The Go to Definition chooser. A CodeMirror tooltip anchored at the symbol,
+   so it is small and close rather than a dialog: one row per target, the file
+   and line first, then a preview of the target line (or, for a file this
+   window has not opened, where that file lives). Keyboard-first — the editor
+   keeps focus and the arrows move the highlight — so the rows carry no hover
+   affordance that would suggest otherwise. */
+.tl-definition-chooser {
+  display: flex;
+  flex-direction: column;
+  min-width: 240px;
+  max-width: 520px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.tl-definition-chooser__item {
+  display: flex;
+  gap: var(--tl-space-2);
+  align-items: baseline;
+  padding: var(--tl-space-1) var(--tl-space-2);
+  cursor: default;
+}
+
+/* Highlight only — the selection colour, not focus styling, because focus
+   stays in the editor while the chooser is open. */
+.tl-definition-chooser__item--active {
+  background: var(--tl-selection-bg);
+  color: var(--tl-selection-fg);
+}
+
+.tl-definition-chooser__where {
+  flex: 0 0 auto;
+  color: var(--tl-fg);
+  font-family: var(--tl-font-mono, monospace);
+  white-space: nowrap;
+}
+
+.tl-definition-chooser__preview {
+  flex: 1 1 auto;
+  color: var(--tl-fg-muted);
+  font-family: var(--tl-font-mono, monospace);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

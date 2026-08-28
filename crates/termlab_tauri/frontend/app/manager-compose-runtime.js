@@ -391,6 +391,25 @@
           currentPane: () => paneManager.currentPane(),
         });
       }
+      // Go to Definition needs the same view -> pane lookup for its own
+      // CodeMirror hooks, plus two things neither completion nor the tooltips
+      // do: the whole pane map (the chooser previews a target line from a file
+      // this window already has open) and this window's label (a history entry
+      // records the owner it was taken against). The jump itself goes through
+      // editor-service, which owns reservation and cross-window focus.
+      if (global.termlabLspNavigation && typeof global.termlabLspNavigation.configure === 'function') {
+        global.termlabLspNavigation.configure({
+          paneForView: (view) => {
+            for (const pane of panes.values()) {
+              if (pane && pane.view === view) return pane;
+            }
+            return null;
+          },
+          currentPane: () => paneManager.currentPane(),
+          allPanes: () => panes,
+          windowLabel: currentWindowLabel,
+        });
+      }
       // Diagnostics need the whole pane map rather than one lookup: a
       // publication is workspace-wide, so every local editor pane in this
       // window is a candidate owner for the URIs it carries.

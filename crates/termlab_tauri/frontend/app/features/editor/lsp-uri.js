@@ -14,6 +14,16 @@
 
   const FILE_SCHEME = 'file://';
 
+  // Whether a server-supplied URI names a local file at all. Go to Definition
+  // needs the question answered before it converts anything: a `jdt://` or
+  // `untitled:` target must be reported as unsupported, and `uriToPath` — which
+  // deliberately returns unknown schemes unchanged — cannot say so on its own.
+  // The scheme test lives here with the rest of the scheme knowledge.
+  function isFileUri(uri) {
+    const text = String(uri === null || uri === undefined ? '' : uri);
+    return text.slice(0, FILE_SCHEME.length) === FILE_SCHEME;
+  }
+
   function uriToPath(uri) {
     const text = String(uri === null || uri === undefined ? '' : uri);
     if (text.slice(0, FILE_SCHEME.length) !== FILE_SCHEME) return text;
@@ -44,5 +54,5 @@
     return `${FILE_SCHEME}${encoded}`;
   }
 
-  global.termlabLspUri = { uriToPath, pathToUri };
+  global.termlabLspUri = { uriToPath, pathToUri, isFileUri };
 })(window);

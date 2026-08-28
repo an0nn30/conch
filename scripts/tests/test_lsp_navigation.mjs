@@ -1,0 +1,1112 @@
+// Run: node scripts/tests/test_lsp_navigation.mjs
+//
+// Go to Definition, the multiple-definition chooser, and the per-window
+// back/forward navigation history.
+//
+// Three halves, following test_lsp_tooltips.mjs:
+//
+//   * the REAL half — the chooser lives in a CodeMirror StateField read by the
+//     showTooltip facet, and its keydown handler has to beat vim, so those are
+//     asserted against the shipped packages in
+//     crates/termlab_tauri/frontend/node_modules rather than against a stub.
+//
+//   * the CONTROLLER half — request gating, URI rejection, history stacks and
+//     rendering, with editor-service stubbed.
+//
+//   * the SERVICE half — the real features/editor/editor-service.js over a
+//     stubbed Tauri client, because "route every target through the editor
+//     service" is only true if the service's own ownership answers (focus an
+//     open tab, focus an owner in another window) reach the navigator.
+import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { pathToFileURL } from 'node:url';
+
+const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
+const APP = path.join(ROOT, 'app');
+const MODULES = path.join(APP, 'features/editor');
+const NAVIGATION = path.join(MODULES, 'lsp-navigation.js');
+const URI = path.join(MODULES, 'lsp-uri.js');
+const EDITOR_SERVICE = path.join(MODULES, 'editor-service.js');
+const LSP_STATE = path.join(MODULES, 'lsp-state.js');
+const LSP_BRIDGE = path.join(MODULES, 'lsp-bridge.js');
+const LANGUAGE_MAP = path.join(MODULES, 'language-map.js');
+const TAB_LABEL = path.join(MODULES, 'tab-label.js');
+const EDITOR_PANE = path.join(MODULES, 'editor-pane.js');
+const INDEX_HTML = path.join(ROOT, 'index.html');
+const COMPOSE = path.join(APP, 'manager-compose-runtime.js');
+const EDITOR_CSS = path.join(ROOT, 'styles/design-system/components/editor.css');
+const NODE_MODULES = path.join(ROOT, 'node_modules');
+const LSP_CLIENT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/lsp/client.rs');
+const LSP_TYPES = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/lsp/types.rs');
+
+let ran = 0;
+let failures = 0;
+const queued = [];
+function check(name, fn) { queued.push({ name, fn }); }
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+// --- fake DOM ---------------------------------------------------------------
+//
+// Deliberately without innerHTML: a chooser row that reaches for it is putting
+// a path (which the user may not have typed) into the document as markup.
+function makeDocument() {
+  function element(tag) {
+    return {
+      tagName: String(tag).toUpperCase(),
+      className: '',
+      textContent: '',
+      children: [],
+      style: {},
+      listeners: new Map(),
+      classList: { add() {}, remove() {} },
+      appendChild(child) { this.children.push(child); return child; },
+      setAttribute(name, value) { this[`attr:${name}`] = String(value); },
+      addEventListener(type, handler) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type).push(handler);
+      },
+      fire(type, event) {
+        for (const handler of (this.listeners.get(type) || []).slice()) handler(event);
+      },
+    };
+  }
+  return { createElement: (tag) => element(tag) };
+}
+
+function flatten(node) {
+  const out = [node];
+  for (const child of node.children || []) out.push(...flatten(child));
+  return out;
+}
+
+function textOf(node) {
+  if (!node.children || !node.children.length) return node.textContent || '';
+  return (node.textContent || '') + node.children.map(textOf).join('');
+}
+
+// --- the real CodeMirror packages -------------------------------------------
+async function loadRealCM() {
+  const pkg = async (name) => import(
+    pathToFileURL(path.join(NODE_MODULES, name, 'dist/index.js')).href
+  );
+  return {
+    state: await pkg('@codemirror/state'),
+    view: await pkg('@codemirror/view'),
+    autocomplete: await pkg('@codemirror/autocomplete'),
+    vim: await pkg('@replit/codemirror-vim'),
+  };
+}
+const REAL = await loadRealCM();
+
+const VIEW_PLUGIN_FACET = REAL.view.ViewPlugin.define(() => ({})).extension[0].facet;
+
+function keydownOwners(state) {
+  return state.facet(VIEW_PLUGIN_FACET)
+    .filter((entry) => entry.plugin.domEventHandlers && entry.plugin.domEventHandlers.keydown)
+    .map((entry) => entry.plugin.id);
+}
+
+function realCM6() {
+  const { state, view, autocomplete } = REAL;
+  return {
+    EditorState: state.EditorState,
+    StateField: state.StateField,
+    StateEffect: state.StateEffect,
+    Compartment: state.Compartment,
+    Prec: state.Prec,
+    EditorView: view.EditorView,
+    keymap: view.keymap,
+    showTooltip: view.showTooltip,
+    lineNumbers: view.lineNumbers,
+    completionStatus: autocomplete.completionStatus,
+  };
+}
+
+// --- sandbox -----------------------------------------------------------------
+function load(files, extra, cm) {
+  const sandbox = {
+    console, setTimeout, clearTimeout, Promise, Map, Set, WeakMap, Array, Object,
+    JSON, Date, RegExp, String, Number, Boolean, Math, Error,
+  };
+  sandbox.window = sandbox;
+  sandbox.document = makeDocument();
+  const windowListeners = new Map();
+  sandbox.addEventListener = (type, handler) => {
+    if (!windowListeners.has(type)) windowListeners.set(type, []);
+    windowListeners.get(type).push(handler);
+  };
+  sandbox.removeEventListener = (type, handler) => {
+    const list = windowListeners.get(type) || [];
+    const at = list.indexOf(handler);
+    if (at >= 0) list.splice(at, 1);
+  };
+  sandbox.CustomEvent = class CustomEvent {
+    constructor(type, init) { this.type = type; this.detail = init && init.detail; }
+  };
+  sandbox.dispatchEvent = (event) => {
+    for (const handler of (windowListeners.get(event.type) || []).slice()) handler(event);
+    return true;
+  };
+  const toasts = [];
+  sandbox.toast = {
+    error(title, body) { toasts.push(['error', title, body]); },
+    success(title, body) { toasts.push(['success', title, body]); },
+    info(title, body) { toasts.push(['info', title, body]); },
+    warn(title, body) { toasts.push(['warn', title, body]); },
+  };
+  sandbox.CM6 = cm === undefined ? realCM6() : cm;
+  Object.assign(sandbox, extra || {});
+  vm.createContext(sandbox);
+  for (const file of files) {
+    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
+  }
+  return { sandbox, windowListeners, toasts };
+}
+
+const CAPABILITIES = {
+  completion: true, hover: true, signatureHelp: true, definition: true, diagnostics: true,
+};
+
+const ORIGIN_TEXT = 'import { format } from "./fmt";\nconst value = format(1);\n';
+const TARGET_TEXT = 'export function format(value: number): string {\n  return String(value);\n}\n';
+
+// --- the controller harness -----------------------------------------------------
+//
+// A window with one or more editor panes, a stubbed lsp-state and a stubbed
+// editor-service, wired the way manager-compose-runtime wires them.
+function harness(options = {}) {
+  const opts = options || {};
+  const { sandbox, windowListeners, toasts } = load([URI, NAVIGATION]);
+  const navigation = sandbox.termlabLspNavigation;
+  const extensions = navigation.extensions();
+
+  const panes = new Map();
+  const states = new Map();
+  const focused = [];
+  let nextPane = 1;
+
+  function addPane(filePath, text, paneOptions) {
+    const id = nextPane++;
+    const view = {
+      state: REAL.state.EditorState.create({ doc: text, extensions }),
+      dispatches: [],
+      dispatch(spec) {
+        this.dispatches.push(spec);
+        this.state = this.state.update(spec).state;
+      },
+      focus() { focused.push(`view:${id}`); },
+      posAtCoords: (coords) => coords.x,
+      hasFocus: true,
+    };
+    const pane = {
+      paneId: id, tabId: id + 100, kind: 'editor', view, filePath, remote: null,
+    };
+    panes.set(id, pane);
+    states.set(pane, {
+      documentId: `doc-${id}`,
+      version: 3,
+      capabilities: { ...CAPABILITIES, ...((paneOptions || {}).capabilities || {}) },
+      status: { revision: 2, state: 'ready', capabilities: CAPABILITIES },
+    });
+    return pane;
+  }
+
+  const origin = addPane(
+    opts.originPath === undefined ? '/repo/src/main.ts' : opts.originPath,
+    opts.originText === undefined ? ORIGIN_TEXT : opts.originText,
+  );
+  sandbox.termlabLspState = { get: (pane) => states.get(pane) || null };
+
+  const opens = [];
+  let openResponder = opts.open || (() => ({ status: 'opened', pane: null, revealed: false }));
+  // The focused pane follows a successful open, the way it does in the app —
+  // which is what makes the location Back captures the one the user is looking
+  // at rather than the one they started the session in.
+  let focusedPane = origin;
+  sandbox.termlabEditorService = {
+    openLocalFileAt: (filePath, range, openOptions) => {
+      opens.push({ filePath, range, options: openOptions });
+      const result = openResponder(filePath, range, opens.length);
+      if (result && result.pane) focusedPane = result.pane;
+      return Promise.resolve(result);
+    },
+  };
+
+  const requests = [];
+  let responder = opts.respond || (() => null);
+  navigation.configure({
+    paneForView: (view) => {
+      for (const pane of panes.values()) if (pane.view === view) return pane;
+      return null;
+    },
+    currentPane: () => (opts.currentPane ? opts.currentPane(panes) : focusedPane),
+    allPanes: () => panes,
+    windowLabel: 'main',
+    requestFeature: (pane, kind, position, trigger) => {
+      requests.push({ pane, kind, position, trigger });
+      return Promise.resolve(responder(kind, position, requests.length));
+    },
+  });
+
+  return {
+    sandbox,
+    navigation,
+    extensions,
+    panes,
+    states,
+    origin,
+    opens,
+    requests,
+    toasts,
+    focused,
+    windowListeners,
+    addPane,
+    setResponder: (fn) => { responder = fn; },
+    setOpen: (fn) => { openResponder = fn; },
+    history: () => JSON.parse(JSON.stringify(navigation.historyState())),
+    chooser: (view) => JSON.parse(JSON.stringify(navigation.chooserState(view || origin.view))),
+  };
+}
+
+function definitionResponse(locations, documentId = 'doc-1') {
+  return { documentId, sourceVersion: 3, locations };
+}
+
+function location(uri, line, character, endCharacter) {
+  return {
+    uri,
+    range: {
+      start: { line, character },
+      end: { line, character: endCharacter === undefined ? character + 6 : endCharacter },
+    },
+  };
+}
+
+const FMT_URI = 'file:///repo/src/fmt.ts';
+
+// --- one definition ---------------------------------------------------------------
+
+check('a single definition navigates immediately through the editor service', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'opened', pane: target, revealed: true }));
+  const status = await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(status, 'navigated');
+  assert.strictEqual(h.opens.length, 1, 'exactly one target is opened');
+  assert.strictEqual(h.opens[0].filePath, '/repo/src/fmt.ts', 'the URI is converted by lsp-uri');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.opens[0].range)),
+    { start: { line: 0, character: 16 }, end: { line: 0, character: 22 } },
+    'the server range travels to the reveal',
+  );
+  assert.strictEqual(h.navigation.chooserState(h.origin.view).open, false, 'no chooser for one result');
+});
+
+check('the definition request is made at the requested position, with no trigger', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(h.requests.length, 1);
+  assert.strictEqual(h.requests[0].kind, 'definition');
+  assert.strictEqual(h.requests[0].trigger, null);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.requests[0].position)), { line: 1, character: 13 },
+  );
+});
+
+check('a target in the same file still routes through the editor service', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location('file:///repo/src/main.ts', 0, 9, 15)]),
+  });
+  h.setOpen(() => ({ status: 'focused', pane: h.origin, revealed: true }));
+  const status = await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(status, 'navigated');
+  assert.deepStrictEqual(
+    h.opens.map((entry) => entry.filePath), ['/repo/src/main.ts'],
+    'even a same-file jump asks the service, which owns reservation and focus',
+  );
+});
+
+check('an unopened local file is opened through the service, not by this module', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 2, 4)]) });
+  h.setOpen(() => ({ status: 'opened', pane: h.addPane('/repo/src/fmt.ts', TARGET_TEXT), revealed: true }));
+  assert.strictEqual(await h.navigation.goToDefinition(h.origin.view, 45), 'navigated');
+  assert.strictEqual(h.opens.length, 1);
+  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  assert.ok(!/editor_read_file|__termlabCreateEditorTab/.test(source), 'it opens nothing itself');
+});
+
+check('an owner in another window ends the jump quietly and records no history', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 2, 4)]) });
+  h.setOpen(() => ({ status: 'ownerElsewhere' }));
+  const status = await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(status, 'elsewhere');
+  assert.deepStrictEqual(h.history().back, [], 'this window did not move, so Back has nothing to undo');
+  assert.deepStrictEqual(h.toasts, [], 'focusing the real owner is a success, not an error');
+});
+
+check('no result reports a status and leaves the editor alone', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  const status = await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(status, 'none');
+  assert.strictEqual(h.opens.length, 0);
+  assert.deepStrictEqual(h.history().back, []);
+  assert.strictEqual(h.toasts.length, 1, 'a non-blocking status, not silence');
+  assert.strictEqual(h.toasts[0][0], 'info');
+});
+
+check('a null response is a no-result, not a crash', async () => {
+  const h = harness({ respond: () => null });
+  assert.strictEqual(await h.navigation.goToDefinition(h.origin.view, 45), 'none');
+});
+
+check('a response for another document is rejected', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location(FMT_URI, 2, 4)], 'doc-other'),
+  });
+  assert.strictEqual(await h.navigation.goToDefinition(h.origin.view, 45), 'none');
+  assert.strictEqual(h.opens.length, 0);
+});
+
+check('a pane whose session cannot do definitions makes no request', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 2, 4)]) });
+  h.states.get(h.origin).capabilities = { ...CAPABILITIES, definition: false };
+  assert.strictEqual(await h.navigation.goToDefinition(h.origin.view, 45), 'unavailable');
+  assert.strictEqual(h.requests.length, 0);
+});
+
+check('a remote pane is never asked for a definition', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 2, 4)]) });
+  h.origin.remote = { host: 'example' };
+  assert.strictEqual(await h.navigation.goToDefinition(h.origin.view, 45), 'unavailable');
+  assert.strictEqual(h.requests.length, 0);
+});
+
+// --- URI rejection -----------------------------------------------------------------
+
+check('non-file URIs are dropped, and a jump with nothing left reports it', async () => {
+  const h = harness({
+    respond: () => definitionResponse([
+      location('untitled:Untitled-1', 0, 0),
+      location('jdt://contents/rt.jar', 1, 2),
+      location('https://example.com/a.ts', 0, 0),
+    ]),
+  });
+  const status = await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(status, 'unsupported');
+  assert.strictEqual(h.opens.length, 0, 'nothing outside file: is opened');
+  assert.strictEqual(h.toasts.length, 1);
+  assert.strictEqual(h.toasts[0][0], 'info');
+});
+
+check('a mixed result keeps only the file targets', async () => {
+  const h = harness({
+    respond: () => definitionResponse([
+      location('untitled:Untitled-1', 0, 0),
+      location(FMT_URI, 2, 4),
+    ]),
+  });
+  h.setOpen(() => ({ status: 'opened', pane: h.addPane('/repo/src/fmt.ts', TARGET_TEXT), revealed: true }));
+  assert.strictEqual(
+    await h.navigation.goToDefinition(h.origin.view, 45), 'navigated',
+    'one survivor is a single result, so it opens without a chooser',
+  );
+  assert.deepStrictEqual(h.opens.map((entry) => entry.filePath), ['/repo/src/fmt.ts']);
+});
+
+check('URI conversion is lsp-uri’s job, in one place', () => {
+  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  assert.ok(/termlabLspUri/.test(source), 'it uses the shared converter');
+  assert.ok(!/decodeURIComponent|encodeURI\(/.test(source), 'and never re-implements it');
+});
+
+// --- the chooser --------------------------------------------------------------------
+
+const TWO_TARGETS = [location(FMT_URI, 0, 16, 22), location('file:///repo/src/fmt.d.ts', 4, 2, 8)];
+
+check('multiple definitions open a chooser and open nothing', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  const status = await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(status, 'chooser');
+  assert.strictEqual(h.opens.length, 0, 'never open all results');
+  const chooser = h.chooser();
+  assert.strictEqual(chooser.open, true);
+  assert.strictEqual(chooser.index, 0);
+  assert.strictEqual(chooser.items.length, 2);
+  assert.strictEqual(chooser.items[0].name, 'fmt.ts');
+  assert.strictEqual(chooser.items[0].line, 1, 'lines are shown 1-based');
+  assert.strictEqual(chooser.items[1].name, 'fmt.d.ts');
+  assert.strictEqual(chooser.items[1].line, 5);
+});
+
+check('the chooser is anchored at the position the definition was requested for', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  const tooltips = h.origin.view.state.facet(REAL.view.showTooltip).filter(Boolean);
+  assert.strictEqual(tooltips.length, 1, 'exactly one overlay');
+  assert.strictEqual(tooltips[0].pos, 45, 'near the cursor, not pinned to a corner');
+  assert.strictEqual(typeof tooltips[0].create, 'function');
+});
+
+check('the chooser previews the target line when that file is open here', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  const items = h.chooser().items;
+  assert.strictEqual(items[0].preview, 'export function format(value: number): string {');
+  assert.strictEqual(items[1].preview, null, 'a file this window has not opened has no preview');
+  assert.strictEqual(items[1].context, '/repo/src', 'so the row shows where the file lives instead');
+});
+
+check('arrow keys move the selection and are consumed', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(h.navigation.handleKeydown({ key: 'ArrowDown' }, h.origin.view), true);
+  assert.strictEqual(h.chooser().index, 1);
+  assert.strictEqual(h.navigation.handleKeydown({ key: 'ArrowDown' }, h.origin.view), true);
+  assert.strictEqual(h.chooser().index, 0, 'the list wraps');
+  assert.strictEqual(h.navigation.handleKeydown({ key: 'ArrowUp' }, h.origin.view), true);
+  assert.strictEqual(h.chooser().index, 1, 'and wraps backwards too');
+});
+
+check('Enter opens the highlighted target and closes the chooser', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  const target = h.addPane('/repo/src/fmt.d.ts', 'declare function format(v: number): string;\n');
+  h.setOpen(() => ({ status: 'opened', pane: target, revealed: true }));
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  h.navigation.handleKeydown({ key: 'ArrowDown' }, h.origin.view);
+  assert.strictEqual(h.navigation.handleKeydown({ key: 'Enter' }, h.origin.view), true);
+  await sleep(5);
+  assert.strictEqual(h.chooser().open, false);
+  assert.deepStrictEqual(h.opens.map((entry) => entry.filePath), ['/repo/src/fmt.d.ts']);
+  assert.strictEqual(h.history().back.length, 1, 'choosing records the jump');
+});
+
+check('Escape closes the chooser without navigating', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(h.navigation.handleKeydown({ key: 'Escape' }, h.origin.view), true);
+  assert.strictEqual(h.chooser().open, false);
+  assert.strictEqual(h.opens.length, 0);
+  assert.deepStrictEqual(h.history().back, [], 'a cancelled chooser is not a jump');
+});
+
+check('with no chooser open the keys fall through, so vim keeps its arrows and Escape', () => {
+  const h = harness();
+  for (const key of ['ArrowDown', 'ArrowUp', 'Enter', 'Escape']) {
+    assert.strictEqual(h.navigation.handleKeydown({ key }, h.origin.view), false, key);
+  }
+});
+
+check('a modified arrow is not the chooser’s', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(
+    h.navigation.handleKeydown({ key: 'ArrowDown', metaKey: true }, h.origin.view), false,
+  );
+  assert.strictEqual(h.chooser().index, 0);
+});
+
+check('an edit closes the chooser, because its origin position no longer holds', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  h.origin.view.dispatch({ changes: { from: 0, insert: 'x' }, userEvent: 'input.type' });
+  assert.strictEqual(h.chooser().open, false);
+  assert.strictEqual(
+    h.origin.view.state.facet(REAL.view.showTooltip).filter(Boolean).length, 0,
+    'the field drops it, so no stale overlay is left behind',
+  );
+});
+
+check('opening the chooser dismisses an open hover or signature overlay', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  const dismissed = [];
+  h.sandbox.termlabLspTooltips = { dismiss: (view) => dismissed.push(view === h.origin.view) };
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.deepStrictEqual(dismissed, [true], 'one overlay at a time');
+});
+
+check('the chooser renders file, line and preview as text, never as markup', () => {
+  const h = harness();
+  const node = h.navigation.renderChooser({
+    index: 1,
+    items: [
+      {
+        name: 'fmt.ts', line: 1, column: 17, preview: 'export function format() {}', context: '/repo/src',
+      },
+      {
+        name: '<img src=x onerror="steal()">.ts',
+        line: 5,
+        column: 3,
+        preview: null,
+        context: '/repo/<script>',
+      },
+    ],
+  });
+  const all = flatten(node);
+  assert.ok(all.every((child) => child.innerHTML === undefined), 'nothing set innerHTML');
+  assert.ok(!all.some((child) => child.tagName === 'IMG' || child.tagName === 'SCRIPT'));
+  const text = textOf(node);
+  assert.ok(text.indexOf('fmt.ts') >= 0 && text.indexOf('1') >= 0);
+  assert.ok(text.indexOf('export function format() {}') >= 0, 'the preview is shown');
+  assert.ok(text.indexOf('onerror') >= 0, 'a hostile name survives as literal text');
+  const active = all.filter(
+    (child) => String(child.className).indexOf('tl-definition-chooser__item--active') >= 0,
+  );
+  assert.strictEqual(active.length, 1, 'exactly one row is highlighted');
+  assert.ok(String(active[0]['attr:aria-selected']) === 'true', 'and it says so to a screen reader');
+});
+
+check('clicking a row chooses it', async () => {
+  const h = harness({ respond: () => definitionResponse(TWO_TARGETS) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'opened', pane: target, revealed: true }));
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  const tooltip = h.origin.view.state.facet(REAL.view.showTooltip).filter(Boolean)[0];
+  // CodeMirror hands `create` the view; the chooser needs it to know which
+  // editor's list is being clicked.
+  const dom = tooltip.create(h.origin.view).dom;
+  const rows = flatten(dom).filter(
+    (child) => String(child.className).indexOf('tl-definition-chooser__item') >= 0,
+  );
+  assert.strictEqual(rows.length, 2);
+  let defaultPrevented = false;
+  rows[0].fire('mousedown', { preventDefault() { defaultPrevented = true; }, button: 0 });
+  await sleep(5);
+  assert.strictEqual(defaultPrevented, true, 'the click must not steal focus from the editor');
+  assert.deepStrictEqual(h.opens.map((entry) => entry.filePath), ['/repo/src/fmt.ts']);
+});
+
+// --- history ---------------------------------------------------------------------------
+
+check('the source location is captured before navigation, not after it', async () => {
+  let resolveRequest = null;
+  const h = harness({
+    respond: () => new Promise((resolve) => { resolveRequest = resolve; }),
+  });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'opened', pane: target, revealed: true }));
+  const jump = h.navigation.goToDefinition(h.origin.view, 45);
+  // The caret moves while the request is in flight; Back must return to where
+  // F12 was pressed.
+  h.origin.view.dispatch({ selection: { anchor: 3 } });
+  resolveRequest(definitionResponse([location(FMT_URI, 0, 16, 22)]));
+  await jump;
+  const back = h.history().back;
+  assert.strictEqual(back.length, 1);
+  assert.strictEqual(back[0].uri, 'file:///repo/src/main.ts');
+  assert.deepStrictEqual(back[0].position, { line: 1, character: 13 });
+  assert.deepStrictEqual(back[0].range, {
+    start: { line: 1, character: 13 }, end: { line: 1, character: 13 },
+  }, 'the selection at the source, so Back restores it');
+  assert.deepStrictEqual(back[0].owner, { windowLabel: 'main', paneId: '1' });
+});
+
+check('back returns to the source and forward returns to the target', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen((filePath) => ({
+    status: 'focused',
+    pane: filePath === '/repo/src/fmt.ts' ? target : h.origin,
+    revealed: true,
+  }));
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(h.history().back.length, 1);
+
+  assert.strictEqual(await h.navigation.navigateBack(), 'navigated');
+  assert.strictEqual(h.opens[1].filePath, '/repo/src/main.ts');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.opens[1].range)),
+    { start: { line: 1, character: 13 }, end: { line: 1, character: 13 } },
+    'Back restores the caret, not just the file',
+  );
+  let state = h.history();
+  assert.strictEqual(state.back.length, 0);
+  assert.strictEqual(state.forward.length, 1, 'the place Back left becomes Forward');
+  assert.strictEqual(state.forward[0].uri, FMT_URI);
+
+  assert.strictEqual(await h.navigation.navigateForward(), 'navigated');
+  assert.strictEqual(h.opens[2].filePath, '/repo/src/fmt.ts');
+  state = h.history();
+  assert.strictEqual(state.back.length, 1);
+  assert.strictEqual(state.forward.length, 0);
+});
+
+check('back with nothing behind reports it and opens nothing', async () => {
+  const h = harness();
+  assert.strictEqual(await h.navigation.navigateBack(), 'none');
+  assert.strictEqual(await h.navigation.navigateForward(), 'none');
+  assert.strictEqual(h.opens.length, 0);
+});
+
+check('a new jump after going back truncates the forward stack', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const fmt = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  const other = h.addPane('/repo/src/other.ts', 'export const other = 1;\n');
+  h.setOpen((filePath) => ({
+    status: 'focused',
+    pane: { '/repo/src/fmt.ts': fmt, '/repo/src/other.ts': other }[filePath] || h.origin,
+    revealed: true,
+  }));
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  await h.navigation.navigateBack();
+  assert.strictEqual(h.history().forward.length, 1);
+
+  h.setResponder(() => definitionResponse([location('file:///repo/src/other.ts', 0, 13, 18)]));
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  const state = h.history();
+  assert.deepStrictEqual(state.forward, [], 'a new branch discards the abandoned one');
+  assert.strictEqual(state.back.length, 1);
+});
+
+check('the history is bounded at 100 entries per window', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'focused', pane: target, revealed: true }));
+  for (let i = 0; i < 105; i += 1) {
+    // Each jump starts from the origin pane again, so each one records a source.
+    await h.navigation.goToDefinition(h.origin.view, 45);
+  }
+  const state = h.history();
+  assert.strictEqual(state.back.length, 100, 'bounded, so a long session cannot grow without limit');
+});
+
+check('a target that disappeared reports a status and leaves the history untouched', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'focused', pane: target, revealed: true }));
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  const before = h.history();
+
+  h.setOpen(() => ({ status: 'failed', error: new Error('No such file or directory') }));
+  assert.strictEqual(await h.navigation.navigateBack(), 'failed');
+  assert.deepStrictEqual(
+    h.history(), before,
+    'a failed Back must not consume the entry it could not reach',
+  );
+  assert.strictEqual(h.toasts.length, 1);
+  assert.strictEqual(h.toasts[0][0], 'info', 'quiet: the current editor did not change');
+});
+
+check('a definition jump to a file that disappeared records nothing', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  h.setOpen(() => ({ status: 'failed', error: new Error('gone') }));
+  assert.strictEqual(await h.navigation.goToDefinition(h.origin.view, 45), 'failed');
+  assert.deepStrictEqual(h.history().back, []);
+  assert.strictEqual(h.toasts.length, 1);
+});
+
+// --- shortcuts ---------------------------------------------------------------------
+
+check('the configured shortcuts arrive as window events', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  h.sandbox.dispatchEvent(new h.sandbox.CustomEvent('termlab:editor-go-to-definition'));
+  await sleep(5);
+  assert.strictEqual(h.requests.length, 1, 'F12 requests at the caret of the focused pane');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.requests[0].position)), { line: 0, character: 0 },
+  );
+  for (const name of ['termlab:editor-navigate-back', 'termlab:editor-navigate-forward']) {
+    h.sandbox.dispatchEvent(new h.sandbox.CustomEvent(name));
+  }
+  await sleep(5);
+  assert.ok(
+    h.windowListeners.has('termlab:editor-navigate-back')
+    && h.windowListeners.has('termlab:editor-navigate-forward'),
+    'Ctrl-minus and Ctrl-Shift-minus are routed by the shortcut runtime, not by a key handler here',
+  );
+});
+
+check('dispose removes the window listeners', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  h.navigation.dispose();
+  h.sandbox.dispatchEvent(new h.sandbox.CustomEvent('termlab:editor-go-to-definition'));
+  await sleep(5);
+  assert.strictEqual(h.requests.length, 0);
+});
+
+check('Command-click requests a definition at the clicked position', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  const consumed = h.navigation.handleMousedown(
+    { metaKey: true, button: 0, clientX: 45, clientY: 8 }, h.origin.view,
+  );
+  await sleep(5);
+  assert.strictEqual(consumed, false, 'the click still places the caret; it is not swallowed');
+  assert.strictEqual(h.requests.length, 1);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.requests[0].position)), { line: 1, character: 13 },
+  );
+});
+
+check('a plain click, a right click and a Ctrl-click are not Command-click', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  h.navigation.handleMousedown({ button: 0, clientX: 45, clientY: 8 }, h.origin.view);
+  h.navigation.handleMousedown({ metaKey: true, button: 2, clientX: 45, clientY: 8 }, h.origin.view);
+  h.navigation.handleMousedown({ ctrlKey: true, button: 0, clientX: 45, clientY: 8 }, h.origin.view);
+  await sleep(5);
+  assert.strictEqual(h.requests.length, 0);
+});
+
+// --- the REAL half ------------------------------------------------------------------
+
+check('the chooser keydown handler is raised above vim, which is a plugin not a keymap', () => {
+  const h = harness();
+  const state = REAL.state.EditorState.create({
+    doc: 'x',
+    extensions: [REAL.vim.vim(), h.navigation.extensions()],
+  });
+  const owners = keydownOwners(state);
+  assert.ok(owners.length >= 2, 'both vim and the chooser handler registered a keydown');
+  const vimOnly = keydownOwners(REAL.state.EditorState.create({
+    doc: 'x', extensions: [REAL.vim.vim()],
+  }));
+  const vimId = vimOnly[vimOnly.length - 1];
+  assert.ok(
+    owners.indexOf(vimId) > 0,
+    'Enter and the arrows reach the open chooser before vim moves the caret',
+  );
+});
+
+check('extensions() is stable, so mounting twice does not install two fields', () => {
+  const h = harness();
+  const state = REAL.state.EditorState.create({
+    doc: 'x',
+    extensions: [h.navigation.extensions(), h.navigation.extensions()],
+  });
+  assert.strictEqual(state.facet(REAL.view.showTooltip).filter(Boolean).length, 0);
+  assert.ok(state, 'two mounts of the same field must not throw');
+});
+
+check('extensions() is empty when the bundle lacks the tooltip exports', () => {
+  const { sandbox } = load([URI, NAVIGATION], null, { EditorState: REAL.state.EditorState });
+  assert.strictEqual(sandbox.termlabLspNavigation.extensions().length, 0);
+});
+
+// --- the SERVICE half ----------------------------------------------------------------
+//
+// The real editor-service over a stubbed Tauri client: the navigator's promise
+// that "every target routes through the service" is only worth something if the
+// service's answers are the ones it handles.
+
+function serviceHarness(options = {}) {
+  const calls = [];
+  const panes = new Map();
+  const focused = [];
+  let nextPane = 1;
+  let current = options.pane || null;
+  const invoke = async (command, args = {}) => {
+    calls.push({ command, args });
+    if (typeof options.invoke === 'function') {
+      const custom = await options.invoke(command, args, calls);
+      if (custom !== undefined) return custom;
+    }
+    if (command === 'editor_reserve_document') {
+      return { kind: 'reserved', reservationId: `r-${calls.length}`, canonicalPath: args.path };
+    }
+    if (command === 'editor_read_file') return options.contents || TARGET_TEXT;
+    if (command === 'lsp_open_document') {
+      return {
+        documentId: `doc-${calls.length}`,
+        version: 1,
+        projectCandidates: [],
+        status: {
+          revision: 1,
+          documentId: `doc-${calls.length}`,
+          state: 'ready',
+          capabilities: { ...CAPABILITIES },
+          errorCount: 0,
+          warningCount: 0,
+        },
+      };
+    }
+    return null;
+  };
+
+  const { sandbox, toasts } = load([], {
+    termlabServices: {
+      tauriClient: {
+        invoke,
+        listen: () => Promise.resolve(() => {}),
+        listenOnCurrentWindow: () => Promise.resolve(() => {}),
+        currentWindow: { setFocus: async () => { focused.push('window'); } },
+      },
+    },
+  });
+  sandbox.__termlabPaneAccess = {
+    currentPane: () => current,
+    allPanes: () => panes,
+    activateTab: (id) => focused.push(`tab:${id}`),
+    setFocusedPane: (id) => focused.push(`pane:${id}`),
+    setTabLabel: () => true,
+  };
+  sandbox.__termlabCreateEditorTab = (opts) => {
+    const id = nextPane++;
+    const created = {
+      paneId: id,
+      tabId: id + 100,
+      kind: 'editor',
+      filePath: opts.filePath || null,
+      remote: opts.remote || null,
+      dirty: false,
+      view: {
+        state: REAL.state.EditorState.create({ doc: opts.contents || '' }),
+        dispatch(spec) { this.state = this.state.update(spec).state; },
+        focus() { focused.push(`view:${id}`); },
+        termlabResetDirty() {},
+        termlabSetReadOnly() {},
+      },
+    };
+    panes.set(id, created);
+    current = created;
+    if (typeof opts.onPaneCreated === 'function') opts.onPaneCreated(created);
+    return created.tabId;
+  };
+  vm.runInContext(fs.readFileSync(LANGUAGE_MAP, 'utf8'), sandbox, { filename: LANGUAGE_MAP });
+  vm.runInContext(fs.readFileSync(TAB_LABEL, 'utf8'), sandbox, { filename: TAB_LABEL });
+  vm.runInContext(fs.readFileSync(LSP_STATE, 'utf8'), sandbox, { filename: LSP_STATE });
+  vm.runInContext(fs.readFileSync(LSP_BRIDGE, 'utf8'), sandbox, { filename: LSP_BRIDGE });
+  sandbox.termlabEditorPane = { setLanguage() {} };
+  sandbox.termlabLspBridge.configure({
+    windowLabel: 'main', paneAccess: sandbox.__termlabPaneAccess,
+  });
+  vm.runInContext(fs.readFileSync(EDITOR_SERVICE, 'utf8'), sandbox, { filename: EDITOR_SERVICE });
+  return {
+    sandbox,
+    service: sandbox.termlabEditorService,
+    calls,
+    panes,
+    focused,
+    toasts,
+    get pane() { return current; },
+  };
+}
+
+check('the service answers an open with the pane it opened', async () => {
+  const h = serviceHarness();
+  const result = await h.service.openLocalFile('/repo/src/fmt.ts');
+  assert.strictEqual(result.status, 'opened');
+  assert.ok(result.pane, 'the caller needs the pane to reveal a range in it');
+  assert.strictEqual(result.pane.filePath, '/repo/src/fmt.ts');
+});
+
+check('the service answers a second open of the same file with the pane it focused', async () => {
+  const h = serviceHarness();
+  await h.service.openLocalFile('/repo/src/fmt.ts');
+  const before = h.calls.length;
+  const result = await h.service.openLocalFile('/repo/src/fmt.ts');
+  assert.strictEqual(result.status, 'focused');
+  assert.strictEqual(result.pane.filePath, '/repo/src/fmt.ts');
+  assert.strictEqual(h.calls.length, before, 'no second reservation and no second read');
+});
+
+check('the service answers an owner in another window without opening a second view', async () => {
+  const h = serviceHarness({
+    invoke(command) {
+      if (command === 'editor_reserve_document') {
+        return {
+          kind: 'focusOwner', documentId: 'doc-owner', windowLabel: 'main-2', paneId: '9',
+        };
+      }
+      return undefined;
+    },
+  });
+  const result = await h.service.openLocalFile('/repo/src/fmt.ts');
+  assert.strictEqual(result.status, 'ownerElsewhere');
+  assert.strictEqual(result.pane, undefined, 'this window owns no pane for it');
+  assert.strictEqual(h.calls.some((entry) => entry.command === 'editor_read_file'), false);
+});
+
+check('the service answers a missing file with a failure the caller can act on', async () => {
+  const h = serviceHarness({
+    invoke(command) {
+      if (command === 'editor_read_file') throw new Error('No such file or directory');
+      return undefined;
+    },
+  });
+  const result = await h.service.openLocalFile('/repo/src/gone.ts');
+  assert.strictEqual(result.status, 'failed');
+  assert.ok(result.error, 'and says why');
+  assert.strictEqual(
+    h.calls.some((entry) => entry.command === 'editor_release_document'), true,
+    'the reservation is still released',
+  );
+});
+
+check('openLocalFileAt selects and centres the range in the pane it opened', async () => {
+  const h = serviceHarness();
+  const result = await h.service.openLocalFileAt('/repo/src/fmt.ts', {
+    start: { line: 0, character: 16 }, end: { line: 0, character: 22 },
+  });
+  assert.strictEqual(result.status, 'opened');
+  assert.strictEqual(result.revealed, true);
+  const selection = result.pane.view.state.selection.main;
+  assert.strictEqual(selection.from, 16);
+  assert.strictEqual(selection.to, 22);
+  assert.strictEqual(
+    h.focused.some((entry) => String(entry).indexOf('view:') === 0), true,
+    'and puts the keyboard back in the editor',
+  );
+});
+
+check('a range past the end of the document is clamped, not thrown', async () => {
+  const h = serviceHarness();
+  const result = await h.service.openLocalFileAt('/repo/src/fmt.ts', {
+    start: { line: 900, character: 4 }, end: { line: 900, character: 9 },
+  });
+  assert.strictEqual(result.revealed, true);
+  const doc = result.pane.view.state.doc;
+  assert.ok(result.pane.view.state.selection.main.to <= doc.length);
+});
+
+check('openLocalFileAt on an owner elsewhere reveals nothing and reports it', async () => {
+  const h = serviceHarness({
+    invoke(command) {
+      if (command === 'editor_reserve_document') {
+        return { kind: 'focusOwner', documentId: 'd', windowLabel: 'main-2', paneId: '9' };
+      }
+      return undefined;
+    },
+  });
+  const result = await h.service.openLocalFileAt('/repo/src/fmt.ts', {
+    start: { line: 0, character: 0 }, end: { line: 0, character: 1 },
+  });
+  assert.strictEqual(result.status, 'ownerElsewhere');
+  assert.strictEqual(result.revealed, undefined);
+});
+
+// --- the payload the frontend reads -----------------------------------------------
+
+check('Rust normalizes LocationLink to a Location on its target selection range', () => {
+  const source = fs.readFileSync(LSP_CLIENT, 'utf8');
+  assert.ok(
+    /target_selection_range/.test(source),
+    'a LocationLink must land on the name, not on the whole declaration body',
+  );
+});
+
+check('DefinitionResponse carries the document identity the frontend checks', () => {
+  const source = fs.readFileSync(LSP_TYPES, 'utf8');
+  const at = source.indexOf('pub(crate) struct DefinitionResponse');
+  assert.ok(at > 0, 'DefinitionResponse exists');
+  const block = source.slice(at, source.indexOf('}', at));
+  for (const field of ['document_id', 'source_version', 'locations']) {
+    assert.ok(block.includes(field), `DefinitionResponse must carry ${field}`);
+  }
+});
+
+// --- wiring and hygiene -------------------------------------------------------------
+
+check('index.html loads lsp-navigation.js before editor-pane.js', () => {
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = (name) => html.indexOf(name);
+  assert.ok(at('app/features/editor/lsp-navigation.js') > 0, 'the module is loaded at all');
+  assert.ok(
+    at('app/features/editor/lsp-uri.js') < at('app/features/editor/lsp-navigation.js'),
+    'it reads termlabLspUri',
+  );
+  assert.ok(
+    at('app/features/editor/lsp-navigation.js') < at('app/features/editor/editor-pane.js'),
+    'editor-pane reads termlabLspNavigation at view-construction time',
+  );
+});
+
+check('editor-pane mounts the navigation extensions defensively', () => {
+  const source = fs.readFileSync(EDITOR_PANE, 'utf8');
+  assert.ok(/termlabLspNavigation/.test(source));
+  assert.ok(
+    /typeof global\.termlabLspNavigation\.extensions === 'function'/.test(source),
+    'a stale vendor bundle must cost the chooser and nothing else',
+  );
+});
+
+check('the compose runtime configures the navigator with the lookups only it has', () => {
+  const source = fs.readFileSync(COMPOSE, 'utf8');
+  assert.ok(/termlabLspNavigation/.test(source));
+  const at = source.indexOf('termlabLspNavigation');
+  const block = source.slice(at, at + 900);
+  assert.ok(/paneForView/.test(block));
+  assert.ok(/currentPane/.test(block));
+  assert.ok(/allPanes/.test(block), 'previews come from the panes this window has open');
+  assert.ok(/windowLabel/.test(block), 'history entries name their preferred owner');
+});
+
+check('the module reaches the backend only through editor-service', () => {
+  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  assert.ok(!/\binvoke\(/.test(source), 'never calls invoke() directly');
+  assert.ok(!/listenOnCurrentWindow|__TAURI__/.test(source));
+  assert.ok(/requestFeature/.test(source), 'requests use the flush/version barrier');
+  assert.ok(/openLocalFileAt/.test(source), 'and targets go through the ownership authority');
+});
+
+check('the module registers no window or document key handlers', () => {
+  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  assert.ok(!/addEventListener\(\s*['"]key(down|up|press)['"]/.test(source));
+  assert.ok(!/\bdocument\.addEventListener\b/.test(source));
+});
+
+check('the module never uses alert or confirm', () => {
+  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  assert.ok(!/\balert\(|\bconfirm\(/.test(source));
+});
+
+check('the module never sets innerHTML', () => {
+  const source = fs.readFileSync(NAVIGATION, 'utf8');
+  assert.ok(!/innerHTML/.test(source), 'paths go in as textContent, always');
+});
+
+check('the navigation module uses no regex lookbehind', () => {
+  for (const file of [NAVIGATION, EDITOR_SERVICE]) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.ok(
+      !/\(\?<[=!]/.test(source),
+      `${file} uses a lookbehind — it costs the whole file on an older WKWebView`,
+    );
+  }
+});
+
+check('the navigation module contains no control bytes', () => {
+  const bytes = fs.readFileSync(NAVIGATION);
+  for (let i = 0; i < bytes.length; i += 1) {
+    const byte = bytes[i];
+    assert.ok(
+      byte >= 0x20 || byte === 0x0a || byte === 0x09,
+      `control byte 0x${byte.toString(16)} at offset ${i} — git treats the file as binary`,
+    );
+  }
+});
+
+check('the chooser classes it renders are styled with tokens', () => {
+  const css = fs.readFileSync(EDITOR_CSS, 'utf8');
+  const names = [
+    'tl-definition-chooser',
+    'tl-definition-chooser__item',
+    'tl-definition-chooser__item--active',
+    'tl-definition-chooser__where',
+    'tl-definition-chooser__preview',
+  ];
+  for (const name of names) {
+    assert.ok(css.includes(`.${name}`), `${name} is rendered but never styled`);
+  }
+  const block = css.slice(css.indexOf('.tl-definition-chooser'));
+  assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(block), 'tokens only, no hex colours');
+});
+
+for (const { name, fn } of queued) {
+  ran += 1;
+  try {
+    await fn();
+    console.log(`  ok   ${name}`);
+  } catch (error) {
+    failures += 1;
+    console.log(`  FAIL ${name}`);
+    console.log(`       ${(error && error.stack) || error}`);
+  }
+}
+if (failures) {
+  console.log(`lsp navigation: ${failures} of ${ran} checks FAILED`);
+  process.exitCode = 1;
+} else {
+  console.log(`lsp navigation: all ${ran} checks passed`);
+}

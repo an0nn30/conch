@@ -106,21 +106,24 @@
   // Opening a file that is already open focuses its tab instead of making a
   // second view of the same bytes — two editors on one path would each hold a
   // doc and the last save would silently win.
+  // Returns the pane it focused, or null. Callers that only care whether an
+  // editor was already open can test the result for truthiness; Go to
+  // Definition needs the pane itself, to select a range inside it.
   function focusExistingEditor(filePath) {
     // An untitled buffer has `filePath === null`, and two of those are not the
     // same file — they are two files that do not exist yet. Without this
     // guard, opening with a falsy path would match the first untitled pane and
     // hand the user their scratch buffer instead of the file they asked for.
-    if (!filePath) return false;
+    if (!filePath) return null;
     let found = null;
     eachEditorPane((pane) => {
       if (!found && pane.filePath && pane.filePath === filePath) found = pane;
     });
-    if (!found) return false;
+    if (!found) return null;
     const access = paneAccess();
     access.activateTab(found.tabId);
     access.setFocusedPane(found.paneId);
-    return true;
+    return found;
   }
 
   // A local pane exists before its reservation is committed. Keep that
@@ -128,9 +131,19 @@
   // destroy the view and let a late manager response attach state to it.
   const ownershipOpens = new WeakMap();
 
+  // Resolves with what happened, so a caller that has more to do at the target
+  // (Go to Definition selects a range there) can tell an opened pane from a
+  // focused one, and both from a document another WINDOW owns — where Rust has
+  // already focused the owner and this window must not reach further:
+  //
+  //   { status: 'opened' | 'focused', pane } | { status: 'ownerElsewhere' }
+  //   | { status: 'unavailable' } | { status: 'failed', error }
+  //
+  // Existing callers ignore the value; the flow is unchanged for them.
   async function openLocalFile(filePath) {
-    if (bundleMissing()) return;
-    if (focusExistingEditor(filePath)) return;
+    if (bundleMissing()) return { status: 'unavailable' };
+    const existing = focusExistingEditor(filePath);
+    if (existing) return { status: 'focused', pane: existing };
     const bridge = lspBridge();
     let reservation = null;
     try {
@@ -138,7 +151,7 @@
         reservation = await bridge.reserveDocument(filePath);
         if (!reservation || reservation.kind !== 'reserved') {
           if (reservation && reservation.kind === 'focusOwner') await bridge.focusOwner(reservation);
-          return;
+          return { status: 'ownerElsewhere', owner: reservation || null };
         }
       }
       const canonicalPath = reservation && reservation.canonicalPath
@@ -182,12 +195,57 @@
           ownershipOpens.delete(createdPane);
         }
       }
+      return { status: 'opened', pane: createdPane };
     } catch (error) {
       if (reservation && bridge) {
         await bridge.releaseDocument(reservation.reservationId).catch(() => {});
       }
       toastError('Cannot Open File', String(error));
+      return { status: 'failed', error };
     }
+  }
+
+  // Where an LSP range lands in a live document. Both clamps matter: a server
+  // that has raced ahead of the document can name a line past the end, and
+  // CodeMirror throws on an out-of-range line rather than saturating.
+  function offsetAtPosition(document, position) {
+    const line = Number(position && position.line);
+    const character = Number(position && position.character);
+    const wanted = Number.isFinite(line) ? line + 1 : 1;
+    const entry = document.line(Math.min(Math.max(wanted, 1), document.lines));
+    const column = Number.isFinite(character) && character > 0 ? character : 0;
+    return Math.min(entry.from + column, entry.to);
+  }
+
+  // Select `range` in an open pane, centred, and (by default) put the keyboard
+  // back in the editor. Lives here rather than in a caller because the panes
+  // and their views are this module's to drive.
+  function revealRange(pane, range, options) {
+    const CM = global.CM6;
+    if (!pane || !pane.view || !pane.view.state || !range || !range.start) return false;
+    const document = pane.view.state.doc;
+    const anchor = offsetAtPosition(document, range.start);
+    const head = Math.max(offsetAtPosition(document, range.end || range.start), anchor);
+    const spec = { selection: { anchor, head } };
+    if (CM && CM.EditorView && typeof CM.EditorView.scrollIntoView === 'function') {
+      spec.effects = CM.EditorView.scrollIntoView(anchor, { y: 'center' });
+    } else {
+      spec.scrollIntoView = true;
+    }
+    pane.view.dispatch(spec);
+    if (!options || options.focus !== false) {
+      if (typeof pane.view.focus === 'function') pane.view.focus();
+    }
+    return true;
+  }
+
+  // Open (or focus) a local file and land on `range`. The single entry point
+  // for "take me there": it keeps every navigation target inside the ownership
+  // protocol openLocalFile implements, and adds `revealed` to that answer.
+  async function openLocalFileAt(filePath, range, options) {
+    const result = await openLocalFile(filePath);
+    if (!result || !result.pane) return result;
+    return { ...result, revealed: revealRange(result.pane, range, options) };
   }
 
   // ---------------------------------------------------------------------------
@@ -1446,6 +1504,8 @@
 
   global.termlabEditorService = {
     openLocalFile,
+    openLocalFileAt,
+    revealRange,
     openRemoteFile,
     openUntitled,
     saveActiveEditor,

@@ -58,6 +58,18 @@
       : [];
   }
 
+  // Go to Definition's chooser. Same contract as the three above: [] when the
+  // module or the bundle's tooltip exports are missing, so a stale vendor
+  // bundle costs the chooser and nothing else. It carries its own precedence —
+  // its keydown handler must beat vim while the chooser is open — so where it
+  // sits in the list below is not what makes it heard.
+  function navigationExtensions() {
+    return global.termlabLspNavigation
+      && typeof global.termlabLspNavigation.extensions === 'function'
+      ? global.termlabLspNavigation.extensions()
+      : [];
+  }
+
   function languageExtension(filename) {
     const CM = global.CM6;
     const map = global.termlabEditorLanguageMap;
@@ -126,6 +138,7 @@
           ...completionExtensions(),
           ...diagnosticsExtensions(),
           ...tooltipExtensions(),
+          ...navigationExtensions(),
           CM.lineNumbers(),
           CM.highlightActiveLineGutter(),
           CM.highlightSpecialChars(),

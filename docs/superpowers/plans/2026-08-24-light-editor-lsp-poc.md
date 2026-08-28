@@ -873,6 +873,15 @@ git commit -m "feat: add LSP diagnostics and Problems window"
 
 Cover hover delay and movement cancellation, manual hover action, Markdown rendered as safe text/allowed formatting, range anchoring, no-result dismissal, signature trigger/retrigger characters, active parameter highlighting, `Cmd-Shift-Space`, Escape, blur, document change, scroll, and stale response rejection.
 
+Implemented behavior, recorded during Task 13 review so a later reader does not
+"fix" it back: a document change is a dismissal event for HOVER and for PENDING
+requests of either kind. It is deliberately NOT one for a VISIBLE signature
+help overlay, which survives the edit with its anchor mapped through the
+change — retrigger characters are typed inside the call, so a rule that closed
+on every edit would make them unreachable. `docs/superpowers/specs/2026-08-24-light-editor-lsp-design.md:547`
+is the controlling language: "dismisses stale content" for hover, alongside
+"Signature help opens during calls".
+
 - [ ] **Step 2: Run and confirm failure**
 
 Run: `node scripts/tests/test_lsp_tooltips.mjs`
@@ -887,7 +896,7 @@ Use CodeMirror tooltip APIs where available and a single state machine:
 closed | pending(kind, request, version) | visible(kind, anchor, payload)
 ```
 
-Only one LSP overlay may be visible at a time. Flush pending document changes before requests. Cancel pending work and close visible content on the dismissal events above. Sanitize/normalize Markdown; never inject server HTML.
+Only one LSP overlay may be visible at a time. Flush pending document changes before requests. Cancel pending work and close visible content on the dismissal events above — with the one implemented exception recorded in Step 1: an edit closes hover and cancels pending requests, while a visible signature help overlay is carried forward with its anchor mapped through the change. Sanitize/normalize Markdown; never inject server HTML.
 
 - [ ] **Step 4: Wire automatic signature triggers and explicit actions**
 
@@ -1138,10 +1147,13 @@ In a Cargo workspace with multiple member crates:
 
 Verify untrusted, denied, disabled, server-missing, startup-timeout, crash, malformed response, and unsupported curated-language states. In every case confirm local open/save/close, dirty guards, Vim mode, and remote editor behavior still work.
 
-- [ ] **Step 5a: Close the two Problems-window items recorded during Task 12 review**
+- [ ] **Step 5a: Close the items recorded during Task 12 and Task 13 review**
 
 - Verify popped-out Problems activation focuses the owner and opens the file; range reveal is a recorded degradation pending a `HOST_ACTION_EVENTS` protocol extension. A panel host owns no editor, so `app/features/problems/problems-navigation.js` falls back to the existing `open-in-editor` host action (the same escape hatch `app/panels/files-panel.js` uses), which carries a path and no range. Widening that closed action list is a panel-host protocol change, deliberately out of Task 12's scope.
 - I-2 ghost project groups: a session whose last status was `failed`/`unavailable` keeps its group after stop, because no session-level terminal status is emitted (`crates/termlab_tauri/src/lsp/manager.rs:4511` emits per-document only) while `docs/superpowers/specs/2026-08-24-light-editor-lsp-design.md:620` requires the group to disappear. Needs either a session-level status event on stop (Rust) or a frontend prune in `problems-store.js`.
+- L-1 signature help can outlive the call it describes: because a visible signature overlay is carried forward across edits with its anchor mapped, deleting the call leaves a zero-width mapped anchor and the overlay stays until Escape, blur, or scroll. Consider closing the overlay when the mapped anchor collapses on a deletion (`app/features/editor/lsp-tooltips.js`, the `overlayField` update).
+- L-2 a pointer dwell over text closes an open signature-help overlay: the dwell issues a hover request, and the one-overlay rule closes the other kind. VS Code keeps the hints. Consider suppressing dwell-hover while signature help is visible (`handlePointerMove` in `app/features/editor/lsp-tooltips.js`).
+- L-3 extract the Markdown normalize/render block (~190 lines, pure: `isFence`/`plainLine`/`markdownSegments`/`appendSegments`) out of `app/features/editor/lsp-tooltips.js` into its own module the next time that file is opened.
 
 - [ ] **Step 6: Record evidence in the checklist**
 
