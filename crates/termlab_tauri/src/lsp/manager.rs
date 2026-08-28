@@ -240,6 +240,11 @@ pub(crate) enum ManagerEvent {
         window_label: String,
         status: LspStatus,
     },
+    /// One session ended. Unlike `SessionStatus`, which belongs to the window
+    /// that owns a document, this is app-wide: the Problems tool window
+    /// aggregates every project and may be popped out of the owning window, so
+    /// it has to hear the stop wherever it is.
+    SessionStopped(LspStatus),
     DiagnosticsUpdated(DiagnosticUpdate),
     DocumentOwnerFocused {
         window_label: String,
@@ -5492,6 +5497,7 @@ impl LspManager {
         let Some(mut session) = self.state.sessions.remove(key) else {
             return;
         };
+        let stopped_session_id = session.session_id.clone();
         self.session_delivery_progress.remove(key);
         self.pending_repair_closes.remove(key);
         if let Some(mut worker) = session.worker.take()
@@ -5512,6 +5518,42 @@ impl LspManager {
                 managed.session_key = None;
             }
         }
+        self.emit_session_stopped(key, &stopped_session_id);
+    }
+
+    // The Problems tool window aggregates by project, so it has to hear that a
+    // session ENDED — which no per-document status can tell it. The documents
+    // may already be closed, and a session whose last state was `failed` or
+    // `unavailable` never produces another document status at all, which is
+    // exactly how a group was left behind on screen with no session under it.
+    //
+    // Session-level, so `document_id` is `None` and the per-pane store ignores
+    // it; app-wide, because Problems can be popped out of the window that owned
+    // the documents.
+    fn emit_session_stopped(&mut self, key: &SessionKey, session_id: &str) {
+        self.status_revision = self
+            .status_revision
+            .checked_add(1)
+            .expect("LSP status revision exhausted");
+        let status = LspStatus {
+            revision: self.status_revision,
+            document_id: None,
+            session_id: Some(session_id.to_owned()),
+            adapter_id: Some(key.adapter_id.clone()),
+            project_root_uri: lsp::Url::from_file_path(&key.root)
+                .ok()
+                .map(|url| url.to_string()),
+            state: LspSessionState::Stopped,
+            message: None,
+            unavailable_reason: None,
+            capabilities: capabilities(false),
+            completion_trigger_characters: Vec::new(),
+            signature_help_trigger_characters: Vec::new(),
+            signature_help_retrigger_characters: Vec::new(),
+            error_count: 0,
+            warning_count: 0,
+        };
+        self.emit(ManagerEvent::SessionStopped(status));
     }
 
     fn revoke_sessions(&mut self, root: &Path, adapter_id: Option<&str>) {
@@ -8079,6 +8121,95 @@ mod tests {
                 .iter()
                 .any(|record| record.root == root.canonicalize().unwrap())
         );
+    }
+
+    // The Problems tool window groups by project, and a group only disappears
+    // when its last session stops. Per-document statuses cannot say that: a
+    // session whose documents were all closed, or whose last state was
+    // `failed`, leaves no document to carry the news. So stopping a session
+    // emits one session-level status of its own.
+    async fn stopped_statuses(harness: &ManagerHarness) -> Vec<crate::lsp::types::LspStatus> {
+        let mut stopped = Vec::new();
+        let mut events = harness.events.lock().await;
+        while let Ok(event) = events.try_recv() {
+            if let ManagerEvent::SessionStopped(status) = event {
+                stopped.push(status);
+            }
+        }
+        stopped
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_a_session_emits_one_terminal_session_status() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("a.ts", "let a = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        let session_id = harness
+            .manager
+            .status_snapshot(Some(document))
+            .await
+            .unwrap()[0]
+            .session_id
+            .clone();
+        assert!(session_id.is_some(), "the session started");
+
+        harness
+            .manager
+            .set_enablement(Enablement::none())
+            .await
+            .unwrap();
+        spin().await;
+
+        let stopped = stopped_statuses(&harness).await;
+        assert_eq!(stopped.len(), 1, "exactly one terminal status per stop");
+        let status = &stopped[0];
+        assert_eq!(status.state, LspSessionState::Stopped);
+        assert_eq!(
+            status.session_id, session_id,
+            "names the session that ended"
+        );
+        assert!(
+            status.document_id.is_none(),
+            "session-level, not another per-document status"
+        );
+        assert_eq!(status.adapter_id.as_deref(), Some("typescript"));
+        assert!(
+            status.project_root_uri.is_some(),
+            "the Problems group is keyed by its root"
+        );
+        assert!(
+            !status.capabilities.definition,
+            "a stopped session can do nothing"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn revoking_trust_emits_the_terminal_session_status_too() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("a.ts", "let a = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+        harness
+            .manager
+            .set_project_trust(root.clone(), None, TrustDecision::Revoked)
+            .await
+            .unwrap();
+        spin().await;
+
+        let stopped = stopped_statuses(&harness).await;
+        assert_eq!(
+            stopped.len(),
+            1,
+            "revocation stops the session exactly once"
+        );
+        assert_eq!(stopped[0].state, LspSessionState::Stopped);
     }
 
     #[tokio::test(start_paused = true)]

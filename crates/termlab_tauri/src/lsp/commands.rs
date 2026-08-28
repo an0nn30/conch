@@ -223,6 +223,12 @@ pub(crate) fn spawn_event_forwarder<R: Runtime>(
                         let _ = window.emit(SESSION_STATUS_EVENT, status);
                     }
                 }
+                // App-wide, like diagnostics and unlike a document's status: the
+                // Problems window that has to drop the project group may be a
+                // popped-out window that owns none of the session's documents.
+                ManagerEvent::SessionStopped(status) => {
+                    let _ = app.emit(SESSION_STATUS_EVENT, status);
+                }
                 ManagerEvent::DiagnosticsUpdated(snapshot) => {
                     let _ = app.emit(DIAGNOSTICS_UPDATED_EVENT, snapshot);
                 }

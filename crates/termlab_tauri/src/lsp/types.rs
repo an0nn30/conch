@@ -316,6 +316,12 @@ pub(crate) enum LspSessionState {
     Ready,
     Failed,
     Unavailable,
+    /// A session that has ended. Only ever carried by the session-level status
+    /// emitted when a session stops (`document_id` is `None`) — a document
+    /// never enters this state, it is detached and re-stated on its own. The
+    /// Problems window uses it to drop the project group, which no per-document
+    /// status can announce once the last document is closed or failed.
+    Stopped,
 }
 
 /// A stable reason why a curated language adapter cannot be started. The
