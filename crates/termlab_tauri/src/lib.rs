@@ -697,16 +697,16 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 }
             }
             id if id.starts_with(menu::MENU_RECENT_PROJECT_PREFIX) => {
-                // The index is resolved against the CURRENT recents list, so a
-                // menu built before a project was opened cannot open a stale
-                // path — a mismatched index simply finds nothing.
-                let index: usize = id[menu::MENU_RECENT_PROJECT_PREFIX.len()..]
-                    .parse()
-                    .unwrap_or(usize::MAX);
-                if let Some(entry) = project::recents::list_recents().into_iter().nth(index) {
+                // (Fix round 1, F5) the path is carried IN the id — see
+                // MENU_RECENT_PROJECT_PREFIX's doc comment. No re-fetch of
+                // `list_recents()` here: that list can shift between the
+                // menu being built and this click landing, which is exactly
+                // the bug an index-based id used to have.
+                let path = &id[menu::MENU_RECENT_PROJECT_PREFIX.len()..];
+                if !path.is_empty() {
                     menu::emit_menu_action_to_focused_window(
                         app,
-                        &format!("{}{}", menu::MENU_ACTION_OPEN_RECENT_PROJECT, entry.path),
+                        &format!("{}{}", menu::MENU_ACTION_OPEN_RECENT_PROJECT, path),
                     );
                 }
             }

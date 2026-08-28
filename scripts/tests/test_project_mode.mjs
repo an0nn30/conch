@@ -236,7 +236,9 @@ check('adopt binds the window and publishes the globals', async () => {
   };
   const info = await mode.adopt(invoke);
   deepEq(info, { root: '/repo', name: 'repo' });
-  deepEq(invoked, ['project_adopt_pending']);
+  // fix round 1, F6: a successful adopt also fires a fire-and-forget
+  // rebuild_menu so the newly-recorded recent reaches the native menu.
+  deepEq(invoked, ['project_adopt_pending', 'rebuild_menu']);
   assert.strictEqual(mode.isActive(), true);
   assert.strictEqual(mode.root(), '/repo');
   assert.strictEqual(mode.name(), 'repo');
@@ -1508,6 +1510,39 @@ check('F5(i): init({projectRoot}) renders the project tree, not the dual-pane ex
     'the tree\'s element must actually be mounted into the panel');
   assert.strictEqual(h.sandbox.filesPanel.isProjectMode(), true);
   assert.strictEqual(h.sandbox.filesPanel.projectTree(), h.treeHandles[0]);
+});
+
+check('fix round 1, F6: a successful reopen through the missing-root recovery button refreshes the native menu', async () => {
+  const h = await setupProjectFilesHarness({
+    projectRoot: '/repo',
+    invokeExtra: (cmd) => {
+      if (cmd === 'project_pick_folder') return Promise.resolve('/new/repo');
+      if (cmd === 'project_open') {
+        return Promise.resolve({ root: '/new/repo', name: 'repo', windowLabel: 'window-2', focusedExisting: false });
+      }
+      return undefined;
+    },
+  });
+  const onReopen = h.treeCreateCalls[0].onReopen;
+  assert.strictEqual(typeof onReopen, 'function', 'files-panel.js must wire onReopen into the tree');
+  onReopen();
+  await settle();
+  const cmds = h.invokeCalls.map((c) => c.cmd);
+  assert.ok(cmds.includes('project_pick_folder'));
+  assert.ok(cmds.includes('project_open'));
+  assert.ok(cmds.includes('rebuild_menu'),
+    'a successful reopen must refresh the native File menu with the newly-recorded recent');
+});
+
+check('fix round 1, F6: a cancelled reopen (no folder picked) never calls project_open or rebuild_menu', async () => {
+  const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+  const onReopen = h.treeCreateCalls[0].onReopen;
+  onReopen();
+  await settle();
+  const cmds = h.invokeCalls.map((c) => c.cmd);
+  assert.ok(cmds.includes('project_pick_folder'));
+  assert.ok(!cmds.includes('project_open'), 'cancelling the picker must not open anything');
+  assert.ok(!cmds.includes('rebuild_menu'), 'nothing was recorded, so nothing needs to refresh');
 });
 
 check('F5(ii)/F2: toggle round trip project -> dual-pane -> project renders the remote pane and never reuses a destroyed tree handle', async () => {

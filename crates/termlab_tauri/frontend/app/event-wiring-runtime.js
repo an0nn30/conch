@@ -24,7 +24,15 @@
     return routing.create({
       invoke: deps.invoke,
       openLocalFile: (filePath) => g.termlabEditorService.openLocalFile(filePath),
-      openProject: (dirPath) => deps.invoke('project_open', { path: dirPath }),
+      openProject: (dirPath) => {
+        const opened = deps.invoke('project_open', { path: dirPath });
+        // Recorded in recent_projects (project::recents::remember) — refresh
+        // the native File menu so it reflects the new order without a
+        // restart (fix round 1, F6; same fire-and-forget shape as
+        // menu-actions.js's open-folder/open-recent-project handlers).
+        Promise.resolve(opened).then(() => deps.invoke('rebuild_menu').catch(() => {})).catch(() => {});
+        return opened;
+      },
       toastError: (title, body) => { if (g.toast) g.toast.error(title, body); },
     });
   }

@@ -90,6 +90,14 @@ function loadRuntime() {
   const drain = sandbox.termlabEventWiringRuntime.wirePendingOpenDrain(sandbox, { invoke });
   await drain.drainPendingOpens();
   assert.ok(invoked.includes('project_open'), 'a directory must reach project_open');
+  // fix round 1, F6: a successful project_open through this path also
+  // refreshes the native File menu (the project was just recorded into
+  // recent_projects) — settle the microtask queue so the fire-and-forget
+  // rebuild_menu call has landed.
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.ok(invoked.includes('rebuild_menu'),
+    'a directory opened through the CLI/second-instance queue must also refresh the native menu');
 }
 
 // A missing toast global must not throw — the wiring's toast deps are

@@ -673,6 +673,11 @@
       onReopen: () => {
         Promise.resolve(invoke('project_pick_folder'))
           .then((picked) => (picked ? invoke('project_open', { path: picked }) : null))
+          // Recorded in recent_projects — refresh the native File menu so
+          // it reflects the new order without a restart (fix round 1, F6).
+          .then((opened) => {
+            if (opened) invoke('rebuild_menu').catch(() => {});
+          })
           .catch((e) => window.toast.error('Cannot Open Folder', String(e)));
       },
       toastError: (title, body) => window.toast.error(title, body),

@@ -10,4 +10,14 @@ export type SavedLayout = { window_width: number, window_height: number, ssh_pan
  * view mode but never learn it again, so a popped-out tool window would
  * silently come back docked on the next launch.
  */
-tool_window_view_modes: { [key in string]: string }, left_split_ratio: number, right_split_ratio: number, bottom_split_ratio: number, };
+tool_window_view_modes: { [key in string]: string }, left_split_ratio: number, right_split_ratio: number, bottom_split_ratio: number, 
+/**
+ * True exactly when this window resolved to a project AND that project
+ * already had its own `project_layouts` entry — i.e. it has been opened
+ * (and its layout saved) at least once before. Always `false` for a
+ * non-project window. The frontend's boot-reveal hand-off (Task 12/F1)
+ * uses this to tell a fresh project (always reveal Files, per spec §1)
+ * from a returning one (trust exactly what it saved, including a
+ * deliberately-closed panel or a different active tab).
+ */
+has_project_layout: boolean, };

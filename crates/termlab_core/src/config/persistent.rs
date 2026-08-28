@@ -20,10 +20,13 @@ pub struct PersistentState {
     /// `termlab_tauri::chooser_window`).
     pub chooser_window: Option<ChooserWindowSize>,
     /// Most-recently-opened projects, most recent first, capped at ten. An
-    /// entry whose path no longer exists is skipped in the menu and pruned on
-    /// the next update — a project the user deleted should not sit in a menu
+    /// entry whose path no longer exists is validated at click (opening it
+    /// fails through the ordinary project_open error path) and pruned on the
+    /// next open — a project the user deleted should not sit in a menu
     /// forever, but neither should opening an unrelated project delete the
-    /// record of one that is merely on an unmounted volume today.
+    /// record of one that is merely on an unmounted volume today. (Fix round
+    /// 1, F4: menu/palette construction reads this list without stat'ing any
+    /// path — a hung network mount must never block app launch.)
     pub recent_projects: Vec<RecentProject>,
     /// Project path → the layout snapshot that project was last left in. The
     /// value is the SAME `LayoutConfig` the per-window layout persistence
@@ -121,7 +124,7 @@ impl WindowMetrics {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutConfig {
     /// Persisted window width in logical points (0 = use config default).

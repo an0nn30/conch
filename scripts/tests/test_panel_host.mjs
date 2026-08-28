@@ -1134,6 +1134,57 @@ async function loadRuntime(savedLayout, opts) {
   assert.ok(twm.calls.some((c) => c.name === 'activate' && c.args[0] === 'file-explorer'));
 }
 
+// --- 16c. Task 12/F1: the Task 6 hand-off, implemented. A RETURNING
+// project (get_saved_layout reports hasProjectLayout: true) gets exactly
+// what it saved, not the unconditional reveal — a deliberately-closed
+// bottom panel must stay closed, and the saved active tab (here, a
+// restored Search) must not be stomped by a forced activate('file-explorer').
+// `hasProjectLayout` is absent (falsy) in 16a/16b above, which is exactly
+// what makes those two the FRESH-project branch of this same gate.
+{
+  const { twm } = await loadRuntime(
+    {
+      hasProjectLayout: true,
+      bottom_panel_visible: false,
+      active_tool_windows: { 'bottom-left': 'project-search' },
+    },
+    { projectRoot: '/repo' },
+  );
+  const forcedReveal = twm.calls.find(
+    (c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom' && c.args[1] === true,
+  );
+  const forcedActivate = twm.calls.find((c) => c.name === 'activate' && c.args[0] === 'file-explorer');
+  assert.ok(!forcedReveal,
+    'a returning project with a saved closed bottom panel must not be force-reopened');
+  assert.ok(!forcedActivate,
+    'a returning project must not have file-explorer force-activated over its saved active tab');
+}
+
+// --- 16d. ...and a returning project that DID save the bottom panel open
+// still gets it open, but through the ORDINARY restore path every window
+// gets (setPanelVisibility using initialLayoutData.bottom_panel_visible),
+// not through the gated force-reveal — no separate forced activate either,
+// since register()'s own saved-active-window restore is what puts the
+// saved tab on top once it registers.
+{
+  const { twm } = await loadRuntime(
+    {
+      hasProjectLayout: true,
+      bottom_panel_visible: true,
+      active_tool_windows: { 'bottom-left': 'file-explorer' },
+    },
+    { projectRoot: '/repo' },
+  );
+  const restoreCall = twm.calls.find(
+    (c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom' && c.args[1] === true,
+  );
+  const forcedActivate = twm.calls.find((c) => c.name === 'activate' && c.args[0] === 'file-explorer');
+  assert.ok(restoreCall,
+    'the ordinary restore path still opens the bottom zone when the saved layout says visible');
+  assert.ok(!forcedActivate,
+    'no separate forced activate call — the gate stays off for a returning project regardless of what it saved');
+}
+
 // --- 17. The four panel-host events are wired to the manager --------------
 {
   const { twm, emit } = await loadRuntime({});

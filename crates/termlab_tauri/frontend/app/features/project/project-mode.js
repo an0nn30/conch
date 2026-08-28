@@ -50,7 +50,14 @@
         lastAdoptFocusedExisting = !!(result && result.focusedExisting);
         return null;
       }
-      return set(result.adopted);
+      const adopted = set(result.adopted);
+      // Recorded in recent_projects (project::recents::remember, called from
+      // project_adopt_pending's Reserved arm) — refresh the native File menu
+      // so it reflects the new order without a restart (fix round 1, F6).
+      // Fire-and-forget: this window's own boot must never wait on it, and a
+      // rejection here has no user-visible consequence worth surfacing.
+      invoke('rebuild_menu').catch(() => {});
+      return adopted;
     } catch (error) {
       console.warn('project-mode: could not adopt a pending project', error);
       return null;

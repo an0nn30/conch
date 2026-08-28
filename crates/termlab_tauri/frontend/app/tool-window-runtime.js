@@ -654,28 +654,42 @@
 
         registerBuiltInToolWindows();
 
-        // Spec section 1: a project window opens with the Files tool window
-        // visible in its zone, unconditionally. The zen-effective block
-        // immediately below still wins over this — it re-hides 'bottom' (and
-        // 'left'/'right') whenever __termlabEffectiveZen is true — so a
-        // zen-effective project window never gets its panels revealed here
-        // only to have them hidden a moment later.
+        // Spec section 1: a FRESH project window (one with no project_layouts
+        // entry yet) opens with the Files tool window visible in its zone,
+        // unconditionally. The zen-effective block immediately below still
+        // wins over this — it re-hides 'bottom' (and 'left'/'right') whenever
+        // __termlabEffectiveZen is true — so a zen-effective project window
+        // never gets its panels revealed here only to have them hidden a
+        // moment later.
         //
         // CONTROLLER RULING (task-6 review, F3): this block used to reveal
         // the panel only when the layout this window booted with had never
         // recorded a bottom-zone window (a `knowsBottom` guard), intending to
         // respect a user who had deliberately closed the panel in this
         // project. In practice that guard was a no-op for nearly every
-        // install: the saved layout is GLOBAL, not per-project, and
+        // install: the saved layout was GLOBAL, not per-project, and
         // register() unconditionally writes a zone assignment for every
         // built-in tool window — including file-explorer itself — the
         // moment ANY window has ever run, so `knowsBottom` read true for
         // essentially every existing user and the reveal never fired.
-        // Dropped entirely per this ruling: a project window always reveals
-        // its Files tool window. Task 12's per-project layouts are the
-        // intended home for "this project's panel was deliberately closed";
-        // until that lands, always-reveal is the correct default.
-        if (projectRoot) {
+        // Dropped entirely per this ruling in favor of always-reveal, with a
+        // named IOU: "Task 12's per-project layouts are the intended home
+        // for 'this project's panel was deliberately closed'; until that
+        // lands, always-reveal is the correct default."
+        //
+        // TASK 12/F1: that hand-off, implemented. `hasProjectLayout` (from
+        // get_saved_layout, Rust-side) is true exactly when THIS project
+        // already has its own project_layouts entry — i.e. it has been
+        // opened, and its layout saved, at least once before. Gating on it:
+        // a fresh project (no entry yet) still always reveals, per spec §1.
+        // A returning project gets exactly what it saved instead — a
+        // deliberately-closed bottom panel stays closed (the panel-visibility
+        // restore a few lines above already applied it), and a restored
+        // Search (or any other) active tab is not stomped by forcing
+        // file-explorer active here — register()'s own saved-active-window
+        // restore (via setPersistedActiveZoneWindows, above) already put the
+        // right tab on top once file-explorer's own register() call is done.
+        if (projectRoot && !(initialLayoutData && initialLayoutData.hasProjectLayout)) {
           global.toolWindowManager.setPanelVisibility('bottom', true, { save: false });
           // { save: false }: this re-asserts state the layout this window
           // just booted with already agrees with (Task 12/F7) — a project

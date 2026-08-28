@@ -642,4 +642,64 @@ mod tests {
             );
         }
     }
+
+    // --- F9: remember() actually fires on every successful bind path ------
+    //
+    // `project_open`/`project_open_build`/`project_adopt_pending` are async
+    // Tauri commands that build a real window — not unit-testable in
+    // isolation without a live app handle. `remember()` itself writes
+    // straight to `~/.config/termlab/state.toml` (no path-injection seam
+    // exists in termlab_core to redirect it to a tempdir), so exercising it
+    // end to end from here would either pollute a real user's state file or
+    // require a much larger seam than this fix round's scope. Following the
+    // same precedent `termlab_remote::ssh::key_auth_log_messages_never_include_private_key_paths`
+    // sets for exactly this situation (a production behavior that can only
+    // be pinned by reading the source, not by executing it in a test), this
+    // asserts the wiring is present at all three bind sites by source
+    // inspection instead.
+    #[test]
+    fn recents_are_remembered_on_every_project_open_and_adopt_path() {
+        let full_source = include_str!("mod.rs");
+        // Non-test source only — the test module below quotes this exact
+        // string as a literal, which would otherwise self-count.
+        let source = &full_source[..full_source
+            .find("#[cfg(test)]")
+            .expect("this file has a test module")];
+        let call = "recents::remember(&root.display().to_string(), now_ms());";
+        let occurrences = source.matches(call).count();
+        assert_eq!(
+            occurrences, 3,
+            "one remember() call in project_open's focused-existing branch, \
+             one in project_open_build's success path, and one in \
+             project_adopt_pending's Reserved arm — found {occurrences}"
+        );
+
+        let adopt_fn_start = source
+            .find("pub(crate) fn project_adopt_pending")
+            .expect("project_adopt_pending must exist");
+        assert!(
+            source[adopt_fn_start..].contains(call),
+            "project_adopt_pending must remember the project it just bound"
+        );
+
+        let open_build_fn_start = source
+            .find("async fn project_open_build")
+            .expect("project_open_build must exist");
+        let open_build_fn_end = source[open_build_fn_start..]
+            .find("\n#[tauri::command]")
+            .map(|rel| open_build_fn_start + rel)
+            .unwrap_or(source.len());
+        assert!(
+            source[open_build_fn_start..open_build_fn_end].contains(call),
+            "project_open_build must remember a freshly opened project"
+        );
+
+        let open_fn_start = source
+            .find("pub(crate) async fn project_open(")
+            .expect("project_open must exist");
+        assert!(
+            source[open_fn_start..open_build_fn_start].contains(call),
+            "project_open's focused-existing branch must remember the project too"
+        );
+    }
 }

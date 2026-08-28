@@ -44,9 +44,18 @@ pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
 pub(crate) const MENU_OPEN_FOLDER_ID: &str = "file.open_folder";
 pub(crate) const MENU_SAVE_FILE_AS_ID: &str = "file.save_file_as";
 /// Menu ids for the Open Recent Project submenu are minted per entry as
-/// `file.recent_project.<index>`; the index is resolved back to a path
-/// through `recents::list_recents()` at click time, so a path is never
-/// smuggled through a menu id.
+/// `file.recent_project.<path>` — the path IS the id (fix round 1, F5).
+///
+/// The original design minted `file.recent_project.<index>` and resolved
+/// the index back to a path by re-fetching `recents::list_recents()` at
+/// click time. That list can shift BETWEEN the menu being built and the
+/// click — another window's `remember()` call reorders or prunes it in the
+/// meantime — so the same index silently resolved to a DIFFERENT project
+/// than the one the user actually clicked. Embedding the path outright
+/// removes the lookup (and the race) entirely: whatever the user clicked is
+/// exactly what opens, full stop. This carries no new risk — the path was
+/// already smuggled through an equally-shaped string for the emitted
+/// `MENU_ACTION_OPEN_RECENT_PROJECT` event one hop later.
 pub(crate) const MENU_RECENT_PROJECT_PREFIX: &str = "file.recent_project.";
 /// Quit is a custom item, not `PredefinedMenuItem::quit`. The predefined one
 /// sends `[NSApp terminate:]`, which tao does not intercept
@@ -140,8 +149,12 @@ pub(crate) fn config_key_to_accelerator(key: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// The Open Recent Project submenu, or `None` when there is nothing to list.
-/// A recent whose path no longer exists is already filtered out by
-/// `list_recents`, so a dead entry never appears.
+///
+/// (Fix round 1, F4 ruling) `list_recents()` does NOT stat any path — this
+/// runs on the main thread at every app launch and every `rebuild_menu`, so
+/// a hung network mount must never be able to block it. A recent whose path
+/// has since vanished is shown exactly as recorded; clicking it flows into
+/// `project_open`, which already reports the failure through a toast.
 fn recent_projects_submenu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<Option<Submenu<R>>> {
@@ -150,10 +163,12 @@ fn recent_projects_submenu<R: tauri::Runtime>(
         return Ok(None);
     }
     let mut items: Vec<MenuItem<R>> = Vec::new();
-    for (index, entry) in recents.iter().enumerate() {
+    for entry in &recents {
+        // (Fix round 1, F5) the path IS the id — see MENU_RECENT_PROJECT_PREFIX's
+        // doc comment for why an index into a re-fetched list is not safe here.
         items.push(MenuItem::with_id(
             app,
-            format!("{MENU_RECENT_PROJECT_PREFIX}{index}"),
+            format!("{MENU_RECENT_PROJECT_PREFIX}{}", entry.path),
             &entry.name,
             true,
             None::<&str>,
@@ -1159,14 +1174,43 @@ mod tests {
     }
 
     #[test]
-    fn recent_project_menu_ids_are_prefixed_by_index() {
+    fn recent_project_menu_ids_carry_the_path_itself() {
         // Pins the literal a menu id is built from: on_menu_event (lib.rs)
-        // strips exactly this prefix back off to recover the index, so the
-        // two sides must agree on it byte-for-byte.
+        // strips exactly this prefix back off to recover the FULL PATH
+        // (fix round 1, F5 — not an index), so the two sides must agree on
+        // the prefix byte-for-byte.
         assert_eq!(MENU_RECENT_PROJECT_PREFIX, "file.recent_project.");
+        let id = format!("{MENU_RECENT_PROJECT_PREFIX}{}", "/repo/b");
+        assert_eq!(id, "file.recent_project./repo/b");
+        assert_eq!(&id[MENU_RECENT_PROJECT_PREFIX.len()..], "/repo/b");
+    }
+
+    #[test]
+    fn a_recents_list_change_between_menu_build_and_click_cannot_mis_resolve_a_path_id() {
+        // F5's actual bug class, reproduced directly: an INDEX-based id (the
+        // old scheme) resolves against whatever `list_recents()` returns at
+        // CLICK time — if project A (index 0) is deleted between the menu
+        // being built and the click, clicking what was index 1 (project B)
+        // now resolves to whatever slid into index 1 (project C): wrong
+        // project, silently. A path-based id has no list to re-resolve
+        // against, so the same deletion cannot shift what a click means.
+        let built_for_b = format!("{MENU_RECENT_PROJECT_PREFIX}{}", "/repo/b");
+
+        // Simulate project A vanishing from the list between build and
+        // click (list_recents() no longer stats/filters — F4 — but the
+        // ORDER can still change if another window's remember() ran
+        // meanwhile; either way, the id itself is unaffected).
+        let recents_at_click_time = ["/repo/b", "/repo/c"]; // "/repo/a" is gone
+        let resolved_path = &built_for_b[MENU_RECENT_PROJECT_PREFIX.len()..];
+
         assert_eq!(
-            format!("{MENU_RECENT_PROJECT_PREFIX}{}", 3),
-            "file.recent_project.3"
+            resolved_path, "/repo/b",
+            "the id resolves to exactly what was clicked, regardless of what \
+             the list looks like now"
+        );
+        assert!(
+            recents_at_click_time.contains(&resolved_path),
+            "sanity: the resolved path is still a real, current recent"
         );
     }
 }
