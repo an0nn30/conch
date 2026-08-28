@@ -1496,9 +1496,17 @@ const TYPESCRIPT_ARGUMENTS: &[CommandArgument] = &[
     CommandArgument::Literal("--stdio"),
 ];
 
+/// The packaged layout produced by `scripts/lsp/fetch-macos-arm64.sh` from the
+/// pins in `packaging/lsp/manifest.toml`. TypeScript 7.0.2 dropped the single
+/// `lib/typescript.js` bundle: the npm package now exposes `lib/version.cjs` as
+/// its entry point and delegates compilation to a per-platform native binary,
+/// so an arm64 install must also carry `@typescript/typescript-darwin-arm64`.
+/// Naming both here makes a resource tree that is missing the native compiler
+/// fail closed at resolution instead of at the first completion request.
 const TYPESCRIPT_REQUIRED_FILES: &[&str] = &[
     "typescript/node_modules/typescript-language-server/lib/cli.mjs",
-    "typescript/node_modules/typescript/lib/typescript.js",
+    "typescript/node_modules/typescript/lib/version.cjs",
+    "typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc",
 ];
 
 const TYPESCRIPT_FILE_BINDINGS: &[FileBinding] = &[
@@ -2081,7 +2089,7 @@ mod tests {
         fs::write(
             resources
                 .root()
-                .join("typescript/node_modules/typescript/lib/typescript.js"),
+                .join("typescript/node_modules/typescript/lib/version.cjs"),
             b"corrupt runtime",
         )
         .expect("corrupt TypeScript runtime");
@@ -2089,9 +2097,7 @@ mod tests {
             catalog.resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host()),
             Err(CatalogUnavailable::CorruptResource {
                 adapter_id: "typescript".to_owned(),
-                relative_path: PathBuf::from(
-                    "typescript/node_modules/typescript/lib/typescript.js"
-                ),
+                relative_path: PathBuf::from("typescript/node_modules/typescript/lib/version.cjs"),
             })
         );
 
@@ -2682,8 +2688,16 @@ mod tests {
             write_file(
                 &self
                     .root()
-                    .join("typescript/node_modules/typescript/lib/typescript.js"),
+                    .join("typescript/node_modules/typescript/lib/version.cjs"),
                 b"module.exports = {};\n",
+            );
+            write_macho_binary(
+                &self
+                    .root()
+                    .join("typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc"),
+                0x0100_000c,
+                1,
+                true,
             );
         }
 
@@ -3102,11 +3116,100 @@ mod tests {
         let _ = (path, executable);
     }
 
+    /// The packaging manifest is the single source of the pinned versions that
+    /// `scripts/lsp/fetch-macos-arm64.sh` downloads and records in the receipt.
+    /// `validate_receipt_identity` hard-codes the same pins so the runtime
+    /// fails closed on an unexpected tree — which only works while the two
+    /// agree, hence this test.
+    #[test]
+    fn packaging_manifest_pins_match_the_receipt_identity_pins() {
+        #[derive(serde::Deserialize)]
+        struct PackagingManifest {
+            schema: u32,
+            platform: String,
+            artifact: Vec<PackagingArtifact>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PackagingArtifact {
+            id: String,
+            version: String,
+            url: String,
+            sha256: String,
+            license: String,
+        }
+
+        let manifest: PackagingManifest =
+            toml::from_str(include_str!("../../../../packaging/lsp/manifest.toml"))
+                .expect("packaging/lsp/manifest.toml parses");
+
+        assert_eq!(manifest.schema, 1, "packaging manifest schema");
+        assert_eq!(
+            manifest.platform, "macos-arm64",
+            "packaging manifest platform"
+        );
+
+        let mut pins: Vec<(&str, &str)> = manifest
+            .artifact
+            .iter()
+            .map(|artifact| (artifact.id.as_str(), artifact.version.as_str()))
+            .collect();
+        pins.sort_unstable();
+        assert_eq!(
+            pins,
+            vec![
+                ("node", "24.19.0"),
+                ("rust-analyzer", "2026-08-24"),
+                ("typescript", "7.0.2"),
+                ("typescript-language-server", "6.0.0"),
+            ],
+            "packaging/lsp/manifest.toml must pin exactly what validate_receipt_identity accepts"
+        );
+
+        for artifact in &manifest.artifact {
+            assert!(
+                artifact.url.starts_with("https://"),
+                "artifact {} must be fetched over https",
+                artifact.id
+            );
+            assert!(
+                super::is_sha256(&artifact.sha256),
+                "artifact {} must pin a SHA-256",
+                artifact.id
+            );
+            assert!(
+                !artifact.license.is_empty(),
+                "artifact {} must declare a license for THIRD_PARTY_NOTICES.md",
+                artifact.id
+            );
+        }
+    }
+
+    /// TypeScript 7 compiles through a per-platform native binary, so a tree
+    /// with the JavaScript entry points but no arm64 compiler is unusable.
+    #[test]
+    fn typescript_resolution_requires_the_packaged_native_compiler() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        let relative_path = "typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc";
+
+        fs::remove_file(resources.root().join(relative_path)).expect("remove native compiler");
+
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host()),
+            Err(CatalogUnavailable::MissingResource {
+                adapter_id: "typescript".to_owned(),
+                relative_path: PathBuf::from(relative_path),
+            })
+        );
+    }
+
     fn write_receipt(lsp_root: &Path, root: &Path) {
         let files = [
             "node/bin/node",
             "typescript/node_modules/typescript-language-server/lib/cli.mjs",
-            "typescript/node_modules/typescript/lib/typescript.js",
+            "typescript/node_modules/typescript/lib/version.cjs",
+            "typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc",
             "rust-analyzer/rust-analyzer",
         ]
         .into_iter()

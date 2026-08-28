@@ -86,17 +86,73 @@ check-macos-tools:
 	@[ -f "$(ICNS)" ] || { echo "error: app icon missing at $(ICNS)"; exit 1; }
 
 # Assemble $(APP) from an already-built binary at $(1).
+#
+# The bundled LSP resources are staged and signed BEFORE the outer signature:
+# codesign seals Contents/Resources, so anything copied in afterwards
+# invalidates the bundle. lsp-resources-arm64 signs each nested Mach-O first and
+# this macro signs the app last.
 define assemble_app
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	cp $(1) "$(APP)/Contents/MacOS/termlab"
 	cp packaging/macos/Info.plist "$(APP)/Contents/"
 	cp "$(ICNS)" "$(APP)/Contents/Resources/termlab.icns"
+	$(MAKE) --no-print-directory stage-lsp-resources-if-available
 	codesign --remove-signature "$(APP)" 2>/dev/null || true
 	codesign --force --deep --sign - "$(APP)"
 	@[ -x "$(APP)/Contents/MacOS/termlab" ] || { echo "error: app bundle has no executable"; exit 1; }
 	@[ -f "$(APP)/Contents/Resources/termlab.icns" ] || { echo "error: app bundle has no icon"; exit 1; }
 endef
+
+# ---------------------------------------------------------------------------
+# Bundled arm64 language servers
+#
+# packaging/lsp/dist is git-ignored and produced only by an explicit
+# `scripts/lsp/fetch-macos-arm64.sh` run — never by cargo build, build.rs, or
+# app startup. `app` and `dmg-native` therefore stage it when it is present and
+# say so loudly when it is not, while `lsp-resources-arm64` (asked for
+# directly) fails hard on a missing or unverified tree.
+# ---------------------------------------------------------------------------
+LSP_DIST = packaging/lsp/dist
+
+.PHONY: lsp-resources-arm64
+lsp-resources-arm64:
+	@[ "$$(uname)" = "Darwin" ] || { echo "error: macOS-only target (this is $$(uname))"; exit 1; }
+	@[ "$$(uname -m)" = "arm64" ] || { echo "error: lsp-resources-arm64 stages an arm64-only resource tree, but this host is $$(uname -m)"; exit 1; }
+	@[ -d "$(APP)" ] || { echo "error: no assembled $(APP) to stage into — run 'make app' or 'make dmg-native'"; exit 1; }
+	@if lipo -archs "$(APP)/Contents/MacOS/termlab" 2>/dev/null | grep -q " "; then \
+		echo "error: $(APP) holds a universal binary ($$(lipo -archs "$(APP)/Contents/MacOS/termlab"))."; \
+		echo "       lsp-resources-arm64 ships only the arm64 server tree, so a universal artifact"; \
+		echo "       would run x86_64 with arm64-only language servers. Universal packaging needs an"; \
+		echo "       x86_64 resource tree first — see docs/superpowers/specs/2026-08-24-light-editor-lsp-design.md."; \
+		exit 1; \
+	fi
+	@[ -d "$(LSP_DIST)/arm64" ] || { echo "error: $(LSP_DIST)/arm64 is missing — run scripts/lsp/fetch-macos-arm64.sh first"; exit 1; }
+	scripts/lsp/fetch-macos-arm64.sh --verify-only "$(LSP_DIST)/arm64"
+	rm -rf "$(APP)/Contents/Resources/lsp"
+	mkdir -p "$(APP)/Contents/Resources/lsp"
+	cp -R "$(LSP_DIST)/." "$(APP)/Contents/Resources/lsp/"
+	@# Nested executables are signed by scripts/lsp/fetch-macos-arm64.sh while
+	@# staging, before the receipt records their bytes — re-signing them here
+	@# would rewrite each Mach-O and invalidate the SHA-256 the runtime checks
+	@# (and would downgrade the upstream Developer ID signatures on node and the
+	@# TypeScript native compiler to ad-hoc). --verify-only re-checks every
+	@# nested signature, so this still proves nested code is signed before the
+	@# outer app signature is applied by assemble_app.
+	scripts/lsp/fetch-macos-arm64.sh --verify-only "$(APP)/Contents/Resources/lsp/arm64"
+	@echo "Staged bundled arm64 language servers into $(APP)/Contents/Resources/lsp"
+
+# Internal helper: stage when a verified tree exists, otherwise leave the app
+# LSP-less rather than breaking builds on machines that never ran the fetch.
+.PHONY: stage-lsp-resources-if-available
+stage-lsp-resources-if-available:
+	@if [ "$$(uname -m)" != "arm64" ]; then \
+		echo "note: skipping bundled LSP resources (host is $$(uname -m), tree is arm64-only)"; \
+	elif [ ! -d "$(LSP_DIST)/arm64" ]; then \
+		echo "note: skipping bundled LSP resources ($(LSP_DIST)/arm64 not staged; run scripts/lsp/fetch-macos-arm64.sh)"; \
+	else \
+		$(MAKE) --no-print-directory lsp-resources-arm64; \
+	fi
 
 # Build a DMG named $(1) from the assembled $(APP).
 define make_dmg

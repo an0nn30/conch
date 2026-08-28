@@ -1,0 +1,37 @@
+# Allowlisted upstream artifacts for the bundled macOS arm64 language servers.
+#
+# Every entry is an immutable version pinned to an immutable URL and verified by
+# SHA-256 before extraction. `scripts/lsp/fetch-macos-arm64.sh` refuses to stage
+# anything that is not listed here, and refuses to substitute a different
+# version when a hash does not match. Generated binaries are never committed;
+# the fetch script regenerates `packaging/lsp/dist/` from this file.
+schema = 1
+platform = "macos-arm64"
+
+[[artifact]]
+id = "node"
+version = "24.19.0"
+url = "https://nodejs.org/dist/v24.19.0/node-v24.19.0-darwin-arm64.tar.gz"
+sha256 = "8294b7aa9b03997481c06babf1e8b270c859358f27da57a11509afe537ac381d"
+license = "MIT"
+
+[[artifact]]
+id = "typescript-language-server"
+version = "6.0.0"
+url = "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.0.tgz"
+sha256 = "6e23b48efc76af4e70928cdfe62ea6e6cfef67ab4c1e7579c4e82dd284fbdfd2"
+license = "MIT"
+
+[[artifact]]
+id = "typescript"
+version = "7.0.2"
+url = "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz"
+sha256 = "da2513f4b95176d6dde8b51aab7afe8a927656c9d277369793f77f7e59371c08"
+license = "Apache-2.0"
+
+[[artifact]]
+id = "rust-analyzer"
+version = "2026-08-24"
+url = "https://github.com/rust-lang/rust-analyzer/releases/download/2026-08-24/rust-analyzer-aarch64-apple-darwin.gz"
+sha256 = "5f4557c2ea4d62f80f1ffeea2646d0d56fab7172a0db11f3065c4d246b763989"
+license = "MIT OR Apache-2.0"

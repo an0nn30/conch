@@ -31,7 +31,8 @@
       "icons/icon.png"
     ],
     "resources": {
-      "frontend/themes/": "themes/"
+      "frontend/themes/": "themes/",
+      "../../packaging/lsp/dist/": "lsp/"
     }
   },
   "plugins": {
