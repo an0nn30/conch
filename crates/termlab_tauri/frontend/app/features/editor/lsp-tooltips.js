@@ -284,16 +284,22 @@
   // the anchor: only a deletion that strictly crosses it counts, so editing
   // arguments keeps the hints and deleting the call closes them.
   function deletedAcross(changes, anchor) {
-    // Signature help anchors on the caret, so its anchor is zero-width and the
-    // test has to be strict on BOTH sides: a deletion that merely ends at the
-    // anchor is a backspace inside the call.
-    const wide = anchor.to > anchor.from;
+    // Strict containment on BOTH sides, and the same test whatever the anchor's
+    // width. The anchor does not stay a caret: the carry-forward below maps its
+    // ends with opposite associativity, so every character typed at the caret
+    // widens it over what has been typed since the overlay opened. An overlap
+    // test would therefore call an ordinary backspace "the call was deleted" —
+    // the most common in-call gesture there is — so the deletion has to swallow
+    // the anchor whole before this counts.
+    //
+    // The cost is a deletion that begins exactly AT the anchor (select from the
+    // caret to the end of the line and delete): the overlay survives it, until
+    // Escape, blur or scroll. That is the better trade — the alternative closes
+    // on a plain forward-delete inside the call.
     let removed = false;
     changes.iterChanges((fromA, toA) => {
       if (toA <= fromA) return;
-      removed = removed || (wide
-        ? fromA < anchor.to && toA > anchor.from
-        : fromA < anchor.from && toA > anchor.from);
+      removed = removed || (fromA < anchor.from && toA > anchor.to);
     });
     return removed;
   }

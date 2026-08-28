@@ -813,6 +813,34 @@ check('backspacing an argument keeps the hints up', async () => {
   assert.strictEqual(h.phase(), 'visible', 'editing arguments is exactly when they are wanted');
 });
 
+// The anchor does not stay a caret: the carry-forward maps its ends with
+// opposite associativity, so every character typed at the caret WIDENS it to
+// cover what has been typed since the overlay opened. Two characters in, a
+// plain backspace overlaps that span — which must not read as "the call was
+// deleted", or the most ordinary in-call gesture there is closes the hints.
+check('typing arguments and backspacing over them keeps the hints up', async () => {
+  const h = harness({ respond: () => SIGNATURE_RESPONSE, text: 'format()' });
+  await h.tooltips.showSignatureHelp(h.view, 7);
+  const anchor = () => JSON.parse(JSON.stringify(h.snapshot().anchor));
+  assert.deepStrictEqual(anchor(), { from: 7, to: 7 });
+  h.view.dispatch({ changes: { from: 7, insert: 'a' }, userEvent: 'input.type' });
+  h.view.dispatch({ changes: { from: 8, insert: 'b' }, userEvent: 'input.type' });
+  assert.deepStrictEqual(anchor(), { from: 7, to: 9 }, 'the anchor grew over the argument');
+  h.view.dispatch({ changes: { from: 8, to: 9, insert: '' }, userEvent: 'delete.backward' });
+  assert.strictEqual(h.phase(), 'visible', 'a backspace inside the call is editing, not deleting it');
+});
+
+check('deleting across a widened anchor still closes the overlay', async () => {
+  const h = harness({ respond: () => SIGNATURE_RESPONSE, text: 'const x = format();' });
+  await h.tooltips.showSignatureHelp(h.view, 17);
+  h.view.dispatch({ changes: { from: 17, insert: 'ab' }, userEvent: 'input.type' });
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.snapshot().anchor)), { from: 17, to: 19 },
+  );
+  h.view.dispatch({ changes: { from: 10, to: 21, insert: '' }, userEvent: 'delete.selection' });
+  assert.strictEqual(h.phase(), 'closed', 'the whole call went with it');
+});
+
 check('a deletion elsewhere in the document leaves the overlay alone', async () => {
   const h = harness({ respond: () => SIGNATURE_RESPONSE, text: 'const x = format(1);' });
   await h.tooltips.showSignatureHelp(h.view, 17);
