@@ -186,4 +186,47 @@ const BOTTOM_WINDOW = {
   );
 }
 
+// --- 5. Task 12/F7: the boot reveal's explicit activate() must not save ----
+//
+// tool-window-runtime.js's project-window boot block reveals the bottom zone
+// with { save: false } and then calls activate('file-explorer') on it, with
+// no way to suppress THAT save — activate() always called triggerSave()
+// unconditionally. Harmless while every window shared one global layout (the
+// values it wrote were the same ones a moment later anyway), but Task 12
+// gives a project window its OWN project_layouts entry: an unsuppressed save
+// here would write that entry from transient boot state, before the
+// effective-zen adjustment a few lines later has had its say.
+{
+  const twm = loadManager();
+  let saveCount = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => { saveCount += 1; } });
+  twm.setPanelVisibility('bottom', true, { save: false });
+  // Registering the only window in the zone auto-activates it (register()'s
+  // own internal activate() call, out of this fix's scope) — reset the
+  // counter so this scenario isolates the EXPLICIT boot-reveal call below.
+  twm.register('file-explorer', BOTTOM_WINDOW);
+  saveCount = 0;
+  twm.activate('file-explorer', { save: false });
+  assert.strictEqual(
+    saveCount,
+    0,
+    'the boot reveal must not trigger a debounced save of transient boot state',
+  );
+}
+
+// --- 6. activate() still saves by default for every other caller ----------
+{
+  const twm = loadManager();
+  let saveCount = 0;
+  twm.init({ fitActiveTab: () => {}, saveLayout: () => { saveCount += 1; } });
+  twm.register('ssh-sessions', { title: 'Hosts', type: 'built-in', defaultZone: 'right-top', renderFn: () => {} });
+  saveCount = 0;
+  twm.activate('ssh-sessions');
+  assert.strictEqual(
+    saveCount,
+    1,
+    'an ordinary activate() call (rail, palette, ...) must keep saving as before',
+  );
+}
+
 console.log('tool-window closed-state persistence: all assertions passed');

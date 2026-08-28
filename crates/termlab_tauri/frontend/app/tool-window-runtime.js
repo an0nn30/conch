@@ -677,7 +677,12 @@
         // until that lands, always-reveal is the correct default.
         if (projectRoot) {
           global.toolWindowManager.setPanelVisibility('bottom', true, { save: false });
-          global.toolWindowManager.activate('file-explorer');
+          // { save: false }: this re-asserts state the layout this window
+          // just booted with already agrees with (Task 12/F7) — a project
+          // window now has its OWN project_layouts entry, and an unsuppressed
+          // save here would write it from transient boot state, before the
+          // effective-zen adjustment a few lines below has had its say.
+          global.toolWindowManager.activate('file-explorer', { save: false });
         }
 
         // Reads the EFFECTIVE zen decision (startup-runtime.js), not the raw

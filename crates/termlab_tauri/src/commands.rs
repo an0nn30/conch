@@ -6,9 +6,10 @@
 
 use std::sync::Arc;
 
-use termlab_core::config;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
+use termlab_core::config;
 use ts_rs::TS;
 
 use crate::TauriState;
@@ -331,9 +332,22 @@ fn saved_layout_from_state(layout: &config::LayoutConfig) -> SavedLayout {
     }
 }
 
+/// The layout this window should boot with. A project window gets its
+/// PROJECT's saved layout; every other window gets the shared one. An absent
+/// project entry falls back to the shared layout, which the frontend then
+/// adjusts into the default project-window shape.
 #[tauri::command]
-pub(crate) fn get_saved_layout() -> SavedLayout {
+pub(crate) fn get_saved_layout(
+    window: tauri::WebviewWindow,
+    projects: tauri::State<'_, parking_lot::Mutex<crate::project::ProjectRegistry>>,
+) -> SavedLayout {
     let state = config::load_persistent_state().unwrap_or_default();
+    let root = projects.lock().root_for(window.label());
+    if let Some(root) = root
+        && let Some(layout) = state.project_layouts.get(&root)
+    {
+        return saved_layout_from_state(layout);
+    }
     saved_layout_from_state(&state.layout)
 }
 
@@ -394,20 +408,34 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     let logical_w = size.width as f64 / scale;
     let logical_h = size.height as f64 / scale;
 
+    let project_root = {
+        let projects = window
+            .app_handle()
+            .state::<parking_lot::Mutex<crate::project::ProjectRegistry>>();
+        projects.lock().root_for(window.label())
+    };
+
     // Loaded, mutated, and saved as one locked span (config::
     // update_persistent_state) — this command runs on the main thread, but
     // the panel-host bounds debounce thread also writes state.toml now, so
     // an unlocked load-mutate-save here could interleave with it and drop
     // one side's mutation (branch review F2).
     let _ = config::update_persistent_state(|state| {
-        // Recorded for diagnostics only. Nothing reads these back for sizing
-        // any more: windows open at the configured columns x lines (see
-        // estimate_window_px and app/core/window-size.js), so restoring the
-        // last session's pixels would defeat that setting — and made a
-        // window spawned from a full-screen one open full-screen.
+        // Recorded for diagnostics only (see the note above): nothing reads
+        // these back for sizing.
         state.layout.window_width = logical_w as f32;
         state.layout.window_height = logical_h as f32;
-        merge_window_layout(&mut state.layout, layout);
+        // A project window writes ONLY its project's entry. Otherwise a
+        // project's panel arrangement would become the shape every ordinary
+        // window opens in.
+        let base = state.layout.clone();
+        match project_root.as_ref() {
+            Some(root) => {
+                let entry = state.project_layouts.entry(root.clone()).or_insert(base);
+                merge_window_layout(entry, layout);
+            }
+            None => merge_window_layout(&mut state.layout, layout),
+        }
         true
     });
 }

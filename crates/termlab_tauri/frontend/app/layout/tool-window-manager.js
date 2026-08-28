@@ -445,7 +445,12 @@
 
   // ---- Activation / Deactivation --------------------------------------------
 
-  function activate(id) {
+  // `opts.save === false` suppresses the trailing triggerSave() — mirrors
+  // setPanelVisibility's own opt, and exists for the same reason: a boot-time
+  // reveal that re-asserts state the layout already agrees with must not
+  // itself provoke a write. Every other caller (rail, palette, register()'s
+  // own auto-activate) omits opts and keeps saving as before.
+  function activate(id, opts) {
     // A companion currently riding inside its host's composite window has no
     // docked presence to activate — auto-open (register's shouldAutoActivate
     // path won't hit a suppressed id, but the palette/rail/plugin callers can
@@ -483,7 +488,7 @@
     updateBottomZone();
     updateStrips();
     if (fitActiveTabFn) fitActiveTabFn();
-    triggerSave();
+    if (!opts || opts.save !== false) triggerSave();
   }
 
   function deactivate(id) {
@@ -1781,7 +1786,10 @@
       const rightZone = zones['bottom-right'];
       if (panelState.bottom.visible && leftZone.activeId === null && rightZone.activeId === null) {
         const candidate = firstDockableIn(leftZone.windows) || firstDockableIn(rightZone.windows);
-        if (candidate) activate(candidate);
+        // The fallback activation is part of THIS call's reveal, so it
+        // inherits the same save intent — a { save: false } reveal must not
+        // have its suppression undone by the candidate it auto-activates.
+        if (candidate) activate(candidate, opts);
       }
       if (panelState.bottom.visible) {
         updateZone('bottom-left');
@@ -1798,7 +1806,7 @@
       const botZone = zones[side + '-bottom'];
       if (topZone && botZone && topZone.activeId === null && botZone.activeId === null) {
         const candidate = firstDockableIn(topZone.windows) || firstDockableIn(botZone.windows);
-        if (candidate) activate(candidate);
+        if (candidate) activate(candidate, opts);
       }
     }
     if (panelState[side].visible) {

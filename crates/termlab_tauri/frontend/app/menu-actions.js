@@ -136,6 +136,13 @@
             if (!picked) return null;
             return invoke('project_open', { path: picked });
           })
+          // Opening a project records it as the newest recent — the native
+          // File menu (built once, at boot/last rebuild) would otherwise
+          // never learn about it. Fire-and-forget, the same pattern
+          // settings/data-service.js uses after a plugin toggle.
+          .then((opened) => {
+            if (opened) invoke('rebuild_menu').catch(() => {});
+          })
           .catch((error) => {
             if (global.toast) global.toast.error('Cannot Open Folder', String(error));
           });
@@ -150,6 +157,17 @@
         const panel = document.getElementById('project-search-panel');
         const field = panel ? panel.querySelector('.tl-project-search__input') : null;
         if (field && typeof field.focus === 'function') field.focus();
+        return;
+      }
+      if (action.startsWith('open-recent-project:')) {
+        const projectPath = action.slice('open-recent-project:'.length);
+        Promise.resolve(invoke('project_open', { path: projectPath }))
+          // Reopening moves this entry back to the front — refresh the
+          // native menu so it reflects the new order without a restart.
+          .then(() => invoke('rebuild_menu').catch(() => {}))
+          .catch((error) => {
+            if (global.toast) global.toast.error('Cannot Open Project', projectPath + ': ' + String(error));
+          });
         return;
       }
       if (action === 'new-plain-shell-tab') {

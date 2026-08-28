@@ -95,11 +95,12 @@
     }
 
     async function buildPaletteCommands() {
-      const [plugins, pluginItems, serverResp, tunnels] = await Promise.all([
+      const [plugins, pluginItems, serverResp, tunnels, recentProjects] = await Promise.all([
         invoke('scan_plugins').catch(() => []),
         invoke('get_plugin_menu_items').catch(() => []),
         invoke('remote_get_servers').catch(() => ({ folders: [], ungrouped: [], ssh_config: [] })),
         invoke('tunnel_get_all').catch(() => []),
+        invoke('project_recents').catch(() => []),
       ]);
 
       const commands = [];
@@ -118,6 +119,24 @@
       add('core:open-file', 'Open File…', 'Editor', 'open file editor browse local remote sftp host chooser', () => handleMenuAction('open-file'));
       add('core:open-folder', 'Open Folder as Project…', 'Project', 'open folder project directory workspace tree search git', () => handleMenuAction('open-folder'), 'Project');
       add('core:search-in-project', 'Search in Project', 'Project', 'search find text grep project files contents', () => handleMenuAction('search-in-project'), 'Project');
+      for (const recent of (recentProjects || [])) {
+        add(
+          'core:reopen-project:' + recent.path,
+          'Reopen Project: ' + recent.name,
+          recent.path,
+          'project reopen recent open folder workspace',
+          () => {
+            invoke('project_open', { path: recent.path })
+              // Reopening moves this entry back to the front — refresh the
+              // native menu so it reflects the new order without a restart.
+              .then(() => invoke('rebuild_menu').catch(() => {}))
+              .catch((error) => {
+                if (window.toast) window.toast.error('Cannot Open Project', String(error));
+              });
+          },
+          'Project',
+        );
+      }
       // Editor-only, like the keybinding: handleMenuAction('save-file-as')
       // returns without acting when the focused pane is not an editor.
       add('core:save-file-as', 'Save File As…', 'Editor', 'save as file editor copy rename local remote sftp host upload', () => handleMenuAction('save-file-as'));

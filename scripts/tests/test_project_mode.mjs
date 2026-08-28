@@ -1227,10 +1227,13 @@ check('the SFTP tool window stays reachable and is registered with a project-awa
 // has the exact fake-manager/loadRuntime machinery this needs.
 check('a project window opens with the Files tool window visible, unconditionally (not gated on a stale knowsBottom guard)', () => {
   const src = fs.readFileSync(path.join(APP, 'tool-window-runtime.js'), 'utf8');
-  assert.ok(src.includes("activate('file-explorer')"), 'a project window activates the Files panel');
+  // Task 12/F7: this now passes { save: false }, the same suppression the
+  // panel-visibility reveal right above it already used — a project window's
+  // OWN project_layouts entry must not be written from transient boot state.
+  assert.ok(src.includes("activate('file-explorer', { save: false })"), 'a project window activates the Files panel without saving');
   assert.ok(!src.includes('const knowsBottom ='), 'the knowsBottom guard must be gone, not merely bypassed');
   const register = src.indexOf('registerBuiltInToolWindows();');
-  const activate = src.indexOf("activate('file-explorer')");
+  const activate = src.indexOf("activate('file-explorer', { save: false })");
   assert.ok(register < activate, 'the panel must be registered before it can be activated');
   const zenBlock = src.indexOf('window.__termlabEffectiveZen === true');
   assert.ok(zenBlock > activate,

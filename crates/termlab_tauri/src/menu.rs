@@ -43,6 +43,11 @@ pub(crate) const MENU_NEW_FILE_ID: &str = "file.new_file";
 pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
 pub(crate) const MENU_OPEN_FOLDER_ID: &str = "file.open_folder";
 pub(crate) const MENU_SAVE_FILE_AS_ID: &str = "file.save_file_as";
+/// Menu ids for the Open Recent Project submenu are minted per entry as
+/// `file.recent_project.<index>`; the index is resolved back to a path
+/// through `recents::list_recents()` at click time, so a path is never
+/// smuggled through a menu id.
+pub(crate) const MENU_RECENT_PROJECT_PREFIX: &str = "file.recent_project.";
 /// Quit is a custom item, not `PredefinedMenuItem::quit`. The predefined one
 /// sends `[NSApp terminate:]`, which tao does not intercept
 /// (`applicationShouldTerminate:` is unimplemented) and which raises neither
@@ -85,6 +90,7 @@ pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
 pub(crate) const MENU_ACTION_CHECK_UPDATES: &str = "check-for-updates";
 pub(crate) const MENU_ACTION_ABOUT: &str = "about";
 pub(crate) const MENU_ACTION_OPEN_DEVTOOLS: &str = "open-devtools";
+pub(crate) const MENU_ACTION_OPEN_RECENT_PROJECT: &str = "open-recent-project:";
 
 // ---------------------------------------------------------------------------
 // Menu action event payload
@@ -132,6 +138,38 @@ pub(crate) fn config_key_to_accelerator(key: &str) -> String {
 // ---------------------------------------------------------------------------
 // Menu builders
 // ---------------------------------------------------------------------------
+
+/// The Open Recent Project submenu, or `None` when there is nothing to list.
+/// A recent whose path no longer exists is already filtered out by
+/// `list_recents`, so a dead entry never appears.
+fn recent_projects_submenu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<Option<Submenu<R>>> {
+    let recents = crate::project::recents::list_recents();
+    if recents.is_empty() {
+        return Ok(None);
+    }
+    let mut items: Vec<MenuItem<R>> = Vec::new();
+    for (index, entry) in recents.iter().enumerate() {
+        items.push(MenuItem::with_id(
+            app,
+            format!("{MENU_RECENT_PROJECT_PREFIX}{index}"),
+            &entry.name,
+            true,
+            None::<&str>,
+        )?);
+    }
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = items
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<R>)
+        .collect();
+    Ok(Some(Submenu::with_items(
+        app,
+        "Open Recent Project",
+        true,
+        &refs,
+    )?))
+}
 
 /// The Quit item, carrying the user's configured accelerator (default
 /// `cmd+q`) so it behaves exactly like the predefined one it replaces.
@@ -247,26 +285,28 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     let ssh_manager_menu =
         Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
     let separator2 = PredefinedMenuItem::separator(app)?;
-    let file_menu = Submenu::with_items(
-        app,
-        "File",
-        true,
-        &[
-            &new_tab,
-            &new_plain_shell_tab,
-            &new_window,
-            &new_file,
-            &open_file,
-            &open_folder,
-            &save_file_as,
-            &separator,
-            &ssh_manager_menu,
-            &separator2,
-            &rename_tab,
-            &close_tab,
-            &close_window,
-        ],
-    )?;
+    let recent_projects = recent_projects_submenu(app)?;
+    let mut file_items: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![
+        &new_tab,
+        &new_plain_shell_tab,
+        &new_window,
+        &new_file,
+        &open_file,
+        &open_folder,
+    ];
+    if let Some(recent) = recent_projects.as_ref() {
+        file_items.push(recent);
+    }
+    file_items.extend([
+        &save_file_as as &dyn tauri::menu::IsMenuItem<R>,
+        &separator,
+        &ssh_manager_menu,
+        &separator2,
+        &rename_tab,
+        &close_tab,
+        &close_window,
+    ]);
+    let file_menu = Submenu::with_items(app, "File", true, &file_items)?;
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
@@ -771,26 +811,28 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let ssh_manager_menu =
             Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
         let separator2 = PredefinedMenuItem::separator(app)?;
-        let file_menu = Submenu::with_items(
-            app,
-            "File",
-            true,
-            &[
-                &new_tab,
-                &new_plain_shell_tab,
-                &new_window,
-                &new_file,
-                &open_file,
-                &open_folder,
-                &save_file_as,
-                &separator,
-                &ssh_manager_menu,
-                &separator2,
-                &rename_tab,
-                &close_tab,
-                &close_window,
-            ],
-        )?;
+        let recent_projects = recent_projects_submenu(app)?;
+        let mut file_items: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![
+            &new_tab,
+            &new_plain_shell_tab,
+            &new_window,
+            &new_file,
+            &open_file,
+            &open_folder,
+        ];
+        if let Some(recent) = recent_projects.as_ref() {
+            file_items.push(recent);
+        }
+        file_items.extend([
+            &save_file_as as &dyn tauri::menu::IsMenuItem<R>,
+            &separator,
+            &ssh_manager_menu,
+            &separator2,
+            &rename_tab,
+            &close_tab,
+            &close_window,
+        ]);
+        let file_menu = Submenu::with_items(app, "File", true, &file_items)?;
         let edit_menu = Submenu::with_items(
             app,
             "Edit",
@@ -1114,5 +1156,17 @@ mod tests {
     #[test]
     fn config_key_to_accelerator_single_key() {
         assert_eq!(config_key_to_accelerator("f2"), "F2");
+    }
+
+    #[test]
+    fn recent_project_menu_ids_are_prefixed_by_index() {
+        // Pins the literal a menu id is built from: on_menu_event (lib.rs)
+        // strips exactly this prefix back off to recover the index, so the
+        // two sides must agree on it byte-for-byte.
+        assert_eq!(MENU_RECENT_PROJECT_PREFIX, "file.recent_project.");
+        assert_eq!(
+            format!("{MENU_RECENT_PROJECT_PREFIX}{}", 3),
+            "file.recent_project.3"
+        );
     }
 }

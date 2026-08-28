@@ -19,6 +19,17 @@ pub struct PersistentState {
     /// clamped to the floor and the parent's monitor work area there (see
     /// `termlab_tauri::chooser_window`).
     pub chooser_window: Option<ChooserWindowSize>,
+    /// Most-recently-opened projects, most recent first, capped at ten. An
+    /// entry whose path no longer exists is skipped in the menu and pruned on
+    /// the next update — a project the user deleted should not sit in a menu
+    /// forever, but neither should opening an unrelated project delete the
+    /// record of one that is merely on an unmounted volume today.
+    pub recent_projects: Vec<RecentProject>,
+    /// Project path → the layout snapshot that project was last left in. The
+    /// value is the SAME `LayoutConfig` the per-window layout persistence
+    /// uses, so a project window saves and restores exactly what an ordinary
+    /// window does; an absent entry means the default project-window shape.
+    pub project_layouts: HashMap<String, LayoutConfig>,
 }
 
 impl Default for PersistentState {
@@ -28,8 +39,18 @@ impl Default for PersistentState {
             loaded_plugins: Vec::new(),
             window_metrics: WindowMetrics::default(),
             chooser_window: None,
+            recent_projects: Vec::new(),
+            project_layouts: HashMap::new(),
         }
     }
+}
+
+/// One entry in the recent-projects list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RecentProject {
+    pub path: String,
+    pub last_opened_ms: u64,
 }
 
 /// The file chooser window's persisted size, in logical pixels. No position
@@ -265,6 +286,8 @@ mod tests {
                 width: 900.0,
                 height: 600.0,
             }),
+            recent_projects: Vec::new(),
+            project_layouts: HashMap::new(),
         };
         let toml_str = toml::to_string(&original).expect("serialize");
         let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
@@ -504,5 +527,54 @@ left_panel_visible = false
         );
         assert!(ps.layout.status_bar_visible, "default status_bar_visible");
         assert!(!ps.layout.zen_mode, "default zen_mode");
+    }
+
+    #[test]
+    fn recent_projects_and_project_layouts_round_trip() {
+        let mut layouts = HashMap::new();
+        layouts.insert(
+            "/repo".to_string(),
+            LayoutConfig {
+                zen_mode: false,
+                bottom_panel_height: 220.0,
+                ..LayoutConfig::default()
+            },
+        );
+        let original = PersistentState {
+            recent_projects: vec![RecentProject {
+                path: "/repo".into(),
+                last_opened_ms: 42,
+            }],
+            project_layouts: layouts,
+            ..PersistentState::default()
+        };
+        let toml_str = toml::to_string(&original).expect("serialize");
+        let restored: PersistentState = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(restored.recent_projects.len(), 1);
+        assert_eq!(restored.recent_projects[0].path, "/repo");
+        assert_eq!(restored.recent_projects[0].last_opened_ms, 42);
+        assert_eq!(
+            restored
+                .project_layouts
+                .get("/repo")
+                .map(|l| l.bottom_panel_height),
+            Some(220.0)
+        );
+    }
+
+    #[test]
+    fn the_two_project_fields_default_when_absent() {
+        // Back-compat: every state.toml written before project mode existed
+        // has neither key.
+        let toml_str = r#"
+loaded_plugins = ["my-plugin"]
+
+[layout]
+zoom_factor = 1.5
+"#;
+        let ps: PersistentState = toml::from_str(toml_str).expect("deserialize");
+        assert!(ps.recent_projects.is_empty());
+        assert!(ps.project_layouts.is_empty());
+        assert_eq!(ps.layout.zoom_factor, 1.5, "the existing keys still load");
     }
 }

@@ -696,6 +696,20 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                     log::error!("Failed to create window from menu: {e}");
                 }
             }
+            id if id.starts_with(menu::MENU_RECENT_PROJECT_PREFIX) => {
+                // The index is resolved against the CURRENT recents list, so a
+                // menu built before a project was opened cannot open a stale
+                // path — a mismatched index simply finds nothing.
+                let index: usize = id[menu::MENU_RECENT_PROJECT_PREFIX.len()..]
+                    .parse()
+                    .unwrap_or(usize::MAX);
+                if let Some(entry) = project::recents::list_recents().into_iter().nth(index) {
+                    menu::emit_menu_action_to_focused_window(
+                        app,
+                        &format!("{}{}", menu::MENU_ACTION_OPEN_RECENT_PROJECT, entry.path),
+                    );
+                }
+            }
             other => {
                 // Check if it's a plugin menu item: "plugin.{source_name}.{action}"
                 let id_str = other;
@@ -929,6 +943,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 project::project_info,
                 project::project_pick_folder,
                 project::project_reveal_path,
+                project::recents::project_recents,
                 project::search::project_search,
                 project::search::project_search_cancel,
                 project::git_status::project_git_status,

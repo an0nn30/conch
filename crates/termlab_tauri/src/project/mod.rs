@@ -7,6 +7,7 @@
 //! `WindowEvent::Destroyed` hook the other secondary-window registries use.
 
 pub(crate) mod git_status;
+pub(crate) mod recents;
 pub(crate) mod search;
 
 use std::collections::HashMap;
@@ -217,6 +218,7 @@ pub(crate) async fn project_open(
         let _ = win.show();
         let _ = win.set_focus();
     }
+    recents::remember(&root.display().to_string(), now_ms());
     Ok(ProjectOpenResult {
         root: root.display().to_string(),
         name,
@@ -251,6 +253,7 @@ async fn project_open_build(
         return Err(e);
     }
 
+    recents::remember(&root.display().to_string(), now_ms());
     Ok(ProjectOpenResult {
         root: root.display().to_string(),
         name,
@@ -374,13 +377,16 @@ pub(crate) fn project_adopt_pending(
     };
 
     match outcome {
-        ReserveOutcome::Reserved => ProjectAdoptResult {
-            adopted: Some(ProjectInfo {
-                root: root.display().to_string(),
-                name: project_name(&root),
-            }),
-            focused_existing: false,
-        },
+        ReserveOutcome::Reserved => {
+            recents::remember(&root.display().to_string(), now_ms());
+            ProjectAdoptResult {
+                adopted: Some(ProjectInfo {
+                    root: root.display().to_string(),
+                    name: project_name(&root),
+                }),
+                focused_existing: false,
+            }
+        }
         ReserveOutcome::Existing(existing) => {
             if let Some(win) = app.get_webview_window(&existing) {
                 let _ = win.show();
