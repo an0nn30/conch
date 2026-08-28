@@ -29,6 +29,9 @@
   let projectMode = false;
   let projectTreeHandle = null;
   let projectRootMissing = false;
+  // The stop() function returned by git-tints.js's startPolling, or null
+  // when no project tree (and so no git refresh loop) is currently mounted.
+  let stopGitPolling = null;
   // The exact markup dual-pane always lays down, declared once so a toggle
   // round trip can never let the project-window and plain-window render
   // paths drift out of sync with each other (task-6 review, F6).
@@ -529,6 +532,10 @@
   // takes renderDualPane and nothing else in this file behaves differently.
   function renderPanelBody() {
     if (!panelEl) return;
+    if (typeof stopGitPolling === 'function') {
+      stopGitPolling();
+      stopGitPolling = null;
+    }
     if (projectTreeHandle) {
       projectTreeHandle.destroy();
       projectTreeHandle = null;
@@ -689,6 +696,24 @@
         bridge: window.termlabLspBridge,
         invoke,
         onDecision: () => {},
+      });
+    }
+
+    // Git tints: refresh on window focus, on an editor save in this window,
+    // and on a 10-second timer gated on the Files panel actually being
+    // visible (see git-tints.js's own note on why the timer, not the user
+    // acts, is the one gated). Stopped at the top of renderPanelBody so a
+    // toggle back to the dual-pane view — or a fresh renderProjectTree call —
+    // never leaves an orphaned interval running against a torn-down tree.
+    if (window.termlabProjectGit && typeof window.termlabProjectGit.startPolling === 'function') {
+      if (typeof stopGitPolling === 'function') stopGitPolling();
+      stopGitPolling = window.termlabProjectGit.startPolling({
+        invoke,
+        getTree: () => projectTreeHandle,
+        // The timer only ticks while the Files panel is actually on screen.
+        isVisible: () => !!(window.toolWindowManager
+          && typeof window.toolWindowManager.isVisible === 'function'
+          && window.toolWindowManager.isVisible('file-explorer')),
       });
     }
 

@@ -1105,6 +1105,14 @@
     });
     savesInFlight.set(pane, inFlight);
     await inFlight;
+
+    // A save is the one project-tree refresh trigger the app knows about
+    // precisely; git-tints.js listens for it.
+    if (typeof global.dispatchEvent === 'function' && typeof global.CustomEvent === 'function') {
+      global.dispatchEvent(new global.CustomEvent('termlab:editor-saved', {
+        detail: { path: pane.filePath || null },
+      }));
+    }
   }
 
   async function saveActiveEditor() {

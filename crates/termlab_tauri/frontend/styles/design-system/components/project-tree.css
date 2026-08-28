@@ -212,3 +212,28 @@
 .tl-project-banner__text {
   min-width: 0;
 }
+
+/* Git tints. A renamed path reads as modified — the tree says "this changed",
+   and which kind of change belongs in a diff view. */
+.tl-project-tree__row[data-git-state="modified"] .tl-project-tree__label,
+.tl-project-tree__row[data-git-state="renamed"] .tl-project-tree__label {
+  color: var(--tl-git-modified);
+}
+
+.tl-project-tree__row[data-git-state="added"] .tl-project-tree__label {
+  color: var(--tl-git-added);
+}
+
+.tl-project-tree__row[data-git-state="deleted"] .tl-project-tree__label {
+  color: var(--tl-git-deleted);
+  text-decoration: line-through;
+}
+
+.tl-project-tree__row[data-git-state="conflicted"] .tl-project-tree__label {
+  color: var(--tl-git-conflicted);
+  font-style: italic;
+}
+
+.tl-project-tree__row[data-git-state="untracked"] .tl-project-tree__label {
+  color: var(--tl-git-untracked);
+}
