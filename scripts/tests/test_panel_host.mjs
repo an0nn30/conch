@@ -32,6 +32,7 @@ const FRONTEND = path.resolve(
 );
 const MANAGER_PATH = path.join(FRONTEND, 'layout/tool-window-manager.js');
 const RUNTIME_PATH = path.join(FRONTEND, 'tool-window-runtime.js');
+const SAVED_LAYOUT_TS_PATH = path.resolve(FRONTEND, '..', 'types', 'SavedLayout.ts');
 const MAIN_RUNTIME_PATH = path.join(FRONTEND, 'main-runtime.js');
 const HOST_RUNTIME_PATH = path.join(FRONTEND, 'panel-host-runtime.js');
 const BRIDGE_PATH = path.join(FRONTEND, 'core/panel-host-bridge.js');
@@ -1135,16 +1136,22 @@ async function loadRuntime(savedLayout, opts) {
 }
 
 // --- 16c. Task 12/F1: the Task 6 hand-off, implemented. A RETURNING
-// project (get_saved_layout reports hasProjectLayout: true) gets exactly
+// project (get_saved_layout reports has_project_layout: true) gets exactly
 // what it saved, not the unconditional reveal — a deliberately-closed
 // bottom panel must stay closed, and the saved active tab (here, a
 // restored Search) must not be stomped by a forced activate('file-explorer').
-// `hasProjectLayout` is absent (falsy) in 16a/16b above, which is exactly
+// `has_project_layout` is absent (falsy) in 16a/16b above, which is exactly
 // what makes those two the FRESH-project branch of this same gate.
+//
+// FIX ROUND 2: the field is snake_case on the wire — SavedLayout has no
+// #[serde(rename_all)], and every sibling field (bottom_panel_visible,
+// active_tool_windows, ...) below is already read/written snake_case at the
+// runtime's actual field-access sites. This fixture must match that exact
+// wire shape, or a passing test proves nothing about the real payload.
 {
   const { twm } = await loadRuntime(
     {
-      hasProjectLayout: true,
+      has_project_layout: true,
       bottom_panel_visible: false,
       active_tool_windows: { 'bottom-left': 'project-search' },
     },
@@ -1169,7 +1176,7 @@ async function loadRuntime(savedLayout, opts) {
 {
   const { twm } = await loadRuntime(
     {
-      hasProjectLayout: true,
+      has_project_layout: true,
       bottom_panel_visible: true,
       active_tool_windows: { 'bottom-left': 'file-explorer' },
     },
@@ -1183,6 +1190,48 @@ async function loadRuntime(savedLayout, opts) {
     'the ordinary restore path still opens the bottom zone when the saved layout says visible');
   assert.ok(!forcedActivate,
     'no separate forced activate call — the gate stays off for a returning project regardless of what it saved');
+}
+
+// --- 16e. Serialization-contract check (fix round 2) -----------------------
+// The exact bug class 16c/16d's first version shipped: the JS read site used
+// `initialLayoutData.hasProjectLayout` (camelCase) while the Rust struct
+// (SavedLayout, no #[serde(rename_all)]) only ever emits `has_project_layout`
+// (snake_case) — an always-undefined read that no test caught, because the
+// mock in `loadRuntime` just echoes back whatever shape a test hands it,
+// camelCase included. This asserts every `initialLayoutData.<field>` the
+// runtime actually reads is a real field on the wire, by checking it appears
+// verbatim (as `<field>:`) in the ts-rs-generated SavedLayout.ts — so a
+// future Rust rename, or a frontend typo like this one, breaks THIS test
+// instead of silently reading undefined forever.
+{
+  const runtimeSource = fs.readFileSync(RUNTIME_PATH, 'utf8');
+  const savedLayoutSource = fs.readFileSync(SAVED_LAYOUT_TS_PATH, 'utf8');
+
+  const fieldsRead = new Set();
+  const fieldPattern = /initialLayoutData\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
+  let match;
+  while ((match = fieldPattern.exec(runtimeSource))) {
+    fieldsRead.add(match[1]);
+  }
+  assert.ok(
+    fieldsRead.size >= 10,
+    `sanity: expected to find the ~13 known SavedLayout fields the runtime reads, found ${fieldsRead.size}`,
+  );
+
+  const missing = [...fieldsRead].filter((field) => {
+    // Word-boundary check, not a bare .includes(): a bare substring check
+    // could false-negative-pass a field whose name happens to be a suffix
+    // of another real field (none currently collide, but the check should
+    // not rely on that staying true).
+    const boundary = new RegExp(`[,{\\s]${field}:`);
+    return !boundary.test(savedLayoutSource);
+  });
+  assert.deepStrictEqual(
+    missing,
+    [],
+    'every initialLayoutData field the runtime reads must be a real field on ' +
+    `SavedLayout's wire shape (types/SavedLayout.ts); missing: ${missing.join(', ')}`,
+  );
 }
 
 // --- 17. The four panel-host events are wired to the manager --------------

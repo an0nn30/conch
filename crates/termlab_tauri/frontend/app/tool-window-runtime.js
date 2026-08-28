@@ -677,19 +677,29 @@
         // for 'this project's panel was deliberately closed'; until that
         // lands, always-reveal is the correct default."
         //
-        // TASK 12/F1: that hand-off, implemented. `hasProjectLayout` (from
-        // get_saved_layout, Rust-side) is true exactly when THIS project
-        // already has its own project_layouts entry — i.e. it has been
-        // opened, and its layout saved, at least once before. Gating on it:
-        // a fresh project (no entry yet) still always reveals, per spec §1.
-        // A returning project gets exactly what it saved instead — a
-        // deliberately-closed bottom panel stays closed (the panel-visibility
-        // restore a few lines above already applied it), and a restored
-        // Search (or any other) active tab is not stomped by forcing
-        // file-explorer active here — register()'s own saved-active-window
-        // restore (via setPersistedActiveZoneWindows, above) already put the
-        // right tab on top once file-explorer's own register() call is done.
-        if (projectRoot && !(initialLayoutData && initialLayoutData.hasProjectLayout)) {
+        // TASK 12/F1: that hand-off, implemented. `has_project_layout` (from
+        // get_saved_layout, Rust-side — SNAKE_CASE on the wire: SavedLayout
+        // has no #[serde(rename_all)], same as every sibling field this
+        // block and the restore code above it already read, e.g.
+        // `bottom_panel_visible`, `active_tool_windows`) is true exactly when
+        // THIS project already has its own project_layouts entry — i.e. it
+        // has been opened, and its layout saved, at least once before.
+        // Gating on it: a fresh project (no entry yet) still always reveals,
+        // per spec §1. A returning project gets exactly what it saved
+        // instead — a deliberately-closed bottom panel stays closed (the
+        // panel-visibility restore a few lines above already applied it),
+        // and a restored Search (or any other) active tab is not stomped by
+        // forcing file-explorer active here — register()'s own saved-active-
+        // window restore (via setPersistedActiveZoneWindows, above) already
+        // put the right tab on top once file-explorer's own register() call
+        // is done.
+        //
+        // FIX ROUND 2: this read a camelCase `hasProjectLayout`, which never
+        // matched the wire's `has_project_layout` — the flag was always
+        // undefined and this gate silently collapsed to the pre-fix
+        // `if (projectRoot)`. See the serialization-contract test in
+        // test_panel_host.mjs for how this class of bug is now caught.
+        if (projectRoot && !(initialLayoutData && initialLayoutData.has_project_layout)) {
           global.toolWindowManager.setPanelVisibility('bottom', true, { save: false });
           // { save: false }: this re-asserts state the layout this window
           // just booted with already agrees with (Task 12/F7) — a project
