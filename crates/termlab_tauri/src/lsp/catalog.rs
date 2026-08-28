@@ -873,7 +873,7 @@ fn validate_receipt_identity(
         || ![
             ("node", "24.19.0"),
             ("typescript-language-server", "6.0.0"),
-            ("typescript", "7.0.2"),
+            ("typescript", "6.0.3"),
             ("rust-analyzer", "2026-08-24"),
         ]
         .iter()
@@ -1497,16 +1497,14 @@ const TYPESCRIPT_ARGUMENTS: &[CommandArgument] = &[
 ];
 
 /// The packaged layout produced by `scripts/lsp/fetch-macos-arm64.sh` from the
-/// pins in `packaging/lsp/manifest.toml`. TypeScript 7.0.2 dropped the single
-/// `lib/typescript.js` bundle: the npm package now exposes `lib/version.cjs` as
-/// its entry point and delegates compilation to a per-platform native binary,
-/// so an arm64 install must also carry `@typescript/typescript-darwin-arm64`.
-/// Naming both here makes a resource tree that is missing the native compiler
-/// fail closed at resolution instead of at the first completion request.
+/// pins in `packaging/lsp/manifest.toml`. `typescript-language-server` resolves
+/// a TypeScript installation by locating `lib/tsserver.js` and spawning it, so
+/// naming it here makes a tree that carries the server but no usable TypeScript
+/// fail closed at resolution rather than at the first completion request.
 const TYPESCRIPT_REQUIRED_FILES: &[&str] = &[
     "typescript/node_modules/typescript-language-server/lib/cli.mjs",
-    "typescript/node_modules/typescript/lib/version.cjs",
-    "typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc",
+    "typescript/node_modules/typescript/lib/tsserver.js",
+    "typescript/node_modules/typescript/lib/typescript.js",
 ];
 
 const TYPESCRIPT_FILE_BINDINGS: &[FileBinding] = &[
@@ -1665,7 +1663,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         completion_trigger_characters: &[".", "'", "\"", "/", "@", "<"],
         trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
-            version: "typescript-language-server 6.0.0; typescript 7.0.2; node 24.19.0",
+            version: "typescript-language-server 6.0.0; typescript 6.0.3; node 24.19.0",
             upstream_url:
                 "https://github.com/typescript-language-server/typescript-language-server",
             license: "MIT; TypeScript Apache-2.0; Node MIT",
@@ -2089,7 +2087,7 @@ mod tests {
         fs::write(
             resources
                 .root()
-                .join("typescript/node_modules/typescript/lib/version.cjs"),
+                .join("typescript/node_modules/typescript/lib/typescript.js"),
             b"corrupt runtime",
         )
         .expect("corrupt TypeScript runtime");
@@ -2097,7 +2095,9 @@ mod tests {
             catalog.resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host()),
             Err(CatalogUnavailable::CorruptResource {
                 adapter_id: "typescript".to_owned(),
-                relative_path: PathBuf::from("typescript/node_modules/typescript/lib/version.cjs"),
+                relative_path: PathBuf::from(
+                    "typescript/node_modules/typescript/lib/typescript.js"
+                ),
             })
         );
 
@@ -2688,16 +2688,14 @@ mod tests {
             write_file(
                 &self
                     .root()
-                    .join("typescript/node_modules/typescript/lib/version.cjs"),
+                    .join("typescript/node_modules/typescript/lib/tsserver.js"),
                 b"module.exports = {};\n",
             );
-            write_macho_binary(
+            write_file(
                 &self
                     .root()
-                    .join("typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc"),
-                0x0100_000c,
-                1,
-                true,
+                    .join("typescript/node_modules/typescript/lib/typescript.js"),
+                b"module.exports = {};\n",
             );
         }
 
@@ -3160,7 +3158,7 @@ mod tests {
             vec![
                 ("node", "24.19.0"),
                 ("rust-analyzer", "2026-08-24"),
-                ("typescript", "7.0.2"),
+                ("typescript", "6.0.3"),
                 ("typescript-language-server", "6.0.0"),
             ],
             "packaging/lsp/manifest.toml must pin exactly what validate_receipt_identity accepts"
@@ -3185,15 +3183,16 @@ mod tests {
         }
     }
 
-    /// TypeScript 7 compiles through a per-platform native binary, so a tree
-    /// with the JavaScript entry points but no arm64 compiler is unusable.
+    /// `typescript-language-server` spawns `lib/tsserver.js`; without it the
+    /// server starts and then fails its own initialize, so the catalog must
+    /// refuse the tree before launching anything.
     #[test]
-    fn typescript_resolution_requires_the_packaged_native_compiler() {
+    fn typescript_resolution_requires_the_packaged_tsserver() {
         let resources = ResourceTree::new();
         let catalog = BundledServerCatalog::new();
-        let relative_path = "typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc";
+        let relative_path = "typescript/node_modules/typescript/lib/tsserver.js";
 
-        fs::remove_file(resources.root().join(relative_path)).expect("remove native compiler");
+        fs::remove_file(resources.root().join(relative_path)).expect("remove tsserver");
 
         assert_eq!(
             catalog.resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host()),
@@ -3208,8 +3207,8 @@ mod tests {
         let files = [
             "node/bin/node",
             "typescript/node_modules/typescript-language-server/lib/cli.mjs",
-            "typescript/node_modules/typescript/lib/version.cjs",
-            "typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc",
+            "typescript/node_modules/typescript/lib/tsserver.js",
+            "typescript/node_modules/typescript/lib/typescript.js",
             "rust-analyzer/rust-analyzer",
         ]
         .into_iter()
@@ -3231,7 +3230,7 @@ mod tests {
                 "artifacts": [
                     { "id": "node", "version": "24.19.0" },
                     { "id": "typescript-language-server", "version": "6.0.0" },
-                    { "id": "typescript", "version": "7.0.2" },
+                    { "id": "typescript", "version": "6.0.3" },
                     { "id": "rust-analyzer", "version": "2026-08-24" },
                 ],
                 "files": files,

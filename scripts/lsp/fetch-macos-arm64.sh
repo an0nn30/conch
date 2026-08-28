@@ -28,8 +28,8 @@ REQUIRED_ENTRIES=(
   "node|node/bin/node|yes"
   "rust-analyzer|rust-analyzer/rust-analyzer|yes"
   "typescript-language-server|typescript/node_modules/typescript-language-server/lib/cli.mjs|no"
-  "typescript|typescript/node_modules/typescript/lib/version.cjs|no"
-  "typescript|typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc|yes"
+  "typescript|typescript/node_modules/typescript/lib/tsserver.js|no"
+  "typescript|typescript/node_modules/typescript/lib/typescript.js|no"
 )
 
 log() {

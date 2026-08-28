@@ -25,7 +25,7 @@ PINS = [
     "--artifact",
     "typescript-language-server=6.0.0",
     "--artifact",
-    "typescript=7.0.2",
+    "typescript=6.0.3",
     "--artifact",
     "rust-analyzer=2026-08-24",
 ]
@@ -142,7 +142,7 @@ def main():
             "--artifact",
             "typescript-language-server=6.0.0",
             "--artifact",
-            "typescript=7.0.2",
+            "typescript=6.0.3",
             "--artifact",
             "rust-analyzer=2026-08-24",
         ]
