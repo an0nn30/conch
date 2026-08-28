@@ -63,6 +63,35 @@ impl ProjectRegistry {
             .find(|(_, state)| state.root == root)
             .map(|(label, _)| label.clone())
     }
+
+    /// Atomically check-and-bind: the single `&mut self` call this method
+    /// makes is what closes the TOCTOU window between "is this root already
+    /// claimed" and "claim it" — `project_open` must call this exactly once
+    /// per attempt, under one continuous `registry.lock()`, rather than a
+    /// separate `window_for_root` check followed by a separate `bind` (two
+    /// independent lock acquisitions let two concurrent callers for the same
+    /// root both observe "unclaimed" and both reserve, double-opening the
+    /// project). `label` is assumed already allocated by the caller —
+    /// allocating a *label* is not racy (it is a monotonic counter); binding
+    /// a *root* to one is.
+    pub(crate) fn reserve(&mut self, label: String, root: PathBuf, now_ms: u64) -> ReserveOutcome {
+        if let Some(existing) = self.window_for_root(&root) {
+            return ReserveOutcome::Existing(existing);
+        }
+        self.bind(label, root, now_ms);
+        ReserveOutcome::Reserved
+    }
+}
+
+/// Result of [`ProjectRegistry::reserve`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReserveOutcome {
+    /// No window held this root; it is now bound to the label that was
+    /// passed in.
+    Reserved,
+    /// Some window already holds this root — attach to it instead of
+    /// building a second window for the same project.
+    Existing(String),
 }
 
 /// Milliseconds since the epoch. A clock that has gone backwards yields 0
@@ -139,6 +168,17 @@ pub(crate) fn reveal_command(path: &str) -> (&'static str, Vec<String>) {
 /// discipline `open_path::seed_then_build` documents), so the new window's
 /// very first `get_saved_layout` already sees its project; a failed build
 /// drains the entry back out.
+///
+/// `project_open` is an async command dispatched on Tauri's worker thread
+/// pool, so two calls for the same root can genuinely run concurrently (a
+/// double-invoked "Open Folder", the CLI queue listing one directory twice).
+/// The check-existing / stale-eviction / reserve sequence below runs under
+/// ONE continuous `registry.lock()` — never two separate lock acquisitions —
+/// specifically so two such calls cannot both observe the root as unclaimed
+/// and both go on to build a window for it. The window itself is still built
+/// with the lock released (see the `run_on_main_thread` call below): only the
+/// registry bookkeeping needs to be atomic, not the (slow, main-thread-only)
+/// window construction.
 #[tauri::command]
 pub(crate) async fn project_open(
     app: tauri::AppHandle,
@@ -147,25 +187,51 @@ pub(crate) async fn project_open(
     let root = canonical_root(&path)?;
     let name = project_name(&root);
     let registry = app.state::<Mutex<ProjectRegistry>>();
-
-    if let Some(existing) = registry.lock().window_for_root(&root) {
-        if let Some(win) = app.get_webview_window(&existing) {
-            let _ = win.show();
-            let _ = win.set_focus();
-            return Ok(ProjectOpenResult {
-                root: root.display().to_string(),
-                name,
-                window_label: existing,
-                focused_existing: true,
-            });
-        }
-        // The entry outlived its window (an OS kill that skipped Destroyed).
-        registry.lock().remove(&existing);
-    }
-
     let label = crate::windows::allocate_window_label(&app);
-    registry.lock().bind(label.clone(), root.clone(), now_ms());
 
+    let outcome = {
+        let mut guard = registry.lock();
+        // A stale entry (its window died without `Destroyed` firing, e.g. an
+        // OS kill) must not block a fresh reservation. Evict it here, inside
+        // the same lock acquisition `reserve` runs under below, so no other
+        // caller can slip a reservation in between the eviction and the
+        // retry.
+        if let Some(existing) = guard.window_for_root(&root)
+            && app.get_webview_window(&existing).is_none()
+        {
+            guard.remove(&existing);
+        }
+        guard.reserve(label.clone(), root.clone(), now_ms())
+    };
+
+    let existing = match outcome {
+        ReserveOutcome::Existing(existing) => existing,
+        ReserveOutcome::Reserved => {
+            return project_open_build(app, root, name, label).await;
+        }
+    };
+
+    if let Some(win) = app.get_webview_window(&existing) {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    Ok(ProjectOpenResult {
+        root: root.display().to_string(),
+        name,
+        window_label: existing,
+        focused_existing: true,
+    })
+}
+
+/// The window-building half of [`project_open`], split out so the reserve
+/// step above stays a small, easily-audited critical section. Only reached
+/// once this call has already won the reservation for `root`.
+async fn project_open_build(
+    app: tauri::AppHandle,
+    root: PathBuf,
+    name: String,
+    label: String,
+) -> Result<ProjectOpenResult, String> {
     let handle = app.clone();
     let build_label = label.clone();
     let build_title = name.clone();
@@ -243,6 +309,122 @@ pub(crate) fn on_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn reserve_lets_exactly_one_racing_caller_win_and_the_loser_gets_the_winners_label() {
+        // Two threads race to reserve the SAME root, synchronized with a
+        // barrier so both cross the check-then-bind boundary as close
+        // together as the scheduler allows. `reserve` must hold ONE lock
+        // across the whole check-and-bind (see project_open), so exactly one
+        // of them can observe the root unclaimed; the other must attach to
+        // the winner instead of both reserving separately.
+        let registry = Arc::new(Mutex::new(ProjectRegistry::default()));
+        let root = PathBuf::from("/repo");
+        let barrier = Arc::new(Barrier::new(2));
+        let labels = ["window-a", "window-b"];
+
+        let handles: Vec<_> = labels
+            .iter()
+            .map(|label| {
+                let registry = Arc::clone(&registry);
+                let barrier = Arc::clone(&barrier);
+                let root = root.clone();
+                let label = label.to_string();
+                thread::spawn(move || {
+                    barrier.wait();
+                    (label.clone(), registry.lock().reserve(label, root, 1))
+                })
+            })
+            .collect();
+
+        let results: Vec<(String, ReserveOutcome)> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let winners: Vec<&str> = results
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, ReserveOutcome::Reserved))
+            .map(|(label, _)| label.as_str())
+            .collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one racing caller reserves the root"
+        );
+        let winner_label = winners[0];
+
+        let losers: Vec<&ReserveOutcome> = results
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, ReserveOutcome::Existing(_)))
+            .map(|(_, outcome)| outcome)
+            .collect();
+        assert_eq!(losers.len(), 1, "the other caller must lose, not also win");
+        match losers[0] {
+            ReserveOutcome::Existing(label) => assert_eq!(
+                label, winner_label,
+                "the loser attaches to the winner's window, not a third one"
+            ),
+            ReserveOutcome::Reserved => unreachable!("filtered to Existing above"),
+        }
+
+        assert_eq!(
+            registry.lock().window_for_root(&root).as_deref(),
+            Some(winner_label),
+            "only the winner's label ends up bound to the root"
+        );
+    }
+
+    #[test]
+    fn reserve_on_an_unclaimed_root_binds_it_and_reports_reserved() {
+        let mut reg = ProjectRegistry::default();
+        let outcome = reg.reserve("window-1".into(), PathBuf::from("/repo"), 5);
+        assert_eq!(outcome, ReserveOutcome::Reserved);
+        assert_eq!(reg.root_for("window-1").as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn reserve_on_an_already_claimed_root_reports_the_existing_window_and_does_not_rebind() {
+        let mut reg = ProjectRegistry::default();
+        assert_eq!(
+            reg.reserve("window-1".into(), PathBuf::from("/repo"), 5),
+            ReserveOutcome::Reserved
+        );
+        assert_eq!(
+            reg.reserve("window-2".into(), PathBuf::from("/repo"), 6),
+            ReserveOutcome::Existing("window-1".to_string()),
+            "a second reservation for the same root attaches to the first window"
+        );
+        assert!(
+            reg.get("window-2").is_none(),
+            "the losing label must not end up bound to anything"
+        );
+    }
+
+    #[test]
+    fn a_failed_build_after_reservation_leaves_no_stuck_entry() {
+        // Mirrors project_open's error path: reserve, then simulate the
+        // window build failing by draining the entry the same way
+        // `registry.lock().remove(&label)` does on that path. The root must
+        // become reservable again immediately — never permanently stuck
+        // pointing at a window that was never actually built.
+        let mut reg = ProjectRegistry::default();
+        let outcome = reg.reserve("window-3".into(), PathBuf::from("/repo"), 5);
+        assert_eq!(outcome, ReserveOutcome::Reserved);
+
+        reg.remove("window-3");
+        assert!(
+            reg.get("window-3").is_none(),
+            "a failed build must not leave a phantom reservation"
+        );
+
+        let retry = reg.reserve("window-4".into(), PathBuf::from("/repo"), 6);
+        assert_eq!(
+            retry,
+            ReserveOutcome::Reserved,
+            "the root is reservable again once the failed build's entry is drained"
+        );
+    }
 
     #[test]
     fn bind_get_and_remove_are_per_window() {
