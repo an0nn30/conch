@@ -152,10 +152,16 @@
       const attempt = (async () => {
         try {
           const entries = await invoke('local_list_dir', { path: dirPath });
+          // Re-checked after the await: destroy() may have run while this
+          // call was in flight. Its effects (toasting, and writing into
+          // listings/errored/expanded) must not land on a tree that has
+          // already declared those collections cleared and final.
+          if (destroyed) return false;
           listings.set(dirPath, Array.isArray(entries) ? entries : []);
           errored.delete(dirPath);
           return true;
         } catch (error) {
+          if (destroyed) return false;
           // Toast, collapse, and do not cache the empty result: the rest of
           // the tree keeps working, and the next expand of this directory
           // retries rather than being stuck showing "empty" forever.
@@ -185,8 +191,13 @@
     async function expand(dirPath) {
       if (!listings.has(dirPath)) {
         const ok = await listDir(dirPath);
-        if (!ok) { render(); return; }
+        if (destroyed || !ok) { render(); return; }
       }
+      // Belt-and-braces: destroy() cannot actually interleave here (nothing
+      // above yields once listings.has(dirPath) was already true), but the
+      // guard keeps expanded.add() from ever running on a torn-down tree
+      // regardless of how this function is reshaped later.
+      if (destroyed) { render(); return; }
       expanded.add(dirPath);
       render();
     }
@@ -254,11 +265,12 @@
 
       const twisty = el('span', 'tl-project-tree__twisty');
       twisty.setAttribute('aria-hidden', 'true');
+      const hasError = node.isDir && errored.has(node.path);
       if (node.isDir) {
         const open = expanded.has(node.path);
         twisty.textContent = open ? '▾' : '▸';
         row.setAttribute('aria-expanded', open ? 'true' : 'false');
-        if (errored.has(node.path)) row.setAttribute('data-state', 'error');
+        if (hasError) row.setAttribute('data-state', 'error');
       } else {
         twisty.textContent = '';
       }
@@ -270,11 +282,18 @@
       const label = el('span', 'tl-project-tree__label');
       label.textContent = node.name;
 
-      const state = gitStateFor(node);
-      if (state) {
-        row.setAttribute('data-git-state', state);
-        row.setAttribute('aria-label', node.name + ', ' + state);
+      // The git-state and error suffixes both compose into one aria-label:
+      // the failure is a spoken word ("failed to load"), not just the
+      // data-state/colour pairing, so a screen reader can tell a directory
+      // that errored apart from one that's simply empty.
+      const gitState = gitStateFor(node);
+      const labelParts = [node.name];
+      if (gitState) {
+        row.setAttribute('data-git-state', gitState);
+        labelParts.push(gitState);
       }
+      if (hasError) labelParts.push('failed to load');
+      if (labelParts.length > 1) row.setAttribute('aria-label', labelParts.join(', '));
 
       row.appendChild(twisty);
       row.appendChild(icon);
@@ -303,14 +322,18 @@
 
     function render() {
       if (destroyed) return;
-      // A real DOM drops focus to <body> when the focused node is removed;
-      // list.replaceChildren() below removes every row, so a row that
-      // currently holds focus must be tracked here and re-focused on its
-      // replacement afterward, or one keyboard-triggered expand would kill
-      // further arrow-key navigation.
+      // A real DOM drops focus to <body> when the focused node is removed.
+      // Both replaced regions below need the same before/after focus check:
+      // list.replaceChildren() removes every row, and missingHost's rebuild
+      // removes the "Choose another folder…" button even when `missing`
+      // stays true across an unrelated render (setShowHidden, a git-status
+      // poll) — so a row OR that reopen button holding focus must be tracked
+      // here and re-focused on its replacement afterward.
       const hadFocus = isWithin(global.document.activeElement, list);
+      const hadMissingFocus = isWithin(global.document.activeElement, missingHost);
 
-      missingHost.replaceChildren(...(missing ? [renderMissing()] : []));
+      const missingNotice = missing ? renderMissing() : null;
+      missingHost.replaceChildren(...(missingNotice ? [missingNotice] : []));
 
       const nodes = missing ? [] : buildNodes();
       const built = nodes.map(renderRow);
@@ -323,6 +346,10 @@
         const idx = rowNodes.findIndex((n) => n.path === activePath);
         const target = idx >= 0 ? built[idx] : list;
         if (target && typeof target.focus === 'function') target.focus();
+      }
+      if (hadMissingFocus && missingNotice) {
+        const reopen = missingNotice.querySelector('[data-tree-action="reopen"]');
+        if (reopen && typeof reopen.focus === 'function') reopen.focus();
       }
     }
 

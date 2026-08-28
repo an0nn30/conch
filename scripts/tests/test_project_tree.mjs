@@ -415,6 +415,24 @@ check('setMissing renders the vanished-root state with a reopen action', async (
   assert.strictEqual(h.handle.element.querySelector('.tl-project-tree__missing'), null);
 });
 
+// --- R1: the reopen button must keep focus across a render triggered while
+// `missing` stays true (missingHost is rebuilt on every render(), same as
+// the row list) -----------------------------------------------------------
+
+check('the reopen button keeps focus across a render triggered while missing stays true', async () => {
+  const h = treeHarness({ dirs: { '/repo': [] } });
+  await h.handle.refreshAll();
+  h.handle.setMissing(true);
+  const beforeButton = h.handle.element.querySelector('[data-tree-action="reopen"]');
+  assert.ok(beforeButton, 'the reopen button is rendered');
+  beforeButton.focus();
+  h.handle.setShowHidden(true); // any render while missing stays true, e.g. a git-status poll
+  const afterButton = h.handle.element.querySelector('[data-tree-action="reopen"]');
+  assert.notStrictEqual(afterButton, beforeButton, 'the button element was rebuilt by render()');
+  assert.strictEqual(h.documentStub.activeElement, afterButton,
+    'focus must follow onto the rebuilt reopen button, not stay on the detached one or fall to <body>');
+});
+
 check('the missing-root reopen button invokes onReopen', async () => {
   const seen = [];
   const { sandbox, body } = load([TREE]);
@@ -542,6 +560,38 @@ check('a failed expand does not cache the empty listing, so a retry can succeed'
   assert.strictEqual(row.getAttribute('data-state'), null, 'success clears the error state');
 });
 
+// --- R2: the error state must be accessible, not colour/attribute-only -------
+
+check('an errored directory carries a "failed to load" note in its aria-label, cleared on successful retry', async () => {
+  const dirs = { '/repo': [entry('flaky', true)] };
+  let attempt = 0;
+  const { sandbox, body } = load([TREE]);
+  const invoke = async (cmd, args) => {
+    if (args.path === '/repo') return dirs['/repo'];
+    if (args.path === '/repo/flaky') {
+      attempt += 1;
+      if (attempt === 1) throw new Error('permission denied');
+      return [entry('ok.rs', false)];
+    }
+    throw new Error('unexpected path ' + args.path);
+  };
+  const handle = sandbox.termlabProjectTree.create({
+    invoke, root: '/repo', showHidden: false,
+    onOpenFile: () => {}, onContextMenu: () => {}, toastError: () => {},
+  });
+  body.appendChild(handle.element);
+  await handle.refreshAll();
+  await handle.expand('/repo/flaky');
+  let row = handle.element.querySelector('[data-tree-path="/repo/flaky"]');
+  const failedLabel = row.getAttribute('aria-label');
+  assert.ok(failedLabel && /failed to load/i.test(failedLabel),
+    'a screen reader must be told the directory failed, not just get a colour/data-state change');
+  await handle.expand('/repo/flaky');
+  row = handle.element.querySelector('[data-tree-path="/repo/flaky"]');
+  const okLabel = row.getAttribute('aria-label');
+  assert.ok(!okLabel || !/failed to load/i.test(okLabel), 'a successful retry clears the failure note');
+});
+
 // --- F4: keyboard navigation must never build a selector from a file name ----
 
 check('arrow navigation copes with quote and bracket characters in file names', async () => {
@@ -656,6 +706,53 @@ check('destroy() is terminal: a refreshAll issued after destroy touches neither 
   await handle.refreshAll();
   assert.strictEqual(listed.length, callsBeforeDestroy, 'no local_list_dir call may happen after destroy');
   deepEq(handle.rows(), [], 'rows must not be repopulated after destroy');
+});
+
+// --- R3: a listDir() call already in flight when destroy() runs must not
+// keep mutating state after it resolves. The module deliberately exposes no
+// getter onto its internal `listings`/`errored` maps (that surface isn't
+// part of the Produces contract Tasks 6/7/11 depend on), so this is checked
+// through the one observable side effect that's inseparable from those
+// mutations in the source: listDir's catch branch calls toastError() and
+// writes into listings/expanded/errored in the same unguarded block, so "no
+// stray toast" and "state wasn't touched" stand or fall together — both are
+// behind the identical `if (destroyed) return false;` early return. -------
+
+check('destroy() during an in-flight listDir discards that call\'s result instead of leaking it into state', async () => {
+  const dirs = { '/repo': [entry('a.rs', false)] };
+  const listed = [];
+  const errors = [];
+  let rejectRootListing = null;
+  const { sandbox, body } = load([TREE]);
+  const invoke = async (cmd, args) => {
+    listed.push(args.path);
+    if (listed.length === 1) return dirs['/repo']; // initial refreshAll(), unraced
+    // Second call (the race): held open until the test rejects it, after
+    // destroy() has already run.
+    return new Promise((resolve, reject) => { rejectRootListing = reject; });
+  };
+  const handle = sandbox.termlabProjectTree.create({
+    invoke, root: '/repo', showHidden: false,
+    onOpenFile: () => {}, onContextMenu: () => {},
+    toastError: (title, msg) => { errors.push(msg); },
+  });
+  body.appendChild(handle.element);
+  await handle.refreshAll();
+
+  const raced = handle.refresh('/repo'); // starts the second, held-open invoke call
+  await Promise.resolve();
+  assert.ok(typeof rejectRootListing === 'function', 'the racing local_list_dir call was issued');
+  handle.destroy();
+  rejectRootListing(new Error('permission denied')); // rejects AFTER destroy() cleared state
+  await raced.catch(() => {});
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.strictEqual(errors.length, 0,
+    'a failure that resolves after destroy() must not toast — the same guard that skips the toast ' +
+    'also skips writing into listings/expanded/errored, since both live in the one early-returned branch');
+  deepEq(handle.rows(), [], 'rows must stay empty — nothing from the stale rejection leaked into a render');
+  assert.strictEqual(listed.length, 2, 'no further local_list_dir calls happened');
 });
 
 // --- F9: sort order must match pane-store.js's localeCompare form ------------

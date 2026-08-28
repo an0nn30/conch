@@ -126,9 +126,11 @@
 }
 
 /* A directory whose last listing attempt failed: visually distinct from a
-   directory that is merely empty, and always paired with aria-expanded set
-   back to false (see renderRow in project-tree.js), so the failure is never
-   colour-only. */
+   directory that is merely empty, and always paired with a "failed to load"
+   suffix on the row's aria-label (see renderRow in project-tree.js) — that
+   spoken word is what actually discriminates the two states for a screen
+   reader; aria-expanded="false" alone does not, since an empty directory
+   collapses to the same value. */
 .tl-project-tree__row[data-state="error"] {
   color: var(--tl-danger);
 }
