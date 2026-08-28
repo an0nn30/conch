@@ -685,7 +685,9 @@
       window.termlabProjectTrustBanner.mount({
         host: projectTreeHandle.noticeHost,
         root: projectRoot,
+        name: (window.termlabProjectMode && window.termlabProjectMode.name()) || '',
         bridge: window.termlabLspBridge,
+        invoke,
         onDecision: () => {},
       });
     }

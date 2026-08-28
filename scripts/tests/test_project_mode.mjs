@@ -662,6 +662,41 @@ check('the banner asks once for an untrusted root and never for a trusted one', 
   );
 });
 
+// Review F4/F7 (fix round 1): the banner grants strictly broader consent
+// than the per-file dialog's per-adapter trust — so only a PROJECT-WIDE
+// record (adapterId null/undefined) may settle it. A per-adapter-only
+// record answers a narrower question and must not suppress the broader
+// offer. A project-wide Revoked record is explicitly pinned as settled too
+// (F7): this banner never re-asks a project the user already gave a
+// project-wide answer to, whatever that answer was.
+check('decide() only settles on a PROJECT-WIDE record — a per-adapter trust record still offers the broader grant', () => {
+  const sandbox = load([BANNER]);
+  const decide = sandbox.termlabProjectTrustBanner.decide;
+  assert.strictEqual(
+    decide([{ root: '/repo', adapterId: 'rust-analyzer', decision: 'trusted' }], '/repo'),
+    'ask',
+    'a per-adapter record answers one language server, not "every language server" — the banner still offers the broader grant',
+  );
+  assert.strictEqual(
+    decide([
+      { root: '/repo', adapterId: 'rust-analyzer', decision: 'trusted' },
+      { root: '/repo', adapterId: 'typescript', decision: 'trusted' },
+    ], '/repo'),
+    'ask',
+    'even every adapter trusted individually is not the same record as a project-wide decision',
+  );
+  assert.strictEqual(
+    decide([{ root: '/repo', adapterId: null, decision: 'revoked' }], '/repo'),
+    'settled',
+    'F7: a project-wide Revoked record is settled too — revoked projects do not re-ask',
+  );
+  assert.strictEqual(
+    decide([{ root: '/repo', decision: 'trusted' }], '/repo'),
+    'settled',
+    'a record with no adapterId field at all (undefined) is project-wide, same as adapterId: null',
+  );
+});
+
 check('Trust project calls lsp_set_project_trust with the root and a trusted decision', async () => {
   const sandbox = load([BANNER]);
   const { body } = (() => {
@@ -711,6 +746,94 @@ check('Trust project is idempotent under a double click', async () => {
   trust.dispatchEvent({ type: 'click', target: trust });
   await handle.settled();
   deepEq(calls, [['/repo', null, 'trusted']], 'a second click before the IPC round trip resolves must not send a second decision');
+});
+
+// Review F3 (ruling): the banner grants strictly broader consent than the
+// per-file dialog while disclosing less — the copy has to name the project
+// (name + path) and state the grant applies to every language server, not a
+// generic "start language servers?" line.
+check('F3: the banner copy names the project (name + path) and discloses that the grant covers every language server', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    name: 'myrepo',
+    bridge: { trustedProjects: async () => [], setProjectTrust: async () => {} },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  const banner = host.querySelector('.tl-project-banner');
+  assert.ok(banner, 'the banner root element must carry the .tl-project-banner class');
+  const title = host.querySelector('.tl-project-banner__title');
+  assert.ok(title, 'the banner has a title line naming the project');
+  assert.ok(title.textContent.includes('myrepo'), 'the title must name the project');
+  assert.ok(title.textContent.includes('/repo'), 'the title must also disclose the full path, not just the friendly name');
+  const detail = host.querySelector('.tl-project-banner__text');
+  assert.ok(detail, 'the banner has a detail line disclosing scope');
+  assert.ok(
+    /language server/i.test(detail.textContent) && /every|all/i.test(detail.textContent),
+    'the detail line must state the grant covers every language server for this project, not just "start language servers"',
+  );
+});
+
+check('F3: without a project name, the banner still discloses the path alone', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    bridge: { trustedProjects: async () => [], setProjectTrust: async () => {} },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  const title = host.querySelector('.tl-project-banner__title');
+  assert.ok(title.textContent.includes('/repo'), 'the path is still disclosed with no project name supplied');
+});
+
+// Review F9 (nit): role="note" alone is only announced when focused —
+// aria-live="polite" is what actually gets an unsolicited banner announced.
+check('F9: the banner container is aria-live="polite"', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    bridge: { trustedProjects: async () => [], setProjectTrust: async () => {} },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  const banner = host.querySelector('.tl-project-banner');
+  assert.strictEqual(banner.getAttribute('aria-live'), 'polite');
+});
+
+// Review F6 (low): a synchronous throw from bridge.setProjectTrust (e.g. the
+// bridge is missing the method entirely) happens before Promise.resolve()'s
+// argument is evaluated, so it never reaches a .catch on that promise chain
+// — reviewer showed this bricks `decided` at true forever, making both
+// buttons permanently dead.
+check('F6: a Trust click that throws synchronously does not brick the banner', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    // setProjectTrust is missing entirely: calling it throws synchronously.
+    bridge: { trustedProjects: async () => [] },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  const trust = host.querySelector('[data-project-trust="trust"]');
+  assert.doesNotThrow(() => trust.dispatchEvent({ type: 'click', target: trust }));
+  await handle.settled();
+  assert.ok(
+    host.querySelector('[data-project-trust="trust"]'),
+    'a synchronous throw must reset `decided` — the banner stays and Trust remains clickable, not permanently bricked',
+  );
 });
 
 check('Not now dismisses for the window lifetime without touching trust', async () => {
@@ -781,6 +904,69 @@ check('an already-trusted project never renders a banner at all', async () => {
   assert.strictEqual(host.children.length, 0, 'nothing is rendered for a settled project');
 });
 
+// Review F5 (ruling): gate mount on editor.lsp.enabled, read the way the
+// Settings dialog itself reads it — the full document from get_all_settings,
+// at `.editor.lsp.enabled` (settings/store.js, sections-editor.js both read
+// it there; get_app_config's flattened snapshot does not carry this field).
+check('F5: editor.lsp.enabled === false suppresses the banner entirely', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const invokeCalls = [];
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    bridge: { trustedProjects: async () => [], setProjectTrust: async () => {} },
+    invoke: async (cmd) => {
+      invokeCalls.push(cmd);
+      if (cmd === 'get_all_settings') return { editor: { lsp: { enabled: false } } };
+      throw new Error(`unexpected command ${cmd}`);
+    },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  assert.ok(invokeCalls.includes('get_all_settings'), 'the gate must actually read settings');
+  assert.strictEqual(host.children.length, 0, 'globally-disabled LSP must suppress the banner');
+});
+
+check('F5: a missing invoke, a settings read failure, or editor.lsp.enabled left unset all default to showing the banner', async () => {
+  const bridge = { trustedProjects: async () => [], setProjectTrust: async () => {} };
+
+  // No invoke supplied at all (mirrors every earlier test in this file).
+  {
+    const sandbox = load([BANNER]);
+    const host = sandbox.document.createElement('div');
+    sandbox.document.body.appendChild(host);
+    const handle = sandbox.termlabProjectTrustBanner.mount({ host, root: '/repo', bridge, onDecision: () => {} });
+    await handle.ready;
+    assert.ok(host.children.length > 0, 'no invoke function must not suppress the banner');
+  }
+
+  // invoke rejects.
+  {
+    const sandbox = load([BANNER]);
+    const host = sandbox.document.createElement('div');
+    sandbox.document.body.appendChild(host);
+    const handle = sandbox.termlabProjectTrustBanner.mount({
+      host, root: '/repo', bridge, invoke: async () => { throw new Error('settings unavailable'); }, onDecision: () => {},
+    });
+    await handle.ready;
+    assert.ok(host.children.length > 0, 'a failed settings read must fail open (LspConfig::default().enabled is true on the Rust side)');
+  }
+
+  // editor.lsp.enabled is present but not `false` (missing/undefined/true).
+  {
+    const sandbox = load([BANNER]);
+    const host = sandbox.document.createElement('div');
+    sandbox.document.body.appendChild(host);
+    const handle = sandbox.termlabProjectTrustBanner.mount({
+      host, root: '/repo', bridge, invoke: async () => ({ editor: {} }), onDecision: () => {},
+    });
+    await handle.ready;
+    assert.ok(host.children.length > 0, 'only an explicit false suppresses the banner');
+  }
+});
+
 check('a file under the root adopts the project root as its LSP context', () => {
   const sandbox = load([MODE, LSP_ROOT]);
   const mode = sandbox.termlabProjectMode;
@@ -834,6 +1020,109 @@ check('install leaves a remote pane and a pane with no file path alone', async (
   listener({ kind: 'terminal', remote: null, filePath: '/repo/src/main.rs' }, choosing);
   await new Promise((resolve) => setTimeout(resolve, 0));
   deepEq(contexts, [], 'a remote pane, a paneless document, and a non-editor pane must never adopt the project root');
+});
+
+// Review F1 (medium): lsp-state re-publishes session status on every
+// diagnostics revision, so a REJECTED adoption (the manager rejects roots
+// not among the document's own candidates — InvalidProjectRoot; real case:
+// root.rs drops non-matching candidates for a JSON file under a
+// package.json subtree) must never be retried — otherwise every republish
+// re-fires lsp_set_project_context. Reviewer proved 5 notifies -> 5 invokes
+// under the pre-fix code; this pins exactly one.
+check('F1: a permanently-rejected adoption is never retried, even across repeated notifies', async () => {
+  const sandbox = load([MODE, LSP_ROOT]);
+  sandbox.termlabProjectMode.set({ root: '/repo', name: 'repo' });
+  let listener = null;
+  const calls = [];
+  sandbox.termlabProjectLspRoot.install({
+    state: { subscribe: (fn) => { listener = fn; return () => {}; } },
+    bridge: {
+      setProjectContext: async (documentId, context) => {
+        calls.push([documentId, context]);
+        throw new Error('InvalidProjectRoot');
+      },
+    },
+    mode: sandbox.termlabProjectMode,
+  });
+  const pane = { kind: 'editor', remote: null, filePath: '/repo/pkg/manifest.json' };
+  const choosing = { documentId: 'doc-json', status: { state: 'choosingProject' } };
+  // Five republishes of the same choosingProject status, exactly as
+  // lsp-state.js does on every diagnostics revision for a document whose
+  // session never settles.
+  for (let i = 0; i < 5; i += 1) {
+    listener(pane, choosing);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.strictEqual(calls.length, 1, 'a rejected adoption must back off permanently, not resend on every republish');
+});
+
+// Review F2 (medium, mostly documentation): the fallback this rejection
+// leaves behind is the per-file chooser (project-context.js), reachable
+// because lsp-root.js only ever calls bridge.setProjectContext itself — it
+// never wraps, replaces, or disables the bridge method the chooser uses, so
+// a rejection for one document changes nothing about the bridge or state
+// modules any other document (or the chooser's own explicit call) relies on.
+check('F2: a rejected adoption leaves the bridge itself untouched — the per-file chooser path stays reachable', async () => {
+  const sandbox = load([MODE, LSP_ROOT]);
+  sandbox.termlabProjectMode.set({ root: '/repo', name: 'repo' });
+  let listener = null;
+  const calls = [];
+  const bridge = {
+    setProjectContext: async (documentId, context) => {
+      calls.push([documentId, context]);
+      if (documentId === 'doc-json') throw new Error('InvalidProjectRoot');
+    },
+  };
+  sandbox.termlabProjectLspRoot.install({
+    state: { subscribe: (fn) => { listener = fn; return () => {}; } },
+    bridge,
+    mode: sandbox.termlabProjectMode,
+  });
+  listener(
+    { kind: 'editor', remote: null, filePath: '/repo/pkg/manifest.json' },
+    { documentId: 'doc-json', status: { state: 'choosingProject' } },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.strictEqual(calls.length, 1);
+
+  // The per-file chooser (a human choosing a project explicitly, e.g. via
+  // project-context.js's chooseProject()) calls the SAME bridge method
+  // directly — this must still work normally for a different document,
+  // proving the module-internal `failed` bookkeeping is scoped per document
+  // id and never touches the bridge or any other document's path.
+  await bridge.setProjectContext('doc-other', { kind: 'root', root: '/repo' });
+  deepEq(calls[1], ['doc-other', { kind: 'root', root: '/repo' }],
+    'the bridge call the per-file chooser would make is unaffected by another document\'s rejected adoption');
+});
+
+// TEST HOLE (required): the reviewer showed that swapping mode.isUnderRoot()
+// for a naive string startsWith() inside the adoption path passes every
+// Task 7 check that existed before this fix round — because the only
+// out-of-root fixture used ('/elsewhere/lib.rs') shares no string prefix
+// with the root at all. This drives the full install() PATH (not the
+// isUnderRoot/shouldAdoptRoot unit tests, which already cover the pure
+// function) with a TRUE sibling-prefix case: '/repository' shares the
+// string prefix '/repo' with the root '/repo' but is a different directory.
+// A regression that swapped isUnderRoot for startsWith(root) here would
+// send the project root as this document's context; this pins that it must
+// not.
+check('TEST HOLE: install() never adopts the root for a sibling path that merely shares a string prefix', async () => {
+  const sandbox = load([MODE, LSP_ROOT]);
+  sandbox.termlabProjectMode.set({ root: '/repo', name: 'repo' });
+  let listener = null;
+  const contexts = [];
+  sandbox.termlabProjectLspRoot.install({
+    state: { subscribe: (fn) => { listener = fn; return () => {}; } },
+    bridge: { setProjectContext: async (documentId, context) => { contexts.push([documentId, context]); } },
+    mode: sandbox.termlabProjectMode,
+  });
+  listener(
+    { kind: 'editor', remote: null, filePath: '/repository/src/x.rs' },
+    { documentId: 'doc-sibling', status: { state: 'choosingProject' } },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  deepEq(contexts, [],
+    '"/repository" shares a string prefix with "/repo" but is a different directory — a startsWith(root) regression would have adopted it');
 });
 
 check('the project feature modules use no regex lookbehind and no control bytes', () => {

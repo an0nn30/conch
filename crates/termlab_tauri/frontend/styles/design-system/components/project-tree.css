@@ -180,18 +180,35 @@
 }
 
 /* The one trust ask per project. A banner, never a modal: editing is not
-   blocked by the decision, so the UI must not block on it either. */
+   blocked by the decision, so the UI must not block on it either. Same
+   warning treatment as the sibling missing-root notice
+   (.tl-project-tree__missing) — --tl-warning-fg on --tl-warning-bg, not the
+   plain foreground token. */
 .tl-project-banner {
   display: flex;
   align-items: center;
   gap: var(--tl-space-2);
   padding: var(--tl-space-2);
-  color: var(--tl-fg);
+  color: var(--tl-warning-fg);
   background: var(--tl-warning-bg);
   border-bottom: 1px solid var(--tl-warning-border);
 }
 
-.tl-project-banner__text {
+.tl-project-banner__copy {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-1);
+}
+
+.tl-project-banner__title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-project-banner__text {
   min-width: 0;
 }
