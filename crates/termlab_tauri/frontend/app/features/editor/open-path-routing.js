@@ -24,7 +24,6 @@
     const openLocalFile = deps.openLocalFile;
     const openProject = deps.openProject;
     const toastError = deps.toastError;
-    const toastInfo = deps.toastInfo;
 
     // True only when a regular file actually reached the editor: the boot
     // path counts these to decide whether the window earned its editor-only

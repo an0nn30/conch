@@ -26,7 +26,6 @@
       openLocalFile: (filePath) => g.termlabEditorService.openLocalFile(filePath),
       openProject: (dirPath) => deps.invoke('project_open', { path: dirPath }),
       toastError: (title, body) => { if (g.toast) g.toast.error(title, body); },
-      toastInfo: (title, body) => { if (g.toast) g.toast.info(title, body); },
     });
   }
 

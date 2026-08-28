@@ -13,6 +13,15 @@
   'use strict';
 
   let project = null;
+  // Set by adopt() whenever it returns null. True only for the BENIGN case —
+  // project_adopt_pending found another window already holding the same
+  // root, focused it, and destroyed this one. Read by startup-runtime.js to
+  // decide whether a failed adopt is worth a toast: a benign hand-off needs
+  // no explanation (this window is already on its way out), but a real
+  // failure (folder vanished mid-boot, permission denied, backend error)
+  // must not boot a plain terminal with no user-visible reason why the
+  // project didn't open.
+  let lastAdoptFocusedExisting = false;
 
   function set(info) {
     if (!info || !info.root) {
@@ -34,14 +43,24 @@
   // Never fatal: a backend that cannot answer leaves the window an ordinary
   // terminal window rather than failing its boot.
   async function adopt(invoke) {
+    lastAdoptFocusedExisting = false;
     try {
       const result = await invoke('project_adopt_pending');
-      if (!result || !result.adopted) return null;
+      if (!result || !result.adopted) {
+        lastAdoptFocusedExisting = !!(result && result.focusedExisting);
+        return null;
+      }
       return set(result.adopted);
     } catch (error) {
       console.warn('project-mode: could not adopt a pending project', error);
       return null;
     }
+  }
+
+  // See lastAdoptFocusedExisting's comment above. Reflects only the most
+  // recent adopt() call.
+  function adoptFocusedExisting() {
+    return lastAdoptFocusedExisting;
   }
 
   function root() {
@@ -65,6 +84,6 @@
   }
 
   global.termlabProjectMode = {
-    adopt, set, reset, root, name, isActive, isUnderRoot,
+    adopt, set, reset, root, name, isActive, isUnderRoot, adoptFocusedExisting,
   };
 })(window);

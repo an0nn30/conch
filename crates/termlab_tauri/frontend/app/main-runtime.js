@@ -559,8 +559,12 @@
       // Tell the user why this window has no panels — otherwise a window that
       // opens bare looks broken rather than deliberate. Only for windows that
       // got zen from the setting, never for one that inherited it from the
-      // saved layout.
-      if (window.__termlabZenIsSessionDefault === true && window.toast) {
+      // saved layout. __termlabEffectiveZen must also be true: a project
+      // window sets __termlabZenIsSessionDefault (it made its own
+      // session-only zen decision) while forcing zen OFF, and without this
+      // check the toast would claim "New windows open in zen mode by
+      // default" on a window that is visibly not in zen.
+      if (window.__termlabZenIsSessionDefault === true && window.__termlabEffectiveZen === true && window.toast) {
         window.toast.info('Zen mode', 'New windows open in zen mode by default. Change this in Settings → Appearance.');
       }
 

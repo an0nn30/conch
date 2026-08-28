@@ -621,7 +621,14 @@
 
         registerBuiltInToolWindows();
 
-        if (initialLayoutData && initialLayoutData.zen_mode === true) {
+        // Reads the EFFECTIVE zen decision (startup-runtime.js), not the raw
+        // saved layout: a project window can inherit a saved zen_mode=true
+        // and still force zen off (it keeps its panels on purpose), and the
+        // raw value here would hide them anyway with no zen class present to
+        // explain why — a project window with no file tree and no search
+        // panel, which is exactly the outcome the project override exists to
+        // prevent.
+        if (window.__termlabEffectiveZen === true) {
           global.toolWindowManager.setPanelVisibility('left', false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', false, { save: false });
           global.toolWindowManager.setPanelVisibility('bottom', false, { save: false });

@@ -163,7 +163,23 @@
           try {
             const pendingKindForAdopt = await invoke('pending_open_paths_kind');
             if (pendingKindForAdopt === 'project') {
-              await global.termlabProjectMode.adopt(invoke);
+              const adopted = await global.termlabProjectMode.adopt(invoke);
+              // A peek that says "project" whose adopt then fails (folder
+              // removed mid-boot, permission denied, backend error) must not
+              // silently boot a plain terminal — the routing path (a
+              // directory opened from an already-running window) toasts by
+              // name for the same failure, so this seam should too. The one
+              // exception is a benign "another window already has this
+              // root" hand-off: project_adopt_pending destroys THIS window
+              // in that case, so there is nothing to explain.
+              const focusedExisting = typeof global.termlabProjectMode.adoptFocusedExisting === 'function'
+                && global.termlabProjectMode.adoptFocusedExisting();
+              if (!adopted && !focusedExisting && window.toast) {
+                window.toast.error(
+                  'Cannot Open Folder',
+                  'The project could not be opened — it may have been moved, deleted, or you may not have permission to access it.',
+                );
+              }
             }
           } catch (_) {}
         }
@@ -230,6 +246,21 @@
             zenOn = false;
             window.__termlabZenIsSessionDefault = true;
           }
+          // The EFFECTIVE decision, as opposed to __termlabInitialZenMode
+          // (the raw saved value) and __termlabZenIsSessionDefault (whether
+          // that decision belongs only to this window). Three other modules
+          // need "is this window actually in zen right now" rather than
+          // either of those: the zen-default toast (main-runtime.js) must
+          // not claim zen when a project window forced it off; the
+          // panel-hiding fallback (tool-window-runtime.js) must not hide
+          // panels a project window deliberately kept visible just because
+          // the saved layout says zen_mode; and the Zen Mode menu toggle
+          // (menu-actions.js) must seed its own active/inactive state from
+          // what actually happened, not from the pre-override saved value.
+          // __termlabInitialZenMode itself stays untouched — the save path
+          // (tool-window-runtime.js's saveLayoutNow) depends on the RAW
+          // value to correctly persist an inherited-not-live zen state.
+          window.__termlabEffectiveZen = zenOn;
           if (zenOn) {
             document.getElementById('app').classList.add('zen-mode');
           } else {

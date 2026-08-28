@@ -20,7 +20,7 @@ function load({ pending, statMap }) {
   const file = path.join(APP, 'features/editor/open-path-routing.js');
   vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
 
-  const calls = { opened: [], projects: [], errors: [], infos: [] };
+  const calls = { opened: [], projects: [], errors: [] };
   let drained = false;
   const routing = sandbox.termlabOpenPathRouting.create({
     invoke: async (cmd, args) => {
@@ -38,7 +38,6 @@ function load({ pending, statMap }) {
     openLocalFile: (p) => { calls.opened.push(p); },
     openProject: async (p) => { calls.projects.push(p); },
     toastError: (title, body) => { calls.errors.push(body); },
-    toastInfo: (title, body) => { calls.infos.push(body); },
   });
   return { routing, calls, sandbox };
 }
@@ -64,7 +63,7 @@ function load({ pending, statMap }) {
   const { routing, calls } = load({ pending: [], statMap: {} });
   await routing.drainPendingOpens();
   assert.deepStrictEqual(calls.opened, []);
-  assert.strictEqual(calls.errors.length + calls.infos.length, 0);
+  assert.strictEqual(calls.errors.length, 0);
 }
 
 // sequential, deterministic order: opens happen in queue order even with
@@ -104,7 +103,7 @@ function load({ pending, statMap }) {
   });
   await routing.drainPendingOpens();
   assert.deepStrictEqual(calls.projects, ['/tmp/dir']);
-  assert.strictEqual(calls.infos.length, 0);
+  assert.strictEqual(calls.errors.length, 0);
 }
 
 // routePaths routes a pre-pulled list (no queue pull) and reports how many

@@ -16,6 +16,7 @@ const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/front
 const APP = path.join(ROOT, 'app');
 const MODE = path.join(APP, 'features/project/project-mode.js');
 const ROUTING = path.join(APP, 'features/editor/open-path-routing.js');
+const STARTUP = path.join(APP, 'startup-runtime.js');
 const INDEX_HTML = path.join(ROOT, 'index.html');
 
 let ran = 0;
@@ -36,6 +37,30 @@ function load(files) {
     vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
   }
   return sandbox;
+}
+
+// applyAppConfig's only DOM touch is `document.getElementById('app').classList`
+// (add/remove 'zen-mode'); everything else it reads is an injected `invoke` or
+// an optional global left undefined. This stub is deliberately that narrow —
+// no jsdom, matching the rest of this suite.
+function loadStartup() {
+  let zenClass = false;
+  const sandbox = { console, Promise, JSON, String, Object, Array, Error };
+  sandbox.window = sandbox;
+  sandbox.document = {
+    getElementById: (id) => (id === 'app' ? {
+      classList: {
+        add: (c) => { if (c === 'zen-mode') zenClass = true; },
+        remove: (c) => { if (c === 'zen-mode') zenClass = false; },
+        contains: (c) => c === 'zen-mode' && zenClass,
+      },
+    } : null),
+  };
+  vm.createContext(sandbox);
+  for (const file of [MODE, STARTUP]) {
+    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
+  }
+  return { sandbox, hasZenClass: () => zenClass };
 }
 
 check('adopt binds the window and publishes the globals', async () => {
@@ -137,6 +162,156 @@ check('startup-runtime keeps a project window out of zen', () => {
   const adopt = src.indexOf('termlabProjectMode');
   const layout = src.indexOf("invoke('get_saved_layout')");
   assert.ok(adopt < layout, 'adopt must precede the layout read so the per-project layout applies');
+});
+
+// Table-driven over every (queued-path kind) x (saved zen) combination.
+// Deleting the kind==='project' gate, or the __termlabZenIsSessionDefault
+// flag, leaves this red: it pins the effective zen decision AND that adopt
+// is invoked for the project row alone (never for a mixed queue, which
+// classifies as "files" — see project_adopt_pending's carry-in gate).
+check('applyAppConfig computes the effective zen decision and gates adopt to the project row', async () => {
+  const kinds = ['none', 'files', 'project', 'mixed-files'];
+  for (const kind of kinds) {
+    for (const savedZen of [true, false]) {
+      const { sandbox, hasZenClass } = loadStartup();
+      const invoked = [];
+      const invoke = async (cmd) => {
+        invoked.push(cmd);
+        switch (cmd) {
+          case 'get_app_config':
+            return { editor_vim_mode: false, appearance_mode: 'dark', new_window_zen_mode: false };
+          case 'current_window_label':
+            // Fixed at 'main' so the secondary-window zen default never
+            // participates — this table isolates the queued-path decision.
+            return 'main';
+          case 'pending_open_paths_kind':
+            if (kind === 'project') return 'project';
+            if (kind === 'files' || kind === 'mixed-files') return 'files';
+            return 'none';
+          case 'project_adopt_pending':
+            return { adopted: { root: '/repo', name: 'repo' }, focusedExisting: false };
+          case 'get_saved_layout':
+            return {
+              zen_mode: savedZen,
+              files_panel_visible: true,
+              ssh_panel_visible: true,
+              bottom_panel_visible: true,
+            };
+          default:
+            throw new Error('unexpected command ' + cmd);
+        }
+      };
+
+      const runtime = sandbox.termlabStartupRuntime.create();
+      await runtime.applyAppConfig(invoke);
+
+      const label = `kind=${kind} savedZen=${savedZen}`;
+      const expectZenOn = kind === 'project' ? false : (kind === 'files' || kind === 'mixed-files') ? true : savedZen;
+      const expectSessionDefault = kind === 'project' || kind === 'files' || kind === 'mixed-files';
+      const expectAdoptCalls = kind === 'project' ? 1 : 0;
+
+      assert.strictEqual(hasZenClass(), expectZenOn, `${label}: zen-mode class on #app`);
+      assert.strictEqual(sandbox.window.__termlabEffectiveZen, expectZenOn, `${label}: __termlabEffectiveZen`);
+      assert.strictEqual(
+        sandbox.window.__termlabZenIsSessionDefault === true,
+        expectSessionDefault,
+        `${label}: __termlabZenIsSessionDefault`,
+      );
+      assert.strictEqual(
+        invoked.filter((c) => c === 'project_adopt_pending').length,
+        expectAdoptCalls,
+        `${label}: project_adopt_pending invocation count`,
+      );
+    }
+  }
+});
+
+check('main-runtime only toasts the zen default when zen is actually effective', () => {
+  const src = fs.readFileSync(path.join(APP, 'main-runtime.js'), 'utf8');
+  const toastLine = src.split('\n').find((line) => line.includes("toast.info('Zen mode'"));
+  assert.ok(toastLine, 'the zen-mode-default toast is still wired');
+  const condition = src.slice(0, src.indexOf(toastLine)).split('\n').slice(-6).join('\n') + toastLine;
+  assert.ok(
+    condition.includes('__termlabEffectiveZen'),
+    'the toast condition must read the effective zen decision, not just the session-default flag — ' +
+    'otherwise a project window (session-default true, zen OFF) claims to be in zen when it visibly is not',
+  );
+});
+
+check('tool-window-runtime hides panels only on the effective zen decision', () => {
+  const src = fs.readFileSync(path.join(APP, 'tool-window-runtime.js'), 'utf8');
+  assert.ok(
+    !/initialLayoutData\s*&&\s*initialLayoutData\.zen_mode === true/.test(src),
+    'the panel-hiding block must not key off the raw saved zen_mode value',
+  );
+  assert.ok(
+    src.includes('__termlabEffectiveZen'),
+    'the panel-hiding block must read the effective zen decision — otherwise a project window that ' +
+    'inherited saved zen_mode=true hides its panels with no zen class to explain why',
+  );
+});
+
+check('menu-actions seeds zen state from the effective decision', () => {
+  const src = fs.readFileSync(path.join(APP, 'menu-actions.js'), 'utf8');
+  assert.ok(
+    src.includes('zenState') && src.includes('__termlabEffectiveZen'),
+    'zenState.active must be seeded from the effective zen decision, not the stale initial-zen-mode flag',
+  );
+});
+
+check('a failed project adopt (not a benign hand-off) reports the folder by name', async () => {
+  const { sandbox } = loadStartup();
+  const toasts = [];
+  sandbox.window.toast = { error: (title, body) => toasts.push([title, body]), info: () => {} };
+  const invoke = async (cmd) => {
+    switch (cmd) {
+      case 'get_app_config':
+        return { editor_vim_mode: false, appearance_mode: 'dark', new_window_zen_mode: false };
+      case 'current_window_label':
+        return 'main';
+      case 'pending_open_paths_kind':
+        return 'project';
+      case 'project_adopt_pending':
+        // Folder vanished / permission denied mid-boot: a real failure, not
+        // the benign "another window already has this root" hand-off.
+        return { adopted: null, focusedExisting: false };
+      case 'get_saved_layout':
+        return { zen_mode: false, files_panel_visible: true, ssh_panel_visible: true, bottom_panel_visible: true };
+      default:
+        throw new Error('unexpected command ' + cmd);
+    }
+  };
+  const runtime = sandbox.termlabStartupRuntime.create();
+  await runtime.applyAppConfig(invoke);
+  assert.strictEqual(toasts.length, 1, 'a real adopt failure must be reported, not silently swallowed');
+  assert.strictEqual(toasts[0][0], 'Cannot Open Folder');
+});
+
+check('a benign focused-existing hand-off does not toast', async () => {
+  const { sandbox } = loadStartup();
+  const toasts = [];
+  sandbox.window.toast = { error: (title, body) => toasts.push([title, body]), info: () => {} };
+  const invoke = async (cmd) => {
+    switch (cmd) {
+      case 'get_app_config':
+        return { editor_vim_mode: false, appearance_mode: 'dark', new_window_zen_mode: false };
+      case 'current_window_label':
+        return 'main';
+      case 'pending_open_paths_kind':
+        return 'project';
+      case 'project_adopt_pending':
+        // Another window already holds this root; Rust destroys this
+        // window. Nothing went wrong, so nothing should be reported.
+        return { adopted: null, focusedExisting: true };
+      case 'get_saved_layout':
+        return { zen_mode: false, files_panel_visible: true, ssh_panel_visible: true, bottom_panel_visible: true };
+      default:
+        throw new Error('unexpected command ' + cmd);
+    }
+  };
+  const runtime = sandbox.termlabStartupRuntime.create();
+  await runtime.applyAppConfig(invoke);
+  assert.strictEqual(toasts.length, 0, 'a window on its way to being destroyed needs no explanation');
 });
 
 check('main-runtime gives a project window a terminal tab at the project root', () => {

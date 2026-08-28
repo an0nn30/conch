@@ -23,7 +23,12 @@
     const showUpdateAvailableToast = deps.showUpdateAvailableToast;
     const initialLayout = global.__termlabInitialLayout || {};
     const zenState = {
-      active: global.__termlabInitialZenMode === true,
+      // The EFFECTIVE zen decision, not the raw saved value: a project
+      // window can inherit saved zen_mode=true while forcing zen off, and
+      // seeding from the raw flag would leave this window's state as
+      // active:true with no zen class applied — the first Zen Mode press
+      // would then take the "exit zen" branch and appear to do nothing.
+      active: global.__termlabEffectiveZen === true,
       leftVisible: initialLayout.files_panel_visible !== false,
       rightVisible: initialLayout.ssh_panel_visible !== false,
       bottomVisible: initialLayout.bottom_panel_visible !== false,
