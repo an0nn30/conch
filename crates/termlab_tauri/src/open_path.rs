@@ -15,20 +15,38 @@ impl PendingOpens {
         self.0.lock().unwrap().remove(label).unwrap_or_default()
     }
 
-    /// Non-destructive: does this label have queued paths? The boot path asks
-    /// this early (to decide the editor-window layout) before the destructive
-    /// take runs later in startup.
-    pub(crate) fn has(&self, label: &str) -> bool {
+    /// Non-destructive read of a label's whole queue.
+    pub(crate) fn peek(&self, label: &str) -> Vec<String> {
         self.0
             .lock()
             .unwrap()
             .get(label)
-            .is_some_and(|paths| !paths.is_empty())
+            .cloned()
+            .unwrap_or_default()
     }
 
-    #[cfg(test)]
-    fn peek(&self, label: &str) -> Vec<String> {
-        self.0.lock().unwrap().get(label).cloned().unwrap_or_default()
+    /// Drain ONLY the directory entries, leaving files queued. The boot path
+    /// adopts a queued directory as this window's project (project mode) while
+    /// the editor still gets any files that arrived alongside it.
+    pub(crate) fn take_directories(
+        &self,
+        label: &str,
+        is_dir: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let mut guard = self.0.lock().unwrap();
+        let Some(queue) = guard.get_mut(label) else {
+            return Vec::new();
+        };
+        let mut dirs = Vec::new();
+        queue.retain(|path| {
+            if is_dir(path) {
+                dirs.push(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        dirs
     }
 }
 
@@ -102,12 +120,66 @@ pub(crate) fn open_in_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, p
     );
 }
 
+/// What a window's queued open-paths amount to, as far as the boot layout is
+/// concerned. A window opening a FILE becomes a zen, editor-only window; a
+/// window opening a PROJECT keeps its panels and gets a terminal tab.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PendingKind {
+    None,
+    Files,
+    Project,
+}
+
+impl PendingKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            PendingKind::None => "none",
+            PendingKind::Files => "files",
+            PendingKind::Project => "project",
+        }
+    }
+}
+
+/// Pure classifier — `is_dir` is injected so the rule is testable without
+/// touching the filesystem. A queue holding even one non-directory is a FILE
+/// queue: the file's editor window is the stronger claim on the layout.
+pub(crate) fn classify(paths: &[String], is_dir: impl Fn(&str) -> bool) -> PendingKind {
+    if paths.is_empty() {
+        return PendingKind::None;
+    }
+    if paths.iter().all(|p| is_dir(p)) {
+        PendingKind::Project
+    } else {
+        PendingKind::Files
+    }
+}
+
+/// Non-destructive peek used by the boot layout decision. Replaces the older
+/// boolean `has_pending_open_paths`: a directory and a file want opposite
+/// window shapes, so a yes/no answer is no longer enough.
+#[tauri::command]
+pub(crate) fn pending_open_paths_kind(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, PendingOpens>,
+) -> String {
+    let paths = state.peek(window.label());
+    classify(&paths, |p| std::path::Path::new(p).is_dir())
+        .as_str()
+        .to_string()
+}
+
+// TODO(Task 3): remove this deprecated wrapper once startup-runtime.js is
+// rewired to call `pending_open_paths_kind` directly. Kept for now so the
+// zen-on-pending-open boot behavior (see startup-runtime.js's
+// `has_pending_open_paths` call) does not silently regress between Task 2
+// and Task 3 landing — the frontend still calls the old command name and
+// its `invoke` error would otherwise be swallowed by an empty `catch`.
 #[tauri::command]
 pub(crate) fn has_pending_open_paths(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, PendingOpens>,
 ) -> bool {
-    state.has(window.label())
+    state.peek(window.label()).into_iter().next().is_some()
 }
 
 #[tauri::command]
@@ -120,17 +192,6 @@ pub(crate) fn take_pending_open_paths(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn has_reports_without_draining() {
-        use super::*;
-        let pending = PendingOpens::default();
-        assert!(!pending.has("main"), "empty map has nothing");
-        seed_for_label(&pending, "main", vec!["/a.txt".into()]);
-        assert!(pending.has("main"));
-        assert_eq!(pending.take("main").len(), 1, "has() must not drain");
-        assert!(!pending.has("main"), "drained label reports empty");
-    }
-
     use super::*;
 
     #[test]
@@ -206,5 +267,46 @@ mod tests {
             Err::<(), String>("nope".to_string())
         });
         assert_eq!(pending.take("main"), vec!["/keep.txt".to_string()]);
+    }
+
+    #[test]
+    fn classify_reports_none_files_or_project() {
+        let dirs = |p: &str| p.ends_with('/');
+        assert_eq!(classify(&[], dirs), PendingKind::None);
+        assert_eq!(classify(&["/a.txt".to_string()], dirs), PendingKind::Files);
+        assert_eq!(
+            classify(&["/repo/".to_string()], dirs),
+            PendingKind::Project
+        );
+        // A mixed queue is a FILE queue: the window becomes a zen editor
+        // window for the file, and the directory is handled separately.
+        assert_eq!(
+            classify(&["/repo/".to_string(), "/a.txt".to_string()], dirs),
+            PendingKind::Files
+        );
+    }
+
+    #[test]
+    fn take_directories_drains_only_the_directories() {
+        let dirs = |p: &str| p.ends_with('/');
+        let pending = PendingOpens::default();
+        seed_for_label(
+            &pending,
+            "main",
+            vec!["/repo/".into(), "/a.txt".into(), "/other/".into()],
+        );
+        assert_eq!(
+            pending.take_directories("main", dirs),
+            vec!["/repo/".to_string(), "/other/".to_string()]
+        );
+        assert_eq!(
+            pending.peek("main"),
+            vec!["/a.txt".to_string()],
+            "files stay queued for the editor"
+        );
+        assert!(
+            pending.take_directories("main", dirs).is_empty(),
+            "a second drain finds no directories"
+        );
     }
 }

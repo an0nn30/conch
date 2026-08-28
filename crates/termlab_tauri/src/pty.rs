@@ -59,6 +59,7 @@ fn spawn_shell_for_pane(
     shell: Option<String>,
     shell_args: Vec<String>,
     clear_tmux_env: bool,
+    cwd: Option<String>,
 ) -> Result<(), String> {
     let key = session_key(&window_label, pane_id);
     let cfg = state.config.read();
@@ -69,6 +70,7 @@ fn spawn_shell_for_pane(
         &shell_args,
         &cfg.terminal.env,
         clear_tmux_env,
+        cwd.as_deref(),
     )
     .map_err(|e| format!("Failed to spawn PTY: {e}"))?;
     drop(cfg);
@@ -118,6 +120,7 @@ pub(crate) fn spawn_shell(
     pane_id: u32,
     cols: u16,
     rows: u16,
+    cwd: Option<String>,
 ) -> Result<(), String> {
     let window_label = window.label().to_string();
     let cfg = state.config.read();
@@ -135,6 +138,7 @@ pub(crate) fn spawn_shell(
         shell_owned,
         shell_args_owned,
         false,
+        cwd,
     )
 }
 
@@ -158,6 +162,7 @@ pub(crate) fn spawn_default_shell(
         None,
         Vec::new(),
         true,
+        None,
     )
 }
 

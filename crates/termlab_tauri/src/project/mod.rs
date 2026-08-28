@@ -306,6 +306,90 @@ pub(crate) fn on_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) 
     registry.lock().remove(window.label());
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectAdoptResult {
+    pub adopted: Option<ProjectInfo>,
+    pub focused_existing: bool,
+}
+
+/// Bind THIS window to a directory that the CLI/IPC queued into it.
+///
+/// Called from `startup-runtime.js` during `applyAppConfig` — before the
+/// layout read and before any tool window registers — so the per-project
+/// layout is already in effect on the window's first paint and the Search
+/// tool window knows it has a project at registration time.
+///
+/// If another window already holds the root, that window is focused and this
+/// one (a blank window the IPC layer created moments ago) destroys itself
+/// rather than lingering empty. The check-existing / stale-eviction / reserve
+/// sequence mirrors `project_open`'s and runs under the same ONE continuous
+/// `registry.lock()` for the same reason: two windows racing to adopt the
+/// same queued root (e.g. `termlab open /repo` invoked twice back to back,
+/// each spawning its own window) must not both observe the root as
+/// unclaimed and both bind — see `ProjectRegistry::reserve`'s doc comment.
+#[tauri::command]
+pub(crate) fn project_adopt_pending(
+    window: tauri::WebviewWindow,
+    pending: tauri::State<'_, crate::open_path::PendingOpens>,
+    registry: tauri::State<'_, Mutex<ProjectRegistry>>,
+) -> ProjectAdoptResult {
+    let label = window.label().to_string();
+    let dirs = pending.take_directories(&label, |p| Path::new(p).is_dir());
+    let none = ProjectAdoptResult {
+        adopted: None,
+        focused_existing: false,
+    };
+    let Some(first) = dirs.first() else {
+        return none;
+    };
+    if dirs.len() > 1 {
+        log::warn!(
+            "project: {} directories queued for {label}; opening only {first}",
+            dirs.len()
+        );
+    }
+    let Ok(root) = canonical_root(first) else {
+        log::warn!("project: cannot adopt {first}");
+        return none;
+    };
+
+    let app = window.app_handle().clone();
+    let outcome = {
+        let mut guard = registry.lock();
+        // A stale entry (its window died without `Destroyed` firing) must
+        // not block this window from adopting the root. Evict it here,
+        // inside the same lock acquisition `reserve` runs under below.
+        if let Some(existing) = guard.window_for_root(&root)
+            && app.get_webview_window(&existing).is_none()
+        {
+            guard.remove(&existing);
+        }
+        guard.reserve(label, root.clone(), now_ms())
+    };
+
+    match outcome {
+        ReserveOutcome::Reserved => ProjectAdoptResult {
+            adopted: Some(ProjectInfo {
+                root: root.display().to_string(),
+                name: project_name(&root),
+            }),
+            focused_existing: false,
+        },
+        ReserveOutcome::Existing(existing) => {
+            if let Some(win) = app.get_webview_window(&existing) {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+            let _ = window.destroy();
+            ProjectAdoptResult {
+                adopted: None,
+                focused_existing: true,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +594,20 @@ mod tests {
             "/",
             "a rootless path falls back to its display form"
         );
+    }
+
+    #[test]
+    fn adopt_result_serializes_as_camel_case() {
+        let json = serde_json::to_string(&ProjectAdoptResult {
+            adopted: Some(ProjectInfo {
+                root: "/repo".into(),
+                name: "repo".into(),
+            }),
+            focused_existing: false,
+        })
+        .expect("serialize");
+        assert!(json.contains("\"focusedExisting\":false"), "got {json}");
+        assert!(json.contains("\"root\":\"/repo\""), "got {json}");
     }
 
     #[test]

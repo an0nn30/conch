@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -56,6 +57,7 @@ impl PtyBackend {
         shell_args: &[String],
         extra_env: &HashMap<String, String>,
         clear_tmux_env: bool,
+        cwd: Option<&str>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
 
@@ -78,6 +80,16 @@ impl PtyBackend {
         let mut cmd = CommandBuilder::new(&actual_shell);
         for arg in shell_args {
             cmd.arg(arg);
+        }
+
+        // A project window's first terminal starts at the project root. An
+        // unreadable directory is dropped rather than failing the spawn: a
+        // shell in the wrong directory is a nuisance, a window with no shell
+        // at all is a broken window.
+        if let Some(dir) = cwd
+            && Path::new(dir).is_dir()
+        {
+            cmd.cwd(dir);
         }
 
         // The CLI layer's private env markers must not reach the user's
