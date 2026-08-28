@@ -6,6 +6,7 @@
 //! does, and window destruction drops the entry through the same
 //! `WindowEvent::Destroyed` hook the other secondary-window registries use.
 
+pub(crate) mod git_status;
 pub(crate) mod search;
 
 use std::collections::HashMap;

@@ -931,6 +931,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 project::project_reveal_path,
                 project::search::project_search,
                 project::search::project_search_cancel,
+                project::git_status::project_git_status,
                 commands::rebuild_menu,
                 cli_install::install_cli_symlink,
                 cli_install::uninstall_cli_symlink,
