@@ -1671,8 +1671,7 @@ const DESCRIPTORS: &[AdapterDescriptor] = &[
         trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
         metadata: PackagedMetadata {
             version: "typescript-language-server 6.0.0; typescript 6.0.3; node 24.19.0",
-            upstream_url:
-                "https://github.com/typescript-language-server/typescript-language-server",
+            upstream_url: "https://github.com/typescript-language-server/typescript-language-server",
             license: "MIT; TypeScript Apache-2.0; Node MIT",
             notices_file: "THIRD_PARTY_NOTICES.md",
         },
@@ -1867,10 +1866,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        resource_path, BundledServerCatalog, CatalogUnavailable, HostArchitecture,
-        HostOperatingSystem, HostPlatform, ResourceResolutionMode, ResourceRootCandidates,
-        ResourceRootResolver, ARM64, LC_BUILD_VERSION, LC_MAIN, LC_SEGMENT_64, MH_EXECUTE,
-        PLATFORM_MACOS,
+        ARM64, BundledServerCatalog, CatalogUnavailable, HostArchitecture, HostOperatingSystem,
+        HostPlatform, LC_BUILD_VERSION, LC_MAIN, LC_SEGMENT_64, MH_EXECUTE, PLATFORM_MACOS,
+        ResourceResolutionMode, ResourceRootCandidates, ResourceRootResolver, resource_path,
     };
     use crate::lsp::root::LanguageId;
 
@@ -1914,10 +1912,12 @@ mod tests {
             command.resource_files[1].identity.sha256,
             "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
         );
-        assert!(command
-            .resource_files
-            .iter()
-            .all(|resource| resource.path != command.args[1]));
+        assert!(
+            command
+                .resource_files
+                .iter()
+                .all(|resource| resource.path != command.args[1])
+        );
     }
 
     #[test]
@@ -1955,16 +1955,20 @@ mod tests {
             "json"
         );
         assert_eq!(catalog.descriptor(LanguageId::Go).root_strategy.id(), "go");
-        assert!(catalog
-            .descriptor(LanguageId::C)
-            .root_strategy
-            .markers()
-            .contains(&".clangd"));
-        assert!(catalog
-            .descriptor(LanguageId::Java)
-            .root_strategy
-            .markers()
-            .contains(&".project"));
+        assert!(
+            catalog
+                .descriptor(LanguageId::C)
+                .root_strategy
+                .markers()
+                .contains(&".clangd")
+        );
+        assert!(
+            catalog
+                .descriptor(LanguageId::Java)
+                .root_strategy
+                .markers()
+                .contains(&".project")
+        );
         assert_eq!(
             catalog.normalize_completion_triggers(
                 LanguageId::TypeScript,
@@ -2073,9 +2077,11 @@ mod tests {
             })
         );
         #[cfg(not(unix))]
-        assert!(catalog
-            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
-            .is_ok());
+        assert!(
+            catalog
+                .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2276,9 +2282,11 @@ mod tests {
         fixture.assert_invariants();
         resources.install_rust_analyzer_bytes(&fixture.bytes, true);
         resources.write_receipt();
-        assert!(catalog
-            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
-            .is_ok());
+        assert!(
+            catalog
+                .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+                .is_ok()
+        );
 
         let mut invalid_entry = fixture.bytes;
         invalid_entry[fixture.main_command_offset + 8..fixture.main_command_offset + 16]

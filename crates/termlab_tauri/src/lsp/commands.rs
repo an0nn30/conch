@@ -11,9 +11,9 @@ use super::manager::{
 use super::trust::TrustDecision;
 use super::types::{
     ApplyChangesResponse, CompletionItem, CompletionResponse, DefinitionResponse,
-    DiagnosticSnapshot, DocumentId,
-    EditorPosition, HoverResponse, LspChangeBatch, LspStatus, OpenDocumentResponse,
-    ProjectCandidate, ReservationId, ReserveResult, ResyncDocumentResponse, SignatureHelpResponse,
+    DiagnosticSnapshot, DocumentId, EditorPosition, HoverResponse, LspChangeBatch, LspStatus,
+    OpenDocumentResponse, ProjectCandidate, ReservationId, ReserveResult, ResyncDocumentResponse,
+    SignatureHelpResponse,
 };
 
 pub(crate) const SESSION_STATUS_EVENT: &str = "lsp-session-status";

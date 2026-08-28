@@ -79,13 +79,18 @@ The branch-attributable hunks are all in LSP files this branch authored:
 - `crates/termlab_tauri/src/lsp/catalog.rs` — 6 hunks
 - `crates/termlab_tauri/src/lsp/commands.rs` — 1 hunk
 
-These predate Task 15 (they arrived with the files in Tasks 1–14; Task 15's own
+These predated Task 15 (they arrived with the files in Tasks 1–14; Task 15's own
 edits to `catalog.rs` were kept at that file's existing 6-hunk baseline). They
-are pure formatting, no behavior. **The POC acceptance gate's "no new warnings
-or regressions" bullet is not satisfied while these stand** — either run
-`cargo fmt -p termlab_tauri` over the three files, or the owner accepts them
-alongside the 170 pre-existing hunks as a repo-wide formatting cleanup tracked
-separately.
+were pure formatting, no behavior.
+
+**RESOLVED** in the formatting commit that follows this evidence commit: the
+three files were formatted (`rustfmt --edition 2024`, applied to those files
+only), `cargo fmt --all -- --check` now reports 168 hunks (all pre-existing on
+`main`; the branch total sits 2 below `main`'s 170 because branch edits had
+already incidentally cleaned 2 pre-existing hunks elsewhere) — zero hunks in
+branch-authored files — and
+`cargo test -p termlab_tauri` stayed at 961 passed / 0 failed. The remaining
+hunks are `main`'s pre-existing dirt, tracked as a separate repo-wide cleanup.
 
 ### Warnings observed (recorded separately, per the plan)
 
@@ -235,7 +240,7 @@ demonstrates it; "manual" means it awaits the matrices.
 | Navigation history works across files and windows. | **Partial.** `test_lsp_navigation.mjs` passes (cmd 4); cross-window Back awaits Step 5a. |
 | Remote buffers never attach to LSP and continue to behave as before. | **Partial.** `test_editor_remote_transfer.mjs` passes (cmd 4); live remote editing awaits Step 5. |
 | The signed arm64 `.app` contains and launches only the pinned resource executables. | **Automated — MET.** Commands 5, 6, 7, 8: receipt verifies 144 files, both executables are arm64 Mach-O inside `Contents/Resources`, they answer LSP under a scrubbed `PATH`, and the signature is valid. |
-| Full Rust and frontend test suites pass with no new warnings or regressions. | **NOT MET.** `cargo test --workspace` (1497 passed, 0 failed) and the 63 JS files pass, but `cargo fmt --all -- --check` exits 1 with 9 branch-attributable hunks in 3 files. See "Formatting" above. |
+| Full Rust and frontend test suites pass with no new warnings or regressions. | **MET** (as of the formatting commit after the evidence commit). `cargo test --workspace` 1497 passed / 0 failed; 63 JS files pass; zero branch-attributable fmt hunks remain (168 total, all pre-existing on `main` — see "Formatting" above). |
 
 ### Shippability caveat
 
