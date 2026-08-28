@@ -28,6 +28,7 @@ const APP = path.join(ROOT, 'app');
 const MODULES = path.join(APP, 'features/editor');
 const NAVIGATION = path.join(MODULES, 'lsp-navigation.js');
 const URI = path.join(MODULES, 'lsp-uri.js');
+const TOOLTIPS = path.join(MODULES, 'lsp-tooltips.js');
 const EDITOR_SERVICE = path.join(MODULES, 'editor-service.js');
 const LSP_STATE = path.join(MODULES, 'lsp-state.js');
 const LSP_BRIDGE = path.join(MODULES, 'lsp-bridge.js');
@@ -690,6 +691,36 @@ check('a target that disappeared reports a status and leaves the history untouch
   assert.strictEqual(h.toasts[0][0], 'info', 'quiet: the current editor did not change');
 });
 
+// A document can move windows under a history entry (Save As, or an owner in a
+// window opened later). Focusing that window IS the navigation the user asked
+// for, so the entry has to be consumed like any other — an entry that stays on
+// top forever puts every older entry permanently out of reach.
+check('Back through documents that moved to another window still drains the stack', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'focused', pane: target, revealed: true }));
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  await h.navigation.goToDefinition(h.origin.view, 45);
+  assert.strictEqual(h.history().back.length, 2);
+
+  h.setOpen(() => ({ status: 'ownerElsewhere' }));
+  assert.strictEqual(await h.navigation.navigateBack(), 'elsewhere');
+  assert.strictEqual(h.history().back.length, 1, 'the focused owner consumed the entry');
+  assert.strictEqual(await h.navigation.navigateBack(), 'elsewhere');
+  assert.strictEqual(h.history().back.length, 0, 'so the next Back reaches the older entry');
+  assert.strictEqual(h.history().forward.length, 2, 'and Forward can retrace both');
+  assert.strictEqual(await h.navigation.navigateBack(), 'none');
+});
+
+check('a jump that opened nothing to select is not recorded as history', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  // The degraded path: an open that produced no pane to select a range in.
+  h.setOpen(() => ({ status: 'opened', pane: null }));
+  assert.strictEqual(await h.navigation.goToDefinition(h.origin.view, 45), 'unrevealed');
+  assert.deepStrictEqual(h.history().back, [], 'Back would have nowhere to return from');
+  assert.deepStrictEqual(h.toasts, [], 'and the file did open, so there is nothing to report');
+});
+
 check('a definition jump to a file that disappeared records nothing', async () => {
   const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
   h.setOpen(() => ({ status: 'failed', error: new Error('gone') }));
@@ -782,6 +813,82 @@ check('extensions() is stable, so mounting twice does not install two fields', (
 check('extensions() is empty when the bundle lacks the tooltip exports', () => {
   const { sandbox } = load([URI, NAVIGATION], null, { EditorState: REAL.state.EditorState });
   assert.strictEqual(sandbox.termlabLspNavigation.extensions().length, 0);
+});
+
+// The one-overlay rule has to hold in both directions. Opening the chooser
+// dismisses hover and signature help; this is the other half — while the
+// chooser is up, the pointer dwell must not render a hover box on top of it.
+check('an open chooser stands down the hover dwell, so only one overlay is on screen', async () => {
+  const { sandbox } = load([URI, TOOLTIPS, NAVIGATION]);
+  const navigation = sandbox.termlabLspNavigation;
+  const tooltips = sandbox.termlabLspTooltips;
+  const view = {
+    state: REAL.state.EditorState.create({
+      doc: ORIGIN_TEXT,
+      extensions: [tooltips.extensions(), navigation.extensions()],
+    }),
+    dispatch(spec) { this.state = this.state.update(spec).state; },
+    posAtCoords: (coords) => coords.x,
+    focus() {},
+    hasFocus: true,
+  };
+  const pane = {
+    paneId: 1, tabId: 101, kind: 'editor', view, filePath: '/repo/src/main.ts', remote: null,
+  };
+  const panes = new Map([[1, pane]]);
+  sandbox.termlabLspState = {
+    get: (candidate) => (candidate === pane ? {
+      documentId: 'doc-1',
+      version: 3,
+      capabilities: { ...CAPABILITIES },
+      status: { revision: 2, state: 'ready', capabilities: CAPABILITIES },
+    } : null),
+  };
+  sandbox.termlabEditorService = {
+    openLocalFileAt: () => Promise.resolve({ status: 'focused', pane, revealed: true }),
+  };
+  const lookups = {
+    paneForView: (candidate) => (candidate === view ? pane : null),
+    currentPane: () => pane,
+  };
+  const hoverRequests = [];
+  tooltips.configure({
+    ...lookups,
+    hoverDelayMs: 5,
+    requestFeature: (target, kind, position) => {
+      hoverRequests.push({ kind, position });
+      return Promise.resolve({
+        documentId: 'doc-1',
+        sourceVersion: 3,
+        range: null,
+        blocks: [{ markdown: false, value: 'string' }],
+      });
+    },
+  });
+  navigation.configure({
+    ...lookups,
+    allPanes: () => panes,
+    windowLabel: 'main',
+    requestFeature: () => Promise.resolve(definitionResponse(TWO_TARGETS)),
+  });
+
+  assert.strictEqual(await navigation.goToDefinition(view, 45), 'chooser');
+  tooltips.handlePointerMove({ clientX: 16, clientY: 0 }, view);
+  await sleep(30);
+  assert.deepStrictEqual(hoverRequests, [], 'the dwell stood down while the chooser was open');
+  assert.strictEqual(
+    view.state.facet(REAL.view.showTooltip).filter(Boolean).length, 1,
+    'one overlay, and it is the chooser',
+  );
+  assert.strictEqual(
+    await tooltips.showHover(view), false,
+    'an explicit Show Hover stands down too; Escape closes the chooser first',
+  );
+
+  navigation.closeChooser(view);
+  tooltips.handlePointerMove({ clientX: 16, clientY: 0 }, view);
+  await sleep(30);
+  assert.strictEqual(hoverRequests.length, 1, 'and hover is available again the moment it closes');
 });
 
 // --- the SERVICE half ----------------------------------------------------------------

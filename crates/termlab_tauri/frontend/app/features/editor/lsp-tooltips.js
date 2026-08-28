@@ -472,6 +472,22 @@
     }
   }
 
+  // Go to Definition's chooser is the third surface that wants this anchor,
+  // and unlike the other two it is keyboard-modal while open: Enter and the
+  // arrows belong to it. So neither an automatic dwell nor an explicit Show
+  // Hover may render on top of it — Escape closes the chooser, and hover is
+  // available again immediately after. Asked of the owning module, exactly the
+  // way completionOpen asks CodeMirror.
+  function chooserOpen(view) {
+    const navigation = global.termlabLspNavigation;
+    if (!view || !navigation || typeof navigation.chooserOpen !== 'function') return false;
+    try {
+      return navigation.chooserOpen(view) === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function requestFeature(pane, kind, position, trigger) {
     if (typeof requestFeatureHook === 'function') {
       return Promise.resolve(requestFeatureHook(pane, kind, position, trigger));
@@ -502,6 +518,9 @@
       dismiss(view);
       return false;
     }
+    // The definition chooser wins over both kinds, manual invocation included:
+    // it is on screen at the same anchor and owns the keyboard until Escape.
+    if (chooserOpen(view)) return false;
     if (!opts.manual) {
       // Completion wins the collision; signature help is available again the
       // moment its popup closes.

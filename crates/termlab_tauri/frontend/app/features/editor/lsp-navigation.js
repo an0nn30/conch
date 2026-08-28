@@ -290,7 +290,14 @@
     }
     const outcome = result && result.status;
     if (outcome === 'ownerElsewhere') return 'elsewhere';
-    if (outcome === 'focused' || outcome === 'opened') return 'navigated';
+    if (outcome === 'focused' || outcome === 'opened') {
+      // The file is open, but only a completed reveal is a jump. A degraded
+      // open (no ownership bridge, so no pane to select in) reports `revealed`
+      // as false or not at all, and recording that as history would give Back
+      // a step that returns to a place the user was never taken to. No toast:
+      // nothing failed that the user asked for.
+      return result.revealed === true ? 'navigated' : 'unrevealed';
+    }
     status(
       'Cannot Navigate',
       result && result.error
@@ -356,6 +363,14 @@
 
   function closeChooser(view) {
     setChooser(view, null);
+  }
+
+  // Asked by lsp-tooltips before it opens anything of its own, the same way it
+  // asks CodeMirror whether the completion popup is up. The one-overlay rule
+  // has to hold in both directions: opening the chooser dismisses hover and
+  // signature help, and while it is open they stand down.
+  function chooserOpen(view) {
+    return chooserOf(view) !== null;
   }
 
   // --- rendering --------------------------------------------------------------------------
@@ -526,21 +541,29 @@
 
   // --- back and forward -----------------------------------------------------------------------
   //
-  // Anything other than a completed jump consumes nothing. If the file behind
-  // Back has been deleted, the entry stays where it is and the current editor
-  // does not move, so a second press is not silently a jump two places back;
-  // if another window owns it, that window has just been focused and the entry
-  // is still what Back means HERE.
-
+  // Two outcomes consume the entry, and the policy is deliberate:
+  //
+  //   'navigated'  — this window went there.
+  //   'elsewhere'  — the document has moved to another WINDOW since the entry
+  //                  was recorded (a Save As, or an owner that opened later),
+  //                  and that window has just been focused. That IS the
+  //                  navigation the user asked for, so the step completes.
+  //                  Leaving the entry on top instead would make every further
+  //                  Back focus the same window forever, with every older
+  //                  entry permanently out of reach.
+  //
+  // A genuine failure — the file was deleted, or nothing could be selected —
+  // consumes nothing: the file may come back, and a second press must not
+  // silently become a jump two places back.
   async function step(from, to) {
     if (!from.length) return 'none';
     const entry = from[from.length - 1];
     const here = captureLocation(currentPane(), null);
     const outcome = await jumpTo(entryTarget(entry));
-    if (outcome !== 'navigated') return outcome;
+    if (outcome !== 'navigated' && outcome !== 'elsewhere') return outcome;
     from.pop();
     if (here) pushBounded(to, here);
-    return 'navigated';
+    return outcome;
   }
 
   function navigateBack() {
@@ -656,6 +679,7 @@
     navigateForward,
     historyState,
     chooserState,
+    chooserOpen,
     closeChooser,
     moveChooser,
     choose,
