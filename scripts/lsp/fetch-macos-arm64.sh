@@ -5,6 +5,14 @@
 #
 # Every upstream artifact is pinned in packaging/lsp/manifest.toml with an
 # immutable URL and a SHA-256 that is checked *before* anything is extracted.
+#
+# That last sentence is literally true for node and rust-analyzer, whose staged
+# bytes come straight out of the archives verified here. The two npm packages
+# are different: their manifest.toml digests prove the pinned tarballs are what
+# upstream published, but the bytes that actually ship are installed by
+# `npm ci`, so package-lock.json's sha512 `integrity` fields are the real
+# anchor for them. Both checks are deliberate; neither alone covers everything.
+#
 # Nothing here is ever run from cargo build, build.rs, or app startup: bundling
 # is an explicit packaging step, and the generated tree is git-ignored.
 #
@@ -36,15 +44,24 @@ log() {
   printf 'lsp-fetch: %s\n' "$1"
 }
 
-# Scratch directories removed on exit. Tracked in a global so the EXIT trap
+# Scratch directories removed on exit. Tracked in globals so the EXIT trap
 # never reaches for a variable that is local to a function that has returned.
 CLEANUP_PATHS=()
+# Set while the old dist/ has been moved aside but the new one is not yet in
+# place. If the script dies in that window, the old tree goes back rather than
+# leaving the machine with no packaging/lsp/dist.
+RESTORE_FROM=""
 
 cleanup() {
+  if [[ -n "$RESTORE_FROM" && -d "$RESTORE_FROM" && ! -d "$DIST_DIR" ]]; then
+    mv "$RESTORE_FROM" "$DIST_DIR" 2>/dev/null \
+      && printf 'lsp-fetch: interrupted mid-swap, restored the previous %s\n' "$DIST_DIR" >&2
+  fi
   local path
   for path in ${CLEANUP_PATHS[@]+"${CLEANUP_PATHS[@]}"}; do
     [[ -e "$path" ]] && rm -rf "$path"
   done
+  rm -rf "$PACKAGING_DIR"/.previous.* 2>/dev/null || true
   return 0
 }
 
@@ -54,7 +71,15 @@ fail() {
 }
 
 usage() {
-  sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat <<'USAGE'
+Reproducibly stage the bundled macOS arm64 language servers into
+packaging/lsp/dist.
+
+Usage:
+  scripts/lsp/fetch-macos-arm64.sh                        fetch and stage
+  scripts/lsp/fetch-macos-arm64.sh --verify-only <root>   check a staged
+                                                          architecture root
+USAGE
 }
 
 require_tool() {
@@ -187,7 +212,7 @@ verify_only() {
   python3 "$RECEIPT_TOOL" verify \
     --arch-root "$arch_root" \
     --receipt "$lsp_root/manifest.json" \
-    "${pin_flags[@]}" \
+    ${pin_flags[@]+"${pin_flags[@]}"} \
     || fail "receipt verification failed for $arch_root"
 
   log "verified staged resources at $arch_root"
@@ -222,7 +247,10 @@ stage_node() {
   local extracted
   mkdir -p "$work/node"
   tar -xzf "$archive" -C "$work/node"
-  extracted="$(find "$work/node" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  # -print -quit rather than piping to `head -1`: under `set -o pipefail` the
+  # closed pipe makes find exit 141 (SIGPIPE) and aborts the whole run after
+  # every download has already been paid for.
+  extracted="$(find "$work/node" -mindepth 1 -maxdepth 1 -type d -print -quit)"
   [[ -n "$extracted" ]] || fail "node archive did not contain a top-level directory"
   mkdir -p "$stage/node/bin"
   cp "$extracted/bin/node" "$stage/node/bin/node"
@@ -239,6 +267,13 @@ stage_rust_analyzer() {
   log "staged rust-analyzer"
 }
 
+# NOTE ON WHAT GUARDS THESE BYTES: the manifest.toml SHA-256 values for the two
+# npm artifacts were verified against the downloaded tarballs by the caller, but
+# nothing below extracts those tarballs. `npm ci` re-resolves both packages from
+# the committed lockfile and checks each against its sha512 `integrity` field —
+# that is what pins the bytes that end up in the app. The manifest digests
+# additionally pin the exact published tarballs, and the version assertions
+# below fail closed if the lockfile ever drifts from the manifest.
 stage_typescript() {
   local stage="$1" work="$2"
   local npm_dir="$work/npm"
@@ -297,6 +332,10 @@ strip_staging() {
 # is ad-hoc signed here, where the receipt is still ahead of it.
 sign_nested_executables() {
   local stage="$1" path signed=0 adhoc=0
+  # Selected by Mach-O detection, not by the executable bit: the spec requires
+  # nested executables AND runtime libraries to be signed, and dylibs / .node
+  # addons ship 0644. There are none in the current pin set, but a future
+  # adapter that adds one must not silently ship it unsigned.
   while IFS= read -r path; do
     file -b "$path" | grep -q 'Mach-O' || continue
     if codesign --verify --strict "$path" >/dev/null 2>&1; then
@@ -308,8 +347,8 @@ sign_nested_executables() {
     codesign --verify --strict "$path" >/dev/null 2>&1 \
       || fail "nested executable is still unsigned after ad-hoc signing: ${path#"$stage/"}"
     adhoc=$((adhoc + 1))
-  done < <(find "$stage" -type f -perm -u+x)
-  log "nested executables: $signed already signed, $adhoc ad-hoc signed here"
+  done < <(find "$stage" -type f)
+  log "nested Mach-O files: $signed already signed, $adhoc ad-hoc signed here"
 }
 
 write_notices() {
@@ -335,7 +374,7 @@ write_notices() {
       cat "$license_file"
       printf '\n```\n\n'
     done < <(find "$stage" -type f \
-      \( -iname 'LICENSE' -o -iname 'LICENSE.txt' -o -iname 'NOTICE.txt' \) | sort)
+      \( -iname 'licen*' -o -iname 'notice*' -o -iname 'copying*' \) | sort)
   } >"$notices"
   log "wrote $(basename "$notices")"
 }
@@ -392,22 +431,31 @@ fetch_and_stage() {
   python3 "$RECEIPT_TOOL" generate \
     --arch-root "$stage" \
     --output "$stage_parent/manifest.json" \
-    "${pin_flags[@]}" \
+    ${pin_flags[@]+"${pin_flags[@]}"} \
     || fail "receipt generation failed"
 
   verify_only "$stage"
 
   # Replace packaging/lsp/dist only now that every check has passed: move the
   # old tree aside, rename the verified staging directory into place, then drop
-  # the old tree. A crash mid-swap leaves a .previous.* directory behind rather
-  # than a half-written dist/.
+  # the old tree.
+  #
+  # The .previous.* directory is deliberately NOT registered in CLEANUP_PATHS.
+  # Between the two renames it holds the only copy of the old dist/, so a
+  # Ctrl-C there would otherwise fire the EXIT trap and delete both trees,
+  # leaving no packaging/lsp/dist at all — which also removes the tracked
+  # .gitkeep and breaks cargo build until someone re-runs this script. Instead
+  # the trap restores the old tree when the swap did not complete, and the
+  # success path deletes .previous.* explicitly.
   local previous
   previous="$(mktemp -d "$PACKAGING_DIR/.previous.XXXXXX")"
-  CLEANUP_PATHS+=("$previous")
   if [[ -d "$DIST_DIR" ]]; then
     mv "$DIST_DIR" "$previous/dist"
+    RESTORE_FROM="$previous/dist"
   fi
   mv "$stage_parent" "$DIST_DIR"
+  RESTORE_FROM=""
+  rm -rf "$previous"
   # mktemp -d creates 0700; the tree is copied into an app bundle read by every
   # user of the machine.
   chmod 0755 "$DIST_DIR"

@@ -90,6 +90,25 @@ def handshake(program: List[str], root: str, timeout: float) -> int:
         stderr=subprocess.PIPE,
     )
 
+    # Drain stderr continuously. A server that logs more than the ~64KB pipe
+    # buffer before answering would otherwise block writing to a pipe nobody is
+    # reading, and the handshake would look like a timeout rather than a chatty
+    # server. Draining also means the timeout path has something to report.
+    stderr_chunks: List[bytes] = []
+
+    def drain_stderr() -> None:
+        try:
+            for line in iter(process.stderr.readline, b""):
+                stderr_chunks.append(line)
+        except (OSError, ValueError):
+            pass
+
+    stderr_reader = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_reader.start()
+
+    def captured_stderr() -> str:
+        return b"".join(stderr_chunks).decode("utf-8", "replace").strip()
+
     result: Dict[str, object] = {}
     failure: List[str] = []
 
@@ -121,17 +140,24 @@ def handshake(program: List[str], root: str, timeout: float) -> int:
 
     if worker.is_alive():
         process.kill()
+        stderr_reader.join(2)
         print(f"smoke: handshake timed out after {timeout:.0f}s", file=sys.stderr)
+        stderr = captured_stderr()
+        if stderr:
+            print(f"smoke: server stderr: {stderr[:2000]}", file=sys.stderr)
+        else:
+            print("smoke: the server wrote nothing to stderr", file=sys.stderr)
         return 1
 
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         process.kill()
+    stderr_reader.join(2)
 
     if failure:
-        stderr = process.stderr.read().decode("utf-8", "replace").strip()
         print(f"smoke: {failure[0]}", file=sys.stderr)
+        stderr = captured_stderr()
         if stderr:
             print(f"smoke: server stderr: {stderr[:2000]}", file=sys.stderr)
         return 1

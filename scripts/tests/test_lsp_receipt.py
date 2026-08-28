@@ -104,6 +104,38 @@ def main():
 
         check(verify(arch_root, output) == 0, "verify accepts the tree it just recorded")
 
+        # The whole point of the packaging step is reproducibility: two runs
+        # over the same inputs must produce the same receipt, byte for byte.
+        second = os.path.join(root, "manifest-again.json")
+        check(generate(arch_root, second) == 0, "generate runs a second time")
+        check(
+            open(output, "rb").read() == open(second, "rb").read(),
+            "two generate runs produce byte-identical receipts",
+        )
+
+        # A receipt carrying machine-specific paths or a build timestamp could
+        # not be compared across machines, and would defeat the check above.
+        raw = open(output, encoding="utf-8").read()
+        check(root not in raw, "the receipt embeds no absolute build path")
+        check(
+            not any(line.lstrip().startswith('"') and ":" in line and "T" in line
+                    and any(key in line for key in ("date", "time", "generated", "created"))
+                    for line in raw.splitlines()),
+            "the receipt records no timestamp field",
+        )
+        check(
+            set(document.keys()) == {"schema", "platform", "architecture", "artifacts", "files"},
+            "the receipt has exactly the five fields catalog.rs deserializes",
+        )
+        check(
+            all(
+                set(entry.keys()) == {"relativePath", "sha256", "size"}
+                for entry in document["files"]
+            )
+            and all(not os.path.isabs(entry["relativePath"]) for entry in document["files"]),
+            "every file entry is a relative path with only size and digest",
+        )
+
         # Tampering with a recorded file must be caught by digest, not by size.
         target = os.path.join(arch_root, "rust-analyzer/rust-analyzer")
         original = open(target, "rb").read()

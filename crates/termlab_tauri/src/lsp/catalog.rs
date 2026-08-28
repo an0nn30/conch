@@ -20,6 +20,20 @@ const LC_UNIXTHREAD: u32 = 0x5;
 const PLATFORM_MACOS: u32 = 1;
 const MH_EXECUTE: u32 = 2;
 const INSTALLED_RECEIPT_SCHEMA: u32 = 1;
+/// The exact artifact set a valid receipt must name, mirroring
+/// `packaging/lsp/manifest.toml`. This is the ONE place a version bump is
+/// written: `validate_receipt_identity` accepts nothing else, the test
+/// fixtures generate receipts from it, and
+/// `packaging_manifest_pins_match_the_receipt_identity_pins` asserts the
+/// committed manifest agrees. Duplicating a pin instead of reading this
+/// constant reopens the gap where a bump can go green in tests while the
+/// runtime rejects the shipped receipt.
+const RECEIPT_ARTIFACT_PINS: &[(&str, &str)] = &[
+    ("node", "24.19.0"),
+    ("typescript-language-server", "6.0.0"),
+    ("typescript", "6.0.3"),
+    ("rust-analyzer", "2026-08-24"),
+];
 const MACH_HEADER_64_SIZE: usize = 32;
 const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
 const MAX_RESOURCE_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -869,15 +883,8 @@ fn validate_receipt_identity(
     if receipt.schema != INSTALLED_RECEIPT_SCHEMA
         || receipt.platform != "macos"
         || receipt.architecture != "arm64"
-        || receipt.artifacts.len() != 4
-        || ![
-            ("node", "24.19.0"),
-            ("typescript-language-server", "6.0.0"),
-            ("typescript", "6.0.3"),
-            ("rust-analyzer", "2026-08-24"),
-        ]
-        .iter()
-        .all(|(id, version)| {
+        || receipt.artifacts.len() != RECEIPT_ARTIFACT_PINS.len()
+        || !RECEIPT_ARTIFACT_PINS.iter().all(|(id, version)| {
             receipt
                 .artifacts
                 .iter()
@@ -3114,11 +3121,12 @@ mod tests {
         let _ = (path, executable);
     }
 
-    /// The packaging manifest is the single source of the pinned versions that
-    /// `scripts/lsp/fetch-macos-arm64.sh` downloads and records in the receipt.
-    /// `validate_receipt_identity` hard-codes the same pins so the runtime
-    /// fails closed on an unexpected tree — which only works while the two
-    /// agree, hence this test.
+    /// `packaging/lsp/manifest.toml` drives what
+    /// `scripts/lsp/fetch-macos-arm64.sh` downloads and records in the receipt;
+    /// `RECEIPT_ARTIFACT_PINS` is what the runtime will accept. Comparing the
+    /// parsed manifest against that constant — rather than against a third copy
+    /// of the versions written here — is what makes a half-finished version
+    /// bump fail in CI instead of shipping a receipt the runtime rejects.
     #[test]
     fn packaging_manifest_pins_match_the_receipt_identity_pins() {
         #[derive(serde::Deserialize)]
@@ -3147,21 +3155,18 @@ mod tests {
             "packaging manifest platform"
         );
 
-        let mut pins: Vec<(&str, &str)> = manifest
+        let mut manifest_pins: Vec<(&str, &str)> = manifest
             .artifact
             .iter()
             .map(|artifact| (artifact.id.as_str(), artifact.version.as_str()))
             .collect();
-        pins.sort_unstable();
+        manifest_pins.sort_unstable();
+        let mut runtime_pins = super::RECEIPT_ARTIFACT_PINS.to_vec();
+        runtime_pins.sort_unstable();
         assert_eq!(
-            pins,
-            vec![
-                ("node", "24.19.0"),
-                ("rust-analyzer", "2026-08-24"),
-                ("typescript", "6.0.3"),
-                ("typescript-language-server", "6.0.0"),
-            ],
-            "packaging/lsp/manifest.toml must pin exactly what validate_receipt_identity accepts"
+            manifest_pins, runtime_pins,
+            "packaging/lsp/manifest.toml must pin exactly what RECEIPT_ARTIFACT_PINS accepts — \
+             a bump to one without the other ships a receipt the runtime rejects at launch"
         );
 
         for artifact in &manifest.artifact {
@@ -3221,18 +3226,20 @@ mod tests {
             })
         })
         .collect::<Vec<_>>();
+        // Built from RECEIPT_ARTIFACT_PINS rather than repeated literals, so a
+        // version bump that misses the runtime constant cannot be masked by a
+        // fixture that was updated alongside the test.
+        let artifacts = super::RECEIPT_ARTIFACT_PINS
+            .iter()
+            .map(|(id, version)| serde_json::json!({ "id": id, "version": version }))
+            .collect::<Vec<_>>();
         fs::write(
             lsp_root.join("manifest.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "schema": 1,
                 "platform": "macos",
                 "architecture": "arm64",
-                "artifacts": [
-                    { "id": "node", "version": "24.19.0" },
-                    { "id": "typescript-language-server", "version": "6.0.0" },
-                    { "id": "typescript", "version": "6.0.3" },
-                    { "id": "rust-analyzer", "version": "2026-08-24" },
-                ],
+                "artifacts": artifacts,
                 "files": files,
             }))
             .expect("receipt JSON"),

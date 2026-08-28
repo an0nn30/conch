@@ -102,6 +102,14 @@ define assemble_app
 	codesign --force --deep --sign - "$(APP)"
 	@[ -x "$(APP)/Contents/MacOS/termlab" ] || { echo "error: app bundle has no executable"; exit 1; }
 	@[ -f "$(APP)/Contents/Resources/termlab.icns" ] || { echo "error: app bundle has no icon"; exit 1; }
+	@# Re-verify AFTER the outer signature. Today codesign seals loose Mach-O
+	@# files in Resources by hash without rewriting them, so the receipt still
+	@# matches; if that ever changes, the shipped app would fail its own runtime
+	@# hash check. Catch that here rather than only in the smoke test.
+	@if [ -d "$(APP)/Contents/Resources/lsp/arm64" ]; then \
+		scripts/lsp/fetch-macos-arm64.sh --verify-only "$(APP)/Contents/Resources/lsp/arm64" \
+			|| { echo "error: signing the app invalidated the bundled LSP receipt"; exit 1; }; \
+	fi
 endef
 
 # ---------------------------------------------------------------------------
@@ -132,6 +140,9 @@ lsp-resources-arm64:
 	rm -rf "$(APP)/Contents/Resources/lsp"
 	mkdir -p "$(APP)/Contents/Resources/lsp"
 	cp -R "$(LSP_DIST)/." "$(APP)/Contents/Resources/lsp/"
+	@# .gitkeep exists only so a clean checkout has the directory tauri.conf.json
+	@# declares as a resource. It has no business inside a shipped bundle.
+	rm -f "$(APP)/Contents/Resources/lsp/.gitkeep"
 	@# Nested executables are signed by scripts/lsp/fetch-macos-arm64.sh while
 	@# staging, before the receipt records their bytes — re-signing them here
 	@# would rewrite each Mach-O and invalidate the SHA-256 the runtime checks
