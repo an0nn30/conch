@@ -178,3 +178,20 @@
   white-space: nowrap;
   color: var(--tl-fg);
 }
+
+/* The one trust ask per project. A banner, never a modal: editing is not
+   blocked by the decision, so the UI must not block on it either. */
+.tl-project-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  padding: var(--tl-space-2);
+  color: var(--tl-fg);
+  background: var(--tl-warning-bg);
+  border-bottom: 1px solid var(--tl-warning-border);
+}
+
+.tl-project-banner__text {
+  flex: 1;
+  min-width: 0;
+}

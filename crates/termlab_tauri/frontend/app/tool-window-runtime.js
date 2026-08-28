@@ -870,6 +870,15 @@
         });
       }
 
+      // The LSP-root pass-through: subscribed once per window, here, because
+      // this init() runs after startup-runtime's applyAppConfig has already
+      // resolved project mode (adopt/fallback) and before any editor tab —
+      // including a CLI-queued one restored at boot — is created, so no
+      // document can reach `choosingProject` before this listener exists.
+      if (projectRoot && global.termlabProjectLspRoot) {
+        global.termlabProjectLspRoot.install({});
+      }
+
       return {
         debouncedSaveLayout: saveLayoutNow,
       };

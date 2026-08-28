@@ -22,6 +22,8 @@ const FILES_PANEL = path.join(APP, 'panels/files-panel.js');
 const FILES_DATA_SERVICE_PATH = path.join(APP, 'features/files/data-service.js');
 const FILES_PANE_STORE_PATH = path.join(APP, 'features/files/pane-store.js');
 const FILES_ACTIONS_PATH = path.join(APP, 'features/files/actions.js');
+const BANNER = path.join(APP, 'features/project/trust-banner.js');
+const LSP_ROOT = path.join(APP, 'features/project/lsp-root.js');
 
 let ran = 0;
 let failures = 0;
@@ -33,8 +35,164 @@ function deepEq(actual, expected, message) {
   assert.deepStrictEqual(plain(actual), plain(expected), message);
 }
 
+// --- DOM stand-in for the trust-banner/lsp-root checks below -----------------
+// Copied from test_problems_panel.mjs (makeElement, selectorParts, dataName)
+// and given distinct names — this file already has its own, narrower
+// `makeElement` below for the files-panel behavioral harness, which returns
+// `null` from querySelector by design (each of those fixtures overrides
+// querySelector itself); this one is a full stand-in so
+// `body.querySelector('[data-project-trust="trust"]')` actually works.
+
+function domDataName(attr) {
+  return attr.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+function domSelectorParts(selector) {
+  const match = /^([a-zA-Z]*)(?:#([\w-]+))?(?:\.([\w-]+))?(?:\[([\w-]+)(?:="([^"]*)")?\])?$/.exec(selector);
+  if (!match) throw new Error(`unsupported selector in test DOM: ${selector}`);
+  return { tag: match[1], id: match[2], className: match[3], attr: match[4], attrValue: match[5] };
+}
+
+function domMakeElement(tag) {
+  const listeners = new Map();
+  const attributes = new Map();
+  let ownText = '';
+  let className = '';
+  const element = {
+    tagName: String(tag || 'div').toUpperCase(),
+    children: [],
+    parentNode: null,
+    dataset: {},
+    style: {},
+    id: '',
+    hidden: false,
+    disabled: false,
+    type: '',
+    value: '',
+    title: '',
+    get className() { return className; },
+    set className(value) { className = String(value || ''); },
+    classList: {
+      add(...names) {
+        const values = new Set(className.split(/\s+/).filter(Boolean));
+        names.forEach((name) => values.add(name));
+        className = Array.from(values).join(' ');
+      },
+      remove(...names) {
+        const removed = new Set(names);
+        className = className.split(/\s+/).filter((name) => name && !removed.has(name)).join(' ');
+      },
+      contains(name) { return className.split(/\s+/).includes(name); },
+    },
+    get textContent() {
+      return ownText + this.children.map((child) => child.textContent || '').join('');
+    },
+    set textContent(value) {
+      for (const child of this.children) child.parentNode = null;
+      this.children = [];
+      ownText = String(value == null ? '' : value);
+    },
+    appendChild(child) {
+      if (child.parentNode) child.parentNode.removeChild(child);
+      this.children.push(child);
+      child.parentNode = this;
+      return child;
+    },
+    removeChild(child) {
+      const index = this.children.indexOf(child);
+      if (index >= 0) this.children.splice(index, 1);
+      child.parentNode = null;
+      return child;
+    },
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+    focus() {},
+    setAttribute(name, value) {
+      const stringValue = String(value);
+      attributes.set(name, stringValue);
+      if (name === 'id') this.id = stringValue;
+      else if (name === 'class') this.className = stringValue;
+      else if (name.startsWith('data-')) this.dataset[domDataName(name)] = stringValue;
+    },
+    removeAttribute(name) { attributes.delete(name); },
+    getAttribute(name) {
+      if (name === 'id' && this.id) return this.id;
+      if (name === 'class' && this.className) return this.className;
+      if (name.startsWith('data-')) {
+        const value = this.dataset[domDataName(name)];
+        return value === undefined ? null : String(value);
+      }
+      return attributes.has(name) ? attributes.get(name) : null;
+    },
+    matches(selector) {
+      const parts = domSelectorParts(selector);
+      if (parts.tag && this.tagName !== parts.tag.toUpperCase()) return false;
+      if (parts.id && this.id !== parts.id) return false;
+      if (parts.className && !this.classList.contains(parts.className)) return false;
+      if (parts.attr) {
+        const value = this.getAttribute(parts.attr);
+        if (value === null) return false;
+        if (parts.attrValue !== undefined && value !== parts.attrValue) return false;
+      }
+      return true;
+    },
+    closest(selector) {
+      let current = this;
+      while (current) {
+        if (current.matches(selector)) return current;
+        current = current.parentNode;
+      }
+      return null;
+    },
+    querySelectorAll(selector) {
+      const found = [];
+      const visit = (node) => {
+        for (const child of node.children) {
+          if (child.matches(selector)) found.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return found;
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+    addEventListener(name, handler) {
+      if (!listeners.has(name)) listeners.set(name, []);
+      listeners.get(name).push(handler);
+    },
+    removeEventListener(name, handler) {
+      const values = listeners.get(name) || [];
+      const index = values.indexOf(handler);
+      if (index >= 0) values.splice(index, 1);
+    },
+    // Not bubbling: every check in this file dispatches directly on the exact
+    // element it wants to hear from (a specific button), so a plain
+    // this-element-only dispatch is all the trust-banner checks need.
+    dispatchEvent(event) {
+      const type = event && event.type;
+      const record = { target: this, ...event };
+      for (const handler of (listeners.get(type) || []).slice()) handler(record);
+      return true;
+    },
+  };
+  return element;
+}
+
 function load(files) {
-  const sandbox = { console, Promise, JSON, String, Object, Array, Error };
+  const body = domMakeElement('body');
+  const documentStub = {
+    body,
+    activeElement: body,
+    createElement: (tag) => domMakeElement(tag),
+    getElementById: (id) => body.querySelector(`#${id}`),
+    querySelector: (selector) => body.querySelector(selector),
+    querySelectorAll: (selector) => body.querySelectorAll(selector),
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const sandbox = {
+    console, Promise, JSON, String, Object, Array, Error,
+    document: documentStub, setTimeout, clearTimeout, Set, Map,
+  };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   for (const file of files) {
@@ -477,6 +635,239 @@ check('the project modules contain no control bytes', () => {
       );
     }
   }
+});
+
+// ===========================================================================
+// Task 7: the trust banner and the LSP-root pass-through.
+// ===========================================================================
+
+check('the banner asks once for an untrusted root and never for a trusted one', () => {
+  const sandbox = load([BANNER]);
+  const decide = sandbox.termlabProjectTrustBanner.decide;
+  assert.strictEqual(decide([], '/repo'), 'ask', 'no record means ask');
+  assert.strictEqual(
+    decide([{ root: '/repo', adapterId: null, decision: 'trusted' }], '/repo'),
+    'settled',
+    'an existing trust decision means the banner never returns',
+  );
+  assert.strictEqual(
+    decide([{ root: '/repo', adapterId: null, decision: 'denied' }], '/repo'),
+    'settled',
+    'a recorded denial is also a decision — do not nag',
+  );
+  assert.strictEqual(
+    decide([{ root: '/other', adapterId: null, decision: 'trusted' }], '/repo'),
+    'ask',
+    'a different project says nothing about this one',
+  );
+});
+
+check('Trust project calls lsp_set_project_trust with the root and a trusted decision', async () => {
+  const sandbox = load([BANNER]);
+  const { body } = (() => {
+    const host = sandbox.document.createElement('div');
+    sandbox.document.body.appendChild(host);
+    return { body: host };
+  })();
+  const calls = [];
+  const decisions = [];
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host: body,
+    root: '/repo',
+    bridge: {
+      trustedProjects: async () => [],
+      setProjectTrust: async (root, adapterId, decision) => { calls.push([root, adapterId, decision]); },
+    },
+    onDecision: (d) => { decisions.push(d); },
+  });
+  await handle.ready;
+  const trust = body.querySelector('[data-project-trust="trust"]');
+  assert.ok(trust, 'the banner offers Trust project');
+  assert.ok(body.querySelector('[data-project-trust="later"]'), 'and Not now');
+  trust.dispatchEvent({ type: 'click', target: trust });
+  await handle.settled();
+  deepEq(calls, [['/repo', null, 'trusted']]);
+  deepEq(decisions, ['trusted']);
+  assert.strictEqual(body.querySelector('[data-project-trust="trust"]'), null, 'the banner leaves once decided');
+});
+
+check('Trust project is idempotent under a double click', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const calls = [];
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    bridge: {
+      trustedProjects: async () => [],
+      setProjectTrust: async (root, adapterId, decision) => { calls.push([root, adapterId, decision]); },
+    },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  const trust = host.querySelector('[data-project-trust="trust"]');
+  trust.dispatchEvent({ type: 'click', target: trust });
+  trust.dispatchEvent({ type: 'click', target: trust });
+  await handle.settled();
+  deepEq(calls, [['/repo', null, 'trusted']], 'a second click before the IPC round trip resolves must not send a second decision');
+});
+
+check('Not now dismisses for the window lifetime without touching trust', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const calls = [];
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    bridge: { trustedProjects: async () => [], setProjectTrust: async (...a) => { calls.push(a); } },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  const later = host.querySelector('[data-project-trust="later"]');
+  later.dispatchEvent({ type: 'click', target: later });
+  await handle.settled();
+  deepEq(calls, [], 'Not now must never write a trust record');
+  assert.strictEqual(host.querySelector('[data-project-trust="later"]'), null, 'the banner is gone for this window');
+});
+
+// Binding mount contract (task-6 review): the project tree handle — and this
+// banner's mount point, noticeHost — does NOT survive a dual-pane <-> project
+// mode toggle. setProjectMode(true) builds a fresh handle and files-panel.js
+// calls mount() again from scratch. "One ask per project" therefore has to be
+// state that outlives any single mount() call, for as long as the window
+// lives — this drives two separate mount() calls at the SAME sandbox (i.e.
+// the same loaded module instance) to stand in for that toggle, rather than
+// two independent `load()` calls which would each get a fresh module and
+// prove nothing about cross-toggle memory.
+check('a Not now dismissal survives a fresh mount() call for the same root (mode-toggle simulation)', async () => {
+  const sandbox = load([BANNER]);
+  const bridge = { trustedProjects: async () => [], setProjectTrust: async () => {} };
+
+  const firstHost = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(firstHost);
+  const first = sandbox.termlabProjectTrustBanner.mount({ host: firstHost, root: '/repo', bridge, onDecision: () => {} });
+  await first.ready;
+  const later = firstHost.querySelector('[data-project-trust="later"]');
+  assert.ok(later, 'the banner shows on the first mount');
+  later.dispatchEvent({ type: 'click', target: later });
+  await first.settled();
+
+  // A toggle away and back destroys the old host/handle and mounts fresh,
+  // exactly as renderProjectTree() does on every setProjectMode(true).
+  const secondHost = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(secondHost);
+  const second = sandbox.termlabProjectTrustBanner.mount({ host: secondHost, root: '/repo', bridge, onDecision: () => {} });
+  await second.ready;
+  assert.strictEqual(secondHost.children.length, 0,
+    'a project dismissed with Not now must stay dismissed across a mode toggle, for the window\'s lifetime');
+});
+
+check('an already-trusted project never renders a banner at all', async () => {
+  const sandbox = load([BANNER]);
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host,
+    root: '/repo',
+    bridge: {
+      trustedProjects: async () => [{ root: '/repo', adapterId: null, decision: 'trusted' }],
+      setProjectTrust: async () => {},
+    },
+    onDecision: () => {},
+  });
+  await handle.ready;
+  assert.strictEqual(host.children.length, 0, 'nothing is rendered for a settled project');
+});
+
+check('a file under the root adopts the project root as its LSP context', () => {
+  const sandbox = load([MODE, LSP_ROOT]);
+  const mode = sandbox.termlabProjectMode;
+  mode.set({ root: '/repo', name: 'repo' });
+  const should = sandbox.termlabProjectLspRoot.shouldAdoptRoot;
+  const choosing = { documentId: 'doc-1', status: { state: 'choosingProject' } };
+  assert.strictEqual(should(choosing, '/repo/src/main.rs', mode), true);
+  assert.strictEqual(should(choosing, '/elsewhere/lib.rs', mode), false,
+    'a file outside the root keeps the loose-file behaviour: no prompt, no attach');
+  assert.strictEqual(should({ documentId: 'doc-1', status: { state: 'ready' } }, '/repo/src/main.rs', mode), false,
+    'a document that already has a context is left alone');
+  assert.strictEqual(should(choosing, '/repo/src/main.rs', { isActive: () => false, isUnderRoot: () => false }), false,
+    'no project means no adoption');
+});
+
+check('install sets the context exactly once per document', async () => {
+  const sandbox = load([MODE, LSP_ROOT]);
+  sandbox.termlabProjectMode.set({ root: '/repo', name: 'repo' });
+  let listener = null;
+  const contexts = [];
+  const unsubscribe = sandbox.termlabProjectLspRoot.install({
+    state: {
+      subscribe: (fn) => { listener = fn; return () => { listener = null; }; },
+    },
+    bridge: {
+      setProjectContext: async (documentId, context) => { contexts.push([documentId, context]); },
+    },
+    mode: sandbox.termlabProjectMode,
+  });
+  const pane = { kind: 'editor', remote: null, filePath: '/repo/src/main.rs' };
+  listener(pane, { documentId: 'doc-1', status: { state: 'choosingProject' } });
+  listener(pane, { documentId: 'doc-1', status: { state: 'choosingProject' } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  deepEq(contexts, [['doc-1', { kind: 'root', root: '/repo' }]]);
+  assert.strictEqual(typeof unsubscribe, 'function');
+});
+
+check('install leaves a remote pane and a pane with no file path alone', async () => {
+  const sandbox = load([MODE, LSP_ROOT]);
+  sandbox.termlabProjectMode.set({ root: '/repo', name: 'repo' });
+  let listener = null;
+  const contexts = [];
+  sandbox.termlabProjectLspRoot.install({
+    state: { subscribe: (fn) => { listener = fn; return () => {}; } },
+    bridge: { setProjectContext: async (documentId, context) => { contexts.push([documentId, context]); } },
+    mode: sandbox.termlabProjectMode,
+  });
+  const choosing = { documentId: 'doc-1', status: { state: 'choosingProject' } };
+  listener({ kind: 'editor', remote: { hostLabel: 'h', remotePath: '/repo/src/main.rs' }, filePath: '/repo/src/main.rs' }, choosing);
+  listener({ kind: 'editor', remote: null, filePath: null }, choosing);
+  listener({ kind: 'terminal', remote: null, filePath: '/repo/src/main.rs' }, choosing);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  deepEq(contexts, [], 'a remote pane, a paneless document, and a non-editor pane must never adopt the project root');
+});
+
+check('the project feature modules use no regex lookbehind and no control bytes', () => {
+  for (const file of [BANNER, LSP_ROOT]) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.ok(!/\(\?<[=!]/.test(source), `${file} uses a lookbehind`);
+    const bytes = fs.readFileSync(file);
+    for (let i = 0; i < bytes.length; i += 1) {
+      assert.ok(bytes[i] >= 0x20 || bytes[i] === 0x0a || bytes[i] === 0x09,
+        `${file}: control byte at offset ${i}`);
+    }
+  }
+});
+
+check('index.html loads the trust banner and the LSP root adapter after the bridge', () => {
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = (name) => html.indexOf(name);
+  assert.ok(at('app/features/project/trust-banner.js') > 0);
+  assert.ok(at('app/features/project/lsp-root.js') > 0);
+  assert.ok(at('app/features/editor/lsp-bridge.js') < at('app/features/project/lsp-root.js'));
+  assert.ok(at('app/features/editor/lsp-state.js') < at('app/features/project/lsp-root.js'));
+  assert.ok(at('app/features/project/trust-banner.js') < at('app/panels/files-panel.js'));
+});
+
+check('files-panel.js mounts the trust banner into the project tree\'s noticeHost, not directly into the panel', () => {
+  const src = fs.readFileSync(FILES_PANEL, 'utf8');
+  assert.ok(src.includes('termlabProjectTrustBanner'), 'renderProjectTree wires the banner module');
+  assert.ok(src.includes('projectTreeHandle.noticeHost'), 'the banner mounts into the handle\'s noticeHost, per the task-6 review contract');
+});
+
+check('tool-window-runtime installs the LSP root pass-through once per window', () => {
+  const src = fs.readFileSync(path.join(APP, 'tool-window-runtime.js'), 'utf8');
+  assert.ok(src.includes('termlabProjectLspRoot'), 'the runtime wires the lsp-root module');
+  assert.ok(src.includes('termlabProjectLspRoot.install'), 'install() is actually called, not merely referenced');
 });
 
 check('Open Folder is reachable from the menu, the palette and Rust', () => {

@@ -674,6 +674,22 @@
     projectTreeHandle.refreshAll();
     checkProjectRootPresence();
 
+    // The one-trust-ask-per-project banner. Mounted into noticeHost, which
+    // survives every tree-internal repaint (render() only ever touches its
+    // own missingHost child) — so this call happens once per renderProjectTree
+    // (i.e. once per fresh tree handle, on boot and on every mode-toggle back
+    // into project mode), and the banner's own state (a persisted trust
+    // record, or nothing at all if already dismissed this window) is what
+    // keeps it from asking twice for the same project.
+    if (window.termlabProjectTrustBanner && typeof window.termlabProjectTrustBanner.mount === 'function') {
+      window.termlabProjectTrustBanner.mount({
+        host: projectTreeHandle.noticeHost,
+        root: projectRoot,
+        bridge: window.termlabLspBridge,
+        onDecision: () => {},
+      });
+    }
+
     // F13 (task-6 review): project-tree.js's own contextmenu listener lives
     // on the internal `list` element and only fires `onContextMenu` when the
     // right-click resolves to a row ([data-tree-path]) — a click on the
