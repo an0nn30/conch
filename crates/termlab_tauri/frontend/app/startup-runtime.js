@@ -184,6 +184,31 @@
           } catch (_) {}
         }
 
+        // The adopt block above only ever resolves a project that arrived
+        // through PendingOpens — a directory queued by the CLI/IPC before
+        // this window existed. Opening a project from an ALREADY-RUNNING
+        // window (Open Folder in the menu/palette, or routing a directory
+        // dropped/opened in a running window) goes a completely different
+        // way: `project_open` builds a brand-new window and binds the
+        // registry entry for it directly (project_open_build, before the
+        // window is even shown) — nothing is ever queued into PendingOpens
+        // for that new window, so the adopt block above is a no-op for it.
+        // `project_info` resolves independently, by the CALLING window's own
+        // label against that same registry — ask it whenever adopt did not
+        // already win this window a project, so this seam covers BOTH ways a
+        // window can end up with one. Gated on `!isActive()` so a successful
+        // adopt is never redundantly re-queried or overwritten. Still read
+        // before the layout below, so the per-project layout applies either
+        // way a project was bound.
+        if (global.termlabProjectMode
+            && typeof global.termlabProjectMode.isActive === 'function'
+            && !global.termlabProjectMode.isActive()
+            && typeof global.termlabProjectMode.set === 'function') {
+          try {
+            global.termlabProjectMode.set(await invoke('project_info'));
+          } catch (_) {}
+        }
+
         if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
           global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
         }

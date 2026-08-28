@@ -19,6 +19,9 @@ const ROUTING = path.join(APP, 'features/editor/open-path-routing.js');
 const STARTUP = path.join(APP, 'startup-runtime.js');
 const INDEX_HTML = path.join(ROOT, 'index.html');
 const FILES_PANEL = path.join(APP, 'panels/files-panel.js');
+const FILES_DATA_SERVICE_PATH = path.join(APP, 'features/files/data-service.js');
+const FILES_PANE_STORE_PATH = path.join(APP, 'features/files/pane-store.js');
+const FILES_ACTIONS_PATH = path.join(APP, 'features/files/actions.js');
 
 let ran = 0;
 let failures = 0;
@@ -191,6 +194,13 @@ check('applyAppConfig computes the effective zen decision and gates adopt to the
             return 'none';
           case 'project_adopt_pending':
             return { adopted: { root: '/repo', name: 'repo' }, focusedExisting: false };
+          // Reached whenever adopt did not itself win a project (every kind
+          // but 'project' here) — the F1 fallback (task-6 review) asks this
+          // unconditionally once adopt leaves the window project-less. Null
+          // keeps this table's non-'project' rows genuinely project-less,
+          // matching expectSessionDefault/expectZenOn below.
+          case 'project_info':
+            return null;
           case 'get_saved_layout':
             return {
               zen_mode: savedZen,
@@ -276,6 +286,11 @@ check('a failed project adopt (not a benign hand-off) reports the folder by name
         // Folder vanished / permission denied mid-boot: a real failure, not
         // the benign "another window already has this root" hand-off.
         return { adopted: null, focusedExisting: false };
+      // The F1 fallback (task-6 review) fires here too — adopt left the
+      // window project-less. Null: this window really has no project bound
+      // in the registry either (the vanished/denied folder never got one).
+      case 'project_info':
+        return null;
       case 'get_saved_layout':
         return { zen_mode: false, files_panel_visible: true, ssh_panel_visible: true, bottom_panel_visible: true };
       default:
@@ -304,6 +319,11 @@ check('a benign focused-existing hand-off does not toast', async () => {
         // Another window already holds this root; Rust destroys this
         // window. Nothing went wrong, so nothing should be reported.
         return { adopted: null, focusedExisting: true };
+      // The F1 fallback (task-6 review) fires here too, in the brief window
+      // before Rust actually destroys this window — it holds no project of
+      // its own either way.
+      case 'project_info':
+        return null;
       case 'get_saved_layout':
         return { zen_mode: false, files_panel_visible: true, ssh_panel_visible: true, bottom_panel_visible: true };
       default:
@@ -313,6 +333,101 @@ check('a benign focused-existing hand-off does not toast', async () => {
   const runtime = sandbox.termlabStartupRuntime.create();
   await runtime.applyAppConfig(invoke);
   assert.strictEqual(toasts.length, 0, 'a window on its way to being destroyed needs no explanation');
+});
+
+// task-6 review, F1: every test above this line queues its project through
+// PendingOpens (pending_open_paths_kind === 'project', drained by
+// project_adopt_pending) — the CLI path. A window opened via project_open
+// (Open Folder in the menu/palette, or a directory routed from an
+// already-running window) never queues anything: project_open_build binds
+// the registry directly, before the window is even shown, so the adopt
+// block above is unconditionally a no-op for it (pending_open_paths_kind
+// resolves 'none') and — before this fix — termlabProjectMode stayed null
+// forever for that entire class of window. project_info resolves
+// independently, by the calling window's own registry entry.
+check('a window whose project was bound via project_open (not the CLI queue) is picked up through project_info', async () => {
+  const { sandbox } = loadStartup();
+  const invoke = async (cmd) => {
+    switch (cmd) {
+      case 'get_app_config':
+        return { editor_vim_mode: false, appearance_mode: 'dark', new_window_zen_mode: false };
+      case 'current_window_label':
+        return 'window-3';
+      case 'pending_open_paths_kind':
+        // Nothing queued for this window — the adopt block stays fully
+        // inert. project_adopt_pending must not even be called.
+        return 'none';
+      case 'project_adopt_pending':
+        throw new Error('project_adopt_pending must not run when nothing is queued for this window');
+      case 'project_info':
+        return { root: '/repo', name: 'repo' };
+      case 'get_saved_layout':
+        return { zen_mode: false, files_panel_visible: true, ssh_panel_visible: true, bottom_panel_visible: true };
+      default:
+        throw new Error('unexpected command ' + cmd);
+    }
+  };
+  const runtime = sandbox.termlabStartupRuntime.create();
+  await runtime.applyAppConfig(invoke);
+  assert.strictEqual(sandbox.termlabProjectMode.isActive(), true,
+    'project_info must activate project mode when the adopt path never ran');
+  assert.strictEqual(sandbox.termlabProjectMode.root(), '/repo');
+  assert.strictEqual(sandbox.termlabProjectMode.name(), 'repo');
+  deepEq(sandbox.__termlabProject, { root: '/repo', name: 'repo' });
+});
+
+check('project_info resolving null (an ordinary, project-less window) leaves the window project-less', async () => {
+  const { sandbox } = loadStartup();
+  const invoke = async (cmd) => {
+    switch (cmd) {
+      case 'get_app_config':
+        return { editor_vim_mode: false, appearance_mode: 'dark', new_window_zen_mode: false };
+      case 'current_window_label':
+        return 'main';
+      case 'pending_open_paths_kind':
+        return 'none';
+      case 'project_info':
+        return null;
+      case 'get_saved_layout':
+        return { zen_mode: false, files_panel_visible: true, ssh_panel_visible: true, bottom_panel_visible: true };
+      default:
+        throw new Error('unexpected command ' + cmd);
+    }
+  };
+  const runtime = sandbox.termlabStartupRuntime.create();
+  await runtime.applyAppConfig(invoke);
+  assert.strictEqual(sandbox.termlabProjectMode.isActive(), false,
+    'the overwhelmingly common case (an ordinary window) must not be turned into a project window');
+});
+
+check('a successful CLI-queue adopt is never redundantly re-queried through project_info', async () => {
+  const { sandbox } = loadStartup();
+  const calls = [];
+  const invoke = async (cmd) => {
+    calls.push(cmd);
+    switch (cmd) {
+      case 'get_app_config':
+        return { editor_vim_mode: false, appearance_mode: 'dark', new_window_zen_mode: false };
+      case 'current_window_label':
+        return 'main';
+      case 'pending_open_paths_kind':
+        return 'project';
+      case 'project_adopt_pending':
+        return { adopted: { root: '/queued', name: 'queued' }, focusedExisting: false };
+      case 'project_info':
+        return { root: '/wrong', name: 'wrong' };
+      case 'get_saved_layout':
+        return { zen_mode: false, files_panel_visible: true, ssh_panel_visible: true, bottom_panel_visible: true };
+      default:
+        throw new Error('unexpected command ' + cmd);
+    }
+  };
+  const runtime = sandbox.termlabStartupRuntime.create();
+  await runtime.applyAppConfig(invoke);
+  assert.strictEqual(sandbox.termlabProjectMode.isActive(), true);
+  assert.strictEqual(sandbox.termlabProjectMode.root(), '/queued',
+    'the CLI-queue adopt already won this window a project — project_info must not overwrite it');
+  assert.ok(!calls.includes('project_info'), 'the fallback is gated on !isActive(), so it must not even be called here');
 });
 
 check('main-runtime gives a project window a terminal tab at the project root', () => {
@@ -413,13 +528,507 @@ check('the SFTP tool window stays reachable and is registered with a project-awa
     'the root must be known by the time file-explorer registers');
 });
 
-check('a project window opens with the Files tool window visible', () => {
+// task-6 review, F3/F5(iv): this used to also assert `src.includes('knowsBottom')`
+// — the ORIGINAL guard that suppressed the reveal whenever the saved layout
+// already recorded a bottom-zone window. The controller's ruling dropped
+// that guard entirely (it was a near-universal no-op: the layout is global,
+// not per-project, and every install's layout records a bottom-zone window
+// the moment file-explorer's own default zone has ever been used). A grep
+// for the string 'knowsBottom' would have kept passing anyway even with the
+// guard removed, purely by coincidence — it also matches the unrelated,
+// still-present `knowsBottomZone` identifier from the SFTP-bottom-zone
+// migration a few dozen lines above this block — which is exactly the kind
+// of source-grep-that-survives-any-fix problem the review flagged. The real
+// regression coverage (the reveal firing unconditionally, AND the
+// zen-effective override still winning over it) is a BEHAVIORAL test in
+// test_panel_host.mjs (checks 16a/16b), which actually executes
+// tool-window-runtime.js's init() against a fake toolWindowManager — chosen
+// over duplicating that harness here because test_panel_host.mjs already
+// has the exact fake-manager/loadRuntime machinery this needs.
+check('a project window opens with the Files tool window visible, unconditionally (not gated on a stale knowsBottom guard)', () => {
   const src = fs.readFileSync(path.join(APP, 'tool-window-runtime.js'), 'utf8');
   assert.ok(src.includes("activate('file-explorer')"), 'a project window activates the Files panel');
-  assert.ok(src.includes('knowsBottom'), 'and only when the layout has never recorded a bottom-zone window');
+  assert.ok(!src.includes('const knowsBottom ='), 'the knowsBottom guard must be gone, not merely bypassed');
   const register = src.indexOf('registerBuiltInToolWindows();');
   const activate = src.indexOf("activate('file-explorer')");
   assert.ok(register < activate, 'the panel must be registered before it can be activated');
+  const zenBlock = src.indexOf('window.__termlabEffectiveZen === true');
+  assert.ok(zenBlock > activate,
+    'the zen-effective override must run AFTER the reveal, so it is still the last word on visibility');
+});
+
+// ===========================================================================
+// Behavioral harness (task-6 review, F5): files-panel.js driven for real,
+// with `projectRoot` set and window.termlabProjectTree stubbed — the pattern
+// test_files_dnd.mjs's/test_sftp_connect.mjs's setupLogicHarness already
+// established (real files-panel.js + real data-service/pane-store/actions,
+// termlabFilesPaneView stubbed as a recording spy) extended with a fake
+// project tree. The four checks that follow replace/augment the
+// source-grep-only checks above: reverting any ONE of the four review-found
+// deviations (F10's statLocal swap aside — that one has no independent
+// behavioral signature) leaves at least one of these red, which a plain
+// `.includes('buildTreeContextMenuItems')`-style check cannot say.
+// ===========================================================================
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const settle = async (times = 6) => { for (let i = 0; i < times; i += 1) await tick(); };
+
+// A minimal element good enough for files-panel.js's DOM touches in the
+// project-tree render path: classList, appendChild/querySelector (the
+// latter overridden per-fixture, same idiom test_files_dnd.mjs/
+// test_sftp_connect.mjs use), a settable .innerHTML (never actually parsed —
+// nothing in this harness needs it to be), and `closest('[data-tree-path]')`
+// for the F13 background-vs-row contextmenu distinction.
+function makeElement(tag) {
+  const listeners = new Map();
+  const el = {
+    tagName: String(tag || 'div').toUpperCase(),
+    children: [],
+    style: {},
+    dataset: {},
+    className: '',
+    title: '',
+    textContent: '',
+    value: '',
+    parentNode: null,
+    firstElementChild: undefined,
+    classList: {
+      _set: new Set(),
+      add(...c) { c.forEach((x) => this._set.add(x)); },
+      remove(...c) { c.forEach((x) => this._set.delete(x)); },
+      contains(c) { return this._set.has(c); },
+    },
+    appendChild(child) {
+      this.children.push(child);
+      if (child && typeof child === 'object') child.parentNode = this;
+      return child;
+    },
+    removeChild(child) {
+      const i = this.children.indexOf(child);
+      if (i >= 0) this.children.splice(i, 1);
+      if (child && typeof child === 'object') child.parentNode = null;
+      return child;
+    },
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    addEventListener(name, fn) {
+      if (!listeners.has(name)) listeners.set(name, []);
+      listeners.get(name).push(fn);
+    },
+    removeEventListener() {},
+    dispatchEvent(evt) {
+      for (const fn of (listeners.get(evt.type) || []).slice()) fn(evt);
+      return true;
+    },
+    setAttribute(n, v) { el._attrs = el._attrs || new Map(); el._attrs.set(n, String(v)); },
+    getAttribute(n) { return el._attrs && el._attrs.has(n) ? el._attrs.get(n) : null; },
+    getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
+    focus() {},
+    select() {},
+    closest(sel) {
+      let node = el;
+      while (node) {
+        if (sel === '[data-tree-path]' && node._attrs && node._attrs.has('data-tree-path')) return node;
+        node = node.parentNode;
+      }
+      return null;
+    },
+  };
+  return el;
+}
+
+// One fake tree "instance" per create() call — the toggle round-trip check
+// (F5(ii)) needs to tell two separate handles apart (a fresh one must not be
+// the destroyed one it replaced).
+function makeFakeTreeHandle(id, opCalls) {
+  let destroyed = false;
+  const element = makeElement('div');
+  return {
+    _id: id,
+    element,
+    isDestroyed: () => destroyed,
+    expand: (p) => { opCalls.push({ id, op: 'expand', path: p }); },
+    collapse: (p) => { opCalls.push({ id, op: 'collapse', path: p }); },
+    refresh: (p) => { opCalls.push({ id, op: 'refresh', path: p }); return Promise.resolve(); },
+    refreshAll: () => { opCalls.push({ id, op: 'refreshAll' }); return Promise.resolve(); },
+    settled: () => Promise.resolve(),
+    activePath: () => null,
+    rows: () => [],
+    setGitStatus: () => {},
+    setMissing: (v) => { opCalls.push({ id, op: 'setMissing', value: v === true }); },
+    setShowHidden: () => {},
+    focus: () => {},
+    noticeHost: makeElement('div'),
+    destroy: () => { destroyed = true; opCalls.push({ id, op: 'destroy' }); },
+  };
+}
+
+// tlDialog.open() stub good enough for showTextPromptDialog AND
+// showConfirmDialog: both call window.tlDialog.open(cfg) once, read
+// cfg.buttons for a `primary` entry to trigger confirmation, and (the text
+// prompt only) read `handle.el.querySelector('#fp-dlg-input').value` inside
+// their own `confirm()` closure — never anything this stub has to interpret
+// itself. Capturing `cfg` and a controllable fake input is all a caller
+// needs to drive either dialog kind end to end.
+function makeDialogStub() {
+  const opens = [];
+  return {
+    opens,
+    tlDialog: {
+      open(cfg) {
+        const bodyEl = makeElement('div');
+        const inputEl = makeElement('input');
+        bodyEl.querySelector = (sel) => (sel === '#fp-dlg-input' ? inputEl : null);
+        if (typeof cfg.body === 'function') cfg.body(bodyEl);
+        const handle = { el: bodyEl, close() {} };
+        opens.push({ cfg, handle, inputEl });
+        return handle;
+      },
+    },
+  };
+}
+
+function confirmPrompt(dialogs, value) {
+  const { cfg, inputEl } = dialogs.opens[dialogs.opens.length - 1];
+  inputEl.value = value;
+  const primary = cfg.buttons.find((b) => b.primary);
+  primary.onSelect();
+}
+
+function confirmDialog(dialogs) {
+  const { cfg } = dialogs.opens[dialogs.opens.length - 1];
+  const primary = cfg.buttons.find((b) => b.primary);
+  primary.onSelect();
+}
+
+async function setupProjectFilesHarness(options) {
+  const opts = options || {};
+  const invokeCalls = [];
+  const toastCalls = [];
+  const renderCalls = [];
+  const treeCreateCalls = [];
+  const treeHandles = [];
+  const treeOpCalls = [];
+  const openedFiles = [];
+  const listeners = {};
+  const localStatOverrides = new Map(Object.entries(opts.localStatOverrides || {}));
+
+  const invoke = (cmd, args) => {
+    invokeCalls.push({ cmd, args });
+    const extra = typeof opts.invokeExtra === 'function' ? opts.invokeExtra(cmd, args) : undefined;
+    if (extra !== undefined) return extra;
+    switch (cmd) {
+      case 'get_home_dir': return Promise.resolve('/home/demo');
+      case 'get_all_settings': return Promise.resolve({});
+      case 'local_list_dir': return Promise.resolve([]);
+      case 'remote_get_servers': return Promise.resolve({ folders: [], ungrouped: [], ssh_config: [] });
+      case 'remote_get_sessions': return Promise.resolve([]);
+      case 'local_stat': {
+        const p = args && args.path;
+        if (localStatOverrides.has(p)) {
+          const entry = localStatOverrides.get(p);
+          return entry instanceof Error ? Promise.reject(entry) : Promise.resolve(entry);
+        }
+        return Promise.reject(new Error(`ENOENT: no such file or directory, stat '${p}'`));
+      }
+      case 'editor_write_file': return Promise.resolve(undefined);
+      case 'local_mkdir': return Promise.resolve(undefined);
+      case 'local_rename': return Promise.resolve(undefined);
+      case 'local_remove': return Promise.resolve(undefined);
+      case 'clipboard_write_text': return Promise.resolve(undefined);
+      case 'project_reveal_path': return Promise.resolve(undefined);
+      default: return Promise.resolve(undefined);
+    }
+  };
+
+  const sandbox = {
+    console, setTimeout, clearTimeout,
+    setInterval: () => 0,
+    clearInterval: () => {},
+    Promise, Math, Array, JSON, Object, String, Number,
+  };
+  sandbox.window = sandbox;
+  sandbox.global = sandbox;
+  sandbox.document = { createElement: (t) => makeElement(t) };
+  sandbox.utils = {
+    formatSize: () => '', formatDate: () => '',
+    esc: (v) => String(v == null ? '' : v), attr: (v) => String(v == null ? '' : v),
+  };
+  sandbox.toast = {
+    error: (...args) => toastCalls.push({ kind: 'error', args }),
+    info: (...args) => toastCalls.push({ kind: 'info', args }),
+    warn: (...args) => toastCalls.push({ kind: 'warn', args }),
+    success: (...args) => toastCalls.push({ kind: 'success', args }),
+  };
+  sandbox.toolWindowManager = { isVisible: () => true, activate() {}, deactivate() {}, toggle() {} };
+  const dialogs = makeDialogStub();
+  sandbox.tlDialog = dialogs.tlDialog;
+  sandbox.termlabFilesPaneView = {
+    renderPane: (pane, el, deps) => { renderCalls.push({ pane, el, deps }); },
+    showColumnMenu: () => {},
+    showRowContextMenu: (event, items) => { sandbox.__lastMenuItems = items; },
+  };
+  sandbox.termlabProjectTree = {
+    create(createOptions) {
+      treeCreateCalls.push(createOptions);
+      const handle = makeFakeTreeHandle(treeCreateCalls.length, treeOpCalls);
+      treeHandles.push(handle);
+      return handle;
+    },
+  };
+  sandbox.termlabEditorService = {
+    openLocalFile: (p) => { openedFiles.push(p); return Promise.resolve(); },
+  };
+
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(FILES_PANE_STORE_PATH, 'utf8'), sandbox, { filename: FILES_PANE_STORE_PATH });
+  vm.runInContext(fs.readFileSync(FILES_DATA_SERVICE_PATH, 'utf8'), sandbox, { filename: FILES_DATA_SERVICE_PATH });
+  vm.runInContext(fs.readFileSync(FILES_ACTIONS_PATH, 'utf8'), sandbox, { filename: FILES_ACTIONS_PATH });
+  vm.runInContext(fs.readFileSync(FILES_PANEL, 'utf8'), sandbox, { filename: FILES_PANEL });
+
+  const panelEl = makeElement('div');
+  const localRootEl = makeElement('div');
+  const remoteRootEl = makeElement('div');
+  panelEl.querySelector = (sel) => {
+    if (sel === '#fp-local') return localRootEl;
+    if (sel === '#fp-remote') return remoteRootEl;
+    if (sel === '.fp-pane-container') return makeElement('div');
+    return null;
+  };
+
+  sandbox.filesPanel.init({
+    invoke,
+    panelEl,
+    panelWrapEl: makeElement('div'),
+    resizeHandleEl: makeElement('div'),
+    layoutService: null,
+    fitActiveTab: () => {},
+    getActiveTab: () => null,
+    listen: (name, handler) => { listeners[name] = handler; },
+    projectRoot: opts.projectRoot,
+  });
+  await settle();
+
+  return {
+    sandbox, invoke, invokeCalls, toastCalls, renderCalls, listeners,
+    treeCreateCalls, treeHandles, treeOpCalls, openedFiles, dialogs, panelEl,
+    lastMenuItems: () => sandbox.__lastMenuItems,
+  };
+}
+
+check('F5(i): init({projectRoot}) renders the project tree, not the dual-pane explorer', async () => {
+  const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+  assert.strictEqual(h.treeCreateCalls.length, 1, 'exactly one tree must be created on boot');
+  assert.strictEqual(h.treeCreateCalls[0].root, '/repo', 'the tree must be rooted at projectRoot');
+  assert.ok(h.panelEl.children.includes(h.treeHandles[0].element),
+    'the tree\'s element must actually be mounted into the panel');
+  assert.strictEqual(h.sandbox.filesPanel.isProjectMode(), true);
+  assert.strictEqual(h.sandbox.filesPanel.projectTree(), h.treeHandles[0]);
+});
+
+check('F5(ii)/F2: toggle round trip project -> dual-pane -> project renders the remote pane and never reuses a destroyed tree handle', async () => {
+  const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+  const firstHandle = h.treeHandles[0];
+  assert.strictEqual(firstHandle.isDestroyed(), false);
+
+  h.renderCalls.length = 0;
+  h.sandbox.filesPanel.setProjectMode(false);
+  await settle();
+
+  assert.strictEqual(firstHandle.isDestroyed(), true, 'leaving project mode must destroy the tree handle');
+  // F2: renderDualPane must populate #fp-remote every time it runs, not just
+  // once at the original init() — before the fix, refreshHostCombo() (and
+  // therefore this renderPane call) never ran again after the initial
+  // project-mode boot, so the SFTP half stayed permanently blank on toggle.
+  const remoteRender = h.renderCalls.find((c) => c.pane && c.pane.prefix === 'remote');
+  assert.ok(remoteRender, 'toggling back to dual-pane must render the remote pane (F2)');
+  assert.strictEqual(remoteRender.el, h.panelEl.querySelector('#fp-remote'));
+
+  h.sandbox.filesPanel.setProjectMode(true);
+  await settle();
+  assert.strictEqual(h.treeCreateCalls.length, 2, 'toggling back to project mode must create a FRESH tree handle');
+  const secondHandle = h.treeHandles[1];
+  assert.notStrictEqual(secondHandle, firstHandle, 'the fresh handle must not be the destroyed one it replaced');
+  assert.strictEqual(secondHandle.isDestroyed(), false);
+  assert.strictEqual(h.sandbox.filesPanel.projectTree(), secondHandle);
+});
+
+// F5(iii): the deviation-(b) bug class from the original task-6 pass — a
+// shared pseudo-pane whose `currentPath` was the wrong directory for a
+// DIRECTORY node — must not be able to return silently. Asserted against the
+// real invoke() call args, for both a file node (which was already correct)
+// and a directory node (which was not).
+check('F5(iii): buildTreeContextMenuItems targets the right paths for a FILE node', async () => {
+  const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+  const onContextMenu = h.treeCreateCalls[0].onContextMenu;
+  onContextMenu({}, { path: '/repo/src/main.rs', name: 'main.rs', isDir: false, parentPath: '/repo/src' });
+  const items = h.lastMenuItems();
+  assert.ok(items, 'the context menu must have been shown');
+
+  h.invokeCalls.length = 0;
+  items.find((i) => i.label === 'Rename…').action();
+  confirmPrompt(h.dialogs, 'renamed.rs');
+  await settle();
+  const rename = h.invokeCalls.find((c) => c.cmd === 'local_rename');
+  assert.ok(rename, 'Rename must invoke local_rename');
+  assert.strictEqual(rename.args.from, '/repo/src/main.rs');
+  assert.strictEqual(rename.args.to, '/repo/src/renamed.rs');
+
+  h.invokeCalls.length = 0;
+  items.find((i) => i.label === 'Copy Path').action();
+  await settle();
+  const copy = h.invokeCalls.find((c) => c.cmd === 'clipboard_write_text');
+  assert.ok(copy, 'Copy Path must invoke clipboard_write_text');
+  assert.strictEqual(copy.args.text, '/repo/src/main.rs');
+});
+
+check('F5(iii): buildTreeContextMenuItems targets the right paths for a DIRECTORY node (the deviation-(b) bug class)', async () => {
+  const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+  const onContextMenu = h.treeCreateCalls[0].onContextMenu;
+  onContextMenu({}, { path: '/repo/src', name: 'src', isDir: true, parentPath: '/repo' });
+  const items = h.lastMenuItems();
+
+  // Rename: under the original brief-verbatim pseudo-pane, `from` would have
+  // computed as '/repo/src/src' (containingDir === node.path for a
+  // directory, so joining the directory's own name onto itself targets a
+  // nonexistent child of itself instead of the directory).
+  h.invokeCalls.length = 0;
+  items.find((i) => i.label === 'Rename…').action();
+  confirmPrompt(h.dialogs, 'lib');
+  await settle();
+  const rename = h.invokeCalls.find((c) => c.cmd === 'local_rename');
+  assert.ok(rename, 'Rename must invoke local_rename');
+  assert.strictEqual(rename.args.from, '/repo/src');
+  assert.strictEqual(rename.args.to, '/repo/lib');
+
+  // Copy Path: same bug class — would have copied '/repo/src/src'.
+  h.invokeCalls.length = 0;
+  items.find((i) => i.label === 'Copy Path').action();
+  await settle();
+  const copy = h.invokeCalls.find((c) => c.cmd === 'clipboard_write_text');
+  assert.ok(copy, 'Copy Path must invoke clipboard_write_text');
+  assert.strictEqual(copy.args.text, '/repo/src');
+
+  // Delete: same bug class — would have tried to delete '/repo/src/src'.
+  h.invokeCalls.length = 0;
+  items.find((i) => i.label === 'Delete').action();
+  confirmDialog(h.dialogs);
+  await settle();
+  const remove = h.invokeCalls.find((c) => c.cmd === 'local_remove');
+  assert.ok(remove, 'Delete must invoke local_remove');
+  assert.strictEqual(remove.args.path, '/repo/src');
+  assert.strictEqual(remove.args.isDir, true);
+
+  // New Folder still targets the directory's own contents (containingDir),
+  // which the file/directory split must NOT have broken.
+  h.invokeCalls.length = 0;
+  items.find((i) => i.label === 'New Folder…').action();
+  confirmPrompt(h.dialogs, 'nested');
+  await settle();
+  const mkdir = h.invokeCalls.find((c) => c.cmd === 'local_mkdir');
+  assert.ok(mkdir, 'New Folder must invoke local_mkdir');
+  assert.strictEqual(mkdir.args.path, '/repo/src/nested');
+});
+
+// F5(v): the doNewFile collision guard. F12 (controller ruling) is covered
+// in the same two-part flow for free: the happy path (ii) asserts the
+// created dir expands and the new file opens in the editor.
+check('F5(v): doNewFile refuses to overwrite an existing file, and (F12) creating a new one expands the dir and opens it', async () => {
+  // (i) collision: local_stat RESOLVES for the target -> refuse, no write.
+  {
+    const h = await setupProjectFilesHarness({
+      projectRoot: '/repo',
+      localStatOverrides: {
+        '/repo/src/main.rs': { name: 'main.rs', is_dir: false, size: 3, modified: 0, permissions: null },
+      },
+    });
+    const onContextMenu = h.treeCreateCalls[0].onContextMenu;
+    onContextMenu({}, { path: '/repo/src', name: 'src', isDir: true, parentPath: '/repo' });
+    const items = h.lastMenuItems();
+
+    h.invokeCalls.length = 0;
+    h.toastCalls.length = 0;
+    items.find((i) => i.label === 'New File…').action();
+    confirmPrompt(h.dialogs, 'main.rs');
+    await settle();
+
+    assert.ok(!h.invokeCalls.some((c) => c.cmd === 'editor_write_file'),
+      'a name that already exists must never reach editor_write_file (it would silently truncate it)');
+    const errorToast = h.toastCalls.find((t) => t.kind === 'error');
+    assert.ok(errorToast, 'the collision must be reported');
+    assert.strictEqual(errorToast.args[0], 'New File Failed');
+  }
+
+  // (ii) happy path: local_stat REJECTS (nothing there) -> write proceeds,
+  // the containing dir expands, and the new file opens in the editor.
+  {
+    const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+    const onContextMenu = h.treeCreateCalls[0].onContextMenu;
+    onContextMenu({}, { path: '/repo/src', name: 'src', isDir: true, parentPath: '/repo' });
+    const items = h.lastMenuItems();
+
+    h.invokeCalls.length = 0;
+    items.find((i) => i.label === 'New File…').action();
+    confirmPrompt(h.dialogs, 'new.rs');
+    await settle();
+
+    const write = h.invokeCalls.find((c) => c.cmd === 'editor_write_file');
+    assert.ok(write, 'a genuinely new name must reach editor_write_file');
+    assert.strictEqual(write.args.path, '/repo/src/new.rs');
+    assert.strictEqual(write.args.contents, '');
+
+    const expandCall = h.treeOpCalls.find((c) => c.op === 'expand' && c.path === '/repo/src');
+    assert.ok(expandCall, 'F12: the containing directory must expand so the new file is not created-but-invisible');
+    assert.deepStrictEqual(h.openedFiles, ['/repo/src/new.rs'],
+      'F12: the new file must open straight into the editor (IDE convention)');
+  }
+});
+
+// F13: the tree-background context menu (no row target at all) offers New
+// File/New Folder scoped to projectRoot.
+check('F13: right-clicking the tree background (no row) offers New File/New Folder at the project root', async () => {
+  const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+  const treeElement = h.treeHandles[0].element;
+  let defaultPrevented = false;
+  treeElement.dispatchEvent({
+    type: 'contextmenu',
+    target: treeElement,
+    preventDefault: () => { defaultPrevented = true; },
+  });
+  assert.ok(defaultPrevented, 'the background click must suppress the native context menu');
+  const items = h.lastMenuItems();
+  assert.ok(items, 'a root context menu must have been shown');
+  const labels = items.map((i) => i.label).filter(Boolean);
+  assert.ok(labels.includes('New File…'));
+  assert.ok(labels.includes('New Folder…'));
+
+  h.invokeCalls.length = 0;
+  items.find((i) => i.label === 'New Folder…').action();
+  confirmPrompt(h.dialogs, 'newdir');
+  await settle();
+  const mkdir = h.invokeCalls.find((c) => c.cmd === 'local_mkdir');
+  assert.ok(mkdir, 'New Folder from the background menu must invoke local_mkdir');
+  assert.strictEqual(mkdir.args.path, '/repo/newdir', 'it must land directly in projectRoot');
+});
+
+// F13 continued: a right-click that DOES resolve to a row must not ALSO
+// trigger the background menu (no double-firing).
+check('F13: a right-click that resolves to a row does not also trigger the background menu', async () => {
+  const h = await setupProjectFilesHarness({ projectRoot: '/repo' });
+  const treeElement = h.treeHandles[0].element;
+  const row = makeElement('div');
+  row.setAttribute('data-tree-path', '/repo/src');
+  row.parentNode = treeElement;
+  let defaultPrevented = false;
+  treeElement.dispatchEvent({
+    type: 'contextmenu',
+    target: row,
+    preventDefault: () => { defaultPrevented = true; },
+  });
+  assert.strictEqual(defaultPrevented, false,
+    'a row click must be left to project-tree.js\'s own listener, never intercepted here');
+  assert.strictEqual(h.lastMenuItems(), undefined, 'no root menu must have been shown for a row click');
 });
 
 check('the panel modules use no regex lookbehind and no control bytes', () => {

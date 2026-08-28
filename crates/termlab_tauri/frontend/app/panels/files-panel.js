@@ -29,6 +29,16 @@
   let projectMode = false;
   let projectTreeHandle = null;
   let projectRootMissing = false;
+  // The exact markup dual-pane always lays down, declared once so a toggle
+  // round trip can never let the project-window and plain-window render
+  // paths drift out of sync with each other (task-6 review, F6).
+  const DUAL_PANE_MARKUP = `
+      <div class="fp-pane-container">
+        <div class="fp-pane" id="fp-local"></div>
+        <div class="fp-pane-divider" id="fp-pane-divider"></div>
+        <div class="fp-pane" id="fp-remote"></div>
+      </div>
+    `;
   const FILES_TRANSFER_OPTIONS = Object.freeze({
     origin: 'filesPanel',
     conflictPolicy: Object.freeze({ kind: 'ask' }),
@@ -504,8 +514,12 @@
       }
     }
 
+    // refreshHostCombo() is no longer called here directly — renderDualPane()
+    // (invoked above via renderPanelBody(), and again on every toggle back
+    // from the project tree) now owns it, so a non-project window still gets
+    // exactly one initial call and a project window's dual-pane view never
+    // renders with a stale/blank remote pane (task-6 review, F2).
     loadFollowPathSetting();
-    refreshHostCombo();
     startLocalCwdPolling();
     startRemoteCwdPolling();
   }
@@ -549,35 +563,24 @@
       header.appendChild(toggle);
       panelEl.appendChild(header);
 
-      const paneContainer = document.createElement('div');
-      paneContainer.className = 'fp-pane-container';
-      const localPaneEl = document.createElement('div');
-      localPaneEl.className = 'fp-pane';
-      localPaneEl.id = 'fp-local';
-      const paneDivider = document.createElement('div');
-      paneDivider.className = 'fp-pane-divider';
-      paneDivider.id = 'fp-pane-divider';
-      const remotePaneEl = document.createElement('div');
-      remotePaneEl.className = 'fp-pane';
-      remotePaneEl.id = 'fp-remote';
-      paneContainer.appendChild(localPaneEl);
-      paneContainer.appendChild(paneDivider);
-      paneContainer.appendChild(remotePaneEl);
-      panelEl.appendChild(paneContainer);
+      // Built through a detached wrapper rather than panelEl.innerHTML
+      // directly — that would wipe the header just appended above. This
+      // branch already requires `document` for the header, so a throwaway
+      // element costs nothing extra, and it keeps the markup textually
+      // identical to the else branch below (DUAL_PANE_MARKUP, declared once
+      // at module scope) instead of a second hand-maintained copy that could
+      // drift out of sync with it (task-6 review, F6).
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = DUAL_PANE_MARKUP;
+      panelEl.appendChild(wrapper.firstElementChild);
     } else {
       // No project, no header, no risk of wiping anything — panelEl was just
       // cleared by renderPanelBody, so a single innerHTML template is the
       // simplest way to lay down the pane markup (also keeps this branch
       // working against the plain-object panelEl stubs the older, non-
       // project files-panel test harnesses use, which do not implement a
-      // real DOM's element-construction API).
-      panelEl.innerHTML = `
-        <div class="fp-pane-container">
-          <div class="fp-pane" id="fp-local"></div>
-          <div class="fp-pane-divider" id="fp-pane-divider"></div>
-          <div class="fp-pane" id="fp-remote"></div>
-        </div>
-      `;
+      // real DOM's element-construction API or a `document` global at all).
+      panelEl.innerHTML = DUAL_PANE_MARKUP;
     }
 
     // Resizable splitter between the panes. Orientation is read per-drag from
@@ -610,6 +613,18 @@
       localPane.pathInput = '/';
       loadEntries(localPane);
     });
+
+    // The remote half's counterpart to the home-dir bootstrap above. init()
+    // used to call this once, itself, after the (then-unconditional) initial
+    // render — fine when dual-pane was the only shape, but a project window
+    // toggling back from the tree gets a brand-new #fp-remote element every
+    // time renderDualPane runs, and nothing else ever repopulates it: the
+    // combo/session cache is still warm from the FIRST render, so no fetch
+    // re-fires and the remote pane is left permanently blank until some
+    // unrelated event (a session connecting) happens to trigger a redraw
+    // (task-6 review, F2). Calling it here, on every renderDualPane, is what
+    // makes the toggle round trip actually show the SFTP side again.
+    refreshHostCombo();
   }
 
   function renderProjectTree() {
@@ -658,6 +673,25 @@
     panelEl.appendChild(projectTreeHandle.element);
     projectTreeHandle.refreshAll();
     checkProjectRootPresence();
+
+    // F13 (task-6 review): project-tree.js's own contextmenu listener lives
+    // on the internal `list` element and only fires `onContextMenu` when the
+    // right-click resolves to a row ([data-tree-path]) — a click on the
+    // tree's background (an empty project, or the empty space below the
+    // last row) bubbles past it untouched and reaches here instead, with the
+    // OS/browser default context menu still live unless handled. Checking
+    // for a row ancestor before acting is what keeps this from double-firing
+    // a menu for an actual row click: project-tree.js's listener does not
+    // call stopPropagation(), so every row right-click reaches this handler
+    // too, and the `onRow` check is what makes it a no-op there.
+    projectTreeHandle.element.addEventListener('contextmenu', (event) => {
+      const onRow = event.target && typeof event.target.closest === 'function'
+        && event.target.closest('[data-tree-path]');
+      if (onRow) return;
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      if (!filesPaneView || typeof filesPaneView.showRowContextMenu !== 'function') return;
+      filesPaneView.showRowContextMenu(event, buildRootContextMenuItems());
+    });
   }
 
   // The same route the dual-pane explorer's local rows take: the editor
@@ -690,7 +724,13 @@
   // untouched; only the tree changes state.
   function checkProjectRootPresence() {
     if (!projectRoot || !projectTreeHandle) return Promise.resolve();
-    return Promise.resolve(invoke('local_stat', { path: projectRoot }))
+    // filesDataService.statLocal, not a raw invoke('local_stat', ...) —
+    // matches doNewFile's own stat call and every other local-fs read in
+    // this file (task-6 review, F10).
+    const statPromise = filesDataService && typeof filesDataService.statLocal === 'function'
+      ? filesDataService.statLocal(invoke, projectRoot)
+      : invoke('local_stat', { path: projectRoot });
+    return Promise.resolve(statPromise)
       .then((entry) => {
         projectRootMissing = !(entry && entry.is_dir);
         projectTreeHandle.setMissing(projectRootMissing);
@@ -1665,6 +1705,16 @@
   // that file. local_stat rejects when nothing exists at the target path,
   // which is the only case creation should proceed in — resolving instead
   // means something is already there, so refuse rather than truncate it.
+  //
+  // F8 (task-6 review): this is a best-effort stat-then-write, not an atomic
+  // guarantee — a file created at `target` in the window between the stat
+  // resolving "nothing here" and the write landing would still be silently
+  // overwritten (classic TOCTOU). A durable fix needs a Rust command backed
+  // by `OpenOptions::new().create_new(true)` (atomically fails if the path
+  // exists, no separate stat), which is out of scope for this pass; the
+  // in-app race window here is narrow (this window's own UI, one user) and
+  // this guard already closes the overwhelmingly common case (retyping an
+  // existing name by mistake).
   function doNewFile(dirPath, afterCreate) {
     showTextPromptDialog({
       title: 'New File',
@@ -1681,7 +1731,29 @@
             window.toast.error('New File Failed', `"${name}" already exists.`);
           },
           () => Promise.resolve(invoke('editor_write_file', { path: target, contents: '' }))
-            .then(() => { if (typeof afterCreate === 'function') afterCreate(); })
+            .then(() => {
+              if (typeof afterCreate === 'function') afterCreate();
+              // CONTROLLER RULING (task-6 review, F12): a file created inside
+              // a directory that is not currently expanded would otherwise
+              // exist on disk but never render — the tree only walks a
+              // subdirectory's children once it is in the `expanded` set, and
+              // `afterCreate`'s refresh() alone does not add it there.
+              // project-tree.js's expand() only fetches a listing when one
+              // isn't already cached (`!listings.has(dirPath)`), so calling
+              // it here alongside afterCreate's refresh() never double-fetches
+              // — whichever of the two actually owns the fetch in a given
+              // state (collapsed-and-never-listed vs already-expanded) is the
+              // one whose await does real work; the other is a cheap re-render.
+              // Opening the new file straight into the editor is the second
+              // half of the ruling — the IDE convention for "create a file"
+              // is to land the user in it, not leave them to find and click
+              // it themselves.
+              if (projectTreeHandle) projectTreeHandle.expand(dirPath);
+              Promise.resolve(openTreeFile(target)).catch((error) => {
+                console.error('files-panel: could not open new file', error);
+                window.toast.error('Could Not Open File', String(error));
+              });
+            })
             .catch((e) => window.toast.error('New File Failed', String(e))),
         );
       },
@@ -1694,8 +1766,14 @@
   }
 
   // One place that decides what "the view changed" means for the two shapes.
+  // `&& pane.isLocal` (task-6 review, F9): the tree only ever has local
+  // pseudo-panes today, so this is a defensive guard rather than a live fix
+  // — but doNewFolder/doRename/doDelete are shared with the dual-pane REMOTE
+  // side too, and this function has no other way to say "only route to the
+  // tree for a local operation" if a future caller ever reaches it with
+  // projectMode true and a non-local pane.
   function refreshAfterLocalOp(pane) {
-    if (projectMode && projectTreeHandle) return projectTreeHandle.refresh(pane.currentPath);
+    if (projectMode && projectTreeHandle && pane.isLocal) return projectTreeHandle.refresh(pane.currentPath);
     return loadEntries(pane);
   }
 
@@ -1817,6 +1895,26 @@
       { type: 'separator' },
       { icon: 'copy', label: 'Copy Path', action: () => doCopyPath(nodePane, { name: node.name }) },
       { label: 'Reveal in File Manager', action: () => doRevealPath(node.path) },
+      { type: 'separator' },
+      { icon: 'refresh', label: 'Refresh', action: reload },
+    ];
+  }
+
+  // F13 (task-6 review): the tree-background counterpart to
+  // buildTreeContextMenuItems — reachable when there is no row to
+  // right-click at all (an empty project directory, or simply the empty
+  // space below the last row), which previously left New File/New Folder
+  // completely unreachable in that state. Root-scoped: New File/New Folder
+  // always land directly in projectRoot, since there is no node to derive a
+  // containing directory from.
+  function buildRootContextMenuItems() {
+    const reload = () => {
+      if (projectTreeHandle) projectTreeHandle.refreshAll();
+    };
+    const rootPane = { isLocal: true, currentPath: projectRoot, prefix: 'project' };
+    return [
+      { icon: 'add', label: 'New File…', action: () => doNewFile(projectRoot, reload) },
+      { icon: 'newFolder', label: 'New Folder…', action: () => doNewFolder(rootPane) },
       { type: 'separator' },
       { icon: 'refresh', label: 'Refresh', action: reload },
     ];

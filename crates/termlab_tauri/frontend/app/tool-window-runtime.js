@@ -628,19 +628,29 @@
         registerBuiltInToolWindows();
 
         // Spec section 1: a project window opens with the Files tool window
-        // visible in its zone. Applied only when the layout this window booted
-        // with has never recorded a bottom-zone window — a project that HAS a
-        // saved layout always records one (save_window_layout writes
-        // active_tool_windows every time), so a user who closed the panel in
-        // this project keeps it closed.
+        // visible in its zone, unconditionally. The zen-effective block
+        // immediately below still wins over this — it re-hides 'bottom' (and
+        // 'left'/'right') whenever __termlabEffectiveZen is true — so a
+        // zen-effective project window never gets its panels revealed here
+        // only to have them hidden a moment later.
+        //
+        // CONTROLLER RULING (task-6 review, F3): this block used to reveal
+        // the panel only when the layout this window booted with had never
+        // recorded a bottom-zone window (a `knowsBottom` guard), intending to
+        // respect a user who had deliberately closed the panel in this
+        // project. In practice that guard was a no-op for nearly every
+        // install: the saved layout is GLOBAL, not per-project, and
+        // register() unconditionally writes a zone assignment for every
+        // built-in tool window — including file-explorer itself — the
+        // moment ANY window has ever run, so `knowsBottom` read true for
+        // essentially every existing user and the reveal never fired.
+        // Dropped entirely per this ruling: a project window always reveals
+        // its Files tool window. Task 12's per-project layouts are the
+        // intended home for "this project's panel was deliberately closed";
+        // until that lands, always-reveal is the correct default.
         if (projectRoot) {
-          const savedActive = (initialLayoutData && initialLayoutData.active_tool_windows) || {};
-          const knowsBottom = Object.keys(savedActive)
-            .some((zone) => String(zone).startsWith('bottom'));
-          if (!knowsBottom) {
-            global.toolWindowManager.setPanelVisibility('bottom', true, { save: false });
-            global.toolWindowManager.activate('file-explorer');
-          }
+          global.toolWindowManager.setPanelVisibility('bottom', true, { save: false });
+          global.toolWindowManager.activate('file-explorer');
         }
 
         // Reads the EFFECTIVE zen decision (startup-runtime.js), not the raw

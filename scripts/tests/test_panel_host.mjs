@@ -894,6 +894,13 @@ function makeFakeManager() {
     setSidebarWidth: record('setSidebarWidth'),
     setSplitRatio: record('setSplitRatio'),
     setPanelVisibility: record('setPanelVisibility'),
+    // Added for the task-6 review's F3 project-boot-visibility coverage: a
+    // project window's boot path calls activate('file-explorer') directly
+    // (not through the legacy toggle path Part 1 exercises), which no
+    // existing Part 2 test reached before — a fake manager without this
+    // would throw "activate is not a function" the first time that path ran.
+    activate: record('activate'),
+    deactivate: record('deactivate'),
     register(id, opts) { calls.push({ name: 'register', args: [id, opts] }); },
     summonPendingWindowHosts: record('summonPendingWindowHosts'),
     notifyHostShown: record('notifyHostShown'),
@@ -942,6 +949,20 @@ async function loadRuntime(savedLayout, opts) {
   sandbox.global = sandbox;
   sandbox.toolWindowManager = twm;
   sandbox.toast = {};
+  // task-6 review, F3/F5(iv): create(deps) reads global.termlabProjectMode
+  // once, at create() time, to resolve this window's projectRoot — only set
+  // when a scenario asks for it, so every other Part 2 test keeps exercising
+  // the plain (non-project) window path unchanged.
+  if (options.projectRoot) {
+    sandbox.termlabProjectMode = { root: () => options.projectRoot };
+  }
+  // The EFFECTIVE zen decision startup-runtime.js would have already
+  // computed and published by the time tool-window-runtime.js's init() runs
+  // — read as window.__termlabEffectiveZen (== sandbox.__termlabEffectiveZen,
+  // since sandbox.window === sandbox here).
+  if (options.effectiveZen) {
+    sandbox.__termlabEffectiveZen = true;
+  }
   sandbox.termlabTransferRuntime = {
     ensureStarted(options) {
       twm.calls.push({ name: 'transferEnsureStarted', args: [options] });
@@ -1054,6 +1075,63 @@ async function loadRuntime(savedLayout, opts) {
   assert.ok(summonIdx > firstRegisterIdx, 'summoning happens AFTER registrations complete');
   const lastRegisterIdx = twm.calls.map((c) => c.name).lastIndexOf('register');
   assert.ok(summonIdx > lastRegisterIdx, 'summoning happens after the LAST registration');
+}
+
+// --- 16a. A project window boot always reveals the Files tool window
+// (task-6 review, F3/F5(iv)) -------------------------------------------
+// This is deliberately given a layout where active_tool_windows already
+// records a 'bottom' zone window (mirroring how save_window_layout writes
+// active_tool_windows on essentially every save) — the ORIGINAL, buggy
+// `knowsBottom` guard would have read this as "the layout already knows
+// about bottom" and skipped the reveal entirely, which is exactly the no-op
+// bug F3 found. The controller's ruling dropped that guard: the reveal is
+// now unconditional whenever this window has a project.
+{
+  const { twm } = await loadRuntime(
+    // 'bottom-left', not 'right-top': this is the realistic case — an
+    // existing install's saved layout already has file-explorer (or
+    // whatever else lives there) recorded in a bottom-prefixed zone, simply
+    // because that IS file-explorer's own default zone. The old
+    // `knowsBottom` guard treated this as "the layout already knows about
+    // bottom, leave it alone" and skipped the reveal — which is exactly the
+    // near-universal no-op F3 found. A key that does NOT start with
+    // 'bottom' would not have reproduced the bug (the guard was already
+    // passing in that case), so this is deliberately NOT a 'right-top' key.
+    { active_tool_windows: { 'bottom-left': 'file-explorer' } },
+    { projectRoot: '/repo' },
+  );
+  const reveal = twm.calls.find((c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom' && c.args[1] === true);
+  const activateCall = twm.calls.find((c) => c.name === 'activate' && c.args[0] === 'file-explorer');
+  assert.ok(reveal, 'a project window boot must reveal the bottom zone, even when the layout already records one');
+  assert.ok(activateCall, 'a project window boot must activate file-explorer');
+  const registration = twm.calls.find((c) => c.name === 'register' && c.args[0] === 'file-explorer');
+  assert.strictEqual(registration.args[1].title, 'Project', 'file-explorer is titled Project, not SFTP, in a project window');
+}
+
+// --- 16b. ...but a zen-effective project window does NOT end up revealed
+// (task-6 review, F3/F5(iv)) -------------------------------------------
+// The reveal above still fires unconditionally (it must — the zen-effective
+// check runs strictly after it in source order), but the zen block that
+// follows it re-hides 'left'/'right'/'bottom' whenever
+// window.__termlabEffectiveZen is true, and that re-hide must be the LAST
+// word on 'bottom' visibility for this scenario.
+{
+  const { twm } = await loadRuntime(
+    {},
+    { projectRoot: '/repo', effectiveZen: true },
+  );
+  const bottomVisibilityCalls = twm.calls.filter(
+    (c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom',
+  );
+  assert.ok(bottomVisibilityCalls.length >= 2,
+    'both the project reveal and the zen re-hide must have run against bottom');
+  const last = bottomVisibilityCalls[bottomVisibilityCalls.length - 1];
+  assert.strictEqual(last.args[1], false,
+    'the zen-effective hide must be the LAST setPanelVisibility(bottom, ...) call — zen wins over the project reveal');
+  // activate('file-explorer') still fires (the reveal block ran), but that's
+  // fine: a hidden zone's active tab is inert, and this is what
+  // summonPendingWindowHosts / a later zen-off toggle restores correctly.
+  assert.ok(twm.calls.some((c) => c.name === 'activate' && c.args[0] === 'file-explorer'));
 }
 
 // --- 17. The four panel-host events are wired to the manager --------------
