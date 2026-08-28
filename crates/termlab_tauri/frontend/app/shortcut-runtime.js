@@ -81,6 +81,21 @@
       'editor-previous-problem',
     ];
 
+    // Core actions that mean something only in a window that has a project.
+    // The Search tool window is only ever registered when
+    // termlabProjectMode.isActive() — see tool-window-runtime.js — so
+    // claiming the combo in a plain terminal window would swallow it for
+    // nothing: menu-actions.js's 'search-in-project' branch would just no-op
+    // against an id toolWindowManager never registered. Dropped, exactly
+    // like EDITOR_SCOPED_ACTIONS, so cmd+shift+f still reaches the shell (or
+    // any tool-window/plugin binding on the same combo) there.
+    const PROJECT_SCOPED_ACTIONS = ['search-in-project'];
+
+    function hasProject() {
+      const projectMode = global.termlabProjectMode;
+      return !!(projectMode && typeof projectMode.isActive === 'function' && projectMode.isActive());
+    }
+
     function runCoreAction(action) {
       if (action === 'navigate-pane-up') navigatePane('up');
       else if (action === 'navigate-pane-down') navigatePane('down');
@@ -274,6 +289,10 @@
             suppressedCoreAction = coreHit.action;
             coreHit = null;
           }
+        }
+        if (coreHit && PROJECT_SCOPED_ACTIONS.indexOf(coreHit.action) !== -1 && !hasProject()) {
+          suppressedCoreAction = coreHit.action;
+          coreHit = null;
         }
         if (coreHit) {
           runCoreAction(coreHit.action);

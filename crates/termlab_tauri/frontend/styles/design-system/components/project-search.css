@@ -100,6 +100,11 @@
   background: var(--tl-row-hover);
 }
 
+.tl-project-search__row.is-active {
+  background: var(--tl-selection-bg);
+  color: var(--tl-selection-fg);
+}
+
 .tl-project-search__row:focus-visible {
   outline: 2px solid var(--tl-accent);
   outline-offset: -2px;

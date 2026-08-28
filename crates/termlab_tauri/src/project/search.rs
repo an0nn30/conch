@@ -127,7 +127,13 @@ pub(crate) fn run_search(
     // must be turned off — the default only honours `.gitignore` when the
     // root sits inside an actual `.git` repository, but a project root here
     // is whatever directory the user opened, git-tracked or not.
-    let walker = ignore::WalkBuilder::new(root).require_git(false).build();
+    // Sorted so results land in the same order on every machine and every
+    // filesystem — an unsorted walk order is directory-entry order, which is
+    // often creation order and varies run to run.
+    let walker = ignore::WalkBuilder::new(root)
+        .require_git(false)
+        .sort_by_file_path(|a, b| a.cmp(b))
+        .build();
     for entry in walker {
         if cancel.load(Ordering::Relaxed) {
             outcome.cancelled = true;
@@ -373,6 +379,33 @@ mod tests {
         assert!(
             found[0].path.ends_with("kept.rs"),
             "the absolute path is carried too"
+        );
+    }
+
+    #[test]
+    fn run_search_visits_files_in_deterministic_path_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // Names picked so that a directory-entry-order walk (whatever the
+        // filesystem happens to hand back — often creation order, which is
+        // the reverse of this) would very likely disagree with alphabetical.
+        std::fs::write(root.join("zeta.txt"), b"needle\n").expect("write");
+        std::fs::write(root.join("mid.txt"), b"needle\n").expect("write");
+        std::fs::write(root.join("alpha.txt"), b"needle\n").expect("write");
+
+        let cancel = AtomicBool::new(false);
+        let mut found = Vec::new();
+        run_search(root, &opts("needle", true), &cancel, |m| {
+            found.push(m.relative_path)
+        });
+        assert_eq!(
+            found,
+            vec![
+                "alpha.txt".to_string(),
+                "mid.txt".to_string(),
+                "zeta.txt".to_string()
+            ],
+            "results must be in a stable, path-sorted order across machines/filesystems"
         );
     }
 
