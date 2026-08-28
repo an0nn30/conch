@@ -18,6 +18,7 @@ const MODE = path.join(APP, 'features/project/project-mode.js');
 const ROUTING = path.join(APP, 'features/editor/open-path-routing.js');
 const STARTUP = path.join(APP, 'startup-runtime.js');
 const INDEX_HTML = path.join(ROOT, 'index.html');
+const FILES_PANEL = path.join(APP, 'panels/files-panel.js');
 
 let ran = 0;
 let failures = 0;
@@ -380,6 +381,57 @@ check('Open Folder is reachable from the menu, the palette and Rust', () => {
   // Both builders: the plugin-aware rebuild must not silently drop the item.
   const occurrences = menuRs.split('MENU_OPEN_FOLDER_ID').length - 1;
   assert.ok(occurrences >= 4, `Open Folder must appear in both menu builders, saw ${occurrences} references`);
+});
+
+check('the files panel switches on projectRoot and can toggle back to dual-pane', () => {
+  const src = fs.readFileSync(FILES_PANEL, 'utf8');
+  assert.ok(src.includes('opts.projectRoot'), 'init takes a project root');
+  assert.ok(src.includes('termlabProjectTree'), 'project mode renders the tree module');
+  assert.ok(src.includes('fp-pane-container'), 'the dual-pane path is still built for non-project windows');
+  assert.ok(src.includes('isProjectMode'), 'the mode is queryable');
+  assert.ok(src.includes('setProjectMode'), 'the header toggle can switch back to dual-pane');
+  assert.ok(src.includes('projectTree'), 'the tree handle is reachable for git tints and the trust banner');
+});
+
+check('the tree context menu reuses the panel local operations plus new file and reveal', () => {
+  const src = fs.readFileSync(FILES_PANEL, 'utf8');
+  assert.ok(src.includes('buildTreeContextMenuItems'), 'the tree has its own item list');
+  for (const label of ["'New File…'", "'New Folder…'", "'Rename…'", "'Delete'", "'Copy Path'", "'Reveal in File Manager'"]) {
+    assert.ok(src.includes(label), `the tree context menu is missing ${label}`);
+  }
+  assert.ok(src.includes("invoke('project_reveal_path'"), 'reveal goes through the Rust command');
+  assert.ok(src.includes('doNewFile'), 'New File is a real local operation, not a stub');
+});
+
+check('the SFTP tool window stays reachable and is registered with a project-aware title', () => {
+  const src = fs.readFileSync(path.join(APP, 'tool-window-runtime.js'), 'utf8');
+  assert.ok(src.includes('projectRoot'), 'the runtime hands the project root to the files panel');
+  assert.ok(src.includes("termlabProjectMode"), 'the runtime asks the mode resolver');
+  const register = src.indexOf("register('file-explorer'");
+  const mode = src.indexOf('termlabProjectMode');
+  assert.ok(mode < register || src.indexOf('projectRoot', register) > register,
+    'the root must be known by the time file-explorer registers');
+});
+
+check('a project window opens with the Files tool window visible', () => {
+  const src = fs.readFileSync(path.join(APP, 'tool-window-runtime.js'), 'utf8');
+  assert.ok(src.includes("activate('file-explorer')"), 'a project window activates the Files panel');
+  assert.ok(src.includes('knowsBottom'), 'and only when the layout has never recorded a bottom-zone window');
+  const register = src.indexOf('registerBuiltInToolWindows();');
+  const activate = src.indexOf("activate('file-explorer')");
+  assert.ok(register < activate, 'the panel must be registered before it can be activated');
+});
+
+check('the panel modules use no regex lookbehind and no control bytes', () => {
+  for (const file of [FILES_PANEL]) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.ok(!/\(\?<[=!]/.test(source), `${file} uses a lookbehind`);
+    const bytes = fs.readFileSync(file);
+    for (let i = 0; i < bytes.length; i += 1) {
+      assert.ok(bytes[i] >= 0x20 || bytes[i] === 0x0a || bytes[i] === 0x09,
+        `${file}: control byte at offset ${i}`);
+    }
+  }
 });
 
 for (const { name, fn } of queued) {

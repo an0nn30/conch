@@ -21,6 +21,14 @@
   let getActiveTabFn = null;
   let transferController = null;
   let unsubscribeTransferRuntime = null;
+  // Project mode: this window has a project, so the panel renders a single
+  // lazy tree instead of the dual-pane local+SFTP explorer. Per-window and
+  // not persisted in v1 — the header toggle switches views for this session
+  // only, which is what keeps SFTP fully reachable from a project window.
+  let projectRoot = null;
+  let projectMode = false;
+  let projectTreeHandle = null;
+  let projectRootMissing = false;
   const FILES_TRANSFER_OPTIONS = Object.freeze({
     origin: 'filesPanel',
     conflictPolicy: Object.freeze({ kind: 'ask' }),
@@ -433,6 +441,8 @@
       || null;
     fitActiveTabFn = opts.fitActiveTab;
     getActiveTabFn = opts.getActiveTab;
+    projectRoot = opts.projectRoot || null;
+    projectMode = !!projectRoot;
     const transferRuntime = window.termlabTransferRuntime;
     const transferDialogs = window.termlabTransferDialogs;
     transferController = filesTransfers && typeof filesTransfers.createController === 'function'
@@ -465,44 +475,7 @@
       return;
     }
 
-    panelEl.innerHTML = `
-      <div class="fp-pane-container">
-        <div class="fp-pane" id="fp-local"></div>
-        <div class="fp-pane-divider" id="fp-pane-divider"></div>
-        <div class="fp-pane" id="fp-remote"></div>
-      </div>
-    `;
-
-    // Resizable splitter between the panes. Orientation is read per-drag from
-    // the computed style because the zone CSS flips the container to a column
-    // when this tool window docks in a sidebar.
-    if (window.termlabFilesSplit) {
-      const containerEl = panelEl.querySelector('.fp-pane-container');
-      window.termlabFilesSplit.attach({
-        container: containerEl,
-        firstEl: panelEl.querySelector('#fp-local'),
-        secondEl: panelEl.querySelector('#fp-remote'),
-        dividerEl: panelEl.querySelector('#fp-pane-divider'),
-        storage: window.localStorage,
-        getOrientation: () => (
-          window.getComputedStyle(containerEl).flexDirection === 'column' ? 'column' : 'row'
-        ),
-      });
-    }
-
-    // Start local pane at home
-    const homePromise = filesDataService && typeof filesDataService.getHomeDir === 'function'
-      ? filesDataService.getHomeDir(invoke)
-      : Promise.reject(new Error('Files data service unavailable: getHomeDir'));
-    homePromise.then((home) => {
-      localPane.currentPath = home;
-      localPane.pathInput = home;
-      loadEntries(localPane);
-    }).catch(() => {
-      localPane.currentPath = '/';
-      localPane.pathInput = '/';
-      loadEntries(localPane);
-    });
+    renderPanelBody();
 
     // Listen for transfer progress
     if (opts.listen) {
@@ -535,6 +508,197 @@
     refreshHostCombo();
     startLocalCwdPolling();
     startRemoteCwdPolling();
+  }
+
+  // The panel has exactly two shapes and one switch between them. Every
+  // dual-pane behaviour below this line is untouched: a non-project window
+  // takes renderDualPane and nothing else in this file behaves differently.
+  function renderPanelBody() {
+    if (!panelEl) return;
+    if (projectTreeHandle) {
+      projectTreeHandle.destroy();
+      projectTreeHandle = null;
+    }
+    panelEl.innerHTML = '';
+    if (projectMode && projectRoot) renderProjectTree();
+    else renderDualPane();
+  }
+
+  function renderDualPane() {
+    if (projectRoot) {
+      // A project window toggling back from the tree already has a header
+      // appended below, so the pane markup has to be ADDED rather than
+      // replace panelEl's contents wholesale — built as real DOM nodes,
+      // sibling to the header, rather than an innerHTML template (which
+      // would wipe it). .fp-pane-container stays a direct child of panelEl:
+      // panels.css sizes it with flex: 1 against #files-panel's own flex
+      // column, which an intervening wrapper div would break.
+      const header = document.createElement('div');
+      header.className = 'fp-project-header';
+      const label = document.createElement('span');
+      label.className = 'fp-project-header__name';
+      label.textContent = 'Local + Remote';
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'tl-project-tree__button';
+      toggle.textContent = 'Project';
+      toggle.setAttribute('data-files-mode-toggle', 'project');
+      toggle.setAttribute('aria-label', 'Switch to the project tree');
+      toggle.addEventListener('click', () => setProjectMode(true));
+      header.appendChild(label);
+      header.appendChild(toggle);
+      panelEl.appendChild(header);
+
+      const paneContainer = document.createElement('div');
+      paneContainer.className = 'fp-pane-container';
+      const localPaneEl = document.createElement('div');
+      localPaneEl.className = 'fp-pane';
+      localPaneEl.id = 'fp-local';
+      const paneDivider = document.createElement('div');
+      paneDivider.className = 'fp-pane-divider';
+      paneDivider.id = 'fp-pane-divider';
+      const remotePaneEl = document.createElement('div');
+      remotePaneEl.className = 'fp-pane';
+      remotePaneEl.id = 'fp-remote';
+      paneContainer.appendChild(localPaneEl);
+      paneContainer.appendChild(paneDivider);
+      paneContainer.appendChild(remotePaneEl);
+      panelEl.appendChild(paneContainer);
+    } else {
+      // No project, no header, no risk of wiping anything — panelEl was just
+      // cleared by renderPanelBody, so a single innerHTML template is the
+      // simplest way to lay down the pane markup (also keeps this branch
+      // working against the plain-object panelEl stubs the older, non-
+      // project files-panel test harnesses use, which do not implement a
+      // real DOM's element-construction API).
+      panelEl.innerHTML = `
+        <div class="fp-pane-container">
+          <div class="fp-pane" id="fp-local"></div>
+          <div class="fp-pane-divider" id="fp-pane-divider"></div>
+          <div class="fp-pane" id="fp-remote"></div>
+        </div>
+      `;
+    }
+
+    // Resizable splitter between the panes. Orientation is read per-drag from
+    // the computed style because the zone CSS flips the container to a column
+    // when this tool window docks in a sidebar.
+    if (window.termlabFilesSplit) {
+      const containerEl = panelEl.querySelector('.fp-pane-container');
+      window.termlabFilesSplit.attach({
+        container: containerEl,
+        firstEl: panelEl.querySelector('#fp-local'),
+        secondEl: panelEl.querySelector('#fp-remote'),
+        dividerEl: panelEl.querySelector('#fp-pane-divider'),
+        storage: window.localStorage,
+        getOrientation: () => (
+          window.getComputedStyle(containerEl).flexDirection === 'column' ? 'column' : 'row'
+        ),
+      });
+    }
+
+    // Start local pane at home
+    const homePromise = filesDataService && typeof filesDataService.getHomeDir === 'function'
+      ? filesDataService.getHomeDir(invoke)
+      : Promise.reject(new Error('Files data service unavailable: getHomeDir'));
+    homePromise.then((home) => {
+      localPane.currentPath = home;
+      localPane.pathInput = home;
+      loadEntries(localPane);
+    }).catch(() => {
+      localPane.currentPath = '/';
+      localPane.pathInput = '/';
+      loadEntries(localPane);
+    });
+  }
+
+  function renderProjectTree() {
+    const header = document.createElement('div');
+    header.className = 'fp-project-header';
+    const label = document.createElement('span');
+    label.className = 'fp-project-header__name';
+    label.textContent = (window.termlabProjectMode && window.termlabProjectMode.name()) || projectRoot;
+    label.title = projectRoot;
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tl-project-tree__button';
+    toggle.textContent = 'SFTP';
+    toggle.setAttribute('data-files-mode-toggle', 'dual');
+    toggle.setAttribute('aria-label', 'Switch to the local and remote file explorer');
+    toggle.addEventListener('click', () => setProjectMode(false));
+    header.appendChild(label);
+    header.appendChild(toggle);
+    panelEl.appendChild(header);
+
+    if (!window.termlabProjectTree || typeof window.termlabProjectTree.create !== 'function') {
+      console.error('files-panel: project-tree module is unavailable');
+      return;
+    }
+    projectTreeHandle = window.termlabProjectTree.create({
+      invoke,
+      root: projectRoot,
+      showHidden: false,
+      onOpenFile: (filePath) => {
+        Promise.resolve(openTreeFile(filePath)).catch((error) => {
+          console.error('files-panel: could not open in editor', error);
+          window.toast.error('Could Not Open File', String(error));
+        });
+      },
+      onContextMenu: (event, node) => {
+        if (!filesPaneView || typeof filesPaneView.showRowContextMenu !== 'function') return;
+        filesPaneView.showRowContextMenu(event, buildTreeContextMenuItems(node));
+      },
+      onReopen: () => {
+        Promise.resolve(invoke('project_pick_folder'))
+          .then((picked) => (picked ? invoke('project_open', { path: picked }) : null))
+          .catch((e) => window.toast.error('Cannot Open Folder', String(e)));
+      },
+      toastError: (title, body) => window.toast.error(title, body),
+    });
+    panelEl.appendChild(projectTreeHandle.element);
+    projectTreeHandle.refreshAll();
+    checkProjectRootPresence();
+  }
+
+  // The same route the dual-pane explorer's local rows take: the editor
+  // service owns the ownership protocol and the jump trail records the open.
+  function openTreeFile(filePath) {
+    const service = window.termlabEditorService;
+    if (!service || typeof service.openLocalFile !== 'function') {
+      window.toast.error('Could Not Open File', 'The editor is unavailable in this window.');
+      return null;
+    }
+    return service.openLocalFile(filePath);
+  }
+
+  function setProjectMode(on) {
+    if (!projectRoot) return;
+    projectMode = on === true;
+    renderPanelBody();
+    if (typeof fitActiveTabFn === 'function') fitActiveTabFn();
+  }
+
+  function isProjectMode() {
+    return projectMode;
+  }
+
+  function projectTree() {
+    return projectTreeHandle;
+  }
+
+  // The root can vanish while the window is open. Open editor tabs are
+  // untouched; only the tree changes state.
+  function checkProjectRootPresence() {
+    if (!projectRoot || !projectTreeHandle) return Promise.resolve();
+    return Promise.resolve(invoke('local_stat', { path: projectRoot }))
+      .then((entry) => {
+        projectRootMissing = !(entry && entry.is_dir);
+        projectTreeHandle.setMissing(projectRootMissing);
+      })
+      .catch(() => {
+        projectRootMissing = true;
+        projectTreeHandle.setMissing(true);
+      });
   }
 
   function hasPanelDom() {
@@ -1491,6 +1655,50 @@
   // Row actions — New Folder / Rename / Delete / Copy Path (row context menu)
   // ---------------------------------------------------------------------------
 
+  // The tree's context menu offers New File, which the dual-pane explorer
+  // never had. An empty write through the editor's own writer keeps one
+  // definition of "create a text file" rather than adding a second command.
+  //
+  // editor_write_file() (write_text_file in editor_fs.rs) writes
+  // unconditionally — it has no create-vs-overwrite distinction, so calling
+  // it straight through on a name that already exists would silently empty
+  // that file. local_stat rejects when nothing exists at the target path,
+  // which is the only case creation should proceed in — resolving instead
+  // means something is already there, so refuse rather than truncate it.
+  function doNewFile(dirPath, afterCreate) {
+    showTextPromptDialog({
+      title: 'New File',
+      label: 'Name',
+      initialValue: '',
+      confirmLabel: 'Create',
+      onConfirm: (name) => {
+        const target = joinPath(dirPath, name);
+        const statPromise = filesDataService && typeof filesDataService.statLocal === 'function'
+          ? filesDataService.statLocal(invoke, target)
+          : invoke('local_stat', { path: target });
+        Promise.resolve(statPromise).then(
+          () => {
+            window.toast.error('New File Failed', `"${name}" already exists.`);
+          },
+          () => Promise.resolve(invoke('editor_write_file', { path: target, contents: '' }))
+            .then(() => { if (typeof afterCreate === 'function') afterCreate(); })
+            .catch((e) => window.toast.error('New File Failed', String(e))),
+        );
+      },
+    });
+  }
+
+  function doRevealPath(targetPath) {
+    Promise.resolve(invoke('project_reveal_path', { path: targetPath }))
+      .catch((e) => window.toast.error('Reveal Failed', String(e)));
+  }
+
+  // One place that decides what "the view changed" means for the two shapes.
+  function refreshAfterLocalOp(pane) {
+    if (projectMode && projectTreeHandle) return projectTreeHandle.refresh(pane.currentPath);
+    return loadEntries(pane);
+  }
+
   function doNewFolder(pane) {
     showTextPromptDialog({
       title: 'New Folder',
@@ -1507,7 +1715,7 @@
             ? filesDataService.remoteMkdir(invoke, activeRemotePaneId, path)
             : Promise.reject(new Error('Files data service unavailable: remoteMkdir')));
         mkdirPromise
-          .then(() => loadEntries(pane))
+          .then(() => refreshAfterLocalOp(pane))
           .catch((e) => window.toast.error('New Folder Failed', String(e)));
       },
     });
@@ -1531,7 +1739,7 @@
             ? filesDataService.remoteRename(invoke, activeRemotePaneId, from, to)
             : Promise.reject(new Error('Files data service unavailable: remoteRename')));
         renamePromise
-          .then(() => loadEntries(pane))
+          .then(() => refreshAfterLocalOp(pane))
           .catch((e) => window.toast.error('Rename Failed', String(e)));
       },
     });
@@ -1553,7 +1761,7 @@
             ? filesDataService.remoteRemove(invoke, activeRemotePaneId, path, !!entry.is_dir)
             : Promise.reject(new Error('Files data service unavailable: remoteRemove')));
         removePromise
-          .then(() => loadEntries(pane))
+          .then(() => refreshAfterLocalOp(pane))
           .catch((e) => window.toast.error('Delete Failed', String(e)));
       },
     });
@@ -1572,6 +1780,47 @@
   // ---------------------------------------------------------------------------
   // Row context menu
   // ---------------------------------------------------------------------------
+
+  // Reuses the panel's own local operations against a tree row. The dual-pane
+  // list keeps buildRowContextMenuItems (which carries the transfer entries a
+  // tree has no use for); this is the tree's list, and both go through the
+  // same filesPaneView.showRowContextMenu renderer.
+  function buildTreeContextMenuItems(node) {
+    // Where "create inside" operations land, and what Refresh reloads: the
+    // node itself when it is a directory, its parent when it is a file (a
+    // file has no listing of its own to refresh or create into).
+    const containingDir = node.isDir ? node.path : node.parentPath;
+    const reload = () => {
+      if (!projectTreeHandle) return;
+      projectTreeHandle.refresh(containingDir);
+    };
+    const dirPane = { isLocal: true, currentPath: containingDir, prefix: 'project' };
+    // Rename/Delete/Copy Path act ON the node itself, so the pseudo-pane's
+    // directory must be the node's own PARENT — doRename/doDelete/doCopyPath
+    // all rebuild the target as joinPath(pane.currentPath, entry.name), and
+    // that must land back on node.path. Reusing containingDir here would be
+    // wrong for a directory node: containingDir IS node.path, so joining the
+    // node's own name onto it would target a nonexistent child of itself
+    // instead of the directory.
+    const nodePane = { isLocal: true, currentPath: node.parentPath, prefix: 'project' };
+    return [
+      // 'add', not 'newFile': there is no newFile.svg in vendor/intellij-icons
+      // (only 'newFolder' was ever vendored), and 'add' is the codebase's
+      // existing "create new thing" glyph (see ssh-panel.js's New Connection /
+      // Add Server Here) — using 'newFile' verbatim would render a broken
+      // image icon in the menu.
+      { icon: 'add', label: 'New File…', action: () => doNewFile(containingDir, reload) },
+      { icon: 'newFolder', label: 'New Folder…', action: () => doNewFolder(dirPane) },
+      { type: 'separator' },
+      { icon: 'edit', label: 'Rename…', action: () => doRename(nodePane, { name: node.name, is_dir: node.isDir }) },
+      { icon: 'remove', label: 'Delete', danger: true, action: () => doDelete(nodePane, { name: node.name, is_dir: node.isDir }) },
+      { type: 'separator' },
+      { icon: 'copy', label: 'Copy Path', action: () => doCopyPath(nodePane, { name: node.name }) },
+      { label: 'Reveal in File Manager', action: () => doRevealPath(node.path) },
+      { type: 'separator' },
+      { icon: 'refresh', label: 'Refresh', action: reload },
+    ];
+  }
 
   function buildRowContextMenuItems(pane, entry) {
     const noSession = !activeRemotePaneId;
@@ -1796,5 +2045,9 @@
   // API surface otherwise.
   exports.filesPanel = {
     init, togglePanel, isHidden, onTabChanged, pinRemotePane, pollActiveRemotePaneCwd,
+    isProjectMode,
+    setProjectMode,
+    projectTree,
+    checkProjectRootPresence,
   };
 })(window);

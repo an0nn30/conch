@@ -23,6 +23,11 @@
     const setFocusedPane = deps.setFocusedPane;
     const closePane = deps.closePane;
     const getPluginViewPaneById = deps.getPluginViewPaneById;
+    // Read once at create() time: project mode is adopted during boot,
+    // before this runtime is created, so the root is already settled by the
+    // time file-explorer registers below.
+    const projectMode = global.termlabProjectMode || null;
+    const projectRoot = projectMode && typeof projectMode.root === 'function' ? projectMode.root() : null;
     const registeredPluginToolWindows = new Set();
     let resizeDragDepth = 0;
     let transferRuntimeStartup = null;
@@ -108,7 +113,7 @@
     // would have used, so there is exactly one definition of each.
     function registerBuiltInToolWindows() {
       global.toolWindowManager.register('file-explorer', {
-        title: 'SFTP',
+        title: projectRoot ? 'Project' : 'SFTP',
         icon: 'sftp',
         type: 'built-in',
         defaultZone: 'bottom',
@@ -128,6 +133,7 @@
               layoutService,
               fitActiveTab: debouncedFitAndResize,
               getActiveTab: () => getCurrentTab(),
+              projectRoot,
             });
           }
         },
@@ -621,6 +627,22 @@
 
         registerBuiltInToolWindows();
 
+        // Spec section 1: a project window opens with the Files tool window
+        // visible in its zone. Applied only when the layout this window booted
+        // with has never recorded a bottom-zone window — a project that HAS a
+        // saved layout always records one (save_window_layout writes
+        // active_tool_windows every time), so a user who closed the panel in
+        // this project keeps it closed.
+        if (projectRoot) {
+          const savedActive = (initialLayoutData && initialLayoutData.active_tool_windows) || {};
+          const knowsBottom = Object.keys(savedActive)
+            .some((zone) => String(zone).startsWith('bottom'));
+          if (!knowsBottom) {
+            global.toolWindowManager.setPanelVisibility('bottom', true, { save: false });
+            global.toolWindowManager.activate('file-explorer');
+          }
+        }
+
         // Reads the EFFECTIVE zen decision (startup-runtime.js), not the raw
         // saved layout: a project window can inherit a saved zen_mode=true
         // and still force zen off (it keeps its panels on purpose), and the
@@ -824,6 +846,18 @@
         });
 
         initPluginToolWindows();
+      }
+
+      // No filesystem watcher in v1: freshness comes from explicit triggers.
+      // Window focus is the one that matters — the user has just come back
+      // from an editor, a terminal, or another app that changed files.
+      if (projectRoot) {
+        global.addEventListener('focus', () => {
+          if (!global.filesPanel || !global.filesPanel.isProjectMode()) return;
+          const tree = global.filesPanel.projectTree();
+          if (tree) tree.refreshAll();
+          global.filesPanel.checkProjectRootPresence();
+        });
       }
 
       return {

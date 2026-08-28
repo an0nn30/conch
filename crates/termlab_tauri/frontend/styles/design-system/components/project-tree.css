@@ -156,3 +156,25 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* The files panel's mode header — the one control that switches a project
+   window between the project tree and the classic local+remote explorer, so
+   SFTP is never more than one click away from a project. */
+.fp-project-header {
+  flex: 0 0 var(--tl-toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-width: 0;
+  padding: 0 var(--tl-space-2);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+.fp-project-header__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tl-fg);
+}
