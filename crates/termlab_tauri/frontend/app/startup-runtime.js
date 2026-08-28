@@ -146,6 +146,28 @@
         // Published for the post-fit window sizing in main-runtime.js, which
         // runs long after this and needs the configured columns/lines.
         window.__termlabAppConfig = appCfg;
+
+        // Adopt a queued directory as THIS window's project before the layout
+        // is read: `get_saved_layout` returns the per-project layout once the
+        // window is bound, and the tool-window runtime (which registers the
+        // Search window only for a project) runs later still.
+        //
+        // Gated on pending_open_paths_kind === 'project': a mixed queue (a
+        // directory queued alongside a file for the same window) classifies
+        // as "files" — the file's editor-only zen window is the stronger
+        // claim, and adopting unconditionally would still drain the
+        // directory (project_adopt_pending only takes directories out of the
+        // queue) and bind a project root onto what should stay a zen
+        // file-editor window.
+        if (global.termlabProjectMode && typeof global.termlabProjectMode.adopt === 'function') {
+          try {
+            const pendingKindForAdopt = await invoke('pending_open_paths_kind');
+            if (pendingKindForAdopt === 'project') {
+              await global.termlabProjectMode.adopt(invoke);
+            }
+          } catch (_) {}
+        }
+
         if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
           global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
         }
@@ -188,20 +210,26 @@
             // No window label: treat it as the main window and honour the
             // saved layout.
           }
-          // A window with queued CLI open paths (`termlab notes.md`) boots in
-          // zen regardless of the saved layout or window kind: it is about to
-          // become an editor-only window (main-runtime skips the terminal
-          // tab), and should read as a small editor app, not a terminal with
-          // chrome. `has_pending_open_paths` is a non-destructive peek — the
-          // destructive take happens later in main-runtime, after the editor
-          // service exists. Session-only, same as the new-window default:
-          // this window must never teach the shared layout to open in zen.
+          // A window with queued CLI FILE paths (`termlab notes.md`) boots in
+          // zen regardless of the saved layout: it is about to become an
+          // editor-only window. A window opening a PROJECT (`termlab .`) does
+          // the opposite — it keeps its panels, because the tree and the
+          // search panel are the point. `pending_open_paths_kind` is a
+          // non-destructive peek; the destructive take happens later in
+          // main-runtime, after the editor service exists. Session-only, same
+          // as the new-window default: this window must never teach the
+          // shared layout to open in zen.
           try {
-            if (await invoke('has_pending_open_paths')) {
+            const pendingKind = await invoke('pending_open_paths_kind');
+            if (pendingKind === 'files') {
               zenOn = true;
               window.__termlabZenIsSessionDefault = true;
             }
           } catch (_) {}
+          if (global.termlabProjectMode && global.termlabProjectMode.isActive()) {
+            zenOn = false;
+            window.__termlabZenIsSessionDefault = true;
+          }
           if (zenOn) {
             document.getElementById('app').classList.add('zen-mode');
           } else {

@@ -74,27 +74,22 @@ function loadRuntime() {
   assert.deepStrictEqual(calls.toasts, [], 'a plain file open raises no toast');
 }
 
-// The toast deps really are wired to the global toast system (a directory is
-// the cheapest path that produces one).
+// A directory reaches project_open through the wiring (the seam that used to
+// answer with a "coming soon" toast).
 {
   const sandbox = loadRuntime();
-  const toasts = [];
   sandbox.termlabEditorService = { openLocalFile: () => { throw new Error('must not open a directory'); } };
-  sandbox.toast = {
-    error: (title, body) => { toasts.push(['error', body]); },
-    info: (title, body) => { toasts.push(['info', body]); },
-  };
+  sandbox.toast = { error: () => {}, info: () => {} };
+  const invoked = [];
   const invoke = async (cmd) => {
+    invoked.push(cmd);
     if (cmd === 'take_pending_open_paths') return ['/tmp/dir'];
+    if (cmd === 'project_open') return { root: '/tmp/dir', name: 'dir', windowLabel: 'window-2', focusedExisting: false };
     return { name: 'dir', is_dir: true, size: 0, modified: null, permissions: null };
   };
   const drain = sandbox.termlabEventWiringRuntime.wirePendingOpenDrain(sandbox, { invoke });
   await drain.drainPendingOpens();
-  assert.strictEqual(toasts.length, 1);
-  assert.deepStrictEqual(
-    toasts[0],
-    ['info', sandbox.termlabOpenPathRouting.DIRECTORY_COMING_SOON],
-  );
+  assert.ok(invoked.includes('project_open'), 'a directory must reach project_open');
 }
 
 // A missing toast global must not throw — the wiring's toast deps are

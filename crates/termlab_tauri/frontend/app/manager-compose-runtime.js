@@ -133,7 +133,7 @@
               console.error('write_to_pty error:', event);
             });
           },
-          spawnShell: (paneId, cols, rows) => invoke('spawn_shell', { paneId, cols, rows }),
+          spawnShell: (paneId, cols, rows, cwd) => invoke('spawn_shell', { paneId, cols, rows, cwd: cwd || null }),
           spawnDefaultShell: (paneId, cols, rows) => invoke('spawn_default_shell', { paneId, cols, rows }),
           allocatePaneId: () => allocPaneId(),
           splitLeaf: (treeRoot, sourcePaneId, newPaneId, direction) => (
@@ -270,7 +270,7 @@
               console.error(cmd + ' error:', event);
             });
           },
-          spawnShell: (paneId, cols, rows) => invoke('spawn_shell', { paneId, cols, rows }),
+          spawnShell: (paneId, cols, rows, cwd) => invoke('spawn_shell', { paneId, cols, rows, cwd: cwd || null }),
           spawnDefaultShell: (paneId, cols, rows) => invoke('spawn_default_shell', { paneId, cols, rows }),
           onSshData: (_pane, paneId, data) => {
             if (shortcutDebugEnabled) {

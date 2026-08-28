@@ -168,20 +168,6 @@ pub(crate) fn pending_open_paths_kind(
         .to_string()
 }
 
-// TODO(Task 3): remove this deprecated wrapper once startup-runtime.js is
-// rewired to call `pending_open_paths_kind` directly. Kept for now so the
-// zen-on-pending-open boot behavior (see startup-runtime.js's
-// `has_pending_open_paths` call) does not silently regress between Task 2
-// and Task 3 landing — the frontend still calls the old command name and
-// its `invoke` error would otherwise be swallowed by an empty `catch`.
-#[tauri::command]
-pub(crate) fn has_pending_open_paths(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, PendingOpens>,
-) -> bool {
-    state.peek(window.label()).into_iter().next().is_some()
-}
-
 #[tauri::command]
 pub(crate) fn take_pending_open_paths(
     window: tauri::WebviewWindow,

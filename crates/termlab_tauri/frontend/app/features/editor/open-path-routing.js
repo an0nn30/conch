@@ -7,9 +7,8 @@
 // module asks. Each path is `local_stat`-ed to tell a file from a directory
 // from something that no longer exists, then routed:
 //   - a regular file opens in the editor
-//   - a directory is not supported yet — DIRECTORY_COMING_SOON is the one
-//     place that copy lives, so the later LSP/workspace-open branch has a
-//     single seam to replace
+//   - a directory is opened as a project (project_open focuses a window that
+//     already holds the same canonical root, else creates one)
 //   - a path that fails to stat (typically: gone before we got to it) is
 //     reported by name rather than silently dropped
 //
@@ -20,11 +19,10 @@
 (function initTermLabOpenPathRouting(global) {
   'use strict';
 
-  const DIRECTORY_COMING_SOON = 'Opening a folder from the command line is not supported yet — open it from the Files panel instead.';
-
   function create(deps) {
     const invoke = deps.invoke;
     const openLocalFile = deps.openLocalFile;
+    const openProject = deps.openProject;
     const toastError = deps.toastError;
     const toastInfo = deps.toastInfo;
 
@@ -40,7 +38,16 @@
         return false;
       }
       if (entry && entry.is_dir) {
-        toastInfo('Folder', DIRECTORY_COMING_SOON);
+        // A directory is a PROJECT, and a project owns a window: this returns
+        // false because no editor opened here, which is what the boot path
+        // counts. Reported by name on failure rather than dropped — a folder
+        // that vanished between the stat and the open is exactly the case a
+        // silent return would hide.
+        try {
+          await openProject(pathStr);
+        } catch (error) {
+          toastError('Cannot Open Folder', pathStr + ': ' + String(error));
+        }
         return false;
       }
       openLocalFile(pathStr);
@@ -67,5 +74,5 @@
     return { drainPendingOpens, routePaths };
   }
 
-  global.termlabOpenPathRouting = { create, DIRECTORY_COMING_SOON };
+  global.termlabOpenPathRouting = { create };
 })(window);

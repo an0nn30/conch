@@ -905,7 +905,6 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 windows::open_settings_window,
                 open_path::take_pending_open_paths,
                 open_path::pending_open_paths_kind,
-                open_path::has_pending_open_paths,
                 chooser_window::open_file_chooser,
                 chooser_window::get_chooser_request,
                 chooser_window::resolve_file_chooser,

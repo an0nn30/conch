@@ -447,7 +447,7 @@
       // no default terminal tab, just the editor(s) — `termlab notes.md`
       // should read as a small editor app. (startup-runtime already switched
       // this window into session-only zen via the non-destructive
-      // has_pending_open_paths peek.) The destructive take happens here,
+      // pending_open_paths_kind peek.) The destructive take happens here,
       // before any tab exists, so nothing races the editor tab. If nothing in
       // the queue actually opens — every path missing or a directory — fall
       // back to the normal terminal tab rather than presenting an empty
@@ -462,10 +462,19 @@
           }
         } catch (_) {}
       }
+      const projectRoot = window.termlabProjectMode && window.termlabProjectMode.isActive()
+        ? window.termlabProjectMode.root()
+        : null;
       if (cliOpenedEditors > 0) {
         // Closing this window's last tab opens a terminal tab instead of
         // closing the window; tab-manager.js consumes the flag once.
         window.__termlabEditorWindow = true;
+      } else if (projectRoot) {
+        // A project window's initial main content is one terminal at the
+        // project root; editor tabs join it as files are opened from the tree.
+        await createTab({ cwd: projectRoot }).catch((e) => {
+          showStatus('Failed to initialize project terminal: ' + String(e));
+        });
       } else {
         const firstTabPromise = createTab().catch((e) => {
           showStatus('Failed to initialize first tab: ' + String(e));

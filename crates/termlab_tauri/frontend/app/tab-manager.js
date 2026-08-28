@@ -163,6 +163,12 @@
         // path itself, so the prefix was duplicating what follows it.
         title = getTabLabel(tab.button) || tab.label || 'Terminal';
       }
+      // A project window keeps its name in the OS title across tab switches:
+      // the window is "conch", whatever tab happens to be active in it.
+      const projectName = window.__termlabProjectName;
+      if (projectName) {
+        title = title === 'TermLab' ? projectName : projectName + ' — ' + title;
+      }
       try {
         Promise.resolve(setWindowTitle(title)).catch(() => {});
       } catch (_) {
@@ -641,7 +647,7 @@
         if (options && options.plainShell) {
           await spawnDefaultShell(paneId, cols, rows);
         } else {
-          await spawnShell(paneId, cols, rows);
+          await spawnShell(paneId, cols, rows, options ? options.cwd : null);
         }
         pane.spawned = true;
         fitAndResizePane(pane);
