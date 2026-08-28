@@ -47,6 +47,10 @@ unicode-normalization = "0.1.24"
 dirs = { workspace = true }
 chrono = { workspace = true }
 hostname = { workspace = true }
+# ripgrep's directory walker. The project search must honour .gitignore /
+# .ignore / global excludes without depending on an `rg` binary existing on
+# the user's machine, and gitignore precedence is not worth re-implementing.
+ignore = "0.4"
 zeroize = { workspace = true }
 arboard = "3"
 font-kit = "0.14"

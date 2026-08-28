@@ -363,6 +363,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
         .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
         .manage(open_path::PendingOpens::default())
         .manage(Mutex::new(project::ProjectRegistry::default()))
+        .manage(Mutex::new(project::search::SearchRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
 
@@ -928,6 +929,8 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 project::project_info,
                 project::project_pick_folder,
                 project::project_reveal_path,
+                project::search::project_search,
+                project::search::project_search_cancel,
                 commands::rebuild_menu,
                 cli_install::install_cli_symlink,
                 cli_install::uninstall_cli_symlink,

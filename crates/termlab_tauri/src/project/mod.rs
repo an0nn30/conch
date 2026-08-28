@@ -6,6 +6,8 @@
 //! does, and window destruction drops the entry through the same
 //! `WindowEvent::Destroyed` hook the other secondary-window registries use.
 
+pub(crate) mod search;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -43,10 +45,9 @@ impl ProjectRegistry {
         self.by_window.get(label)
     }
 
-    // Not called from Task 1's own commands — the project-mode plan's later
-    // tasks (search, git status, recents) resolve their window's root through
-    // this method instead of duplicating `get(...).root.display()`.
-    #[allow(dead_code)]
+    // Not called from Task 1's own commands — later project-mode tasks
+    // (search, git status, recents) resolve their window's root through this
+    // method instead of duplicating `get(...).root.display()`.
     pub(crate) fn root_for(&self, label: &str) -> Option<String> {
         self.by_window
             .get(label)
@@ -300,6 +301,9 @@ pub(crate) fn project_reveal_path(path: String) -> Result<(), String> {
 /// window that never had one removes nothing.
 pub(crate) fn on_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
     let app = window.app_handle();
+    if let Some(searches) = app.try_state::<Mutex<search::SearchRegistry>>() {
+        searches.lock().cancel(window.label());
+    }
     let Some(registry) = app.try_state::<Mutex<ProjectRegistry>>() else {
         return;
     };
