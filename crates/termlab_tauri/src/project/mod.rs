@@ -278,11 +278,14 @@ pub(crate) fn project_info(
         })
 }
 
-/// The native directory picker. Blocking, and therefore never called on the
-/// main thread: Tauri commands run on a thread pool, the same footing
-/// `share_commands`' blocking file dialogs already rely on.
+/// The native directory picker. Blocking, and therefore this command MUST be
+/// `async`: only async commands run on the async runtime's thread pool — a
+/// sync `#[tauri::command]` executes on the MAIN thread, where a blocking
+/// dialog parks the run loop it needs to pump and freezes the app. This is
+/// the same footing `share_commands`' blocking file dialogs rely on (they
+/// are all `async fn` for exactly this reason).
 #[tauri::command]
-pub(crate) fn project_pick_folder(app: tauri::AppHandle) -> Option<String> {
+pub(crate) async fn project_pick_folder(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     app.dialog()
         .file()
@@ -701,5 +704,29 @@ mod tests {
             source[open_fn_start..open_build_fn_start].contains(call),
             "project_open's focused-existing branch must remember the project too"
         );
+    }
+
+    // Would have caught the Open Folder freeze: a SYNC #[tauri::command] runs
+    // on the MAIN thread in Tauri v2, so a blocking_* dialog call inside one
+    // parks the run loop the native dialog needs to pump — the app freezes.
+    // Only async commands (which run on the async runtime's pool, the footing
+    // share_commands' dialogs rely on) may call blocking dialog APIs.
+    #[test]
+    fn blocking_dialog_calls_live_only_in_async_commands() {
+        let full = include_str!("mod.rs");
+        // Scan production code only — this test's own comments mention the
+        // needle and the attribute, and must not match themselves.
+        let source = &full[..full.find("#[cfg(test)]").expect("test module marker")];
+        for (idx, _) in source.match_indices("blocking_pick_folder") {
+            let decl_start = source[..idx]
+                .rfind("#[tauri::command]")
+                .expect("a blocking dialog call must sit inside a #[tauri::command] fn");
+            let decl = &source[decl_start..idx];
+            assert!(
+                decl.contains("async fn"),
+                "blocking_pick_folder appears in a non-async command: sync commands run \
+                 on the main thread and deadlock the dialog's run loop.\n{decl}"
+            );
+        }
     }
 }
