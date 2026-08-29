@@ -1670,6 +1670,37 @@ async function loadMountLifecycleHarness() {
   assert.ok(moreRow.textContent.includes('+ 50 more transfers not shown'), moreRow.textContent);
 }
 
+// --- The batch header totals the folder as a whole: bytes done, total, and
+// a FileZilla-style remaining figure, marked "+" while discovery continues
+// (the true total is still a moving target), unmarked once the walk ends. ---
+{
+  const harness = loadHarness();
+  const member = job('m1', 'running', { batchId: 'batch-r' });
+  harness.emit(snapshot([member], {
+    batches: [batchAgg('batch-r', {
+      info: { discoveredBytes: 500 },
+      bytesDone: 120,
+    })],
+    summary: summary({ active: 1, running: 1 }),
+  }));
+  const header = harness.panelEl.querySelector('tr.tl-transfer-center__batch[data-batch-id="batch-r"]');
+  assert.ok(header.textContent.includes('120 B of 500 B'), header.textContent);
+  assert.ok(header.textContent.includes('380 B+ left'), header.textContent);
+
+  harness.emit(snapshot([member], {
+    revision: 2,
+    batches: [batchAgg('batch-r', {
+      info: { discoveredBytes: 500, expansion: { kind: 'complete' } },
+      bytesDone: 200,
+    })],
+    summary: summary({ active: 1, running: 1 }),
+  }));
+  const settled = harness.panelEl.querySelector('tr.tl-transfer-center__batch[data-batch-id="batch-r"]');
+  assert.ok(settled.textContent.includes('300 B left'), settled.textContent);
+  assert.ok(!settled.textContent.includes('300 B+ left'),
+    'the moving-target marker drops once discovery is finished');
+}
+
 // --- Batchless queues are also capped, with the tail collapsed. ---
 {
   const harness = loadHarness();

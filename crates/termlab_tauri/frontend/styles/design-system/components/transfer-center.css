@@ -281,6 +281,7 @@
 .tl-transfer-center__batch-direction,
 .tl-transfer-center__batch-progress,
 .tl-transfer-center__batch-bytes,
+.tl-transfer-center__batch-remaining,
 .tl-transfer-center__batch-speed,
 .tl-transfer-center__batch-eta {
   flex: 0 0 auto;
@@ -392,6 +393,7 @@
   .tl-transfer-center__batch-direction,
   .tl-transfer-center__batch-progress,
   .tl-transfer-center__batch-bytes,
+  .tl-transfer-center__batch-remaining,
   .tl-transfer-center__batch-speed,
   .tl-transfer-center__batch-eta,
   .tl-transfer-center__batch-marker {

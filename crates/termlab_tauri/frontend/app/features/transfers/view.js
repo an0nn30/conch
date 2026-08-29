@@ -434,6 +434,17 @@
         'tl-transfer-center__batch-bytes',
         `${formatSize(agg.bytesDone)} of ${formatSize(agg.info.discoveredBytes)}`,
       );
+      // FileZilla-style whole-folder remainder. While the walk is still
+      // discovering files the true total is a moving target, so the figure
+      // carries the same "+" marker as the file count.
+      const remaining = Math.max(0, (Number(agg.info.discoveredBytes) || 0) - (Number(agg.bytesDone) || 0));
+      const discovering = agg.info.expansion && agg.info.expansion.kind === 'running';
+      append(
+        lineEl,
+        'span',
+        'tl-transfer-center__batch-remaining',
+        `${formatSize(remaining)}${discovering ? '+' : ''} left`,
+      );
       const speed = Number(agg.speedBytesPerSecond) || 0;
       append(lineEl, 'span', 'tl-transfer-center__batch-speed', speed > 0 ? `${formatSize(speed)}/s` : '—');
       if (agg.etaSeconds !== null && agg.etaSeconds !== undefined) {

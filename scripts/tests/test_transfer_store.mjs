@@ -531,4 +531,141 @@ function loadRuntime(options = {}) {
   }
 }
 
+// Folder-batch members never toast per file. The folder announces exactly
+// once, when the whole batch is done, with counts and size only — no folder
+// name, member paths, or backend reasons.
+function folderInfo(expansionKind, values = {}) {
+  return {
+    id: 'folder',
+    name: 'secret-folder-name',
+    direction: 'upload',
+    expansion: { kind: expansionKind },
+    discoveredFiles: 2,
+    discoveredBytes: 200,
+    skipped: [],
+    createdAtMs: 10,
+    ...values,
+  };
+}
+
+{
+  const start = snapshot(1, [job('m1', 'running', 1, 'folder'), job('m2', 'queued', 2, 'folder')], {
+    batches: [batchAggregate('folder', {
+      info: folderInfo('running'), filesDone: 0, bytesDone: 0,
+    })],
+  });
+  const harness = loadRuntime({ snapshots: [start] });
+  await harness.runtime.ensureStarted({ invoke: harness.invoke, listen: harness.listen, toast: harness.toast });
+
+  // A member completing while the walk is still discovering queues nothing —
+  // not even a 300ms aggregation window.
+  harness.emit('transfer-job-updated', delta(2, {
+    upserts: [job('m1', 'completed', 1, 'folder')],
+    batches: [batchAggregate('folder', {
+      info: folderInfo('running'), filesDone: 1, bytesDone: 100,
+    })],
+  }));
+  assert.equal(harness.timers.length, 0, 'folder member completion queues no toast window');
+  assert.equal(harness.toastCalls.length, 0);
+
+  // The walk finishes and the last member completes: one success toast, now.
+  harness.emit('transfer-job-updated', delta(3, {
+    upserts: [job('m2', 'completed', 2, 'folder')],
+    batches: [batchAggregate('folder', {
+      info: folderInfo('complete'), filesDone: 2, bytesDone: 200,
+    })],
+  }));
+  assert.deepEqual(harness.toastCalls.map((call) => call.kind), ['success']);
+  const text = JSON.stringify(harness.toastCalls);
+  assert.match(text, /2 files \(200 B\)/);
+  assert.ok(!text.includes('secret-folder-name'), 'toast text must exclude the folder name');
+
+  // Later events must not announce the same batch again.
+  harness.emit('transfer-job-updated', delta(4, {
+    batches: [batchAggregate('folder', {
+      info: folderInfo('complete'), filesDone: 2, bytesDone: 200,
+    })],
+  }));
+  assert.equal(harness.toastCalls.length, 1, 'a done batch announces exactly once');
+}
+
+// A batch already done in the first hydrated snapshot was finished in a
+// previous run — restoring it announces nothing.
+{
+  const restored = snapshot(5, [job('m1', 'completed', 1, 'folder')], {
+    batches: [batchAggregate('folder', {
+      info: folderInfo('complete', { discoveredFiles: 1, discoveredBytes: 100 }),
+      filesDone: 1,
+      bytesDone: 100,
+    })],
+  });
+  const harness = loadRuntime({ snapshots: [restored] });
+  await harness.runtime.ensureStarted({ invoke: harness.invoke, listen: harness.listen, toast: harness.toast });
+  assert.equal(harness.toastCalls.length, 0, 'restored done batches stay silent');
+}
+
+// Folder outcomes that are not clean successes still announce exactly once,
+// with the matching severity: missing files warn, a cancelled batch informs.
+{
+  const start = snapshot(1, [job('m1', 'running', 1, 'folder')], {
+    batches: [batchAggregate('folder', {
+      info: folderInfo('running'), filesDone: 0, bytesDone: 0,
+    })],
+  });
+  const harness = loadRuntime({ snapshots: [start] });
+  await harness.runtime.ensureStarted({ invoke: harness.invoke, listen: harness.listen, toast: harness.toast });
+
+  harness.emit('transfer-job-updated', delta(2, {
+    upserts: [job('m1', 'failed', 1, 'folder')],
+    batches: [batchAggregate('folder', {
+      info: folderInfo('complete'), filesDone: 1, bytesDone: 100,
+    })],
+  }));
+  assert.deepEqual(harness.toastCalls.map((call) => call.kind), ['warn']);
+  assert.match(JSON.stringify(harness.toastCalls), /1 of 2 files/);
+}
+
+{
+  const start = snapshot(1, [job('m1', 'queued', 1, 'folder')], {
+    batches: [batchAggregate('folder', {
+      info: folderInfo('running'), filesDone: 0, bytesDone: 0,
+    })],
+  });
+  const harness = loadRuntime({ snapshots: [start] });
+  await harness.runtime.ensureStarted({ invoke: harness.invoke, listen: harness.listen, toast: harness.toast });
+
+  harness.emit('transfer-job-updated', delta(2, {
+    upserts: [job('m1', 'cancelled', 1, 'folder')],
+    batches: [batchAggregate('folder', {
+      info: folderInfo('interrupted', { expansion: { kind: 'interrupted', reason: 'batch cancelled' } }),
+      filesDone: 0,
+      bytesDone: 0,
+    })],
+  }));
+  assert.deepEqual(harness.toastCalls.map((call) => call.kind), ['info']);
+  assert.equal(harness.timers.length, 0, 'cancelled folder members queue no per-file window');
+}
+
+// Attention transitions on folder members still aggregate and toast — those
+// need the user to act, and the batch cannot finish while they linger.
+{
+  const start = snapshot(1, [job('m1', 'running', 1, 'folder')], {
+    batches: [batchAggregate('folder', {
+      info: folderInfo('running'), filesDone: 0, bytesDone: 0,
+    })],
+  });
+  const harness = loadRuntime({ snapshots: [start] });
+  await harness.runtime.ensureStarted({ invoke: harness.invoke, listen: harness.listen, toast: harness.toast });
+
+  harness.emit('transfer-job-updated', delta(2, {
+    upserts: [job('m1', 'needsAttention', 1, 'folder')],
+    batches: [batchAggregate('folder', {
+      info: folderInfo('running'), filesDone: 0, bytesDone: 0,
+    })],
+  }));
+  assert.deepEqual(harness.timers.map((timer) => timer.delay), [300]);
+  harness.flushToasts();
+  assert.deepEqual(harness.toastCalls.map((call) => call.kind), ['warn']);
+}
+
 console.log('transfer store/runtime: all assertions passed');
