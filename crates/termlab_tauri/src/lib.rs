@@ -886,6 +886,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             cli_install::install_cli_symlink,
             cli_install::uninstall_cli_symlink,
             settings::get_all_settings,
+            settings::default_keyboard_config,
             settings::save_settings,
             theme_catalog::list_terminal_themes,
             fonts::list_system_fonts,

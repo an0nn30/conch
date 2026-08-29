@@ -35,6 +35,14 @@ pub(crate) struct SaveSettingsResult {
     restart_required: bool,
 }
 
+/// The shipped keyboard defaults, so the settings UI's "Reset to defaults"
+/// restores exactly what a fresh config would have — one source of truth,
+/// never a frontend copy that could drift.
+#[tauri::command]
+pub(crate) fn default_keyboard_config() -> serde_json::Value {
+    serde_json::to_value(config::KeyboardConfig::default()).unwrap_or_default()
+}
+
 #[tauri::command]
 pub(crate) fn get_all_settings(state: tauri::State<'_, TauriState>) -> serde_json::Value {
     let mut cfg = state.config.read().clone();

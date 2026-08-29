@@ -370,6 +370,18 @@
       return pendingSettings.termlab.keyboard[ref.key] || '';
     }
 
+    // Replace the pending keymap with the shipped defaults (fetched from
+    // Rust — one source of truth). Override maps empty out: plugins fall
+    // back to their manifest keybinds, tool windows to unassigned. Only
+    // pendingSettings changes; the user still Applies (or cancels) as usual.
+    function resetKeyboardToDefaults(defaults) {
+      if (!pendingSettings?.termlab || !defaults || typeof defaults !== 'object') return;
+      const next = JSON.parse(JSON.stringify(defaults));
+      next.plugin_shortcuts = {};
+      next.tool_window_shortcuts = {};
+      pendingSettings.termlab.keyboard = next;
+    }
+
     function setShortcutValue(ref, value) {
       if (!pendingSettings?.termlab?.keyboard || !ref) return;
       if (ref.kind === 'tool-window') {
@@ -437,6 +449,7 @@
       getSidebarSearchResults,
       getShortcutValue,
       setShortcutValue,
+      resetKeyboardToDefaults,
     };
   }
 
