@@ -318,6 +318,17 @@
       // asked for behind an empty terminal roughly half the time.
       const pendingOpenDrain = wirePendingOpenDrain(global, { invoke });
 
+      // A CLI open-path aimed at THIS already-running window arrives as an
+      // event after Rust seeded the window's queue (see
+      // open_path.rs::open_in_running_app) — the same take-based drain the
+      // boot path uses, so a racing boot drain and this listener can both
+      // fire without double-opening: whoever pulls first gets the paths.
+      if (pendingOpenDrain && typeof listenOnCurrentWindow === 'function') {
+        listenOnCurrentWindow('open-paths-pending', () => {
+          pendingOpenDrain.drainPendingOpens();
+        });
+      }
+
       return {
         handleMenuAction,
         showUpdateAvailableToast,
