@@ -8,6 +8,8 @@
     new_tab: 'New Tab',
     new_plain_shell_tab: 'New Plain Shell Tab',
     close_tab: 'Close Tab',
+    select_tab_left: 'Select Tab to the Left',
+    select_tab_right: 'Select Tab to the Right',
     rename_tab: 'Rename Tab',
     new_window: 'New Window',
     manage_tunnels: 'Manage SSH Tunnels',
@@ -33,7 +35,10 @@
   const KEYBOARD_CORE_GROUPS = [
     {
       label: 'Tab & Window',
-      keys: ['new_tab', 'new_plain_shell_tab', 'close_tab', 'rename_tab', 'new_window', 'quit'],
+      keys: [
+        'new_tab', 'new_plain_shell_tab', 'close_tab', 'select_tab_left',
+        'select_tab_right', 'rename_tab', 'new_window', 'quit',
+      ],
     },
     {
       label: 'Editor',

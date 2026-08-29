@@ -100,6 +100,8 @@ pub struct KeyboardConfig {
     pub new_tab: String,
     pub new_plain_shell_tab: String,
     pub close_tab: String,
+    pub select_tab_left: String,
+    pub select_tab_right: String,
     pub quit: String,
     pub new_window: String,
     pub manage_tunnels: String,
@@ -132,6 +134,10 @@ impl Default for KeyboardConfig {
             new_tab: "cmd+t".into(),
             new_plain_shell_tab: "cmd+shift+t".into(),
             close_tab: "cmd+w".into(),
+            // Spelled as the physical keys: shift+[ types "{", and the
+            // shortcut router normalizes by KeyboardEvent.code.
+            select_tab_left: "cmd+shift+[".into(),
+            select_tab_right: "cmd+shift+]".into(),
             quit: "cmd+q".into(),
             new_window: "cmd+shift+n".into(),
             manage_tunnels: "cmd+shift+m".into(),
@@ -230,6 +236,23 @@ mod tests {
         // opens the file chooser from anywhere, so it consumes cmd+o in a
         // terminal too. Deliberate — see shortcut-runtime.js.
         assert_eq!(k.open_file, "cmd+o");
+    }
+
+    #[test]
+    fn tab_cycle_shortcuts_have_the_documented_defaults() {
+        let k = KeyboardConfig::default();
+        // cmd+shift+{ / cmd+shift+} on the keycap — the router matches by
+        // physical key, so the config spells the unshifted characters.
+        assert_eq!(k.select_tab_left, "cmd+shift+[");
+        assert_eq!(k.select_tab_right, "cmd+shift+]");
+    }
+
+    #[test]
+    fn keyboard_config_without_tab_cycle_keys_gains_the_defaults() {
+        let parsed: KeyboardConfig = toml::from_str(r#"new_tab = "cmd+t""#).unwrap();
+        assert_eq!(parsed.select_tab_left, "cmd+shift+[");
+        assert_eq!(parsed.select_tab_right, "cmd+shift+]");
+        assert_eq!(parsed.new_tab, "cmd+t");
     }
 
     #[test]

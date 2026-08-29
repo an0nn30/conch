@@ -29,6 +29,8 @@
       new_tab: 'new-tab',
       new_plain_shell_tab: 'new-plain-shell-tab',
       close_tab: 'close-tab',
+      select_tab_left: 'select-tab-left',
+      select_tab_right: 'select-tab-right',
       rename_tab: 'rename-tab',
       new_window: 'new-window',
       manage_tunnels: 'manage-tunnels',
@@ -69,6 +71,18 @@
       if (!tab || focusedPaneId == null) return;
       const adj = findAdjacentPane(focusedPaneId, direction, tab.containerEl);
       if (adj != null) setFocusedPane(adj);
+    }
+
+    // Select the tab `delta` positions from the active one, wrapping at both
+    // ends so cycling never dead-ends.
+    function cycleTab(delta) {
+      const tabIds = getTabIds() || [];
+      if (tabIds.length < 2) return;
+      const tab = getActiveTab();
+      const index = tab ? tabIds.indexOf(tab.id) : -1;
+      if (index < 0) return;
+      const next = (index + delta + tabIds.length) % tabIds.length;
+      activateTab(tabIds[next]);
     }
 
     // Config files and the shipped defaults spell arrows "left"/"up"/…, while
@@ -248,7 +262,9 @@
           }
         }
         if (coreHit) {
-          if (coreHit.action === 'navigate-pane-up') navigatePane('up');
+          if (coreHit.action === 'select-tab-left') cycleTab(-1);
+          else if (coreHit.action === 'select-tab-right') cycleTab(1);
+          else if (coreHit.action === 'navigate-pane-up') navigatePane('up');
           else if (coreHit.action === 'navigate-pane-down') navigatePane('down');
           else if (coreHit.action === 'navigate-pane-left') navigatePane('left');
           else if (coreHit.action === 'navigate-pane-right') navigatePane('right');
