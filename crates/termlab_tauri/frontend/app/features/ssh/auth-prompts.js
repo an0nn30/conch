@@ -1,6 +1,26 @@
 (function initTermLabSshAuthPrompts(global) {
   'use strict';
 
+  // Dialogs currently open in THIS window, keyed by prompt id. The backend
+  // broadcasts prompts to every window; when any window answers, it
+  // broadcasts the resolution back so the other windows' copies close
+  // without sending a second (already-consumed) response.
+  const RESOLVED_EVENT = 'ssh-auth-prompt-resolved';
+  const openPrompts = new Map();
+  let installed = false;
+
+  function trackPrompt(promptId, close) {
+    openPrompts.set(promptId, close);
+  }
+
+  function closeResolvedPrompt(promptId) {
+    if (!promptId) return;
+    const close = openPrompts.get(promptId);
+    if (!close) return;
+    openPrompts.delete(promptId);
+    close();
+  }
+
   function showHostKeyPrompt(event, deps) {
     const d = deps || {};
     const payload = event && event.payload ? event.payload : {};
@@ -19,9 +39,14 @@
     const respond = (accepted) => {
       if (done) return;
       done = true;
+      openPrompts.delete(promptId);
       invoke('auth_respond_host_key', { promptId, accepted }).catch(() => {});
       if (handle) handle.close();
     };
+    trackPrompt(promptId, () => {
+      done = true;
+      if (handle) handle.close();
+    });
 
     handle = global.tlDialog.open({
       title: 'SSH Host Key Verification',
@@ -77,9 +102,14 @@
     const respond = (password) => {
       if (done) return;
       done = true;
+      openPrompts.delete(promptId);
       invoke('auth_respond_password', { promptId, password }).catch(() => {});
       if (handle) handle.close();
     };
+    trackPrompt(promptId, () => {
+      done = true;
+      if (handle) handle.close();
+    });
 
     handle = global.tlDialog.open({
       title: 'SSH Authentication',
@@ -115,7 +145,28 @@
     return true;
   }
 
+  // Window-wide prompt wiring. The SSH handler blocks on these prompts, so
+  // their listeners must exist from boot in every window — registering them
+  // only when some panel happens to render leaves an early connection
+  // hanging forever with no dialog anywhere.
+  function install(deps) {
+    const d = deps || {};
+    if (typeof d.listen !== 'function' || typeof d.invoke !== 'function') {
+      throw new TypeError('SSH auth prompts require listen and invoke');
+    }
+    if (installed) return;
+    installed = true;
+    const promptDeps = { invoke: d.invoke, esc: d.esc };
+    d.listen('ssh-host-key-prompt', (event) => showHostKeyPrompt(event, promptDeps));
+    d.listen('ssh-password-prompt', (event) => showPasswordPrompt(event, promptDeps));
+    d.listen(RESOLVED_EVENT, (event) => {
+      const payload = event && event.payload ? event.payload : {};
+      closeResolvedPrompt(payload.prompt_id);
+    });
+  }
+
   global.termlabSshAuthPrompts = {
+    install,
     showHostKeyPrompt,
     showPasswordPrompt,
   };

@@ -19,7 +19,6 @@
   const sshStore = exports.termlabSshStore || {};
   const sshActions = exports.termlabSshActions || {};
   const sshView = exports.termlabSshView || {};
-  const sshAuthPromptsFeature = exports.termlabSshAuthPrompts || {};
   const sshDialogsFeature = exports.termlabSshDialogs || {};
   const sshDependencyPromptFeature = exports.termlabSshDependencyPrompt || {};
   const sshConnectionFormFeature = exports.termlabSshConnectionForm || {};
@@ -234,9 +233,9 @@
       renderServerList();
     });
 
-    // Auth prompts
-    listen('ssh-host-key-prompt', handleHostKeyPrompt);
-    listen('ssh-password-prompt', handlePasswordPrompt);
+    // Auth prompts (host key, password) are installed window-wide at boot by
+    // tool-window-runtime via termlabSshAuthPrompts.install — registering
+    // them here as well would show every dialog twice.
 
     // Vault auto-save prompt
     listen('vault-auto-save-prompt', handleVaultAutoSavePrompt);
@@ -1728,36 +1727,6 @@
       const handle = activeDialogHandle;
       activeDialogHandle = null;
       handle.close();
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Auth prompts
-  // ---------------------------------------------------------------------------
-
-  function handleHostKeyPrompt(event) {
-    if (sshAuthPromptsFeature && typeof sshAuthPromptsFeature.showHostKeyPrompt === 'function') {
-      const handled = sshAuthPromptsFeature.showHostKeyPrompt(event, {
-        invoke,
-        esc,
-      });
-      if (handled) return;
-    }
-    if (window.toast && typeof window.toast.error === 'function') {
-      window.toast.error('SSH Error', 'Host-key prompt module is unavailable.');
-    }
-  }
-
-  function handlePasswordPrompt(event) {
-    if (sshAuthPromptsFeature && typeof sshAuthPromptsFeature.showPasswordPrompt === 'function') {
-      const handled = sshAuthPromptsFeature.showPasswordPrompt(event, {
-        invoke,
-        esc,
-      });
-      if (handled) return;
-    }
-    if (window.toast && typeof window.toast.error === 'function') {
-      window.toast.error('SSH Error', 'Password prompt module is unavailable.');
     }
   }
 

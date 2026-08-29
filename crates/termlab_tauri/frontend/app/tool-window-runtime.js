@@ -27,6 +27,20 @@
     let resizeDragDepth = 0;
     let transferRuntimeStartup = null;
 
+    // SSH auth prompts (host key verification, password entry) must be able
+    // to appear before any panel has rendered: the backend's SSH handler
+    // blocks on their reply, and a connection started from the Files panel
+    // in a window that never opened the Hosts panel would otherwise hang
+    // forever with no dialog. Installed once per window, at boot.
+    if (global.termlabSshAuthPrompts
+        && typeof global.termlabSshAuthPrompts.install === 'function') {
+      global.termlabSshAuthPrompts.install({
+        invoke,
+        listen: listenOnCurrentWindow,
+        esc: global.utils && global.utils.esc,
+      });
+    }
+
     function ensureTransferRuntimeStarted() {
       if (transferRuntimeStartup) return transferRuntimeStartup;
       if (!global.termlabTransferRuntime
