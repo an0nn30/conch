@@ -1087,7 +1087,9 @@
 
   async function doDownload(entry) {
     if (!entry || !activeRemotePaneId) return;
-    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
+    // A directory routes through the backend's recursive expansion; the
+    // per-file path below is for plain files only.
+    if (entry.is_dir) return doDownloadFolder(entry);
 
     const remotePath = joinPath(remotePane.currentPath, entry.name);
     const localPath = joinPath(localPane.currentPath, entry.name);
@@ -1112,7 +1114,9 @@
 
   async function doUpload(entry) {
     if (!entry || !activeRemotePaneId) return;
-    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory upload not yet supported.'); return; }
+    // A directory routes through the backend's recursive expansion; the
+    // per-file path below is for plain files only.
+    if (entry.is_dir) return doUploadFolder(entry);
 
     const localPath = joinPath(localPane.currentPath, entry.name);
     const remotePath = joinPath(remotePane.currentPath, entry.name);
@@ -1137,9 +1141,30 @@
 
   async function doUploadToPath(entry) {
     if (!entry || !activeRemotePaneId) return;
-    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory upload not yet supported.'); return; }
 
     const localPath = joinPath(localPane.currentPath, entry.name);
+    // A directory goes through recursive expansion, whose destination is the
+    // CONTAINER the folder is recreated inside — so the prompt asks for that
+    // container and pre-fills the current remote directory, not a pre-joined
+    // path that would double-append the folder's own name.
+    if (entry.is_dir) {
+      showTextPromptDialog({
+        title: 'Upload Folder to Path',
+        label: `Remote destination directory ("${entry.name}" is created inside it)`,
+        initialValue: remotePane.currentPath,
+        confirmLabel: 'Upload',
+        onConfirm: async (destPath) => {
+          try {
+            await startFolderTransfer(activeRemotePaneId, 'upload', localPath, destPath);
+            window.toast.info('Folder transfer started', entry.name);
+          } catch (e) {
+            window.toast.error('Upload Failed', String(e));
+          }
+        },
+      });
+      return;
+    }
+
     showTextPromptDialog({
       title: 'Upload to Path',
       label: 'Remote destination path',
@@ -1458,9 +1483,28 @@
 
   async function doDownloadToPath(entry) {
     if (!entry || !activeRemotePaneId) return;
-    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
 
     const remotePath = joinPath(remotePane.currentPath, entry.name);
+    // See doUploadToPath: a directory's destination is the CONTAINER the
+    // folder is recreated inside, so the prompt asks for that container.
+    if (entry.is_dir) {
+      showTextPromptDialog({
+        title: 'Download Folder to Path',
+        label: `Local destination directory ("${entry.name}" is created inside it)`,
+        initialValue: localPane.currentPath,
+        confirmLabel: 'Download',
+        onConfirm: async (destPath) => {
+          try {
+            await startFolderTransfer(activeRemotePaneId, 'download', remotePath, destPath);
+            window.toast.info('Folder transfer started', entry.name);
+          } catch (e) {
+            window.toast.error('Download Failed', String(e));
+          }
+        },
+      });
+      return;
+    }
+
     showTextPromptDialog({
       title: 'Download to Path',
       label: 'Local destination path',
@@ -1602,14 +1646,6 @@
         title: noSession ? sessionTitle : undefined,
         action: () => doUploadToPath(entry),
       });
-      if (entry && entry.is_dir) {
-        items.push({
-          label: 'Upload Folder',
-          disabled: noSession,
-          title: noSession ? sessionTitle : undefined,
-          action: () => doUploadFolder(entry),
-        });
-      }
     } else {
       items.push({
         label: 'Download to local host',
@@ -1623,14 +1659,6 @@
         title: noSession ? sessionTitle : undefined,
         action: () => doDownloadToPath(entry),
       });
-      if (entry && entry.is_dir) {
-        items.push({
-          label: 'Download Folder',
-          disabled: noSession,
-          title: noSession ? sessionTitle : undefined,
-          action: () => doDownloadFolder(entry),
-        });
-      }
     }
 
     items.push({ type: 'separator' });
