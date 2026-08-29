@@ -590,14 +590,21 @@ check('a successful CLI-queue adopt is never redundantly re-queried through proj
   assert.ok(!calls.includes('project_info'), 'the fallback is gated on !isActive(), so it must not even be called here');
 });
 
-check('main-runtime gives a project window a terminal tab at the project root', () => {
+// The project window's terminal used to be a main-area TAB at the root
+// (`createTab({ cwd: projectRoot })`). It is now the Terminal tool window in
+// the bottom zone, spawned lazily at the root on first show — see
+// scripts/tests/test_terminal_tool_window.mjs for that half. What this check
+// still owns is that the project branch creates NO tab (a second one would be
+// a second shell) while every other window's boot is untouched.
+check('main-runtime boots a project window with an empty main area', () => {
   const src = fs.readFileSync(path.join(APP, 'main-runtime.js'), 'utf8');
   const pull = src.indexOf('take_pending_open_paths');
-  const projectTab = src.indexOf('createTab({ cwd: projectRoot })');
   const firstTab = src.indexOf('createTab().catch');
-  assert.ok(projectTab !== -1, 'a project window opens its first terminal at the root');
+  assert.ok(!src.includes('createTab({ cwd: projectRoot })'),
+    'the project terminal moved into the Terminal tool window');
+  assert.ok(src.includes('} else if (projectRoot) {'), 'the project branch is still the one deciding');
   assert.ok(firstTab !== -1, 'the plain terminal tab still exists for ordinary windows');
-  assert.ok(pull < projectTab && pull < firstTab, 'the queue pull still precedes any tab creation');
+  assert.ok(pull < firstTab, 'the queue pull still precedes any tab creation');
 });
 
 check('the window title carries the project name across tab switches', () => {

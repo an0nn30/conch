@@ -254,6 +254,21 @@
       // window (a "composite host") — e.g. SFTP carries the transfer center.
       // { id, position }[]; consumed by companionIdsFor()/suppressCompanionsFor().
       companions: Array.isArray(opts.companions) ? opts.companions.filter((c) => c && c.id) : [],
+      // Opt out of the "first registrant claims an empty zone" rule below.
+      // Registration ORDER is how every other bottom-zone window stays out of
+      // the default slot, but order cannot help a window that is the only
+      // registrant of its zone — the Terminal tool window owns 'bottom-right'
+      // alone, and without this it would open itself on every fresh profile,
+      // including plain terminal windows that already have terminal tabs. It
+      // does NOT suppress the saved-active restore a few lines down: a layout
+      // that recorded the window as its zone's open one still gets it back.
+      autoActivate: opts.autoActivate !== false,
+      // Whether this window can be popped out into its own OS window. False
+      // for a window whose contents are bound to THIS window and cannot be
+      // rebuilt in a panel host — the Terminal tool window owns a PTY keyed
+      // by this window's label (crates/termlab_tauri/src/pty.rs), and a host
+      // has no pane registry to hold one.
+      poppable: opts.poppable !== false,
     };
     toolWindows.set(id, tw);
     zones[zone].windows.push(id);
@@ -279,7 +294,7 @@
     // saved layout recorded it as its zone's open window — the same bit that
     // records a docked window as open, so "closed while popped out" survives a
     // restart the same way "closed while docked" does.
-    if (savedViewModes && savedViewModes[id] === VIEW_MODE_WINDOW) {
+    if (tw.poppable && savedViewModes && savedViewModes[id] === VIEW_MODE_WINDOW) {
       viewModes.set(id, VIEW_MODE_WINDOW);
       if (savedActiveId && savedActiveId === id) {
         hostVisible.set(id, true);
@@ -336,7 +351,7 @@
         updateBottomZone();
         updateStrips();
       }
-    } else if (zones[zone].activeId === null && shouldAutoActivate) {
+    } else if (zones[zone].activeId === null && shouldAutoActivate && tw.autoActivate) {
       activate(id);
     } else {
       updateZone(zone);
@@ -574,6 +589,9 @@
     if (!tw) return;
     const next = mode === VIEW_MODE_WINDOW ? VIEW_MODE_WINDOW : VIEW_MODE_DOCK;
     if (next === getViewMode(id)) return;
+    // A non-poppable window has no host to move into; the menu entry is
+    // disabled, and this is the guard for every other caller.
+    if (next === VIEW_MODE_WINDOW && tw.poppable === false) return;
     if (next === VIEW_MODE_WINDOW) enterWindowMode(tw);
     else dockFromWindowMode(id);
   }
@@ -1583,7 +1601,11 @@
     items.push({
       label: 'View Mode: Window',
       checked: mode === VIEW_MODE_WINDOW,
-      disabled: mode === VIEW_MODE_WINDOW || suppressed,
+      // Kept present but disabled for a non-poppable window: test_panel_host's
+      // trait check pins that EVERY registered id carries both flattened
+      // entries, and a missing entry would read as a broken menu rather than
+      // an unavailable choice.
+      disabled: mode === VIEW_MODE_WINDOW || suppressed || tw.poppable === false,
       onSelect: () => setViewMode(windowId, VIEW_MODE_WINDOW),
     });
 

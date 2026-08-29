@@ -91,6 +91,17 @@
     // any tool-window/plugin binding on the same combo) there.
     const PROJECT_SCOPED_ACTIONS = ['search-in-project'];
 
+    // The Terminal tool window hosts a real xterm that is NOT the focused
+    // pane — it has no tab, so getCurrentPane() keeps reporting whatever the
+    // main area last focused (in a project window, typically an editor). Left
+    // to that alone, cmd+s typed into the panel terminal would save a file
+    // instead of reaching the shell. Asking the panel directly is what makes
+    // it count as a terminal context, exactly like a terminal tab.
+    function terminalToolWindowFocused() {
+      const panel = global.termlabTerminalPanel;
+      return !!(panel && typeof panel.hasFocus === 'function' && panel.hasFocus());
+    }
+
     function hasProject() {
       const projectMode = global.termlabProjectMode;
       return !!(projectMode && typeof projectMode.isActive === 'function' && projectMode.isActive());
@@ -285,7 +296,7 @@
         let suppressedCoreAction = null;
         if (coreHit && EDITOR_SCOPED_ACTIONS.indexOf(coreHit.action) !== -1) {
           const pane = getCurrentPane();
-          if (!pane || pane.kind !== 'editor') {
+          if (terminalToolWindowFocused() || !pane || pane.kind !== 'editor') {
             suppressedCoreAction = coreHit.action;
             coreHit = null;
           }
@@ -368,6 +379,10 @@
         if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return false;
         if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return false;
         if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return false;
+        // The panel terminal has macOptionIsMeta on like every other xterm in
+        // the app, so it produces the sequence itself; writing to the focused
+        // PANE here would send it to the wrong terminal entirely.
+        if (terminalToolWindowFocused()) return false;
         const pane = getCurrentPane();
         if (!pane || pane.kind !== 'terminal' || !pane.term) return false;
         const seq = event.key === 'ArrowLeft' ? '\x1b[1;3D' : '\x1b[1;3C';

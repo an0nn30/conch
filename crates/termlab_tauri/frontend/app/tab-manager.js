@@ -339,9 +339,31 @@
       return activeTabId === null ? null : tabs.get(activeTabId) || null;
     }
 
+    // A project window boots with no tabs at all (its terminal is the bottom-
+    // zone Terminal tool window now, not a main-area tab), and closing every
+    // tab in one puts it back in that state. Read off the global rather than
+    // taken as a dep, matching how this file already reads
+    // `__termlabProjectName` and `__termlabEditorWindow`.
+    function isProjectWindow() {
+      const projectMode = global.termlabProjectMode;
+      return !!(projectMode && typeof projectMode.isActive === 'function' && projectMode.isActive());
+    }
+
+    // The empty-main-area hint. It starts visible in index.html so a project
+    // window — which never creates a tab — shows it without anyone having to
+    // remember to switch it on at boot; every window with tabs hides it here,
+    // synchronously, during the first createTab and long before app_ready
+    // reveals the window.
+    function updateEditorPlaceholder() {
+      const placeholderEl = document.getElementById('editor-placeholder');
+      if (!placeholderEl) return;
+      placeholderEl.hidden = getTabs().size > 0;
+    }
+
     function updateTabBarVisibility() {
       const tabs = getTabs();
       appEl.classList.toggle('tabs-visible', tabs.size > 1);
+      updateEditorPlaceholder();
     }
 
     function renumberTabs() {
@@ -522,7 +544,20 @@
 
       updateWindowTitle();
 
-      if (tabs.size === 0 && closeWindowWhenLast) {
+      // A PROJECT window is the one window kind for which zero tabs is a
+      // normal, deliberate state: it BOOTS that way (main-runtime creates no
+      // tab for it) and its shell lives in the bottom-zone Terminal tool
+      // window, not here. So neither fallback below applies — spawning a
+      // terminal tab would put a second shell in the window, and destroying
+      // the window would close a project because its last file was closed.
+      // The placeholder updateTabBarVisibility just re-showed is the whole
+      // response.
+      //
+      // Checked first: __termlabEditorWindow and a project root are set on
+      // mutually exclusive boot paths today (main-runtime's CLI branch vs.
+      // its project branch), and if that ever stops being true the project
+      // window's own invariant is the one that must hold.
+      if (tabs.size === 0 && closeWindowWhenLast && !isProjectWindow()) {
         // A CLI-opened editor window (main-runtime skipped its terminal tab)
         // falls back to a plain terminal instead of dying with its last tab.
         // One-shot: the flag is consumed here, so closing the fallback tab

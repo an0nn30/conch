@@ -28,6 +28,14 @@
     // time file-explorer registers below.
     const projectMode = global.termlabProjectMode || null;
     const projectRoot = projectMode && typeof projectMode.root === 'function' ? projectMode.root() : null;
+    // Everything the Terminal tool window needs to build a real pane on the
+    // same PTY path terminal tabs use: the window's pane map and pane-id
+    // allocator, its terminal runtime, its per-pane fit. Threaded from
+    // main-runtime through orchestration-runtime rather than reached for,
+    // like every other dependency here — and absent in a panel host's
+    // registrations-only boot, which is why terminal-panel.js renders a note
+    // instead of throwing when it is.
+    const terminalPanelDeps = deps.terminalPanel || null;
     const registeredPluginToolWindows = new Set();
     let resizeDragDepth = 0;
     let transferRuntimeStartup = null;
@@ -106,7 +114,7 @@
       }
     }
 
-    // The six built-in tool windows, in registration order (the order is
+    // The built-in tool windows, in registration order (the order is
     // load-bearing — see the comment on 'notifications'). Shared verbatim
     // between the main window's init() and a panel host's registrationsOnly
     // boot: a host mounts a panel through the SAME renderFn the docked panel
@@ -257,6 +265,57 @@
           },
         });
       }
+
+      // The Terminal tool window. In EVERY window, unlike Search — a shell is
+      // not a project feature — but registered after every existing
+      // bottom-zone registrant for the same reason they are ordered:
+      // registration order decides who claims a zone on a layout that has
+      // never configured one.
+      //
+      // 'bottom-right' rather than 'bottom': the bottom zone is a left/right
+      // pair, and a project window wants its tree AND a shell at once, not
+      // one tab hiding the other. The tree keeps 'bottom-left'.
+      //
+      // autoActivate:false — order alone cannot keep this one out of the way,
+      // because it is the ONLY registrant of 'bottom-right' and would
+      // therefore claim it on every fresh profile, including plain terminal
+      // windows that already have terminal tabs and must find this hidden.
+      // The fresh-project block in init() activates it explicitly instead,
+      // and a saved layout that recorded it as open still restores it.
+      //
+      // poppable:false — the panel owns a PTY keyed by THIS window's label
+      // and pane id (crates/termlab_tauri/src/pty.rs's session_key). A panel
+      // host is a different OS window with no pane registry, no terminal
+      // runtime and no PTY of its own, so there is nothing there to host.
+      global.toolWindowManager.register('terminal', {
+        title: 'Terminal',
+        icon: 'terminal',
+        type: 'built-in',
+        defaultZone: 'bottom-right',
+        autoActivate: false,
+        poppable: false,
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'terminal-panel';
+          container.appendChild(panelEl);
+          if (!global.termlabTerminalPanel) return undefined;
+          const terminalDeps = terminalPanelDeps || {};
+          return global.termlabTerminalPanel.init({
+            panelEl,
+            invoke,
+            listen: listenOnCurrentWindow,
+            // A project window's shell starts at the root; everywhere else a
+            // null cwd means "whatever spawn_shell defaults to".
+            cwd: projectRoot,
+            paneId: typeof terminalDeps.allocPaneId === 'function' ? terminalDeps.allocPaneId() : null,
+            panes: typeof terminalDeps.getPanes === 'function' ? terminalDeps.getPanes() : null,
+            initTerminal: terminalDeps.initTerminal,
+            setupTmuxRightClickBridge: terminalDeps.setupTmuxRightClickBridge,
+            createPaneResizeObserver: terminalDeps.createPaneResizeObserver,
+            fitAndResizePane: terminalDeps.fitAndResizePane,
+          });
+        },
+      });
 
       // Registered after 'tunnels' so tunnels stays the right-bottom zone's
       // auto-activated window on first boot; notifications starts inactive
@@ -707,6 +766,20 @@
           // save here would write it from transient boot state, before the
           // effective-zen adjustment a few lines below has had its say.
           global.toolWindowManager.activate('file-explorer', { save: false });
+          // TERMINAL TOOL WINDOW: a project window's shell lives here now
+          // rather than in a main-area tab (main-runtime.js's project branch
+          // creates no tab at all any more), so a fresh project has to come
+          // up with it open — cd'd at the root, per the registration above.
+          // It sits in 'bottom-right', the other half of the same zone, so
+          // this activates ALONGSIDE the Files reveal instead of replacing
+          // it. Same `{ save: false }` reasoning as the line above: this is
+          // boot state being asserted, not a user's arrangement being
+          // recorded, and the effective-zen adjustment below has not run yet.
+          //
+          // Gated by the SAME has_project_layout check: a returning project
+          // gets exactly what it saved, so a user who hid the terminal panel
+          // in this project finds it still hidden.
+          global.toolWindowManager.activate('terminal', { save: false });
         }
 
         // Reads the EFFECTIVE zen decision (startup-runtime.js), not the raw

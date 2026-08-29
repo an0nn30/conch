@@ -27,6 +27,7 @@
   <link rel="stylesheet" href="styles/design-system/components/problems.css" />
   <link rel="stylesheet" href="styles/design-system/components/project-tree.css" />
   <link rel="stylesheet" href="styles/design-system/components/project-search.css" />
+  <link rel="stylesheet" href="styles/design-system/components/terminal-panel.css" />
   <link rel="stylesheet" href="styles/base.css" />
   <link rel="stylesheet" href="styles/layout.css" />
   <link rel="stylesheet" href="styles/tool-windows.css" />
@@ -55,7 +56,15 @@
       </div>
       <div id="editor-column">
         <div id="tabbar"></div>
-        <div id="terminal-host"></div>
+        <div id="terminal-host">
+          <!-- Shown while the window has no tabs. A project window boots that
+               way on purpose (its terminal is the bottom-zone Terminal tool
+               window, not a tab); tab-manager.js hides this the moment a tab
+               exists. -->
+          <div id="editor-placeholder" class="tl-editor-placeholder">
+            <span class="tl-editor-placeholder__hint">Open a file from the project tree</span>
+          </div>
+        </div>
       </div>
       <div id="right-sidebar" class="sidebar-wrap hidden">
         <div id="right-sidebar-resize" class="sidebar-resize"></div>
@@ -226,6 +235,7 @@
   <script src="app/features/problems/problems-store.js"></script>
   <script src="app/features/problems/problems-navigation.js"></script>
   <script src="app/panels/problems-panel.js"></script>
+  <script src="app/panels/terminal-panel.js"></script>
   <script src="app/layout/split-tree.js"></script>
   <script src="app/layout/split-pane.js"></script>
   <script src="app/layout/pane-dnd.js"></script>

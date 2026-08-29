@@ -26,6 +26,13 @@
     const debugLog = deps.debugLog;
     const debouncedFitAndResize = deps.debouncedFitAndResize;
     const rebuildTreeDOM = deps.rebuildTreeDOM;
+    // The Terminal tool window builds a real xterm pane, so it needs the same
+    // two things a terminal tab does: this window's terminal runtime and its
+    // per-pane fit. Passed through to the tool-window runtime below rather
+    // than reached for off `window` — the runtime factory on the global is
+    // the FACTORY, and only main-runtime holds the composed instance.
+    const terminalRuntime = deps.terminalRuntime || null;
+    const fitAndResizePane = deps.fitAndResizePane;
 
     let paneDnd = null;
     let pluginRuntime = null;
@@ -130,6 +137,23 @@
           setFocusedPane: (paneId) => setFocusedPane(paneId),
           closePane: (paneId) => closePane(paneId),
           getPluginViewPaneById: () => pluginViewPaneById,
+          // Null when this window has no terminal runtime at all — the panel
+          // then renders its "not available here" note rather than trying to
+          // build an xterm out of nothing.
+          terminalPanel: terminalRuntime ? {
+            getPanes: () => panes,
+            allocPaneId: () => allocPaneId(),
+            initTerminal: (root) => terminalRuntime.initTerminal(root),
+            setupTmuxRightClickBridge: (term, root) => (
+              terminalRuntime.setupTmuxRightClickBridge(term, root)
+            ),
+            createPaneResizeObserver: (pane, fitCb) => (
+              global.splitPane.createPaneResizeObserver(pane, fitCb)
+            ),
+            fitAndResizePane: (pane) => {
+              if (typeof fitAndResizePane === 'function') fitAndResizePane(pane);
+            },
+          } : null,
         });
         const runtimeResult = await toolWindowRuntime.init();
         if (runtimeResult && typeof runtimeResult.debouncedSaveLayout === 'function') {

@@ -422,6 +422,10 @@
           splitPane: (direction) => splitPane(direction),
           refreshWindowTitle: () => refreshWindowTitle(),
           getPaneManager: () => paneManager,
+          // For the Terminal tool window's xterm pane — see the terminalPanel
+          // block in orchestration-runtime.js.
+          terminalRuntime,
+          fitAndResizePane: (pane) => fitAndResizePane(pane),
           isDebugEnabled: () => shortcutDebugEnabled,
           debugLog: (...args) => console.log(...args),
           debouncedFitAndResize: () => {
@@ -470,11 +474,16 @@
         // closing the window; tab-manager.js consumes the flag once.
         window.__termlabEditorWindow = true;
       } else if (projectRoot) {
-        // A project window's initial main content is one terminal at the
-        // project root; editor tabs join it as files are opened from the tree.
-        await createTab({ cwd: projectRoot }).catch((e) => {
-          showStatus('Failed to initialize project terminal: ' + String(e));
-        });
+        // A project window boots with an EMPTY main area, on purpose. Its
+        // terminal used to be a tab here; it is now the Terminal tool window
+        // in the bottom zone (registered in tool-window-runtime.js, activated
+        // there for a fresh project, spawned lazily at the project root on
+        // first show). The main area is for files: tab-manager.js shows
+        // #editor-placeholder while there are no tabs, and editor tabs arrive
+        // as files are opened from the tree.
+        //
+        // Deliberately no createTab: reintroducing one here would put a
+        // second shell at the root in every project window.
       } else {
         const firstTabPromise = createTab().catch((e) => {
           showStatus('Failed to initialize first tab: ' + String(e));
@@ -525,6 +534,12 @@
         await new Promise((resolve) => requestAnimationFrame(resolve));
         await new Promise((resolve) => requestAnimationFrame(resolve));
 
+        // A project window has no main-area pane to measure (its terminal is
+        // the bottom-zone tool window now), so it skips this and keeps the
+        // metrics the last plain window persisted. Measuring the tool
+        // window's terminal instead would be actively wrong: the arithmetic
+        // derives the window's CHROME from the difference between the
+        // terminal host and the window, and a bottom-zone panel is not that.
         const pane = currentPane();
         const host = document.getElementById('terminal-host');
         if (!pane || !pane.term || !host) return;
