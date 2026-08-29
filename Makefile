@@ -11,6 +11,7 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Local builds (run on the target platform):"
+	@echo "  run            Build frontend bundles, then cargo run the app"
 	@echo "  build          Build release binary"
 	@echo "  build-all      Build release binary + Java Plugin SDK"
 	@echo "  app            Build TermLab.app for current macOS architecture"
@@ -59,6 +60,11 @@ frontend-vendor:
 # Bundle + build + run in one step. Plain `cargo run` now also self-heals the
 # bundle via build.rs, so this is convenience, not a requirement.
 dev:
+	cargo run -p termlab_tauri
+
+# Build the frontend vendor bundles explicitly, then build and run the app.
+.PHONY: run
+run: frontend-vendor
 	cargo run -p termlab_tauri
 
 build: frontend-vendor
