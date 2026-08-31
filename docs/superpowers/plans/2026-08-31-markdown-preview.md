@@ -60,7 +60,7 @@ Adds a **second** vendor bundle rather than extending `vendor-entry.mjs`, whose 
 
 **Interfaces:**
 - Consumes: nothing (first task)
-- Produces: global `MDLib` with `{ MarkdownIt, DOMPurify, highlightCode, classHighlighter }`, loaded from `vendor/markdown/markdown.js`
+- Produces: global `MDLib` with `{ MarkdownIt, DOMPurify, taskListsPlugin, footnotePlugin, highlightCode, classHighlighter }`, loaded from `vendor/markdown/markdown.js`
 
 - [ ] **Step 1: Install the dependencies**
 
