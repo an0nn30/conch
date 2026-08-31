@@ -160,7 +160,7 @@ impl Default for KeyboardConfig {
             save_file: "cmd+s".into(),
             save_file_as: "cmd+shift+s".into(),
             open_file: "cmd+o".into(),
-            toggle_preview: "cmd+shift+p".into(),
+            toggle_preview: "cmd+shift+y".into(),
             tool_window_shortcuts: HashMap::new(),
             plugin_shortcuts: HashMap::new(),
         }
@@ -573,6 +573,12 @@ mod tests {
 
     #[test]
     fn toggle_preview_has_a_default_binding() {
-        assert_eq!(KeyboardConfig::default().toggle_preview, "cmd+shift+p");
+        // NOT cmd+shift+p: that combo is hard-wired to the command palette in
+        // frontend/app/shortcut-runtime.js, at a LOWER router priority than
+        // the handler that dispatches these config bindings — so binding it
+        // here would have made the palette unreachable. A default has to clear
+        // the frontend's hard-wired handlers and CodeMirror's own keymaps, not
+        // just this struct and menu.rs.
+        assert_eq!(KeyboardConfig::default().toggle_preview, "cmd+shift+y");
     }
 }

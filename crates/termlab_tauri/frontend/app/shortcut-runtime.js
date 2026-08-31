@@ -59,8 +59,8 @@
       // fresh window. The cost is that cmd+o no longer reaches the shell.
       open_file: 'open-file',
       // Handled inline in runShortcutFallbacks rather than through
-      // handleMenuAction: it is not a menu item, and its default binding is
-      // shared with the command palette (see togglePreviewOnFocusedPane).
+      // handleMenuAction: it is not a menu item, and it is consumed only by a
+      // pane that has a preview (see togglePreviewOnFocusedPane).
       toggle_preview: 'toggle-preview',
     };
 
@@ -72,13 +72,11 @@
     // Cycle the focused pane's markdown preview, reporting whether there was
     // one to cycle.
     //
-    // `toggle_preview` ships as cmd+shift+p, which is also the (hard-wired)
-    // command palette shortcut, and shortcut-fallbacks runs at a HIGHER
-    // priority than shortcut-palette-toggle. Consuming the key unconditionally
-    // would make the palette unreachable everywhere, so the preview claims it
-    // only where it means something — a markdown editor pane that actually has
-    // a preview mounted — and is dropped otherwise, exactly like the
-    // editor-scoped saves above, leaving the palette to answer it.
+    // Scoped more tightly than EDITOR_SCOPED_ACTIONS above, and for the same
+    // reason: this key means nothing outside a pane that actually has a
+    // preview, so everywhere else it must be DROPPED rather than swallowed —
+    // it still has to reach the shell in a terminal, and a tool window or
+    // plugin action the user bound to the same combo still has to run.
     function togglePreviewOnFocusedPane() {
       const pane = getCurrentPane();
       const api = global.termlabEditorPane;
@@ -285,9 +283,12 @@
             coreHit = null;
           }
         }
-        // Same drop-don't-consume treatment as the saves above, for the same
-        // reason: the combo this action ships with is also the command
-        // palette's, and a pane with no preview must leave the key alone.
+        // Same drop-don't-consume treatment as the saves above. Recording the
+        // suppression matters here for a second reason: 'toggle-preview' is
+        // not a menu action, so a bare `coreHit = null` would let the
+        // function-key table below hand it to handleMenuAction, which knows
+        // nothing about it — reachable today by binding toggle_preview to an
+        // F-key.
         if (coreHit && coreHit.action === 'toggle-preview') {
           if (togglePreviewOnFocusedPane()) return true;
           suppressedCoreAction = coreHit.action;

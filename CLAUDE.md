@@ -169,6 +169,11 @@ separate native plugins but were consolidated for reliability.
 - Plugin config: `~/.config/termlab/plugins/{plugin_name}/{key}.json`
 - Keyboard shortcuts: configurable in `[termlab.keyboard]` section
 - Default shortcuts use `cmd+` prefix (maps to Cmd on macOS, Ctrl on Linux/Windows)
+- A new shortcut default must be checked for collisions against the frontend's
+  hard-wired handlers in `app/shortcut-runtime.js` (the command palette owns
+  `cmd+shift+p` there, at a LOWER router priority than the config bindings — so a
+  config binding silently wins) and against CodeMirror's loaded keymaps, not just
+  `KeyboardConfig` and `menu.rs`
 
 ### Testing Standards
 - `#[cfg(test)] mod tests` at the bottom of each file
