@@ -290,6 +290,15 @@ The sanitizer corpus is non-negotiable given `csp: null`, and should be
 extended with any bypass discovered later rather than being treated as
 complete.
 
+**On jsdom.** Every existing frontend test hand-rolls a minimal element
+factory, and several note "no jsdom in this repo". DOMPurify cannot run against
+such a stub — it needs `DOMParser` and `document.implementation` — so `jsdom`
+is added as a **test-only devDependency**. It is used exclusively by
+`scripts/tests`, is never re-exported from a vendor entry, and never reaches
+the shipped bundle. The existing stub idiom remains correct for every other
+frontend test; this is a targeted exception for the one component whose whole
+purpose is to survive hostile input.
+
 ## Manual verification
 
 1. Open a README with tables, task lists, fenced code, and a local image;
