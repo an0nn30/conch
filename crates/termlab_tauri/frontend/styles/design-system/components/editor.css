@@ -16,6 +16,50 @@
   outline: none;
 }
 
+/* Markdown preview layout.
+   The CodeMirror host and the preview host are absolutely positioned SIBLINGS
+   inside the pane, so switching modes is a class change on the pane and never
+   a re-parent — the EditorView is never detached, which is what keeps the undo
+   history, the selection and the scroll position across a toggle.
+   The preview's own typography lives in markdown-preview.css, which is loaded
+   by the frame itself; these rules are only about where the frame sits. */
+
+.md-preview-host {
+  position: absolute;
+  inset: 0;
+  display: none;
+  overflow: hidden;
+  background: var(--tl-bg);
+}
+
+.md-preview-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* md-mode-editor needs no rules: it is the pane exactly as it is without a
+   preview, and the class exists so the current mode is legible in the DOM. */
+
+.md-mode-split > .editor-pane-host {
+  right: 50%;
+}
+
+.md-mode-split > .md-preview-host {
+  left: 50%;
+  display: block;
+  border-left: 1px solid var(--tl-border);
+}
+
+.md-mode-preview > .editor-pane-host {
+  display: none;
+}
+
+.md-mode-preview > .md-preview-host {
+  display: block;
+}
+
 /* The modified marker in the tab label. */
 .tab-dirty-marker {
   margin-left: var(--tl-space-1);

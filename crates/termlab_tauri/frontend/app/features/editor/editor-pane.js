@@ -15,6 +15,20 @@
   // creation: a scratch saved as `deploy.py` has to start highlighting as
   // Python without losing the document, the selection or the undo history.
   const languageCompartments = new WeakMap();
+  // The markdown preview, when a pane has one. Keyed by view like the
+  // compartments above, and simply ABSENT for every other file — which is how
+  // "the preview is only ever offered for markdown" is enforced structurally
+  // rather than by a flag every call site has to remember to check.
+  const previews = new WeakMap();
+  // The element the preview iframe is mounted into, kept beside its controller
+  // so teardown can remove it without re-deriving it from the DOM.
+  const previewHosts = new WeakMap();
+
+  const MODE_CLASSES = {
+    editor: 'md-mode-editor',
+    split: 'md-mode-split',
+    preview: 'md-mode-preview',
+  };
 
   function vimExtensions(enabled) {
     return global.termlabVimMode && typeof global.termlabVimMode.vimExtensions === 'function'
@@ -60,6 +74,21 @@
       onDirtyChange(true);
     });
 
+    // Both halves no-op until a preview exists, which for a non-markdown pane
+    // is never — so this costs a WeakMap miss per update and nothing else.
+    // `update.view` rather than a captured binding: the listener is built
+    // while the view it belongs to is still being constructed.
+    const previewWatcher = CM.EditorView.updateListener.of((update) => {
+      const preview = previews.get(update.view);
+      if (!preview) return;
+      if (update.docChanged) preview.scheduleRender();
+      // Editor drives preview and never the reverse, so there is no feedback
+      // loop to guard against here.
+      if (update.geometryChanged || update.selectionSet) {
+        preview.scrollToLine(topVisibleLine(update.view));
+      }
+    });
+
     const view = new CM.EditorView({
       parent: hostEl,
       state: CM.EditorState.create({
@@ -94,6 +123,7 @@
           themeComp.of(themeExtensions),
           fontComp.of([]),
           dirtyWatcher,
+          previewWatcher,
         ],
       }),
     });
@@ -111,7 +141,136 @@
   }
 
   function destroyEditorView(view) {
-    if (view && typeof view.destroy === 'function') view.destroy();
+    if (!view) return;
+    destroyPreview(view);
+    if (typeof view.destroy === 'function') view.destroy();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Markdown preview — mounting and layout only
+  // ---------------------------------------------------------------------------
+  //
+  // What the preview DOES lives in preview/preview-controller.js. This half
+  // owns where it hangs in the DOM, which pane it belongs to, and which of the
+  // three layouts is showing.
+
+  // The pane element the CodeMirror host and the preview host are siblings in.
+  // Derived from the view rather than remembered, so a pane moved by the split
+  // system is never wired to the container it used to be in.
+  function paneContainer(view) {
+    const editorHost = view && view.dom ? view.dom.parentNode : null;
+    return editorHost ? editorHost.parentNode : null;
+  }
+
+  // The layout is a class on that container, not a re-parent: the EditorView
+  // stays exactly where it was mounted, so toggling modes cannot cost the undo
+  // history, the selection or the scroll position.
+  function applyPreviewLayout(view, mode) {
+    const container = paneContainer(view);
+    if (!container || !container.classList) return;
+    for (const key of Object.keys(MODE_CLASSES)) container.classList.remove(MODE_CLASSES[key]);
+    container.classList.add(MODE_CLASSES[mode] || MODE_CLASSES.editor);
+  }
+
+  // The source line at the top of the viewport, 0-based to match the
+  // `data-src-line` values markdown-it's token maps produce.
+  function topVisibleLine(view) {
+    if (!view || typeof view.lineBlockAtHeight !== 'function') return -1;
+    try {
+      const top = view.lineBlockAtHeight(view.scrollDOM.scrollTop).from;
+      return view.state.doc.lineAt(top).number - 1;
+    } catch (error) {
+      // Geometry can be asked for mid-layout. A missed scroll sync is
+      // cosmetic and must not take the update cycle down with it.
+      return -1;
+    }
+  }
+
+  function mountPreview(view, source, mode) {
+    const module = global.termlabPreviewController;
+    const container = paneContainer(view);
+    if (!module || typeof module.createController !== 'function' || !container) return null;
+
+    const host = global.document.createElement('div');
+    host.className = 'md-preview-host';
+    container.appendChild(host);
+
+    const controller = module.createController({
+      mountEl: host,
+      readDoc: () => view.state.doc.toString(),
+      source,
+      mode,
+    });
+    if (!controller) {
+      // No vendor bundle (it is gitignored and built by `make frontend-vendor`)
+      // or a preview module that never loaded. Leave the pane byte-for-byte
+      // the pane it was, rather than a dead host element behind an inert
+      // toggle.
+      container.removeChild(host);
+      return null;
+    }
+    previews.set(view, controller);
+    previewHosts.set(view, host);
+    return controller;
+  }
+
+  function destroyPreview(view) {
+    const controller = previews.get(view);
+    if (!controller) return;
+    controller.destroy();
+    previews.delete(view);
+    const host = previewHosts.get(view);
+    if (host && host.parentNode) host.parentNode.removeChild(host);
+    previewHosts.delete(view);
+    applyPreviewLayout(view, 'editor');
+  }
+
+  /**
+   * Put a pane into `mode`, mounting or tearing down its preview as needed.
+   *
+   *   source = { filename, docPath, binding }
+   *
+   * `filename` is what decides whether a preview is offered at all: anything
+   * the language map does not call markdown gets none, and a pane that HAD one
+   * loses it — which is how `notes.md` saved as `notes.txt` leaves preview
+   * mode. Returns the applied mode, or null when the pane has no preview.
+   */
+  function setPreviewMode(view, mode, source) {
+    if (!view) return null;
+    const info = source || {};
+    const map = global.termlabEditorLanguageMap;
+    const markdown = !!(map && typeof map.isMarkdown === 'function' && map.isMarkdown(info.filename));
+
+    if (!markdown) {
+      destroyPreview(view);
+      return null;
+    }
+
+    let controller = previews.get(view);
+    if (controller) controller.setSource(info);
+    else controller = mountPreview(view, info, mode);
+    if (!controller) return null;
+
+    const applied = controller.setMode(mode);
+    applyPreviewLayout(view, applied);
+    return applied;
+  }
+
+  // Editor -> Split -> Preview -> Editor. Returns the new mode, or null when
+  // the pane has no preview to toggle — which is what the keyboard shortcut
+  // reads to decide whether to consume the keystroke or let it fall through.
+  function togglePreview(view) {
+    const controller = previews.get(view);
+    if (!controller) return null;
+    const mode = controller.cycle();
+    applyPreviewLayout(view, mode);
+    return mode;
+  }
+
+  // The pane's current mode, or null when it has no preview.
+  function previewMode(view) {
+    const controller = previews.get(view);
+    return controller ? controller.mode() : null;
   }
 
   function setFontSize(view, px) {
@@ -129,6 +288,11 @@
     const comp = themeCompartments.get(view);
     if (!view || !comp || !global.termlabEditorTheme) return;
     view.dispatch({ effects: comp.reconfigure(global.termlabEditorTheme.buildTheme()) });
+    // The preview lives in its own document, and design tokens do not cascade
+    // across documents — the frame snapshots them on every content write. So
+    // it restyles by re-rendering, not by a reconfigure.
+    const preview = previews.get(view);
+    if (preview) preview.refresh();
   }
 
   // Turn vim keybindings on or off on a view that is already open. A
@@ -161,5 +325,8 @@
     refreshTheme,
     setVimMode,
     setLanguage,
+    setPreviewMode,
+    togglePreview,
+    previewMode,
   };
 })(window);
