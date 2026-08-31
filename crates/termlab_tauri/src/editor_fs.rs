@@ -492,4 +492,109 @@ mod tests {
         );
         assert!(check_image_size(1024).is_ok());
     }
+
+    /// Pins the command's full sequence end to end: extension gate -> metadata
+    /// -> is_file -> size cap -> read -> encode. The individual guards are
+    /// unit-tested above in isolation; this is the one place their ORDER is
+    /// exercised, which is the security-relevant property (see the oversized
+    /// test below).
+    #[test]
+    fn editor_read_image_base64_round_trips_real_bytes() {
+        let dir = std::env::temp_dir().join(format!("termlab-image-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let file = dir.join("pixel.png");
+        let bytes: &[u8] = b"\x89PNG\r\n\x1a\nnot a real png but real bytes";
+        fs::write(&file, bytes).expect("write test image");
+
+        let encoded = editor_read_image_base64(file.to_string_lossy().into_owned())
+            .expect("a real, appropriately-named, appropriately-sized file must read");
+        let decoded = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("command must return valid base64")
+        };
+        assert_eq!(
+            decoded, bytes,
+            "the decoded payload must be exactly the file's bytes"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_read_image_base64_refuses_wrong_extension_before_any_read() {
+        let dir = std::env::temp_dir().join(format!("termlab-image-ext-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let file = dir.join("secret.txt");
+        fs::write(&file, b"not an image").expect("write test file");
+
+        let error = editor_read_image_base64(file.to_string_lossy().into_owned())
+            .expect_err("a non-image extension must be refused");
+        assert!(
+            error.contains("not a recognised image file"),
+            "the message must say the extension was not recognised: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_read_image_base64_refuses_a_directory() {
+        let dir = std::env::temp_dir().join(format!("termlab-image-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let sub = dir.join("foo.png");
+        fs::create_dir_all(&sub).expect("create a directory named like an image");
+
+        let error = editor_read_image_base64(sub.to_string_lossy().into_owned())
+            .expect_err("a directory must be refused even with a recognised image extension");
+        assert!(
+            error.contains("not a file"),
+            "the message must say it is not a file: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_read_image_base64_refuses_a_missing_file() {
+        let missing =
+            std::env::temp_dir().join(format!("termlab-image-missing-{}.png", std::process::id()));
+        let _ = fs::remove_file(&missing);
+
+        assert!(editor_read_image_base64(missing.to_string_lossy().into_owned()).is_err());
+    }
+
+    /// The important case: the size cap must be enforced from `metadata`
+    /// BEFORE `std::fs::read` pulls bytes into memory. `set_len` makes this a
+    /// sparse file, so the size `metadata` reports is real but no bytes are
+    /// actually written to disk — this test stays fast and cheap despite
+    /// exceeding `MAX_IMAGE_BYTES`. If a refactor ever reordered the read
+    /// before the size check, this file is large enough that reading it in
+    /// full would be the observable difference (this test would slow down
+    /// dramatically rather than merely fail).
+    #[test]
+    fn editor_read_image_base64_refuses_an_oversized_file_from_metadata_alone() {
+        let dir =
+            std::env::temp_dir().join(format!("termlab-image-oversize-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let file = dir.join("huge.png");
+        let f = fs::File::create(&file).expect("create sparse file");
+        f.set_len(MAX_IMAGE_BYTES + 1)
+            .expect("set_len must be able to grow a sparse file");
+        drop(f);
+
+        let error = editor_read_image_base64(file.to_string_lossy().into_owned())
+            .expect_err("a file over the cap must be refused");
+        assert!(
+            error.contains("preview limit"),
+            "the message must mention the size limit: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
