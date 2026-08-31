@@ -17,12 +17,25 @@
       .replace(/"/g, '&quot;');
   }
 
+  // Fence tags are LANGUAGE NAMES (```python); language-map.js is keyed by FILE
+  // EXTENSION (.py). The two coincide often enough to be misleading — `go` and
+  // `json` work by luck, `python` and `javascript` do not — so the mapping is
+  // explicit here rather than by seeding non-extensions into that table.
+  // Only tags whose name differs from the extension need an entry.
+  const FENCE_ALIASES = {
+    python: 'py', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts',
+    ruby: 'rb', rust: 'rs', shell: 'sh', powershell: 'ps1', 'c++': 'cpp',
+    perl: 'pl', yml: 'yml', markdown: 'md',
+  };
+
   // A fence language is resolved through the SAME table the editor uses, so a
   // ```rust fence and a .rs file can never disagree about their grammar.
-  // languageKeyFor takes a filename, so the fence tag is turned into one.
+  // languageKeyFor takes a filename, so the fence tag is turned into one —
+  // through the alias table above when the tag is not itself an extension.
   function grammarFor(CM, languageMap, lang) {
     if (!CM || !languageMap || !lang) return null;
-    const key = languageMap.languageKeyFor(`x.${String(lang).toLowerCase()}`);
+    const tag = String(lang).toLowerCase();
+    const key = languageMap.languageKeyFor(`x.${FENCE_ALIASES[tag] || tag}`);
     if (!key) return null;
     const entry = CM[key];
     if (!entry) return null;
