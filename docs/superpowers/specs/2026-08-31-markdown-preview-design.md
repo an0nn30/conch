@@ -208,17 +208,27 @@ images and re-laying-out the frame on every keystroke.
 preview_default_mode = "editor"   # "editor" | "split" | "preview"
 
 [termlab.keyboard]
-toggle_preview = "cmd+shift+p"    # cycles editor -> split -> preview
+toggle_preview = "cmd+shift+y"    # cycles editor -> split -> preview
 ```
 
 Both fields are `#[serde(default)]`, so existing configs keep working
 unchanged. `preview_default_mode` sets only the initial mode when a markdown
 file is opened; the live mode is per-pane runtime state and is not persisted.
 
-`cmd+shift+p` is free: it appears in the tree only as a test fixture in
-`menu.rs` (`config_key_to_accelerator_cmdorctrl_uses_primary_modifier`), not as
-a registered accelerator, and it is absent from `KeyboardConfig::default`. The
-taken `cmd+shift+*` defaults are `[ ] d e j m n o r s t v w z`.
+`toggle_preview` defaults to `cmd+shift+y`.
+
+> **Correction.** An earlier revision of this spec claimed `cmd+shift+p` was free
+> because it appeared in the Rust tree only as a test fixture in `menu.rs`. That
+> verification was incomplete: it never checked the frontend, and
+> `app/shortcut-runtime.js` hard-wires the **command palette** to super+shift+p.
+> Binding preview there would shadow the palette inside exactly the file type where
+> preview is active.
+>
+> The default is now `cmd+shift+y`, verified free across all four binding surfaces —
+> `KeyboardConfig` defaults, `menu.rs` accelerators, `shortcut-runtime.js` hard-wired
+> checks, and CodeMirror's loaded keymaps (which claim only `Mod-Shift-l`,
+> `Mod-Shift-u`, and `Mod-Shift-z`). Taken `cmd+shift+*` letters are
+> `[ ] d e j l m n o p r s t u v w z`.
 
 ### Rust changes (additive only)
 
