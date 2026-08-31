@@ -584,16 +584,12 @@ fn call_on_event(env: &mut JNIEnv, plugin: &GlobalRef, json: &str, plugin_name: 
 /// Read `Plugin-Class` from a JAR's META-INF/MANIFEST.MF.
 fn read_plugin_class_from_jar(jar_path: &Path) -> Result<String, LoadError> {
     let content = read_manifest_content_from_jar(jar_path)?;
-    for line in content.lines() {
-        if let Some(class) = line.strip_prefix("Plugin-Class:") {
-            return Ok(class.trim().to_string());
-        }
-    }
-
-    Err(LoadError::Io(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("no Plugin-Class in manifest of {}", jar_path.display()),
-    )))
+    manifest_attr(&content, "Plugin-Class").ok_or_else(|| {
+        LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no Plugin-Class in manifest of {}", jar_path.display()),
+        ))
+    })
 }
 
 fn read_manifest_content_from_jar(jar_path: &Path) -> Result<String, LoadError> {
@@ -617,17 +613,45 @@ fn read_manifest_content_from_jar(jar_path: &Path) -> Result<String, LoadError> 
 
 fn read_manifest_attr_from_jar(jar_path: &Path, key: &str) -> Result<Option<String>, LoadError> {
     let content = read_manifest_content_from_jar(jar_path)?;
-    let prefix = format!("{key}:");
+    Ok(manifest_attr(&content, key))
+}
+
+/// Join JAR manifest continuation lines into whole logical headers.
+///
+/// The JAR manifest spec wraps headers at 72 bytes; every wrapped segment
+/// starts with a single space that is not part of the value. Standard writers
+/// (Gradle, Maven Archiver, `jar cfm`) wrap automatically, so any value longer
+/// than ~70 bytes arrives split across lines.
+fn unfold_manifest_lines(content: &str) -> Vec<String> {
+    let mut logical: Vec<String> = Vec::new();
     for line in content.lines() {
-        if let Some(value) = line.strip_prefix(&prefix) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Ok(Some(trimmed.to_string()));
+        match line.strip_prefix(' ') {
+            Some(rest) if !logical.is_empty() => {
+                if let Some(last) = logical.last_mut() {
+                    last.push_str(rest);
+                }
             }
-            return Ok(None);
+            _ => logical.push(line.to_string()),
         }
     }
-    Ok(None)
+    logical
+}
+
+/// Look up a manifest attribute by key, honoring continuation lines.
+///
+/// Returns `None` when the key is absent or its value is empty.
+fn manifest_attr(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    for line in unfold_manifest_lines(content) {
+        if let Some(value) = line.strip_prefix(&prefix) {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 fn parse_manifest_permissions(csv: &str) -> Vec<String> {
@@ -1565,5 +1589,116 @@ mod tests {
         }
         let class = read_plugin_class_from_jar(&jar).unwrap();
         assert_eq!(class, "termlab.plugin.hello.HelloPlugin");
+    }
+
+    #[test]
+    fn manifest_attr_reads_single_line_value() {
+        let manifest = "Manifest-Version: 1.0\r\nPlugin-Class: termlab.plugin.Hello\r\n";
+        assert_eq!(
+            manifest_attr(manifest, "Plugin-Class").as_deref(),
+            Some("termlab.plugin.Hello"),
+            "unwrapped attribute should be read verbatim"
+        );
+    }
+
+    #[test]
+    fn manifest_attr_joins_wrapped_value() {
+        // Wrapped the way Gradle/Maven wrap at 72 bytes: the continuation line
+        // starts with one space that is not part of the value.
+        let manifest = concat!(
+            "Manifest-Version: 1.0\r\n",
+            "Plugin-Permissions: ui.panel,ui.menu,ui.notify,session.status,sessi\r\n",
+            " on.exec\r\n",
+        );
+        assert_eq!(
+            manifest_attr(manifest, "Plugin-Permissions").as_deref(),
+            Some("ui.panel,ui.menu,ui.notify,session.status,session.exec"),
+            "continuation line should be joined without truncation or separator"
+        );
+    }
+
+    #[test]
+    fn manifest_attr_joins_value_wrapped_across_three_lines() {
+        let manifest = concat!(
+            "Manifest-Version: 1.0\r\n",
+            "Plugin-Class: termlab.plugin.Hello\r\n",
+            "Plugin-Permissions: ui.panel,ui.menu,ui.notify,session.status,sessi\r\n",
+            " on.exec,config.read,config.write,fs.read,fs.write,net.connect,clipb\r\n",
+            " oard.read\r\n",
+            "Plugin-Api: 1\r\n",
+        );
+        assert_eq!(
+            manifest_attr(manifest, "Plugin-Permissions").as_deref(),
+            Some(concat!(
+                "ui.panel,ui.menu,ui.notify,session.status,session.exec,",
+                "config.read,config.write,fs.read,fs.write,net.connect,clipboard.read"
+            )),
+            "all continuation lines should be joined in order"
+        );
+        assert_eq!(
+            manifest_attr(manifest, "Plugin-Api").as_deref(),
+            Some("1"),
+            "attribute following a wrapped one should still be found"
+        );
+    }
+
+    #[test]
+    fn manifest_attr_parses_permissions_from_wrapped_value() {
+        let manifest = concat!(
+            "Plugin-Permissions: ui.panel,ui.menu,ui.notify,session.status,sessi\r\n",
+            " on.exec\r\n",
+        );
+        let csv = manifest_attr(manifest, "Plugin-Permissions").unwrap();
+        assert_eq!(
+            parse_manifest_permissions(&csv),
+            vec![
+                "ui.panel",
+                "ui.menu",
+                "ui.notify",
+                "session.status",
+                "session.exec"
+            ],
+            "wrapped permission list should yield whole capability tokens"
+        );
+    }
+
+    #[test]
+    fn manifest_attr_handles_wrapped_plugin_class() {
+        let manifest = concat!(
+            "Manifest-Version: 1.0\r\n",
+            "Plugin-Class: com.example.termlab.plugins.deeply.nested.package.Hel\r\n",
+            " loWorldPlugin\r\n",
+        );
+        assert_eq!(
+            manifest_attr(manifest, "Plugin-Class").as_deref(),
+            Some("com.example.termlab.plugins.deeply.nested.package.HelloWorldPlugin"),
+            "Plugin-Class has the same wrapping exposure as Plugin-Permissions"
+        );
+    }
+
+    #[test]
+    fn manifest_attr_returns_none_for_missing_or_empty() {
+        let manifest = "Manifest-Version: 1.0\r\nPlugin-Permissions: \r\n";
+        assert_eq!(
+            manifest_attr(manifest, "Plugin-Permissions"),
+            None,
+            "empty value should read as absent"
+        );
+        assert_eq!(
+            manifest_attr(manifest, "Plugin-Api"),
+            None,
+            "missing key should read as absent"
+        );
+    }
+
+    #[test]
+    fn unfold_manifest_lines_keeps_leading_continuation_and_lf_endings() {
+        // A stray continuation with nothing to join onto must not panic.
+        assert_eq!(unfold_manifest_lines(" orphan\n"), vec![" orphan"]);
+        assert_eq!(
+            unfold_manifest_lines("Plugin-Api: 1\nPlugin-Class: com.exam\n ple.A\n"),
+            vec!["Plugin-Api: 1", "Plugin-Class: com.example.A"],
+            "LF-only manifests should unfold with no separator inserted"
+        );
     }
 }
