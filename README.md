@@ -39,7 +39,13 @@ Positioning: TermLab sits between terminal emulators (iTerm2, WezTerm, Warp) and
 
 **SSH Tunnels** (built-in) — Local port forwarding with persistent tunnel definitions. Start/stop from the sidebar or the tunnel manager dialog.
 
+**Transfer Queue** — Uploads and downloads run through a durable queue that survives restarts. Recursive folder transfers, pipelined SFTP for throughput, per-item and whole-folder progress, and bulk cancellation from the Transfer Center.
+
+**Built-in Editor** — A light CodeMirror-based editor for quick edits without leaving the app. Syntax highlighting for ~20 languages, optional vim keybindings (`[editor] vim_mode`), untitled buffers, and direct editing of remote files — saving a remote file uploads it back to its host.
+
 **Credential Vault** — Encrypted credential storage using AES-256-GCM with Argon2id key derivation. Built-in SSH key generation (Ed25519, ECDSA, RSA), auto-lock timer, and vault-aware SSH connections. Accessible via Tools > Credential Vault.
+
+**Share Bundles** — Export servers, folders, tunnels, SSH keys, and vault entries into a portable `.termlabshare` file, then import them on another machine with per-item conflict resolution.
 
 **Settings Dialog** — Comprehensive settings UI accessible via File > Settings (or `Cmd+,`). Configure appearance, terminal, shell, keyboard shortcuts, plugins, and advanced settings with an Apply/Cancel workflow.
 
@@ -162,7 +168,7 @@ sudo pacman -S --needed \
 
 ```bash
 git clone https://github.com/an0nn30/conch.git
-cd termlab
+cd conch
 
 # Debug build / run
 cargo run -p termlab_tauri
@@ -181,16 +187,24 @@ The binary is at `target/release/termlab`.
 |----------|--------|
 | `Cmd+,` | Settings |
 | `Cmd+T` | New tab |
+| `Cmd+Shift+T` | New plain shell tab |
 | `Cmd+W` | Close tab |
 | `Cmd+1`--`9` | Switch to tab N |
+| `Cmd+Shift+[` / `Cmd+Shift+]` | Previous / next tab |
+| `F2` | Rename tab |
 | `Cmd+Shift+N` | New window |
+| `Cmd+D` / `Cmd+Shift+D` | Split pane vertical / horizontal |
+| `Cmd+Shift+W` | Close pane |
+| `Cmd+Alt+Arrow` | Move focus between panes |
 | `Cmd+Shift+E` | Toggle left panel |
 | `Cmd+Shift+R` | Toggle right panel |
 | `Cmd+Shift+J` | Toggle bottom panel |
 | `Cmd+Shift+Z` | Zen mode (hide all panels) |
 | `Cmd+/` | Toggle & focus quick connect |
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Zoom in / out / reset |
-| `Cmd+Shift+T` | Manage SSH tunnels |
+| `Cmd+Shift+M` | Manage SSH tunnels |
+| `Cmd+Shift+V` | Open credential vault |
+| `Cmd+N` / `Cmd+O` / `Cmd+S` / `Cmd+Shift+S` | Editor: new / open / save / save as |
 
 All shortcuts are configurable in `[termlab.keyboard]`. Plugins can also register their own keybindings.
 
@@ -207,12 +221,25 @@ theme = "auto"              # "auto" follows the app appearance; or any Alacritt
 [termlab]
 check_for_updates = true    # Check for new versions on startup (macOS/Windows)
 
+[editor]
+vim_mode = false           # Vim keybindings in the built-in editor
+
 [termlab.keyboard]
 new_tab = "cmd+t"
+new_plain_shell_tab = "cmd+shift+t"
 close_tab = "cmd+w"
+select_tab_left = "cmd+shift+["
+select_tab_right = "cmd+shift+]"
 new_window = "cmd+shift+n"
 quit = "cmd+q"
-rename_tab = "f2"
+rename_tab = "F2"
+settings = "cmd+,"
+manage_tunnels = "cmd+shift+m"
+vault_open = "cmd+shift+v"
+new_file = "cmd+n"
+open_file = "cmd+o"
+save_file = "cmd+s"
+save_file_as = "cmd+shift+s"
 zen_mode = "cmd+shift+z"
 toggle_left_panel = "cmd+shift+e"
 toggle_right_panel = "cmd+shift+r"
@@ -245,6 +272,7 @@ crates/
   termlab_plugin_sdk/   Widget/event types shared with Lua and Java plugins
   termlab_plugin/       Plugin host — message bus, Lua runner, Java runtime
   termlab_remote/       Platform-agnostic SSH, SFTP, tunnels (russh)
+  termlab_share/        Export/import .termlabshare bundles (servers, keys, vault)
   termlab_tauri/        The app — Tauri/xterm.js UI, built-in SSH/SFTP/tunnels
   termlab_vault/        Credential vault — encrypted storage, key generation
 java-sdk/             Java Plugin SDK (JAR + sources)
