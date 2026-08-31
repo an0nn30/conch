@@ -235,6 +235,76 @@ pub(crate) fn editor_temp_sweep() -> Result<(), String> {
     Ok(())
 }
 
+/// Largest image inlined into a preview. Images become base64 `data:` URIs, so
+/// the cost is ~4/3 of this in the webview per image; a cap keeps one oversized
+/// asset from stalling a render.
+pub(crate) const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn image_extension(name: &str) -> Option<String> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let dot = base.rfind('.')?;
+    if dot == 0 {
+        return None;
+    }
+    Some(base[dot + 1..].to_ascii_lowercase())
+}
+
+pub(crate) fn is_image_name(name: &str) -> bool {
+    matches!(
+        image_extension(name).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico")
+    )
+}
+
+/// Kept alongside `is_image_name` and `check_image_size` as the same
+/// extension table, and covered by its own unit tests, but not yet called
+/// from `editor_read_image_base64`: that command returns the bare base64
+/// payload and lets the frontend derive the MIME type itself when it builds
+/// the `data:` URI, since it already knows the filename.
+#[allow(dead_code)]
+pub(crate) fn image_mime(name: &str) -> &'static str {
+    match image_extension(name).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+pub(crate) fn check_image_size(bytes: u64) -> Result<(), String> {
+    if bytes > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "image is {bytes} bytes, over the {MAX_IMAGE_BYTES} byte preview limit"
+        ));
+    }
+    Ok(())
+}
+
+/// Read a local image for the markdown preview, base64-encoded.
+///
+/// Returns the payload only — the caller builds the `data:` URI, because it
+/// already knows the MIME type from the same filename.
+#[tauri::command]
+pub(crate) fn editor_read_image_base64(path: String) -> Result<String, String> {
+    use base64::Engine;
+
+    if !is_image_name(&path) {
+        return Err(format!("not a recognised image file: {path}"));
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a file"));
+    }
+    check_image_size(meta.len())?;
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +463,36 @@ mod tests {
         assert!(victim.exists(), "a path escaping the root via .. must survive");
 
         let _ = std::fs::remove_dir_all(&escape_dir);
+    }
+
+    #[test]
+    fn image_extensions_are_recognised() {
+        for name in ["a.png", "b.JPG", "c.jpeg", "d.gif", "e.webp", "f.svg", "g.bmp"] {
+            assert!(is_image_name(name), "{name} must be treated as an image");
+        }
+    }
+
+    #[test]
+    fn non_image_extensions_are_rejected() {
+        for name in ["a.txt", "b.rs", "c.md", "d", "e.png.exe"] {
+            assert!(!is_image_name(name), "{name} must not be treated as an image");
+        }
+    }
+
+    #[test]
+    fn image_mime_matches_extension() {
+        assert_eq!(image_mime("a.png"), "image/png");
+        assert_eq!(image_mime("a.JPG"), "image/jpeg");
+        assert_eq!(image_mime("a.svg"), "image/svg+xml");
+        assert_eq!(image_mime("a.unknown"), "application/octet-stream");
+    }
+
+    #[test]
+    fn oversized_images_are_refused() {
+        assert!(
+            check_image_size(MAX_IMAGE_BYTES + 1).is_err(),
+            "an image over the cap must be refused rather than inlined"
+        );
+        assert!(check_image_size(1024).is_ok());
     }
 }

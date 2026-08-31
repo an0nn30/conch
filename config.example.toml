@@ -126,6 +126,9 @@ blinking = true
 # guard, so a file with unsaved changes still asks before it goes.
 vim_mode = false
 
+# Which view mode a markdown file opens in: "editor", "split" or "preview".
+preview_default_mode = "editor"
+
 # ---------------------------------------------------------------------------
 # TermLab — Keyboard Shortcuts
 # ---------------------------------------------------------------------------
@@ -170,6 +173,7 @@ save_file_as = "cmd+shift+s"
 # save_file this is not scoped to a focused editor, so it also consumes this
 # combo in a terminal pane.
 open_file = "cmd+o"
+toggle_preview = "cmd+shift+p"   # cycle editor -> split -> preview
 
 # Optional per-plugin shortcut overrides.
 # Key format: "<plugin_name>:<action>".

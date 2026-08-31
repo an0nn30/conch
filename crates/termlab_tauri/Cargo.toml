@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ttf-parser = "0.25"
+base64 = { workspace = true }
 termlab_core = { workspace = true }
 termlab_plugin = { workspace = true }
 termlab_plugin_sdk = { workspace = true }
