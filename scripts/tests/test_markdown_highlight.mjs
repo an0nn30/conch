@@ -97,4 +97,16 @@ const nasty = highlight('</code><script>alert(1)</script>', 'rust');
 assert.ok(!nasty.includes('<script>'), 'fence content must be escaped, not injected');
 assert.match(nasty, /&lt;script&gt;/, 'angle brackets must be entity-escaped');
 
+// --- a grammar that throws degrades to plain text --------------------------
+// A malformed fence must not take the whole preview down: highlight() returns
+// null so markdown-it falls back to its own escaping.
+{
+  const exploding = sandbox.termlabFenceHighlight.createHighlighter({
+    CM: { rust: () => ({ language: { parser: { parse() { throw new Error('bad parse'); } } } }) },
+    highlightCode, classHighlighter: {},
+  });
+  assert.doesNotThrow(() => exploding('fn main', 'rust'), 'a throwing grammar must not propagate');
+  assert.strictEqual(exploding('fn main', 'rust'), null, 'a throwing grammar degrades to null');
+}
+
 console.log('test_markdown_highlight: ok');

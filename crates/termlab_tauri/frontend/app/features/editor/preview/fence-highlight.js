@@ -23,9 +23,9 @@
   // explicit here rather than by seeding non-extensions into that table.
   // Only tags whose name differs from the extension need an entry.
   const FENCE_ALIASES = {
-    python: 'py', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts',
+    python: 'py', javascript: 'js', typescript: 'ts',
     ruby: 'rb', rust: 'rs', shell: 'sh', powershell: 'ps1', 'c++': 'cpp',
-    perl: 'pl', yml: 'yml', markdown: 'md',
+    perl: 'pl',
   };
 
   // A fence language is resolved through the SAME table the editor uses, so a
