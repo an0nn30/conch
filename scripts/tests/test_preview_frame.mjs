@@ -401,4 +401,46 @@ function loadModule(extraGlobals) {
   }
 }
 
+// --- Scenario: consecutive renders are never byte-identical -----------------
+//
+// The parent hangs image resolution off the frame's `load` event, so it needs
+// the frame to actually re-navigate. Whether a webview re-navigates when
+// `srcdoc` is assigned the value it already holds is engine-dependent, and the
+// concrete failure is a Save As between two directories holding same-named
+// files: identical bytes, identical palette, identical stylesheet — and a
+// stale set of already-resolved images if no load fires. A monotonic render
+// token removes the question.
+{
+  const sandbox = loadModule({});
+  const host = makeEl('div');
+  const frame = sandbox.termlabPreviewFrame.createFrame(host, {
+    readToken: () => '#111111',
+    css: '.md-preview-body { color: red; }',
+  });
+  const iframe = frame.element;
+
+  frame.setContent('<p data-src-line="0">same</p>');
+  const first = iframe.getAttribute('srcdoc');
+  frame.setContent('<p data-src-line="0">same</p>');
+  const second = iframe.getAttribute('srcdoc');
+
+  assert.notStrictEqual(
+    first, second,
+    'identical content must still produce a different srcdoc, or the frame may never re-navigate',
+  );
+  // Only the token differs: the rendered body is untouched.
+  assert.match(first, /<!-- termlab-render 1 -->/, 'the token is present and monotonic');
+  assert.match(second, /<!-- termlab-render 2 -->/);
+  assert.strictEqual(
+    first.replace(/<!-- termlab-render \d+ -->/, ''),
+    second.replace(/<!-- termlab-render \d+ -->/, ''),
+    'and nothing else about the document changed',
+  );
+  // Ahead of the doctype a comment would put the document into quirks mode.
+  assert.ok(
+    second.indexOf('<!doctype html>') < second.indexOf('<!-- termlab-render'),
+    'the token must sit after the doctype, not before it',
+  );
+}
+
 console.log('test_preview_frame: ok');

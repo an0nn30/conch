@@ -96,6 +96,10 @@
     let frame = null;
     let renderTimer = null;
     let destroyed = false;
+    // The frame's current `load` handler, owned by the most recent render.
+    // Held so it can be replaced when a render supersedes it and removed on
+    // teardown.
+    let loadHandler = null;
 
     function frameDoc() {
       return frame && frame.element ? frame.element.contentDocument : null;
@@ -124,25 +128,52 @@
     function ensureFrame() {
       if (frame || destroyed) return frame;
       frame = frames.createFrame(mountEl, { onLinkClick: openLink });
-      const el = frame && frame.element;
-      if (el && typeof el.addEventListener === 'function') {
-        // srcdoc parses ASYNCHRONOUSLY. The <img> elements of a freshly
-        // injected document do not exist until the frame has loaded, so
-        // walking it straight after setContent() would query the PREVIOUS
-        // document and silently resolve nothing. Hanging resolution off the
-        // load event is also what makes it happen after injection, so the
-        // text is readable while the images are still in flight.
-        el.addEventListener('load', () => {
-          resolveImages(images ? images.currentGeneration() : 0);
-        });
-      }
       return frame;
     }
 
-    // Swap each unresolved <img> for a data: URI. Every result is
-    // generation-checked twice — once inside the resolver and once here on
-    // return — so a render that has been superseded can never paint into the
-    // frame that replaced it.
+    // Arm image resolution for the render that has just written `srcdoc`.
+    //
+    // srcdoc parses ASYNCHRONOUSLY. The <img> elements of a freshly injected
+    // document do not exist until the frame has loaded, so walking it straight
+    // after setContent() would query the PREVIOUS document and silently
+    // resolve nothing. Hanging resolution off the load event is also what puts
+    // it after injection, so the text is readable while the images are still
+    // in flight.
+    //
+    // The generation is CAPTURED here, at the moment the render bumped it, and
+    // the previous render's handler is REMOVED. Sampling currentGeneration()
+    // inside the handler instead would let a superseded render's late load
+    // event pass its own check and paint into the document that is about to be
+    // replaced — bounded, cache-served waste, but a weaker invariant than the
+    // one this is meant to provide.
+    //
+    // Deliberately not `{ once: true }`: preview-frame.js re-renders when its
+    // shared stylesheet fetch settles, which rewrites srcdoc with the same
+    // HTML and so wipes the data: URIs already swapped in. That second load
+    // belongs to the SAME generation and has to re-resolve (from cache, at no
+    // I/O cost), so the handler stays armed until the next render replaces it.
+    function armResolution(generation) {
+      const el = frame && frame.element;
+      if (!el || typeof el.addEventListener !== 'function') return;
+      if (loadHandler && typeof el.removeEventListener === 'function') {
+        el.removeEventListener('load', loadHandler);
+      }
+      loadHandler = () => { resolveImages(generation); };
+      el.addEventListener('load', loadHandler);
+    }
+
+    function disarmResolution() {
+      const el = frame && frame.element;
+      if (loadHandler && el && typeof el.removeEventListener === 'function') {
+        el.removeEventListener('load', loadHandler);
+      }
+      loadHandler = null;
+    }
+
+    // Swap each unresolved <img> for a data: URI. `generation` is the one its
+    // render captured, and it is re-checked against the resolver on return —
+    // so a fetch that outlives its own render drops its result rather than
+    // painting it.
     async function resolveImages(generation) {
       if (!images) return;
       const doc = frameDoc();
@@ -163,7 +194,8 @@
       if (!target) return;
       // Bumped before the parse, not after: a fetch still in flight for the
       // previous document is superseded the moment this render begins.
-      if (images) images.nextGeneration();
+      const generation = images ? images.nextGeneration() : 0;
+      armResolution(generation);
       target.setContent(renderer.render(readDoc()));
     }
 
@@ -218,6 +250,7 @@
       destroyed = true;
       if (renderTimer) clearTimeout(renderTimer);
       renderTimer = null;
+      disarmResolution();
       if (images) images.clear();
       if (frame) frame.destroy();
       frame = null;

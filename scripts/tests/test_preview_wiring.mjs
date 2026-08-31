@@ -118,6 +118,9 @@ function makeHarness(options = {}) {
   const sandbox = {
     console, setTimeout, clearTimeout, Promise, Map, Set, WeakMap, Array, Object, String, Number,
     document: { createElement: makeEl },
+    // The scroll sync coalesces per animation frame; a macrotask stands in.
+    requestAnimationFrame: (fn) => setTimeout(fn, 0),
+    cancelAnimationFrame: (handle) => clearTimeout(handle),
   };
   sandbox.window = sandbox;
   sandbox.CM6 = makeCM6();
@@ -153,6 +156,9 @@ function makeHarness(options = {}) {
         contentDocument: null,
         listeners: {},
         addEventListener(type, fn) { (this.listeners[type] || (this.listeners[type] = [])).push(fn); },
+        removeEventListener(type, fn) {
+          this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn);
+        },
       };
       host.appendChild(element);
       const frame = {
@@ -178,11 +184,20 @@ function makeHarness(options = {}) {
   const view = pane.createEditorView(editorHost, { doc: '# hello', filename: 'notes.md' });
   // The real EditorView mounts itself into its parent; the stub does not.
   view.dom = editorHost.appendChild(makeEl('div'));
-  view.scrollDOM = { scrollTop: 0 };
+  // scrollDOM records its listeners so a scroll can be fired at it, and so a
+  // leaked one is visible after teardown.
+  const scrollListeners = new Set();
+  view.scrollDOM = {
+    scrollTop: 0,
+    addEventListener(type, fn) { if (type === 'scroll') scrollListeners.add(fn); },
+    removeEventListener(type, fn) { if (type === 'scroll') scrollListeners.delete(fn); },
+  };
 
   const listeners = view.state.spec.extensions.filter((e) => e && e.ext === 'updateListener');
   return {
     sandbox, pane, view, container, editorHost, record,
+    scrollListeners,
+    fireScroll: () => scrollListeners.forEach((fn) => fn()),
     // The dirty watcher is first, the preview watcher second.
     previewWatcher: listeners[listeners.length - 1].fn,
     hosts: () => container.children.filter((c) => c.className === 'md-preview-host'),
@@ -254,8 +269,12 @@ check('notes.md saved as notes.txt drops out of preview', () => {
   assert.strictEqual(h.pane.previewMode(h.view), null, 'the preview is gone entirely');
   assert.deepStrictEqual(h.hosts(), [], 'and so is its host element');
   assert.strictEqual(h.record.destroyed, 1, 'the frame was destroyed');
-  assert.ok(h.container.classNames().includes('md-mode-editor'));
-  assert.strictEqual(h.container.classNames().includes('md-mode-preview'), false);
+  // No mode class at all: their purpose is to make the CURRENT mode legible,
+  // and a pane with no preview has no mode to be in.
+  assert.deepStrictEqual(
+    h.container.classNames().filter((c) => c.startsWith('md-mode-')), [],
+    'teardown leaves no md-mode-* class behind',
+  );
 });
 
 check('a rename between two markdown names keeps the mode the user chose', () => {
@@ -403,6 +422,107 @@ check('refreshTheme re-renders an open preview', () => {
   const before = h.record.contents.length;
   h.pane.refreshTheme(h.view);
   assert.strictEqual(h.record.contents.length, before + 1, 'the frame re-snapshots the palette');
+});
+
+// --- scroll sync via scrollDOM (wheel/trackpad/scrollbar) -------------------
+check('a scroll on scrollDOM drives the preview, throttled per frame', async () => {
+  const h = makeHarness();
+  h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md' });
+  h.view.lineBlockAtHeight = () => ({ from: 42 });
+  h.view.state.doc.lineAt = () => ({ number: 12 });
+  assert.strictEqual(h.scrollListeners.size, 1, 'exactly one scroll listener');
+
+  // A flung trackpad: many events, one sync.
+  h.fireScroll(); h.fireScroll(); h.fireScroll();
+  assert.deepStrictEqual(h.record.scrolls, [], 'nothing runs synchronously');
+  await sleep(20);
+  assert.deepStrictEqual(h.record.scrolls, [11], 'coalesced to one sync, 0-based');
+
+  h.fireScroll();
+  await sleep(20);
+  assert.deepStrictEqual(h.record.scrolls, [11, 11], 'and re-arms for the next frame');
+});
+
+check('a pane with no preview binds no scroll listener', () => {
+  const h = makeHarness();
+  h.pane.setPreviewMode(h.view, 'split', { filename: 'deploy.py' });
+  assert.strictEqual(h.scrollListeners.size, 0);
+});
+
+check('teardown removes the scroll listener it bound', async () => {
+  const h = makeHarness();
+  h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md' });
+  assert.strictEqual(h.scrollListeners.size, 1);
+  h.pane.destroyEditorView(h.view);
+  assert.strictEqual(h.scrollListeners.size, 0, 'the same path that kills the timer and frame');
+  await sleep(20);
+  assert.deepStrictEqual(h.record.scrolls, [], 'and no queued frame fires after teardown');
+});
+
+check('Save As away from markdown removes the scroll listener too', () => {
+  const h = makeHarness();
+  h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md' });
+  h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.txt' });
+  assert.strictEqual(h.scrollListeners.size, 0);
+});
+
+// --- the per-render generation capture --------------------------------------
+check('a superseded render never resolves, even when its load event lands late', async () => {
+  const h = makeHarness();
+  h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md', docPath: '/home/u/docs/notes.md' });
+  const frame = h.record.frames[0];
+  const stale = [...frame.element.listeners.load];
+
+  const img = {
+    attrs: { src: 'shot.png' },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    setAttribute(k, v) { this.attrs[k] = v; },
+  };
+  frame.element.contentDocument = { querySelectorAll: () => [img] };
+
+  // A second render supersedes the first. The first render's handler must be
+  // UNREGISTERED, so a late load event for its document cannot reach it —
+  // sampling currentGeneration() inside the handler instead would have let it
+  // through both checks and paint into the document being replaced.
+  h.pane.setPreviewMode(h.view, 'preview', { filename: 'notes.md', docPath: '/home/u/docs/notes.md' });
+  assert.strictEqual(
+    frame.element.listeners.load.some((fn) => stale.includes(fn)), false,
+    'the superseded render\'s handler was removed, not left racing',
+  );
+  assert.strictEqual(frame.element.listeners.load.length, 1, 'exactly one armed handler');
+
+  // Fire what is actually registered, as a browser would.
+  frame.element.listeners.load.forEach((fn) => fn());
+  await sleep(20);
+  assert.strictEqual(
+    h.record.invokes.length, 1,
+    'one resolution pass, belonging to the live render — not one per superseded render',
+  );
+});
+
+check('the current render stays armed across the stylesheet re-render', async () => {
+  const h = makeHarness();
+  h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md', docPath: '/home/u/docs/notes.md' });
+  const frame = h.record.frames[0];
+  const img = {
+    attrs: { src: 'shot.png' },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    setAttribute(k, v) { this.attrs[k] = v; },
+  };
+  frame.element.contentDocument = { querySelectorAll: () => [img] };
+
+  frame.element.listeners.load.forEach((fn) => fn());
+  await sleep(20);
+  assert.strictEqual(img.attrs.src, 'data:image/png;base64,QUJD');
+
+  // preview-frame.js rewrites srcdoc when its shared CSS fetch settles, which
+  // resets the swapped-in URIs. That load belongs to the SAME render, so the
+  // handler must still be attached — and re-resolve from cache, at no I/O.
+  img.attrs.src = 'shot.png';
+  frame.element.listeners.load.forEach((fn) => fn());
+  await sleep(20);
+  assert.strictEqual(img.attrs.src, 'data:image/png;base64,QUJD', 're-resolved');
+  assert.strictEqual(h.record.invokes.length, 1, 'served from cache, not refetched');
 });
 
 let failed = 0;

@@ -20,9 +20,10 @@
   // "the preview is only ever offered for markdown" is enforced structurally
   // rather than by a flag every call site has to remember to check.
   const previews = new WeakMap();
-  // The element the preview iframe is mounted into, kept beside its controller
-  // so teardown can remove it without re-deriving it from the DOM.
-  const previewHosts = new WeakMap();
+  // Everything a mounted preview needs UNDONE: the element the iframe lives in,
+  // and the scroll listener bound to the view. Kept beside the controller so
+  // teardown is one lookup and cannot forget half of it.
+  const previewMounts = new WeakMap();
 
   const MODE_CLASSES = {
     editor: 'md-mode-editor',
@@ -162,13 +163,22 @@
     return editorHost ? editorHost.parentNode : null;
   }
 
+  // Back to a pane with no preview at all. Every mode class goes: their stated
+  // purpose is to make the CURRENT mode legible in the DOM, and a pane with
+  // nothing to be in a mode of has none.
+  function clearPreviewLayout(view) {
+    const container = paneContainer(view);
+    if (!container || !container.classList) return;
+    for (const key of Object.keys(MODE_CLASSES)) container.classList.remove(MODE_CLASSES[key]);
+  }
+
   // The layout is a class on that container, not a re-parent: the EditorView
   // stays exactly where it was mounted, so toggling modes cannot cost the undo
   // history, the selection or the scroll position.
   function applyPreviewLayout(view, mode) {
     const container = paneContainer(view);
     if (!container || !container.classList) return;
-    for (const key of Object.keys(MODE_CLASSES)) container.classList.remove(MODE_CLASSES[key]);
+    clearPreviewLayout(view);
     container.classList.add(MODE_CLASSES[mode] || MODE_CLASSES.editor);
   }
 
@@ -184,6 +194,53 @@
       // cosmetic and must not take the update cycle down with it.
       return -1;
     }
+  }
+
+  function requestFrame(fn) {
+    return typeof global.requestAnimationFrame === 'function'
+      ? global.requestAnimationFrame(fn)
+      : global.setTimeout(fn, 0);
+  }
+
+  function cancelFrame(handle) {
+    if (typeof global.cancelAnimationFrame === 'function') global.cancelAnimationFrame(handle);
+    else global.clearTimeout(handle);
+  }
+
+  // Scroll sync's real driver.
+  //
+  // The update listener alone is not enough: wheel and trackpad scrolling in
+  // CodeMirror moves the VIEWPORT and does not reliably mark the update
+  // geometryChanged, so hanging sync off that flag leaves Split mode's
+  // headline behaviour dead for the most common way anyone scrolls — while
+  // arrow keys (which set selectionSet) keep working, so the gap is invisible
+  // to a test written around them. scrollDOM's own scroll event fires
+  // unconditionally for wheel, trackpad and scrollbar drags.
+  //
+  // Bound only for a pane that actually has a preview, and returned as an
+  // unbind so it is torn down on the same path that clears the debounce timer
+  // and destroys the frame.
+  function bindScrollSync(view, controller) {
+    const scroller = view.scrollDOM;
+    if (!scroller || typeof scroller.addEventListener !== 'function') return null;
+    let pendingFrame = null;
+    const onScroll = () => {
+      // Coalesced to one sync per animation frame: a flung trackpad fires this
+      // far more often than the preview can usefully be moved.
+      if (pendingFrame !== null) return;
+      pendingFrame = requestFrame(() => {
+        pendingFrame = null;
+        controller.scrollToLine(topVisibleLine(view));
+      });
+    };
+    scroller.addEventListener('scroll', onScroll);
+    return () => {
+      if (pendingFrame !== null) cancelFrame(pendingFrame);
+      pendingFrame = null;
+      if (typeof scroller.removeEventListener === 'function') {
+        scroller.removeEventListener('scroll', onScroll);
+      }
+    };
   }
 
   function mountPreview(view, source, mode) {
@@ -210,7 +267,7 @@
       return null;
     }
     previews.set(view, controller);
-    previewHosts.set(view, host);
+    previewMounts.set(view, { host, unbindScroll: bindScrollSync(view, controller) });
     return controller;
   }
 
@@ -219,10 +276,13 @@
     if (!controller) return;
     controller.destroy();
     previews.delete(view);
-    const host = previewHosts.get(view);
-    if (host && host.parentNode) host.parentNode.removeChild(host);
-    previewHosts.delete(view);
-    applyPreviewLayout(view, 'editor');
+    const mount = previewMounts.get(view);
+    if (mount) {
+      if (typeof mount.unbindScroll === 'function') mount.unbindScroll();
+      if (mount.host && mount.host.parentNode) mount.host.parentNode.removeChild(mount.host);
+    }
+    previewMounts.delete(view);
+    clearPreviewLayout(view);
   }
 
   /**

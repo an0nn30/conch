@@ -152,14 +152,32 @@
     let css = explicitCss ? options.css : sharedCssText;
     let lastHtml = null;
     let destroyed = false;
+    // Monotonic, and written into the shell below purely so that two
+    // consecutive renders can never produce a byte-identical srcdoc.
+    //
+    // Whether a webview re-navigates when srcdoc is assigned the value it
+    // already holds is engine-dependent, and the parent DEPENDS on the load
+    // event firing — it is what tells it the images of the new document exist
+    // and need resolving. Concrete failure without this: Save As from
+    // `~/a/notes.md` to `~/b/notes.md` with identical bytes. The caller clears
+    // its image cache and repoints its base directory, then this writes the
+    // same shell; a frame that does not re-navigate keeps `~/a`'s already
+    // resolved images and shows the wrong ones when both directories hold a
+    // same-named file. A token removes the question instead of betting on the
+    // answer.
+    let renderToken = 0;
 
     function frameDoc() {
       return iframe.contentDocument || null;
     }
 
     function render() {
+      renderToken += 1;
       const shell = [
+        // The token lives INSIDE <head>, not ahead of the doctype: a comment
+        // before the doctype puts the document into quirks mode.
         '<!doctype html><html><head><meta charset="utf-8">',
+        `<!-- termlab-render ${renderToken} -->`,
         `<style>${paletteCss(readToken)}\n${css}</style>`,
         '</head><body class="md-preview-body">',
         lastHtml || '',
