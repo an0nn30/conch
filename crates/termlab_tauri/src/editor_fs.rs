@@ -256,25 +256,6 @@ pub(crate) fn is_image_name(name: &str) -> bool {
     )
 }
 
-/// Kept alongside `is_image_name` and `check_image_size` as the same
-/// extension table, and covered by its own unit tests, but not yet called
-/// from `editor_read_image_base64`: that command returns the bare base64
-/// payload and lets the frontend derive the MIME type itself when it builds
-/// the `data:` URI, since it already knows the filename.
-#[allow(dead_code)]
-pub(crate) fn image_mime(name: &str) -> &'static str {
-    match image_extension(name).as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("bmp") => "image/bmp",
-        Some("ico") => "image/x-icon",
-        _ => "application/octet-stream",
-    }
-}
-
 pub(crate) fn check_image_size(bytes: u64) -> Result<(), String> {
     if bytes > MAX_IMAGE_BYTES {
         return Err(format!(
@@ -352,11 +333,17 @@ mod tests {
             let lower = format!("file.{ext}");
             let upper = format!("file.{}", ext.to_uppercase());
             assert!(
-                matches!(guard_openable(&lower, 10), Err(OpenRejection::BlockedExtension { .. })),
+                matches!(
+                    guard_openable(&lower, 10),
+                    Err(OpenRejection::BlockedExtension { .. })
+                ),
                 "{lower} should be blocked"
             );
             assert!(
-                matches!(guard_openable(&upper, 10), Err(OpenRejection::BlockedExtension { .. })),
+                matches!(
+                    guard_openable(&upper, 10),
+                    Err(OpenRejection::BlockedExtension { .. })
+                ),
                 "{upper} should be blocked"
             );
         }
@@ -364,7 +351,14 @@ mod tests {
 
     #[test]
     fn ordinary_names_are_allowed() {
-        for name in ["a.txt", "b.rs", "Makefile", ".gitignore", "a.tar.txt", "no_extension"] {
+        for name in [
+            "a.txt",
+            "b.rs",
+            "Makefile",
+            ".gitignore",
+            "a.tar.txt",
+            "no_extension",
+        ] {
             assert!(guard_openable(name, 10).is_ok(), "{name} should be allowed");
         }
     }
@@ -404,7 +398,10 @@ mod tests {
 
         assert_ne!(a.0, b.0, "different hosts must not share a directory");
         assert_eq!(a.0, c.0, "same host must share its directory");
-        assert_ne!(a.1, c.1, "different remote paths must not share a directory");
+        assert_ne!(
+            a.1, c.1,
+            "different remote paths must not share a directory"
+        );
         assert_eq!(a.2, "nginx.conf");
 
         assert_eq!(temp_path_parts("h", "/a/.bashrc").2, ".bashrc");
@@ -460,14 +457,19 @@ mod tests {
             .join("victim.txt");
 
         assert!(editor_temp_cleanup(escaping_path.to_string_lossy().into_owned()).is_err());
-        assert!(victim.exists(), "a path escaping the root via .. must survive");
+        assert!(
+            victim.exists(),
+            "a path escaping the root via .. must survive"
+        );
 
         let _ = std::fs::remove_dir_all(&escape_dir);
     }
 
     #[test]
     fn image_extensions_are_recognised() {
-        for name in ["a.png", "b.JPG", "c.jpeg", "d.gif", "e.webp", "f.svg", "g.bmp"] {
+        for name in [
+            "a.png", "b.JPG", "c.jpeg", "d.gif", "e.webp", "f.svg", "g.bmp",
+        ] {
             assert!(is_image_name(name), "{name} must be treated as an image");
         }
     }
@@ -475,16 +477,11 @@ mod tests {
     #[test]
     fn non_image_extensions_are_rejected() {
         for name in ["a.txt", "b.rs", "c.md", "d", "e.png.exe"] {
-            assert!(!is_image_name(name), "{name} must not be treated as an image");
+            assert!(
+                !is_image_name(name),
+                "{name} must not be treated as an image"
+            );
         }
-    }
-
-    #[test]
-    fn image_mime_matches_extension() {
-        assert_eq!(image_mime("a.png"), "image/png");
-        assert_eq!(image_mime("a.JPG"), "image/jpeg");
-        assert_eq!(image_mime("a.svg"), "image/svg+xml");
-        assert_eq!(image_mime("a.unknown"), "application/octet-stream");
     }
 
     #[test]
