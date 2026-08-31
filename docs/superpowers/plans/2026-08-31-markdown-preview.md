@@ -66,10 +66,17 @@ Adds a **second** vendor bundle rather than extending `vendor-entry.mjs`, whose 
 
 ```bash
 cd crates/termlab_tauri/frontend
-npm install --save-dev markdown-it@^14.1.0 dompurify@^3.2.0 jsdom@^25.0.0
+npm install --save-dev markdown-it@^14.1.0 markdown-it-task-lists@^2.1.1 \
+  markdown-it-footnote@^4.0.0 dompurify@^3.2.0 jsdom@^25.0.0
 ```
 
-`markdown-it` and `dompurify` are bundled into the vendor output. `jsdom` is **only** for `scripts/tests` and must never appear in a vendor entry.
+`markdown-it`, its two plugins, and `dompurify` are bundled into the vendor
+output. `jsdom` is **only** for `scripts/tests` and must never appear in a
+vendor entry.
+
+The plugins are required, not optional: markdown-it core renders `- [x] done`
+as the literal text `[x] done` and `[^1]` as a broken link. Verified against
+markdown-it 14.3.1 — task lists and footnotes do **not** work without them.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -101,6 +108,8 @@ const MDLib = sandbox.MDLib;
 assert.ok(MDLib, 'bundle must define the MDLib global');
 assert.strictEqual(typeof MDLib.MarkdownIt, 'function', 'MDLib.MarkdownIt must be a constructor');
 assert.strictEqual(typeof MDLib.DOMPurify, 'function', 'MDLib.DOMPurify must be a factory');
+assert.strictEqual(typeof MDLib.taskListsPlugin, 'function', 'MDLib.taskListsPlugin must be a function');
+assert.strictEqual(typeof MDLib.footnotePlugin, 'function', 'MDLib.footnotePlugin must be a function');
 assert.strictEqual(typeof MDLib.highlightCode, 'function', 'MDLib.highlightCode must be a function');
 assert.ok(MDLib.classHighlighter, 'MDLib.classHighlighter must be present');
 
@@ -127,6 +136,12 @@ Create `crates/termlab_tauri/frontend/vendor-markdown-entry.mjs`:
 // implementation to users who already have one.
 export { default as MarkdownIt } from 'markdown-it';
 export { default as DOMPurify } from 'dompurify';
+
+// GFM constructs markdown-it core does NOT implement. Without these, a task
+// list renders as the literal text "[x] done" and a footnote reference
+// renders as a link to a nonexistent page.
+export { default as taskListsPlugin } from 'markdown-it-task-lists';
+export { default as footnotePlugin } from 'markdown-it-footnote';
 
 // Standalone syntax highlighting for fenced code. `highlightCode` walks a
 // parsed tree emitting (text, classes) pairs, which is how a code fence gets
@@ -231,6 +246,8 @@ import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 import MarkdownIt from 'markdown-it';
 import createDOMPurify from 'dompurify';
+import taskListsPlugin from 'markdown-it-task-lists';
+import footnotePlugin from 'markdown-it-footnote';
 
 const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
 const SRC = path.join(ROOT, 'app/features/editor/preview/markdown-renderer.js');
@@ -244,6 +261,8 @@ const dom = new JSDOM('');
 const renderer = sandbox.termlabMarkdownRenderer.createRenderer({
   MarkdownIt,
   DOMPurify: createDOMPurify(dom.window),
+  taskListsPlugin,
+  footnotePlugin,
 });
 
 // --- GFM constructs --------------------------------------------------------
@@ -257,6 +276,11 @@ assert.match(strike, /<s>gone<\/s>/, 'strikethrough must render');
 const task = renderer.render('- [x] done\n- [ ] todo');
 assert.match(task, /type="checkbox"/, 'task lists must render as checkboxes');
 assert.match(task, /disabled/, 'task list checkboxes must not be interactive');
+
+const footnote = renderer.render('text[^1]\n\n[^1]: the note');
+assert.match(footnote, /footnote-ref/, 'footnote references must render');
+assert.match(footnote, /<section/, 'the footnote section must survive sanitizing');
+assert.match(footnote, /the note/, 'footnote body text must render');
 
 // --- source mapping --------------------------------------------------------
 // Scroll sync reads these back off the rendered elements, so every top-level
@@ -309,6 +333,10 @@ Create `crates/termlab_tauri/frontend/app/features/editor/preview/markdown-rende
     'table', 'thead', 'tbody', 'tr', 'th', 'td',
     'a', 'img', 'em', 'strong', 's', 'del', 'ins', 'sup', 'sub', 'kbd', 'mark',
     'details', 'summary', 'input',
+    // markdown-it-footnote wraps the footnote list in <section class="footnotes">
+    // with an <hr class="footnotes-sep">. Without `section` here the whole
+    // footnote block is silently stripped and footnotes render as dangling refs.
+    'section',
   ];
 
   // No `style` (CSS can exfiltrate via url()), no `on*`, no `srcset`.
@@ -324,6 +352,8 @@ Create `crates/termlab_tauri/frontend/app/features/editor/preview/markdown-rende
     const options = deps || {};
     const MarkdownIt = options.MarkdownIt;
     const DOMPurify = options.DOMPurify;
+    const taskListsPlugin = options.taskListsPlugin || null;
+    const footnotePlugin = options.footnotePlugin || null;
     const highlight = typeof options.highlight === 'function' ? options.highlight : null;
     if (!MarkdownIt || !DOMPurify) return null;
 
@@ -336,6 +366,15 @@ Create `crates/termlab_tauri/frontend/app/features/editor/preview/markdown-rende
         return highlight(code, lang) || '';
       },
     });
+
+    // Task lists and footnotes are plugins, not core markdown-it. Left off,
+    // "- [x] done" renders as the literal text "[x] done".
+    //
+    // markdown-it-task-lists is used at its DEFAULT, which emits `disabled`
+    // checkboxes. Passing { enabled: true } would make them clickable, and a
+    // preview is a view of the file, not an editor for it.
+    if (taskListsPlugin) md.use(taskListsPlugin);
+    if (footnotePlugin) md.use(footnotePlugin);
 
     // Attach source lines to top-level blocks. markdown-it gives every block
     // token a `.map` of [startLine, endLine]; level 0 keeps this to the
