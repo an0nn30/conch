@@ -118,4 +118,115 @@ function makeResolver() {
   );
 }
 
+// --- Windows absolute paths: a drive letter is not a URL scheme -----------
+{
+  const { resolver, calls } = makeResolver();
+  await resolver.resolve('C:\\Users\\bob\\img.png', null, resolver.currentGeneration(), '/d/doc.md');
+  assert.strictEqual(
+    calls[0].command, 'editor_read_image_base64',
+    'a Windows drive letter must not be mistaken for an unsupported scheme like http:',
+  );
+  assert.strictEqual(
+    calls[0].args.path, 'C:\\Users\\bob\\img.png',
+    'a Windows absolute src is fetched with its path unchanged',
+  );
+}
+
+// --- Windows relative resolution: joined against a drive-rooted dir -------
+{
+  const { resolver, calls } = makeResolver();
+  await resolver.resolve('./img.png', null, resolver.currentGeneration(), 'C:\\Users\\bob\\doc.md');
+  assert.strictEqual(
+    calls[0].args.path, 'C:/Users/bob/img.png',
+    'a relative src under a Windows docPath must join onto the drive, not get an extra leading slash',
+  );
+}
+
+// --- remote bindings are always POSIX, regardless of docPath's shape ------
+{
+  const { resolver, calls } = makeResolver();
+  const uri = await resolver.resolve(
+    './img/b.png',
+    { paneId: 7, remotePath: '/srv/docs/readme.md' },
+    resolver.currentGeneration(),
+    'C:\\fake\\windows.md',
+  );
+  assert.match(uri, /^data:image\/png;base64,UkVNT1RF$/, 'remote image still resolves');
+  assert.strictEqual(calls[0].command, 'sftp_read_file');
+  assert.strictEqual(
+    calls[0].args.path, '/srv/docs/img/b.png',
+    'a Windows-looking docPath must not leak drive-letter handling into the remote (always-POSIX) branch',
+  );
+}
+
+// --- negative cache: a missing image is fetched exactly once per pane -----
+{
+  let attempts = 0;
+  const invoke = async () => { attempts += 1; throw new Error('ENOENT'); };
+  const resolver = sandbox.termlabPreviewImages.createResolver({ invoke, mimeFor: () => 'image/png' });
+  const gen = resolver.currentGeneration();
+  const a = await resolver.resolve('./missing.png', null, gen, '/d/doc.md');
+  const b = await resolver.resolve('./missing.png', null, gen, '/d/doc.md');
+  const c = await resolver.resolve('./missing.png', null, gen, '/d/doc.md');
+  assert.strictEqual(a, null);
+  assert.strictEqual(b, null);
+  assert.strictEqual(c, null);
+  assert.strictEqual(
+    attempts, 1,
+    'a broken reference must cost exactly one fetch attempt per pane, not one per debounce tick',
+  );
+}
+
+// --- SFTP chunk ceiling: a still-not-exhausted file must not return a
+//     silently truncated data URI ------------------------------------------
+{
+  let calls = 0;
+  const invoke = async (command) => {
+    if (command !== 'sftp_read_file') throw new Error(`unexpected command ${command}`);
+    calls += 1;
+    // Every read comes back full-length, as if the file were larger than the
+    // ceiling: the loop must give up rather than hand back a partial image.
+    return { data: 'AAAA', bytes_read: 1024 * 1024 };
+  };
+  const resolver = sandbox.termlabPreviewImages.createResolver({ invoke, mimeFor: () => 'image/png' });
+  const out = await resolver.resolve(
+    './big.png',
+    { paneId: 1, remotePath: '/srv/docs/readme.md' },
+    resolver.currentGeneration(),
+    null,
+  );
+  assert.strictEqual(out, null, 'hitting the chunk ceiling with more data left must resolve to null, not a truncated URI');
+  assert.ok(calls > 1, 'the ceiling must actually be exercised (more than one chunk requested)');
+}
+
+// --- a throwing mimeFor must not make resolve() reject ---------------------
+{
+  const invoke = async (command) => {
+    if (command === 'editor_read_image_base64') return 'AAAA';
+    throw new Error(`unexpected command ${command}`);
+  };
+  const resolver = sandbox.termlabPreviewImages.createResolver({
+    invoke,
+    mimeFor: () => { throw new Error('mimeFor blew up'); },
+  });
+  const out = await resolver.resolve('./ok.png', null, resolver.currentGeneration(), '/d/doc.md');
+  assert.strictEqual(out, null, 'a throwing mimeFor must degrade to null, never reject resolve()');
+}
+
+// --- a malformed sftp_read_file response must not make resolve() reject ---
+{
+  const invoke = async (command) => {
+    if (command !== 'sftp_read_file') throw new Error(`unexpected command ${command}`);
+    return { bytes_read: 4 }; // no `data` field
+  };
+  const resolver = sandbox.termlabPreviewImages.createResolver({ invoke, mimeFor: () => 'image/png' });
+  const out = await resolver.resolve(
+    './x.png',
+    { paneId: 1, remotePath: '/srv/docs/readme.md' },
+    resolver.currentGeneration(),
+    null,
+  );
+  assert.strictEqual(out, null, 'a malformed sftp_read_file response must resolve to null, not reject');
+}
+
 console.log('test_markdown_image_resolve: ok');
