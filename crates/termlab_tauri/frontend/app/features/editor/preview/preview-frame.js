@@ -34,10 +34,37 @@
 (function initTermLabPreviewFrame(global) {
   'use strict';
 
-  const TOKENS = [
+  const BASE_TOKENS = [
     '--tl-bg', '--tl-fg', '--tl-fg-muted', '--tl-accent', '--tl-border',
     '--tl-row-hover', '--tl-danger', '--tl-terminal-bg',
   ];
+
+  // The ANSI syntax-accent vars the stylesheet's .tok-* rules read for fence
+  // highlighting (`var(--green, var(--tl-accent))` etc). Snapshotted ONLY
+  // when the appearance is not light, mirroring the `syntax` branch in
+  // features/editor/theme.js: under Light that file ignores the ANSI vars
+  // entirely and uses the plain app tokens instead, because the ANSI palette
+  // stays tuned for a dark canvas and would look wrong pasted onto a light
+  // document. Omitting these vars under Light lets the stylesheet's own
+  // fallbacks apply, and those fallbacks were chosen to match theme.js's
+  // light-branch choices exactly (string/number/bool/typeName/className ->
+  // --tl-accent, function -> --tl-fg) — so a change to either side of that
+  // correspondence needs a matching change to the other.
+  const SYNTAX_TOKENS = ['--green', '--yellow', '--blue', '--cyan'];
+
+  // Same appearance check as features/editor/theme.js's isLightAppearance():
+  // a missing global.termlabAppearance (or a stub without current()) is
+  // treated as not-light, matching that file's own default.
+  function isLightAppearance() {
+    const appearance = global.termlabAppearance;
+    return !!(appearance
+      && typeof appearance.current === 'function'
+      && appearance.current() === 'light');
+  }
+
+  function tokenList() {
+    return isLightAppearance() ? BASE_TOKENS : BASE_TOKENS.concat(SYNTAX_TOKENS);
+  }
 
   const CSS_PATH = 'styles/design-system/components/markdown-preview.css';
 
@@ -53,6 +80,9 @@
   // rendering at all.
   function loadSharedCss() {
     if (typeof global.fetch !== 'function') {
+      if (global.console && typeof global.console.warn === 'function') {
+        global.console.warn('termlabPreviewFrame: fetch unavailable, markdown-preview.css not loaded');
+      }
       return Promise.resolve('');
     }
     let promise;
@@ -90,7 +120,7 @@
   }
 
   function paletteCss(readToken) {
-    const lines = TOKENS
+    const lines = tokenList()
       .map((name) => {
         const value = readToken(name);
         return value ? `  ${name}: ${value};` : '';
@@ -121,6 +151,7 @@
     // settled yet). `render` is called again once it does.
     let css = explicitCss ? options.css : sharedCssText;
     let lastHtml = null;
+    let destroyed = false;
 
     function frameDoc() {
       return iframe.contentDocument || null;
@@ -152,6 +183,10 @@
       // fine; a frame that never gets styled because it missed the load is
       // not.
       sharedCssReady.then((text) => {
+        // The frame may have been torn down before the fetch settled — a
+        // detached iframe object is harmless to keep writing to, but there's
+        // no reason to touch it once its own destroy() has run.
+        if (destroyed) return;
         css = text;
         if (lastHtml !== null) render();
       });
@@ -194,6 +229,7 @@
     }
 
     function destroy() {
+      destroyed = true;
       if (typeof iframe.remove === 'function') iframe.remove();
       else if (hostEl.removeChild) hostEl.removeChild(iframe);
     }
