@@ -13,6 +13,11 @@
     py: 'python',
     md: 'markdown', markdown: 'markdown',
     rs: 'rust',
+    // Markdown fences are tagged with the LANGUAGE NAME (```rust), not the
+    // file extension (.rs) — fence-highlight.js builds a fake filename from
+    // the fence tag to reuse this table, so the language name needs its own
+    // entry alongside the real extension.
+    rust: 'rust',
     html: 'html', htm: 'html',
     css: 'css',
     xml: 'xml',
