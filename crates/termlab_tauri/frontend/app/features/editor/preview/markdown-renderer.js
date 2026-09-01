@@ -36,6 +36,92 @@
 
   const SAFE_LINK = /^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i;
 
+  // A scheme needs at least two characters before its colon, so a Windows
+  // drive root (`C:\pics\x.png`) is not read as one. Same rule, for the same
+  // reason, as REMOTE_SCHEME in image-resolver.js.
+  const URL_SCHEME = /^[a-z][a-z0-9+.-]+:/i;
+
+  // Elements that fetch a subresource from `src`. `input` is here because
+  // `input`, `type` and `src` are all allowlisted for task-list checkboxes,
+  // and `input[type=image]` issues a request in every engine.
+  const FETCHING_TAGS = { IMG: true, INPUT: true };
+
+  // The URL parser DELETES ASCII tab, CR and LF while resolving, so
+  // `ht<TAB>tps://evil/x.png` — and its `&Tab;` entity spelling, and a literal
+  // newline — resolve and load exactly as the plain form would. Classification
+  // therefore runs on a value with all whitespace and control characters
+  // removed, never on the raw attribute text.
+  function flattenUrl(value) {
+    return String(value === null || value === undefined ? '' : value)
+      .replace(/[\s\u0000-\u001f\u007f]+/g, '');
+  }
+
+  // `//host/x.png` is protocol-relative. On Windows and Android the frontend
+  // is served over http from tauri.localhost, so there it is a real outbound
+  // request rather than a dead reference — and TermLab ships those targets.
+  function isRemoteRef(flat) {
+    return flat.startsWith('//') || URL_SCHEME.test(flat);
+  }
+
+  // Nothing that can issue a subresource request keeps its `src`: the value is
+  // MOVED to data-img-ref, which only preview-controller.js reads, and it
+  // writes back a `data:` URI it fetched through Rust — never a URL. The frame
+  // therefore makes zero network requests by construction.
+  //
+  // This is deliberately a rule about SHAPE rather than a blocklist of bad
+  // URLs. Every previous spelling of "remote" (tab-split scheme, entity tab,
+  // protocol-relative, a tag the check did not look at) got past a pattern
+  // that tested for http(s); removing `src` unconditionally cannot be spelled
+  // around. Nothing else protects this: the frame's sandbox blocks execution,
+  // not subresource loads, and `csp` is null app-wide.
+  function neutraliseFetchingSource(node) {
+    // Authors do not get to hand the resolver a path directly — the attribute
+    // is written here or not at all.
+    node.removeAttribute('data-img-ref');
+    if (!node.hasAttribute('src')) return;
+    const raw = node.getAttribute('src') || '';
+    const flat = flattenUrl(raw);
+    // Already inline: no request is possible and the resolver has nothing
+    // to fetch, so leave it exactly as the author wrote it.
+    if (/^data:/i.test(flat)) return;
+
+    node.removeAttribute('src');
+    if (isRemoteRef(flat)) {
+      node.setAttribute('alt', `[remote image blocked] ${node.getAttribute('alt') || ''}`.trim());
+      node.setAttribute('class', 'md-img-blocked');
+      return;
+    }
+    node.setAttribute('data-img-ref', raw);
+  }
+
+  // Runs at SANITIZE time, not render time, so a neutralised element never
+  // reaches a document — hiding it after the fact would already have leaked.
+  function afterSanitizeAttributes(node) {
+    if (FETCHING_TAGS[node.tagName]) neutraliseFetchingSource(node);
+    if (node.tagName === 'A') {
+      const href = node.getAttribute('href') || '';
+      if (href && !SAFE_LINK.test(href)) node.removeAttribute('href');
+    }
+    // Checkboxes come from task lists and must stay inert.
+    if (node.tagName === 'INPUT') node.setAttribute('disabled', 'disabled');
+  }
+
+  // DOMPurify is a module SINGLETON — `MDLib.DOMPurify` is one object shared by
+  // every pane — and addHook APPENDS rather than replaces. createRenderer runs
+  // once per preview controller, so hooking there stacked one identical hook
+  // per open markdown file, every one of them running on every node of every
+  // sanitize, for the life of the process. Hooks are per-instance state, so
+  // each distinct instance is hooked exactly once. (Tests build their own
+  // instance per suite, which is why this is keyed on the instance rather
+  // than being a single module-level boolean.)
+  const hookedInstances = new WeakSet();
+
+  function ensureHooks(DOMPurify) {
+    if (hookedInstances.has(DOMPurify)) return;
+    hookedInstances.add(DOMPurify);
+    DOMPurify.addHook('afterSanitizeAttributes', afterSanitizeAttributes);
+  }
+
   function createRenderer(deps) {
     const options = deps || {};
     const MarkdownIt = options.MarkdownIt;
@@ -77,25 +163,35 @@
       return true;
     });
 
-    // Drop remote images at SANITIZE time, not render time. Doing it here
-    // means the element never reaches a document, so no request is ever
-    // issued — hiding it after the fact would already have leaked.
-    DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-      if (node.tagName === 'IMG') {
-        const src = node.getAttribute('src') || '';
-        if (/^https?:/i.test(src)) {
-          node.removeAttribute('src');
-          node.setAttribute('alt', `[remote image blocked] ${node.getAttribute('alt') || ''}`.trim());
-          node.setAttribute('class', 'md-img-blocked');
-        }
-      }
-      if (node.tagName === 'A') {
-        const href = node.getAttribute('href') || '';
-        if (href && !SAFE_LINK.test(href)) node.removeAttribute('href');
-      }
-      // Checkboxes come from task lists and must stay inert.
-      if (node.tagName === 'INPUT') node.setAttribute('disabled', 'disabled');
-    });
+    // markdown-it's fence renderer SHORT-CIRCUITS: when the highlight callback
+    // returns a string that already starts with `<pre`, it hands that string
+    // back verbatim and never renders the token's own attributes. A highlighted
+    // fence therefore lost data-src-line, leaving scroll sync with no anchor
+    // for the entire height of a code block — the one construct this feature
+    // exists to display well. Re-applying the attribute here (rather than
+    // threading the line into the highlighter) is what keeps fence-highlight.js
+    // ignorant of markdown-it internals.
+    //
+    // Guarded rather than assumed: createRenderer is called with stub parsers
+    // in tests, and a missing renderer must degrade, not throw.
+    const rules = md.renderer && md.renderer.rules ? md.renderer.rules : null;
+    const baseFence = rules ? rules.fence : null;
+    if (rules && typeof baseFence === 'function') {
+      rules.fence = function fenceWithSourceLine(tokens, idx, opts, env, self) {
+        const html = baseFence(tokens, idx, opts, env, self);
+        const token = tokens[idx];
+        const line = token && typeof token.attrGet === 'function'
+          ? token.attrGet('data-src-line')
+          : null;
+        // Only a plain integer is ever written by the rule above, so anything
+        // else means the token was not ours to annotate.
+        if (!/^\d+$/.test(String(line)) || !/^<pre[\s>]/.test(html)) return html;
+        if (/\sdata-src-line=/.test(html)) return html;
+        return html.replace(/^<pre/, `<pre data-src-line="${line}"`);
+      };
+    }
+
+    ensureHooks(DOMPurify);
 
     function escapeText(text) {
       return String(text)

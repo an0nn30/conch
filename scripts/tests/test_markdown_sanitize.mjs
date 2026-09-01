@@ -130,13 +130,96 @@ for (const input of sinkCases) {
 
 const newBypassCaseCount = 5; // the five entity/vbscript cases above that are not re-checks of existing `cases` entries
 
-// --- remote images are dropped, local ones survive -------------------------
+// --- no element may carry a fetchable src ----------------------------------
+// This is the network-egress barrier, and it is the ONLY one: the frame's
+// sandbox blocks execution, not subresource loads, and `csp` is null app-wide.
+// So the assertion is not "http(s) is filtered" but "nothing that reaches the
+// document can name a URL at all" — every source is moved to data-img-ref (or
+// dropped), and preview-controller.js writes `src` back only as a data: URI it
+// fetched through Rust.
+//
+// Parsed, not substring-matched, for the same reason as the anchors above: the
+// vectors below are exactly the ones a pattern over the raw attribute text
+// missed.
+function fetchableSources(html) {
+  const parsed = new JSDOM(`<body>${html}</body>`);
+  return [...parsed.window.document.querySelectorAll('[src]')]
+    .map((el) => el.getAttribute('src') || '')
+    // A data: URI is inline — it is the resolver's own output shape and can
+    // issue no request. Everything else is a URL the engine would fetch.
+    .filter((src) => !/^data:/i.test(src.replace(/[\s\x00-\x1f\x7f]+/g, '')));
+}
+
+const egressCases = [
+  // The URL Standard STRIPS ASCII tab, CR and LF while parsing, so all three
+  // of these resolve and load exactly like the plain spelling.
+  '<img src="ht\tps://evil.example/x.png">',
+  '<img src="ht&Tab;tps://evil.example/x.png">',
+  '<img src="ht\ntps://evil.example/x.png">',
+  // Protocol-relative. On Windows and Android the frontend is served over http
+  // from tauri.localhost, so this is real egress there — and TermLab ships
+  // those targets.
+  '<img src="//evil.example/x.png">',
+  '![a](//evil.example/x.png)',
+  // `input`, `type` and `src` are all allowlisted for task-list checkboxes,
+  // and input[type=image] issues a request in every engine.
+  '<input type="image" src="https://evil.example/beacon.png">',
+  '<img src="https://evil.example/x.png">',
+];
+
+for (const input of egressCases) {
+  const out = renderer.render(input);
+  assert.deepStrictEqual(
+    fetchableSources(out), [],
+    `sanitizer left a fetchable src\n  input:  ${input}\n  output: ${out}`,
+  );
+  assert.ok(
+    !out.includes('evil.example'),
+    `a remote source must be dropped outright, not relocated\n  output: ${out}`,
+  );
+}
+
+// --- remote images are marked, local ones reach the resolver ---------------
 const remote = renderer.render('![b](https://img.shields.io/badge.svg)');
 assert.ok(!remote.includes('https://img.shields.io'), 'remote image src must be dropped');
 assert.match(remote, /md-img-blocked/, 'blocked images must be marked for the placeholder style');
 
 const local = renderer.render('![logo](./img/logo.png)');
-assert.match(local, /src="\.\/img\/logo\.png"/, 'local image paths must survive to the resolver');
+assert.match(
+  local, /data-img-ref="\.\/img\/logo\.png"/,
+  'a local image path must reach the resolver through data-img-ref',
+);
+assert.deepStrictEqual(fetchableSources(local), [], 'and it must carry no src of its own');
+
+// --- <style> is stripped, content and all ----------------------------------
+// CSS is not inert here: `url()` in a rule is an outbound request, and the
+// frame has no CSP to fall back on. Pinned rather than left to DOMPurify's
+// defaults.
+{
+  const styled = renderer.render('<style>body{background:url(http://evil.example/x)}</style>');
+  assert.ok(!styled.includes('<style'), '<style> must not survive');
+  assert.ok(!styled.includes('evil.example'), 'stripping <style> must take its rules with it');
+  assert.match(
+    renderer.render('<p><style>.a{}</style>text</p>'), /^<p>text<\/p>/,
+    'an inline <style> is removed without taking the surrounding text with it',
+  );
+}
+
+// --- DOM-clobbering attributes do not survive ------------------------------
+// `id` is allowlisted for footnote anchors, so an author-chosen id that shadows
+// a document property (`document.body`, `document.getElementById`) would let a
+// .md file break the parent's own DOM lookups. `name` is not allowlisted at
+// all. Both are incidental on DOMPurify's SANITIZE_DOM default, which is why
+// they are asserted here.
+for (const input of [
+  '<a id="body" name="location">x</a>',
+  '<img alt="x" id="getElementById" name="body">',
+  '<input type="checkbox" id="location" name="body">',
+]) {
+  const out = renderer.render(input);
+  assert.ok(!/\sid=/.test(out), `a clobbering id must not survive\n  output: ${out}`);
+  assert.ok(!/\sname=/.test(out), `name must not survive\n  output: ${out}`);
+}
 
 // --- legitimate README HTML survives ---------------------------------------
 const details = renderer.render('<details><summary>More</summary>\n\nhidden\n\n</details>');
@@ -146,6 +229,20 @@ assert.match(renderer.render('press <kbd>Cmd</kbd>'), /<kbd>/, '<kbd> must survi
 
 // --- scroll-sync attribute must not be stripped ----------------------------
 assert.match(renderer.render('# h'), /data-src-line="0"/, 'data-src-line must survive sanitizing');
+
+// --- sanitize hooks are registered once per DOMPurify instance -------------
+// DOMPurify is a module singleton shared by every pane, and addHook APPENDS
+// rather than replaces. Registering once per createRenderer meant N open
+// markdown files ran N identical hooks over every node of every sanitize, for
+// the life of the process.
+{
+  let added = 0;
+  const counting = { addHook: () => { added += 1; }, sanitize: (html) => html };
+  for (let i = 0; i < 3; i += 1) {
+    sandbox.termlabMarkdownRenderer.createRenderer({ MarkdownIt, DOMPurify: counting });
+  }
+  assert.strictEqual(added, 1, 'one hook registration per DOMPurify instance, not per renderer');
+}
 
 // --- a parser failure is reported, not thrown ------------------------------
 // The renderer is called on every debounced keystroke; throwing would take the
@@ -160,4 +257,4 @@ assert.match(renderer.render('# h'), /data-src-line="0"/, 'data-src-line must su
   assert.match(out, /boom/, 'the error message is shown to the reader');
 }
 
-console.log(`test_markdown_sanitize: ok (${cases.length + newBypassCaseCount} attack cases)`);
+console.log(`test_markdown_sanitize: ok (${cases.length + newBypassCaseCount + egressCases.length} attack cases)`);

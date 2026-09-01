@@ -108,6 +108,34 @@
     return `/${out.join('/')}`;
   }
 
+  // sftp_read_file base64-encodes EACH CHUNK INDEPENDENTLY, and
+  // SFTP_CHUNK % 3 === 1, so a full chunk's encoding always ends in `==`
+  // padding. Concatenating the encoded TEXT therefore buries padding in the
+  // middle of the payload and decodes to garbage — silently, and only for
+  // images over 1MB, since anything smaller arrives in a single chunk. The
+  // bytes have to be rejoined and encoded once, which is what these two do.
+  //
+  // atob/btoa are read off the module's injected global so this stays testable
+  // outside a browser; without them a remote image degrades to no image, which
+  // is the same outcome as any other failed fetch here.
+  function decodeBase64(text) {
+    if (typeof global.atob !== 'function') return null;
+    try {
+      return global.atob(text);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function encodeBase64(binary) {
+    if (typeof global.btoa !== 'function') return null;
+    try {
+      return global.btoa(binary);
+    } catch (err) {
+      return null;
+    }
+  }
+
   function createResolver(deps) {
     const options = deps || {};
     const invoke = options.invoke;
@@ -125,23 +153,28 @@
     }
 
     async function fetchRemote(paneId, absPath) {
-      let out = '';
+      let binary = '';
       let offset = 0;
       for (let i = 0; i < MAX_REMOTE_CHUNKS; i += 1) {
         const res = await invoke('sftp_read_file', {
           paneId, path: absPath, offset, length: SFTP_CHUNK,
         });
         if (!res || typeof res.data !== 'string') break;
-        out += res.data;
+        const chunk = decodeBase64(res.data);
+        if (chunk === null) return null;
+        binary += chunk;
         const read = Number(res.bytes_read) || 0;
+        // Zero bytes is the ONLY end-of-file signal the Rust side gives: it
+        // performs one `read()` per call, and a short read is permitted at any
+        // point in a stream. Treating a short read as EOF truncated images
+        // whose transfer merely came back in smaller pieces.
+        if (read <= 0) return binary ? encodeBase64(binary) : null;
         offset += read;
-        // A short read means end of file: done, hand back what was read.
-        if (read < SFTP_CHUNK) return out || null;
       }
-      // Either the ceiling was hit with every chunk still coming back full
-      // (the file is not exhausted — MAX_REMOTE_CHUNKS is a real ceiling,
-      // not just a loop bound) or a chunk came back malformed. Handing back
-      // `out` in either case would silently produce a truncated/corrupt
+      // Either the ceiling was hit before EOF (the file is not exhausted —
+      // MAX_REMOTE_CHUNKS is a real ceiling, not just a loop bound) or a chunk
+      // came back malformed. Handing back what was read so far in either case
+      // would silently produce a truncated/corrupt
       // image; editor_read_image_base64 (the local counterpart) refuses
       // oversized files outright instead of reading a partial slice, so
       // mirror that here rather than returning bad output.

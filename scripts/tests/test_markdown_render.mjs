@@ -72,6 +72,36 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(lines[0], 0, 'first block maps to source line 0');
 
+// --- a highlighted fence keeps its scroll-sync anchor ----------------------
+// markdown-it's fence renderer SHORT-CIRCUITS: when the highlight callback
+// returns a string that already starts with `<pre`, it hands that string back
+// verbatim and never renders the token's attributes. Unguarded, a highlighted
+// fence therefore loses data-src-line and scroll sync dead-ends for the whole
+// height of a code block — the construct this feature exists to display well.
+{
+  const highlighted = sandbox.termlabMarkdownRenderer.createRenderer({
+    MarkdownIt,
+    DOMPurify: createDOMPurify(dom.window),
+    taskListsPlugin,
+    footnotePlugin,
+    highlight: (code) => `<pre class="md-code"><code>${code}</code></pre>`,
+  });
+  const out = highlighted.render('intro\n\n```rust\nfn main() {}\n```');
+  assert.match(out, /class="md-code"/, 'the highlighter output must still be used');
+  assert.match(
+    out, /<pre[^>]*data-src-line="2"/,
+    'a highlighted fence must carry the source line of its opening delimiter',
+  );
+  // The unhighlighted path anchors the same line on the inner <code> —
+  // markdown-it's own attribute target. scrollToLine queries plain
+  // `[data-src-line]`, so either element serves; what matters is that the line
+  // survives at all.
+  assert.match(
+    renderer.render('intro\n\n```\nfn main() {}\n```'), /data-src-line="2"/,
+    'and the unhighlighted fence path must keep its anchor too',
+  );
+}
+
 // --- inline code is not a fence -------------------------------------------
 assert.match(renderer.render('`x`'), /<code>x<\/code>/, 'inline code must render');
 

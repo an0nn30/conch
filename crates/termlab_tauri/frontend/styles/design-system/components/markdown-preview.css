@@ -58,6 +58,26 @@
   font-size: 0.85em;
 }
 
+/* A failed parse is reported as CONTENT rather than as a toast (see
+   markdown-renderer.js), so it needs to read as a deliberate message instead
+   of as unstyled fallback text in the middle of the document. */
+.md-preview-body .md-render-error {
+  margin: 1em 0;
+  padding: 10px 14px;
+  border: 1px solid var(--tl-danger);
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: var(--tl-row-hover);
+  color: var(--tl-fg);
+}
+.md-preview-body .md-render-error pre {
+  margin: 0.6em 0 0;
+  white-space: pre-wrap;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  color: var(--tl-fg-muted);
+}
+
 /* Syntax classes emitted by lezer's classHighlighter. Mirrors the tag->colour
    choices in features/editor/theme.js so a fence and the editor agree. */
 .md-preview-body .tok-keyword { color: var(--tl-accent); }

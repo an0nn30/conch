@@ -352,22 +352,43 @@ check('the watcher is inert for a pane with no preview', () => {
 });
 
 // --- images -----------------------------------------------------------------
+// The sanitizer MOVES every fetchable source to data-img-ref and removes `src`
+// outright (see markdown-renderer.js), so the controller selects on
+// data-img-ref and writes `src` only with the data: URI it got back. These
+// stubs mirror that contract: an element carrying no data-img-ref is never
+// selected, and the selector itself is asserted so a regression back to
+// `img[src]` — which would let the frame fetch a URL — fails here.
+function makeImage(ref) {
+  return {
+    attrs: ref === null ? {} : { 'data-img-ref': ref },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    setAttribute(k, v) { this.attrs[k] = v; },
+  };
+}
+
+function makeImageDoc(elements) {
+  return {
+    querySelectorAll(selector) {
+      assert.strictEqual(
+        selector, '[data-img-ref]',
+        'the controller must select on data-img-ref, never on a src attribute',
+      );
+      return elements.filter((el) => el.getAttribute('data-img-ref') !== null);
+    },
+  };
+}
+
 check('images resolve on the frame load event, after the text is injected', async () => {
   const h = makeHarness();
   h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md', docPath: '/home/u/docs/notes.md' });
   const frame = h.record.frames[0];
 
-  const img = {
-    attrs: { src: 'shot.png' },
-    getAttribute(k) { return this.attrs[k] ?? null; },
-    setAttribute(k, v) { this.attrs[k] = v; },
-  };
-  const inline = {
-    attrs: { src: 'data:image/png;base64,AAA' },
-    getAttribute(k) { return this.attrs[k] ?? null; },
-    setAttribute(k, v) { this.attrs[k] = v; },
-  };
-  frame.element.contentDocument = { querySelectorAll: () => [img, inline] };
+  const img = makeImage('shot.png');
+  // An author-inlined data: URI keeps its src and gets no data-img-ref, so it
+  // is not even a candidate for resolution.
+  const inline = makeImage(null);
+  inline.attrs.src = 'data:image/png;base64,AAA';
+  frame.element.contentDocument = makeImageDoc([img, inline]);
 
   // srcdoc parses asynchronously, so resolution hangs off `load`, not off the
   // setContent call — which is also what makes the text readable first.
@@ -389,19 +410,15 @@ check('a render that lands mid-fetch supersedes the one in flight', async () => 
   const h = makeHarness();
   h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md', docPath: '/home/u/docs/notes.md' });
   const frame = h.record.frames[0];
-  const img = {
-    attrs: { src: 'shot.png' },
-    getAttribute(k) { return this.attrs[k] ?? null; },
-    setAttribute(k, v) { this.attrs[k] = v; },
-  };
-  frame.element.contentDocument = { querySelectorAll: () => [img] };
+  const img = makeImage('shot.png');
+  frame.element.contentDocument = makeImageDoc([img]);
 
   frame.element.listeners.load.forEach((fn) => fn());
   // Re-render before the fetch above settles: the generation moves on, so its
   // result must be dropped rather than painted into the frame that replaced it.
   h.pane.setPreviewMode(h.view, 'preview', { filename: 'notes.md', docPath: '/home/u/docs/notes.md' });
   await sleep(20);
-  assert.strictEqual(img.attrs.src, 'shot.png', 'the superseded result never landed');
+  assert.strictEqual(img.getAttribute('src'), null, 'the superseded result never landed');
 });
 
 // --- teardown ---------------------------------------------------------------
@@ -473,12 +490,8 @@ check('a superseded render never resolves, even when its load event lands late',
   const frame = h.record.frames[0];
   const stale = [...frame.element.listeners.load];
 
-  const img = {
-    attrs: { src: 'shot.png' },
-    getAttribute(k) { return this.attrs[k] ?? null; },
-    setAttribute(k, v) { this.attrs[k] = v; },
-  };
-  frame.element.contentDocument = { querySelectorAll: () => [img] };
+  const img = makeImage('shot.png');
+  frame.element.contentDocument = makeImageDoc([img]);
 
   // A second render supersedes the first. The first render's handler must be
   // UNREGISTERED, so a late load event for its document cannot reach it —
@@ -504,21 +517,18 @@ check('the current render stays armed across the stylesheet re-render', async ()
   const h = makeHarness();
   h.pane.setPreviewMode(h.view, 'split', { filename: 'notes.md', docPath: '/home/u/docs/notes.md' });
   const frame = h.record.frames[0];
-  const img = {
-    attrs: { src: 'shot.png' },
-    getAttribute(k) { return this.attrs[k] ?? null; },
-    setAttribute(k, v) { this.attrs[k] = v; },
-  };
-  frame.element.contentDocument = { querySelectorAll: () => [img] };
+  const img = makeImage('shot.png');
+  frame.element.contentDocument = makeImageDoc([img]);
 
   frame.element.listeners.load.forEach((fn) => fn());
   await sleep(20);
   assert.strictEqual(img.attrs.src, 'data:image/png;base64,QUJD');
 
   // preview-frame.js rewrites srcdoc when its shared CSS fetch settles, which
-  // resets the swapped-in URIs. That load belongs to the SAME render, so the
-  // handler must still be attached — and re-resolve from cache, at no I/O.
-  img.attrs.src = 'shot.png';
+  // reparses the document and so drops the swapped-in URIs. That load belongs
+  // to the SAME render, so the handler must still be attached — and re-resolve
+  // from cache, at no I/O.
+  delete img.attrs.src;
   frame.element.listeners.load.forEach((fn) => fn());
   await sleep(20);
   assert.strictEqual(img.attrs.src, 'data:image/png;base64,QUJD', 're-resolved');

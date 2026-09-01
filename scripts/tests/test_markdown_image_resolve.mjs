@@ -15,6 +15,11 @@ const SRC = path.join(ROOT, 'app/features/editor/preview/image-resolver.js');
 
 const sandbox = { window: {} };
 sandbox.window = sandbox;
+// The resolver rejoins multi-chunk remote reads through atob/btoa, which it
+// reads off its injected global rather than assuming a browser. Supplying
+// Node's is what lets the reassembly be exercised here at all.
+sandbox.atob = atob;
+sandbox.btoa = btoa;
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(SRC, 'utf8'), sandbox);
 
@@ -24,7 +29,10 @@ function makeResolver() {
     calls.push({ command, args });
     if (command === 'editor_read_image_base64') return 'TE9DQUw=';
     if (command === 'sftp_read_file') {
-      // One short read: 4 base64 chars, fewer bytes than requested => done.
+      // The whole file in the first read, then the zero-byte read that ends
+      // it. Zero bytes — not a short read — is the only EOF signal the Rust
+      // side gives, since it performs one read() per call.
+      if (args && args.offset > 0) return { data: '', bytes_read: 0 };
       return { data: 'UkVNT1RF', bytes_read: 6 };
     }
     throw new Error(`unexpected command ${command}`);
@@ -197,6 +205,38 @@ function makeResolver() {
   );
   assert.strictEqual(out, null, 'hitting the chunk ceiling with more data left must resolve to null, not a truncated URI');
   assert.ok(calls > 1, 'the ceiling must actually be exercised (more than one chunk requested)');
+}
+
+// --- multi-chunk remote reads: the BYTES are rejoined, not the base64 -----
+// sftp_read_file base64-encodes EACH chunk independently and the 1MB chunk
+// size is not a multiple of 3, so every full chunk's encoding ends in `==`
+// padding. Concatenating the encoded text buries that padding mid-payload and
+// decodes to garbage — invisibly, and only for images over 1MB.
+{
+  const CHUNK = 1024 * 1024;
+  const whole = Buffer.concat([
+    Buffer.alloc(CHUNK, 0x01),   // exactly one full chunk: encoding ends in ==
+    Buffer.alloc(1234, 0x02),    // a partial second chunk
+  ]);
+  let reads = 0;
+  const invoke = async (command, args) => {
+    if (command !== 'sftp_read_file') throw new Error(`unexpected command ${command}`);
+    reads += 1;
+    const slice = whole.subarray(args.offset, args.offset + args.length);
+    return { data: slice.toString('base64'), bytes_read: slice.length };
+  };
+  const resolver = sandbox.termlabPreviewImages.createResolver({ invoke, mimeFor: () => 'image/png' });
+  const uri = await resolver.resolve(
+    './big.png',
+    { paneId: 3, remotePath: '/srv/docs/readme.md' },
+    resolver.currentGeneration(),
+    null,
+  );
+  assert.ok(reads > 2, 'the multi-chunk path must actually be exercised');
+  assert.strictEqual(
+    uri, `data:image/png;base64,${whole.toString('base64')}`,
+    'a multi-chunk remote image must decode to the original bytes, not to concatenated base64',
+  );
 }
 
 // --- a throwing mimeFor must not make resolve() reject ---------------------

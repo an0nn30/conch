@@ -170,19 +170,25 @@
       loadHandler = null;
     }
 
-    // Swap each unresolved <img> for a data: URI. `generation` is the one its
-    // render captured, and it is re-checked against the resolver on return —
-    // so a fetch that outlives its own render drops its result rather than
+    // Give each image a data: URI. `generation` is the one its render
+    // captured, and it is re-checked against the resolver on return — so a
+    // fetch that outlives its own render drops its result rather than
     // painting it.
+    //
+    // The path is read from data-img-ref, not from `src`: the sanitizer moves
+    // every fetchable source there and removes `src` outright, so an element
+    // that reaches this document has no URL for the engine to load. `src` is
+    // only ever written here, and only with a data: URI — which is what makes
+    // "the preview issues no network requests" a property of the code rather
+    // than of a pattern match over URLs.
     async function resolveImages(generation) {
       if (!images) return;
       const doc = frameDoc();
       if (!doc || typeof doc.querySelectorAll !== 'function') return;
-      const pending = Array.prototype.slice.call(doc.querySelectorAll('img[src]'))
-        .filter((img) => !String(img.getAttribute('src') || '').startsWith('data:'));
+      const pending = Array.prototype.slice.call(doc.querySelectorAll('[data-img-ref]'));
       await Promise.all(pending.map(async (img) => {
         const uri = await images.resolve(
-          img.getAttribute('src'), source.binding, generation, source.docPath,
+          img.getAttribute('data-img-ref'), source.binding, generation, source.docPath,
         );
         if (uri && generation === images.currentGeneration()) img.setAttribute('src', uri);
       }));
