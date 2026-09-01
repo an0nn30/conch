@@ -1,0 +1,13 @@
+{
+  "name": "termlab-frontend-tests",
+  "private": true,
+  "description": "Test harness for the TermLab frontend runtime (crates/termlab_tauri/frontend).",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.8"
+  }
+}
