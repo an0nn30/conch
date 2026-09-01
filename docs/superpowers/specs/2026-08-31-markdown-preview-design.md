@@ -227,8 +227,11 @@ file is opened; the live mode is per-pane runtime state and is not persisted.
 > The default is now `cmd+shift+y`, verified free across all four binding surfaces —
 > `KeyboardConfig` defaults, `menu.rs` accelerators, `shortcut-runtime.js` hard-wired
 > checks, and CodeMirror's loaded keymaps (which claim only `Mod-Shift-l`,
-> `Mod-Shift-u`, and `Mod-Shift-z`). Taken `cmd+shift+*` letters are
-> `[ ] d e j l m n o p r s t u v w z`.
+> `Mod-Shift-u`, and `Mod-Shift-z` directly, **plus `Mod-Shift-g`**, which
+> `@codemirror/search` binds through the `shift:` property of its `Mod-g`
+> entry rather than as its own key — easy to miss with a naive grep, which is
+> precisely the failure this erratum exists to warn about). Taken
+> `cmd+shift+*` letters are `[ ] d e g j l m n o p r s t u v w z`.
 
 ### Rust changes (additive only)
 
