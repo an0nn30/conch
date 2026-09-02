@@ -8,9 +8,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .emit()?;
 
     ensure_vendor_bundle();
+    require_common_controls_v6_in_tests();
 
     tauri_build::build();
     Ok(())
+}
+
+/// Give Windows test binaries the same comctl32 v6 manifest the app gets.
+///
+/// `TaskDialogIndirect` is exported only by comctl32 version 6, which lives in
+/// WinSxS and is bound only for executables whose manifest declares a
+/// dependency on Microsoft.Windows.Common-Controls 6.0.0.0. `tauri_build`
+/// embeds that manifest into the app binary, but `cargo test` links a separate
+/// executable that never received it — so the loader bound
+/// System32\comctl32.dll (v5.82), found no `TaskDialogIndirect`, and killed the
+/// process at load with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before `main`.
+///
+/// The whole `termlab_tauri` lib test target was unrunnable on Windows because
+/// of it, on both x86_64 and aarch64.
+fn require_common_controls_v6_in_tests() {
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if !(windows && msvc) {
+        return;
+    }
+    // `-tests` scopes this to test targets; the app binary is already covered
+    // by the manifest tauri_build embeds.
+    println!(
+        "cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' \
+         name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+         processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+    );
 }
 
 /// Keep the generated CodeMirror bundle in step with its sources on every
