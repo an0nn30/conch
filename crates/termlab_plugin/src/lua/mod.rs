@@ -6,5 +6,6 @@
 //! - [`runner`] — lifecycle management (setup → event loop → teardown).
 
 pub mod api;
+pub mod convert;
 pub mod metadata;
 pub mod runner;
