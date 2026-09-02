@@ -30,8 +30,18 @@
   // remote paths live on the SSH host and are always POSIX, so callers pass
   // `posixOnly: true` to keep this out of that branch entirely.
   const WINDOWS_DRIVE = /^[a-z]:[\\/]/i;
-  const SFTP_CHUNK = 1024 * 1024; // sftp_read_file caps each call at 1MB
-  const MAX_REMOTE_CHUNKS = 8;    // ceiling of 8MB, matching MAX_IMAGE_BYTES
+  const SFTP_CHUNK = 1024 * 1024; // what each sftp_read_file call ASKS for
+  // The real backstop is a BYTE budget, matching editor_read_image_base64's
+  // MAX_IMAGE_BYTES so a remote image and a local one are refused at the same
+  // size. A count of round trips cannot express that: russh-sftp caps every
+  // read at MAX_READ_LENGTH (261120) and sftp.rs performs exactly one read()
+  // per command, so a call returns at most 255KiB however much is requested.
+  // The former 8-CALL ceiling therefore stopped at ~1.74MB while claiming
+  // 8MB — a remote image between the two rendered as nothing at all.
+  const MAX_REMOTE_BYTES = 8 * 1024 * 1024;
+  // A runaway guard only, generous enough that the budget above is always what
+  // actually binds: 8MB of 255KiB reads is ~33 calls.
+  const MAX_REMOTE_CALLS = 256;
 
   // Mirrors the extension guard in editor_read_image_base64 (Rust). MIME
   // belongs on this side because this module is the one building the
@@ -108,12 +118,17 @@
     return `/${out.join('/')}`;
   }
 
-  // sftp_read_file base64-encodes EACH CHUNK INDEPENDENTLY, and
-  // SFTP_CHUNK % 3 === 1, so a full chunk's encoding always ends in `==`
-  // padding. Concatenating the encoded TEXT therefore buries padding in the
-  // middle of the payload and decodes to garbage — silently, and only for
-  // images over 1MB, since anything smaller arrives in a single chunk. The
-  // bytes have to be rejoined and encoded once, which is what these two do.
+  // sftp_read_file base64-encodes EACH READ INDEPENDENTLY, so concatenating
+  // the encoded TEXT buries a chunk's `=` padding in the middle of the payload
+  // and decodes to garbage. The bytes have to be rejoined and encoded once,
+  // which is what these two do.
+  //
+  // (An earlier note here blamed SFTP_CHUNK % 3 === 1. That is arithmetic on
+  // the wrong number: a read comes back at russh-sftp's 261120-byte cap, which
+  // IS a multiple of 3, so a full read's encoding carries no padding at all.
+  // The operative bug was the old `read < SFTP_CHUNK` end-of-file test, which
+  // read that capped short read as EOF and truncated every remote image at
+  // 255KiB.)
   //
   // atob/btoa are read off the module's injected global so this stays testable
   // outside a browser; without them a remote image degrades to no image, which
@@ -155,7 +170,7 @@
     async function fetchRemote(paneId, absPath) {
       let binary = '';
       let offset = 0;
-      for (let i = 0; i < MAX_REMOTE_CHUNKS; i += 1) {
+      for (let i = 0; i < MAX_REMOTE_CALLS; i += 1) {
         const res = await invoke('sftp_read_file', {
           paneId, path: absPath, offset, length: SFTP_CHUNK,
         });
@@ -170,14 +185,17 @@
         // whose transfer merely came back in smaller pieces.
         if (read <= 0) return binary ? encodeBase64(binary) : null;
         offset += read;
+        // Measured on the bytes actually held, not on the offsets a server
+        // reported: this is the size the preview would have to display, and it
+        // is the number MAX_IMAGE_BYTES governs on the local side.
+        if (binary.length > MAX_REMOTE_BYTES) return null;
       }
-      // Either the ceiling was hit before EOF (the file is not exhausted —
-      // MAX_REMOTE_CHUNKS is a real ceiling, not just a loop bound) or a chunk
-      // came back malformed. Handing back what was read so far in either case
-      // would silently produce a truncated/corrupt
-      // image; editor_read_image_base64 (the local counterpart) refuses
-      // oversized files outright instead of reading a partial slice, so
-      // mirror that here rather than returning bad output.
+      // Either a read came back malformed (the `break` above) or the runaway
+      // guard tripped before EOF. Handing back what was read so far
+      // would silently produce a truncated image; editor_read_image_base64
+      // (the local counterpart) refuses oversized files outright instead of
+      // reading a partial slice, so mirror that here rather than returning bad
+      // output.
       return null;
     }
 

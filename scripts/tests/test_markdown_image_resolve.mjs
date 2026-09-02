@@ -207,6 +207,64 @@ function makeResolver() {
   assert.ok(calls > 1, 'the ceiling must actually be exercised (more than one chunk requested)');
 }
 
+// --- the remote backstop is a BYTE budget, not a count of round trips -----
+// russh-sftp caps every read at MAX_READ_LENGTH (261120) and the Rust command
+// performs exactly one read() per call, so asking for 1MB still returns at most
+// 255KiB. A ceiling counted in CALLS therefore cut remote images off at ~1.74MB
+// while the comment beside it (and the local path) promised 8MB: anything in
+// between resolved to null and rendered as nothing.
+{
+  const SFTP_READ = 261120;          // russh-sftp MAX_READ_LENGTH
+  const whole = Buffer.alloc(3 * 1024 * 1024, 0x07);   // well past the old 8-call cap
+  let reads = 0;
+  const invoke = async (command, args) => {
+    if (command !== 'sftp_read_file') throw new Error(`unexpected command ${command}`);
+    reads += 1;
+    const slice = whole.subarray(args.offset, args.offset + Math.min(args.length, SFTP_READ));
+    return { data: slice.toString('base64'), bytes_read: slice.length };
+  };
+  const resolver = sandbox.termlabPreviewImages.createResolver({ invoke, mimeFor: () => 'image/png' });
+  const uri = await resolver.resolve(
+    './big.png',
+    { paneId: 5, remotePath: '/srv/docs/readme.md' },
+    resolver.currentGeneration(),
+    null,
+  );
+  assert.ok(reads > 8, 'more round trips than the old call ceiling allowed');
+  assert.strictEqual(
+    uri, `data:image/png;base64,${whole.toString('base64')}`,
+    'a 3MB remote image is under the 8MB budget and must resolve in full',
+  );
+}
+
+// --- and the budget is what stops an oversized one ------------------------
+// editor_read_image_base64 refuses anything over MAX_IMAGE_BYTES outright, so
+// the remote path gives up at the same size rather than at some accidental
+// multiple of the transport's read length.
+{
+  const SFTP_READ = 261120;
+  const whole = Buffer.alloc(9 * 1024 * 1024, 0x08);   // over MAX_IMAGE_BYTES
+  let reads = 0;
+  const invoke = async (command, args) => {
+    if (command !== 'sftp_read_file') throw new Error(`unexpected command ${command}`);
+    reads += 1;
+    const slice = whole.subarray(args.offset, args.offset + Math.min(args.length, SFTP_READ));
+    return { data: slice.toString('base64'), bytes_read: slice.length };
+  };
+  const resolver = sandbox.termlabPreviewImages.createResolver({ invoke, mimeFor: () => 'image/png' });
+  const out = await resolver.resolve(
+    './huge.png',
+    { paneId: 6, remotePath: '/srv/docs/readme.md' },
+    resolver.currentGeneration(),
+    null,
+  );
+  assert.strictEqual(out, null, 'over the byte budget must resolve to null, not a truncated URI');
+  assert.ok(
+    reads < 64,
+    'the BYTE budget stopped it (8MB / 255KiB is ~33 reads), not the runaway call guard',
+  );
+}
+
 // --- multi-chunk remote reads: the BYTES are rejoined, not the base64 -----
 // sftp_read_file base64-encodes EACH chunk independently and the 1MB chunk
 // size is not a multiple of 3, so every full chunk's encoding ends in `==`

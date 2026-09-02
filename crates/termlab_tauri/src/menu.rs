@@ -38,6 +38,7 @@ pub(crate) const MENU_SPLIT_VERTICAL_ID: &str = "view.split_vertical";
 pub(crate) const MENU_SPLIT_HORIZONTAL_ID: &str = "view.split_horizontal";
 pub(crate) const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
+pub(crate) const MENU_TOGGLE_PREVIEW_ID: &str = "view.toggle_preview";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
 pub(crate) const MENU_NEW_FILE_ID: &str = "file.new_file";
 pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
@@ -80,6 +81,7 @@ pub(crate) const MENU_ACTION_NEW_FILE: &str = "new-file";
 pub(crate) const MENU_ACTION_OPEN_FILE: &str = "open-file";
 pub(crate) const MENU_ACTION_SAVE_FILE_AS: &str = "save-file-as";
 pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
+pub(crate) const MENU_ACTION_TOGGLE_PREVIEW: &str = "toggle-preview";
 pub(crate) const MENU_ACTION_CHECK_UPDATES: &str = "check-for-updates";
 pub(crate) const MENU_ACTION_ABOUT: &str = "about";
 pub(crate) const MENU_ACTION_OPEN_DEVTOOLS: &str = "open-devtools";
@@ -353,6 +355,23 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         true,
         optional_accelerator(&close_pane_accel),
     )?;
+    // Deliberately NO accelerator, for the same reason as Save File As… above
+    // and more sharply: a native menu accelerator is consumed by AppKit before
+    // the webview sees the key, and this one is scoped tighter than any other
+    // — shortcut-runtime.js consumes it ONLY in a pane that actually has a
+    // markdown preview, and drops it everywhere else so it still reaches the
+    // shell in a terminal. Binding the configured `toggle_preview` combo here
+    // would take it from the shell in every pane in the app. The keystroke is
+    // still handled by that guard and Settings > Keymap still lists it; this
+    // item is the discoverable, always-safe route (menu-actions.js re-checks
+    // the focused pane before acting).
+    let toggle_preview = MenuItem::with_id(
+        app,
+        MENU_TOGGLE_PREVIEW_ID,
+        "Toggle Markdown Preview",
+        true,
+        None::<&str>,
+    )?;
     let view_menu = Submenu::with_items(
         app,
         "View",
@@ -365,6 +384,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             &split_v,
             &split_h,
             &close_pane_item,
+            &toggle_preview,
             &PredefinedMenuItem::separator(app)?,
             &focus_sessions,
             &zen_mode,
@@ -869,6 +889,14 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             true,
             optional_accelerator(&close_pane_accel),
         )?;
+        // No accelerator — see build_app_menu above.
+        let toggle_preview = MenuItem::with_id(
+            app,
+            MENU_TOGGLE_PREVIEW_ID,
+            "Toggle Markdown Preview",
+            true,
+            None::<&str>,
+        )?;
         let view_menu = Submenu::with_items(
             app,
             "View",
@@ -881,6 +909,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 &split_v,
                 &split_h,
                 &close_pane_item,
+                &toggle_preview,
                 &PredefinedMenuItem::separator(app)?,
                 &focus_sessions,
                 &zen_mode,

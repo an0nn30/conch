@@ -75,9 +75,6 @@
   // around. Nothing else protects this: the frame's sandbox blocks execution,
   // not subresource loads, and `csp` is null app-wide.
   function neutraliseFetchingSource(node) {
-    // Authors do not get to hand the resolver a path directly — the attribute
-    // is written here or not at all.
-    node.removeAttribute('data-img-ref');
     if (!node.hasAttribute('src')) return;
     const raw = node.getAttribute('src') || '';
     const flat = flattenUrl(raw);
@@ -97,6 +94,14 @@
   // Runs at SANITIZE time, not render time, so a neutralised element never
   // reaches a document — hiding it after the fact would already have leaked.
   function afterSanitizeAttributes(node) {
+    // Stripped on EVERY element, before anything is written back. The
+    // attribute is allowlisted so the sanitizer's own write below survives,
+    // which means an author can spell it on any tag; preview-controller.js
+    // selects a bare `[data-img-ref]`, so one left standing on a <div> still
+    // costs a resolver file read. Doing this inside the IMG/INPUT branch left
+    // exactly that hole — authors do not get to hand the resolver a path,
+    // whatever element they hang it on.
+    node.removeAttribute('data-img-ref');
     if (FETCHING_TAGS[node.tagName]) neutraliseFetchingSource(node);
     if (node.tagName === 'A') {
       const href = node.getAttribute('href') || '';

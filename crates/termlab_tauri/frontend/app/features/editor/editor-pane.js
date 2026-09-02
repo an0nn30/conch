@@ -21,8 +21,8 @@
   // rather than by a flag every call site has to remember to check.
   const previews = new WeakMap();
   // Everything a mounted preview needs UNDONE: the element the iframe lives in,
-  // and the scroll listener bound to the view. Kept beside the controller so
-  // teardown is one lookup and cannot forget half of it.
+  // the scroll listener bound to the view, and the mode control. Kept beside
+  // the controller so teardown is one lookup and cannot forget any of it.
   const previewMounts = new WeakMap();
 
   const MODE_CLASSES = {
@@ -243,6 +243,46 @@
     };
   }
 
+  // Land every mode change in one place.
+  //
+  // The shortcut, the View menu, the toolbar and the initial mount all arrive
+  // here, so the layout class and the control's pressed state can never
+  // disagree with the controller about which mode the pane is in. Callers hand
+  // in the mode the controller APPLIED, not the one they asked for — an
+  // unknown value degrades to 'editor' inside preview-mode.js, and the DOM has
+  // to follow the real state rather than the requested one.
+  function afterModeChange(view, mode) {
+    applyPreviewLayout(view, mode);
+    const mount = previewMounts.get(view);
+    if (mount && mount.toolbar) mount.toolbar.setMode(mode);
+    return mode;
+  }
+
+  // The toolbar's click target, and the reason a click cannot diverge from the
+  // keystroke: both end at afterModeChange with a mode the controller applied.
+  function setPaneMode(view, mode) {
+    const controller = previews.get(view);
+    if (!controller) return null;
+    return afterModeChange(view, controller.setMode(mode));
+  }
+
+  // The visible route into the three modes, mounted into the PANE rather than
+  // into the preview host: it has to be there in editor mode too, where that
+  // host is hidden. A control you can only see once you have already found the
+  // feature would not fix the discoverability problem it exists for.
+  //
+  // Absent module (or a refused build) simply means no control — the same
+  // quiet degradation as a missing markdown bundle, and the shortcut still
+  // works.
+  function mountToolbar(view, container, controller) {
+    const module = global.termlabPreviewToolbar;
+    if (!module || typeof module.createToolbar !== 'function') return null;
+    return module.createToolbar(container, {
+      readMode: () => controller.mode(),
+      onSelect: (mode) => { setPaneMode(view, mode); },
+    });
+  }
+
   function mountPreview(view, source, mode) {
     const module = global.termlabPreviewController;
     const container = paneContainer(view);
@@ -267,7 +307,11 @@
       return null;
     }
     previews.set(view, controller);
-    previewMounts.set(view, { host, unbindScroll: bindScrollSync(view, controller) });
+    previewMounts.set(view, {
+      host,
+      unbindScroll: bindScrollSync(view, controller),
+      toolbar: mountToolbar(view, container, controller),
+    });
     return controller;
   }
 
@@ -279,6 +323,7 @@
     const mount = previewMounts.get(view);
     if (mount) {
       if (typeof mount.unbindScroll === 'function') mount.unbindScroll();
+      if (mount.toolbar) mount.toolbar.destroy();
       if (mount.host && mount.host.parentNode) mount.host.parentNode.removeChild(mount.host);
     }
     previewMounts.delete(view);
@@ -311,9 +356,7 @@
     else controller = mountPreview(view, info, mode);
     if (!controller) return null;
 
-    const applied = controller.setMode(mode);
-    applyPreviewLayout(view, applied);
-    return applied;
+    return afterModeChange(view, controller.setMode(mode));
   }
 
   // Editor -> Split -> Preview -> Editor. Returns the new mode, or null when
@@ -322,9 +365,7 @@
   function togglePreview(view) {
     const controller = previews.get(view);
     if (!controller) return null;
-    const mode = controller.cycle();
-    applyPreviewLayout(view, mode);
-    return mode;
+    return afterModeChange(view, controller.cycle());
   }
 
   // The pane's current mode, or null when it has no preview.

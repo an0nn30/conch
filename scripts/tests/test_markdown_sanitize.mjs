@@ -230,6 +230,28 @@ assert.match(renderer.render('press <kbd>Cmd</kbd>'), /<kbd>/, '<kbd> must survi
 // --- scroll-sync attribute must not be stripped ----------------------------
 assert.match(renderer.render('# h'), /data-src-line="0"/, 'data-src-line must survive sanitizing');
 
+// --- data-img-ref is written by the sanitizer, never by the author ---------
+// The attribute is the resolver's private channel: preview-controller.js
+// selects a bare [data-img-ref] and hands whatever it finds to a file read. It
+// is allowlisted so the sanitizer's OWN writes survive, which means an author
+// can spell it on any element — and stripping it only inside the IMG/INPUT
+// branch left it standing on everything else, falsifying the invariant the
+// code states beside it.
+for (const tag of ['div', 'span', 'p', 'code']) {
+  const out = renderer.render(`<${tag} data-img-ref="/etc/passwd.png">x</${tag}>`);
+  assert.ok(
+    !/data-img-ref/.test(out),
+    `an author-supplied data-img-ref must not survive on <${tag}>\n  output: ${out}`,
+  );
+}
+{
+  // The counterpart: the sanitizer's own write still has to reach the frame,
+  // or no local image resolves at all.
+  const out = renderer.render('![alt](./pics/a.png)');
+  assert.match(out, /data-img-ref="\.\/pics\/a\.png"/, 'the sanitizer still moves img src');
+  assert.ok(!/\ssrc=/.test(out), 'and removes the fetchable src');
+}
+
 // --- sanitize hooks are registered once per DOMPurify instance -------------
 // DOMPurify is a module singleton shared by every pane, and addHook APPENDS
 // rather than replaces. Registering once per createRenderer meant N open
