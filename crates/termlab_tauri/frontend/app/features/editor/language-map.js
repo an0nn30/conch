@@ -56,5 +56,12 @@
     return BY_EXTENSION[ext] || null;
   }
 
-  global.termlabEditorLanguageMap = { languageKeyFor };
+  // Whether a file gets the markdown preview. Derived from the SAME table that
+  // drives highlighting, so a file that highlights as markdown can always be
+  // previewed as markdown — the two can never drift apart.
+  function isMarkdown(filename) {
+    return languageKeyFor(filename) === 'markdown';
+  }
+
+  global.termlabEditorLanguageMap = { languageKeyFor, isMarkdown };
 })(window);

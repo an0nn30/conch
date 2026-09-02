@@ -30,6 +30,7 @@
     save_file: 'Save File',
     save_file_as: 'Save File As',
     open_file: 'Open File',
+    toggle_preview: 'Toggle Markdown Preview',
   };
 
   const KEYBOARD_CORE_GROUPS = [
@@ -42,7 +43,7 @@
     },
     {
       label: 'Editor',
-      keys: ['new_file', 'open_file', 'save_file', 'save_file_as'],
+      keys: ['new_file', 'open_file', 'save_file', 'save_file_as', 'toggle_preview'],
     },
     {
       label: 'Tools',

@@ -37,6 +37,8 @@ Positioning: TermLab sits between terminal emulators (iTerm2, WezTerm, Warp) and
 
 **File Explorer** (built-in) — Dual-pane local and remote file browsing. Upload and download with real-time progress tracking via SFTP. Sortable columns, hidden file toggle, navigation history.
 
+**Built-in Editor** — A light [CodeMirror 6](https://codemirror.net/) editor for local and remote files, with syntax highlighting, optional vim keybindings (`[editor] vim_mode`), and Save As to either a local path or an SSH host. Markdown files add a rendered preview — GFM tables, task lists, footnotes, and code fences highlighted with the same grammars the editor uses — in Editor / Split / Preview modes, switched with the buttons in the top-right of the pane, from View > Toggle Markdown Preview, or cycled with `Cmd+Shift+Y`. The preview is offline by design: images are inlined from disk or over the existing SFTP session, no image source ever reaches the preview as a URL — remote ones are stripped and local ones are fetched through TermLab itself — so the preview issues no network requests at all, and the rendered HTML is sanitized and displayed in a sandboxed iframe that cannot execute scripts. Set the mode markdown files open in with `[editor] preview_default_mode`.
+
 **SSH Tunnels** (built-in) — Local port forwarding with persistent tunnel definitions. Start/stop from the sidebar or the tunnel manager dialog.
 
 **Credential Vault** — Encrypted credential storage using AES-256-GCM with Argon2id key derivation. Built-in SSH key generation (Ed25519, ECDSA, RSA), auto-lock timer, and vault-aware SSH connections. Accessible via Tools > Credential Vault.
@@ -191,6 +193,7 @@ The binary is at `target/release/termlab`.
 | `Cmd+/` | Toggle & focus quick connect |
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Zoom in / out / reset |
 | `Cmd+Shift+T` | Manage SSH tunnels |
+| `Cmd+Shift+Y` | Toggle markdown preview (editor / split / preview) |
 
 All shortcuts are configurable in `[termlab.keyboard]`. Plugins can also register their own keybindings.
 
