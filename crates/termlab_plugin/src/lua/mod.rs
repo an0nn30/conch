@@ -3,6 +3,7 @@
 //!
 //! - [`metadata`] — parse `-- plugin-*` headers from `.lua` files.
 //! - [`api`] — register `ui`, `session`, `app`, `net` Lua tables.
+//! - [`convert`] — the single Lua↔JSON conversion bridge for plugin data payloads.
 //! - [`runner`] — lifecycle management (setup → event loop → teardown).
 
 pub mod api;

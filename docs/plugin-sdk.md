@@ -1372,6 +1372,14 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 | `theme_changed` | `theme_json` | Reserved event kind in the shared schema (not currently emitted by the host) |
 | `shutdown` | -- | Reserved event kind in the shared schema (plugins are currently shut down via `teardown()`) |
 
+Event payloads are converted from JSON to native Lua values by the host. A JSON
+`null` arrives as Lua `nil` (so `if e.data.field == nil then` works as written),
+integers stay integers, and arrays arrive as plain tables with no metatable.
+
+If a payload cannot be converted, the event is dropped and the reason is logged.
+Plugins never receive a partially converted payload, and never receive a raw
+JSON string in place of a table.
+
 ### Event JSON Examples
 
 ```json

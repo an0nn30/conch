@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use crate::HostApi;
 use crate::bus::PluginMail;
 use crate::lua::api;
+use crate::lua::convert;
 use crate::lua::metadata::{self, LuaPluginMeta};
 
 /// Maximum Lua instructions per callback invocation (render, on_event, on_query).
@@ -223,30 +224,25 @@ fn dispatch_event(lua: &Lua, event: &PluginEvent) {
         return;
     };
 
-    let json = match serde_json::to_string(event) {
-        Ok(j) => j,
-        Err(_) => return,
+    let value = match serde_json::to_value(event) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("dispatch_event: failed to encode event: {e}");
+            return;
+        }
     };
 
-    // Parse the JSON into a Lua table so the plugin gets a native table.
-    let lua_literal = json_to_lua_literal(&json);
-    let Ok(tbl) = lua
-        .load(&format!("return {}", lua_literal))
-        .eval::<LuaTable>()
-    else {
-        log::warn!("dispatch_event: failed to eval lua literal: {lua_literal}");
-        // Fallback: pass as string.
-        with_instruction_limit(lua, || {
-            if let Err(e) = on_event.call::<()>(json) {
-                log::warn!("dispatch_event: on_event(string) error: {e}");
-            }
-        });
-        return;
+    let payload = match convert::json_to_lua(lua, &value) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("dispatch_event: failed to convert event payload: {e}");
+            return;
+        }
     };
 
     with_instruction_limit(lua, || {
-        if let Err(e) = on_event.call::<()>(tbl) {
-            log::warn!("dispatch_event: on_event(table) error: {e}");
+        if let Err(e) = on_event.call::<()>(payload) {
+            log::warn!("dispatch_event: on_event error: {e}");
         }
     });
 }
@@ -257,22 +253,17 @@ fn dispatch_event_json_raw(lua: &Lua, json: &str) {
         return;
     };
 
-    let lua_literal = json_to_lua_literal(json);
-    let Ok(tbl) = lua
-        .load(&format!("return {}", lua_literal))
-        .eval::<LuaTable>()
-    else {
-        with_instruction_limit(lua, || {
-            if let Err(e) = on_event.call::<()>(json.to_string()) {
-                log::warn!("dispatch_event_json_raw: on_event(string) error: {e}");
-            }
-        });
-        return;
+    let payload = match convert::json_str_to_lua(lua, json) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("dispatch_event_json_raw: failed to convert event payload: {e}");
+            return;
+        }
     };
 
     with_instruction_limit(lua, || {
-        if let Err(e) = on_event.call::<()>(tbl) {
-            log::warn!("dispatch_event_json_raw: on_event(table) error: {e}");
+        if let Err(e) = on_event.call::<()>(payload) {
+            log::warn!("dispatch_event_json_raw: on_event error: {e}");
         }
     });
 }
@@ -336,110 +327,119 @@ fn handle_query(lua: &Lua, method: &str, args: &serde_json::Value) -> Option<ser
     serde_json::from_str(&result).ok()
 }
 
-/// Convert a JSON string to a Lua table literal.
-///
-/// This is a simple approach for passing structured data to Lua.
-/// For production, you'd use mlua's serde integration.
-fn json_to_lua_literal(json: &str) -> String {
-    let value: serde_json::Value = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return format!("{{}}"),
-    };
-    json_value_to_lua_literal(&value)
-}
-
-fn json_value_to_lua_literal(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "nil".into(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            // Escape special characters for Lua string literal.
-            let escaped = s
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\0', "");
-            format!("\"{escaped}\"")
-        }
-        serde_json::Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_value_to_lua_literal).collect();
-            format!("{{{}}}", items.join(", "))
-        }
-        serde_json::Value::Object(map) => {
-            let items: Vec<String> = map
-                .iter()
-                .map(|(k, v)| {
-                    let key = if k.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !k.is_empty()
-                        && !k.starts_with(|c: char| c.is_ascii_digit())
-                    {
-                        k.clone()
-                    } else {
-                        format!("[\"{}\"]", k.replace('"', "\\\""))
-                    };
-                    format!("{} = {}", key, json_value_to_lua_literal(v))
-                })
-                .collect();
-            format!("{{{}}}", items.join(", "))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn json_to_lua_literal_object() {
-        let lua_str = json_to_lua_literal(r#"{"type":"button_click","id":"btn1"}"#);
-        // Should produce a valid Lua table literal.
-        assert!(lua_str.contains("type"));
-        assert!(lua_str.contains("button_click"));
-        assert!(lua_str.contains("id"));
+    fn menu_action_event_reaches_on_event() {
+        let lua = sandboxed_lua();
+        lua.load(
+            r#"
+            seen_kind = nil
+            seen_action = nil
+            function on_event(e)
+                seen_kind = e.kind
+                seen_action = e.action
+            end
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+        let event = PluginEvent::MenuAction { action: "trigger_notification".into() };
+        dispatch_event(&lua, &event);
+
+        assert_eq!(lua.globals().get::<String>("seen_kind").unwrap(), "menu_action");
+        assert_eq!(
+            lua.globals().get::<String>("seen_action").unwrap(),
+            "trigger_notification"
+        );
     }
 
     #[test]
-    fn json_to_lua_literal_array() {
-        let lua_str = json_to_lua_literal(r#"[1, 2, 3]"#);
-        assert!(lua_str.contains("1"));
-        assert!(lua_str.contains("3"));
-    }
+    fn bus_event_key_with_backslash_is_delivered_intact() {
+        let lua = sandboxed_lua();
+        lua.load(
+            r#"
+            received_type = nil
+            received_key = nil
+            function on_event(e)
+                received_type = type(e.data)
+                if type(e.data) == 'table' then
+                    for k, _ in pairs(e.data) do received_key = k end
+                end
+            end
+        "#,
+        )
+        .exec()
+        .unwrap();
 
-    #[test]
-    fn json_to_lua_literal_nested() {
-        let lua_str = json_to_lua_literal(r#"{"data":{"nested":true},"count":5}"#);
-        assert!(lua_str.contains("data"));
-        assert!(lua_str.contains("nested"));
-    }
-
-    #[test]
-    fn json_to_lua_literal_string_escaping() {
-        let lua_str = json_to_lua_literal(r#"{"msg":"hello \"world\""}"#);
-        assert!(lua_str.contains("hello"));
-    }
-
-    #[test]
-    fn json_to_lua_literal_null() {
-        let lua_str = json_to_lua_literal(r#"{"x":null}"#);
-        assert!(lua_str.contains("nil"));
-    }
-
-    #[test]
-    fn json_to_lua_literal_menu_action() {
-        use termlab_plugin_sdk::PluginEvent;
-        let event = PluginEvent::MenuAction {
-            action: "trigger_notification".into(),
+        // A key ending in a backslash breaks the generated Lua literal: the
+        // escape consumes the closing quote of the bracketed key.
+        let event = PluginEvent::BusEvent {
+            event_type: "test".into(),
+            data: serde_json::json!({ "danger\\": 1 }),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        eprintln!("JSON: {json}");
-        let lua_str = json_to_lua_literal(&json);
-        eprintln!("Lua: {lua_str}");
-        assert!(lua_str.contains("kind"));
-        assert!(lua_str.contains("menu_action"));
-        assert!(lua_str.contains("action"));
-        assert!(lua_str.contains("trigger_notification"));
+        dispatch_event(&lua, &event);
+
+        assert_eq!(
+            lua.globals().get::<String>("received_type").unwrap(),
+            "table",
+            "event payload must arrive as a table, not fall back to a raw string"
+        );
+        assert_eq!(
+            lua.globals().get::<String>("received_key").unwrap(),
+            "danger\\",
+            "key must arrive byte-identical"
+        );
+    }
+
+    #[test]
+    fn bus_event_key_with_quotes_and_newlines_is_delivered_intact() {
+        let lua = sandboxed_lua();
+        lua.load(
+            r#"
+            keys = {}
+            function on_event(e)
+                for k, _ in pairs(e.data) do keys[#keys+1] = k end
+                table.sort(keys)
+            end
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+        let event = PluginEvent::BusEvent {
+            event_type: "test".into(),
+            data: serde_json::json!({ "a\"b": 1, "c\nd": 2 }),
+        };
+        dispatch_event(&lua, &event);
+
+        let keys: Vec<String> = lua.globals().get::<LuaTable>("keys").unwrap()
+            .sequence_values().collect::<LuaResult<_>>().unwrap();
+        assert_eq!(keys, vec!["a\"b".to_string(), "c\nd".to_string()]);
+    }
+
+    #[test]
+    fn bus_event_null_value_arrives_as_nil() {
+        let lua = sandboxed_lua();
+        lua.load(
+            r#"
+            was_nil = nil
+            function on_event(e) was_nil = (e.data.maybe == nil) end
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+        let event = PluginEvent::BusEvent {
+            event_type: "test".into(),
+            data: serde_json::json!({ "maybe": null }),
+        };
+        dispatch_event(&lua, &event);
+
+        assert!(lua.globals().get::<bool>("was_nil").unwrap());
     }
 
     #[test]
