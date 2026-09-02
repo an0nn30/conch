@@ -50,6 +50,14 @@ Code MUST be broken into small, focused modules. When adding new functionality:
 - When changing behavior, update nearby docs, examples, or inline help text if the user-visible contract changed.
 - Favor incremental, reviewable changes over broad rewrites.
 
+### Plugin SDK Documentation (STRICT)
+
+Documentation drift has been a recurring problem here, and `docs/plugin-sdk.md` is the only real contract plugin authors have. A stale entry is worse than a missing one — it describes an API that silently does nothing.
+
+- Every task that adds, renames, removes, or changes the signature of anything in the Lua or Java plugin surface MUST update `docs/plugin-sdk.md` **in the same commit**. Never batch doc updates to the end of a branch.
+- Update `docs/plugin-security-model.md` the same way for any capability or permission change.
+- Reviewing a branch includes reviewing its documentation. Diff the docs against the actual API surface in both directions: entries describing functions that no longer exist, and functions with no entry.
+
 ## Architecture
 
 ### Workspace (4 crates, no egui, no native plugins)
