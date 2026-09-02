@@ -349,6 +349,16 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// Render a unix-style path the way `PathBuf` does on this platform.
+    ///
+    /// `evaluate` normalizes through `PathBuf`, so its output carries native
+    /// separators — `\home\dustin\a.txt` on Windows. These assertions stay
+    /// readable as unix paths and get converted, rather than being duplicated
+    /// per platform.
+    fn native(path: &str) -> String {
+        path.replace('/', std::path::MAIN_SEPARATOR_STR)
+    }
+
     fn eval(args: &[&str]) -> CliDecision {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         evaluate(&owned, Path::new("/home/dustin/proj"))
@@ -364,7 +374,7 @@ mod tests {
         assert_eq!(
             eval(&["notes.md"]),
             CliDecision::ForwardOrRun {
-                paths: vec!["/home/dustin/proj/notes.md".into()]
+                paths: vec![native("/home/dustin/proj/notes.md")]
             }
         );
     }
@@ -374,7 +384,7 @@ mod tests {
         assert_eq!(
             eval(&["../other/./a.txt"]),
             CliDecision::ForwardOrRun {
-                paths: vec!["/home/dustin/other/a.txt".into()]
+                paths: vec![native("/home/dustin/other/a.txt")]
             }
         );
     }
@@ -384,7 +394,7 @@ mod tests {
         assert_eq!(
             eval(&["/tmp/x.txt"]),
             CliDecision::ForwardOrRun {
-                paths: vec!["/tmp/x.txt".into()]
+                paths: vec![native("/tmp/x.txt")]
             }
         );
     }
@@ -396,7 +406,7 @@ mod tests {
         };
         assert_eq!(
             paths,
-            vec!["/home/dustin/proj/a.txt".to_string(), "/b.txt".to_string()]
+            vec![native("/home/dustin/proj/a.txt"), native("/b.txt")]
         );
     }
 
@@ -421,7 +431,7 @@ mod tests {
         assert_eq!(
             eval(&["/../etc/passwd"]),
             CliDecision::ForwardOrRun {
-                paths: vec!["/etc/passwd".into()]
+                paths: vec![native("/etc/passwd")]
             }
         );
     }
@@ -436,7 +446,7 @@ mod tests {
         assert_eq!(
             eval(&["-psn_0_123456", "notes.md"]),
             CliDecision::ForwardOrRun {
-                paths: vec!["/home/dustin/proj/notes.md".into()]
+                paths: vec![native("/home/dustin/proj/notes.md")]
             }
         );
         // Real typos must still fail loudly.
@@ -453,7 +463,7 @@ mod tests {
         assert_eq!(
             plan_for(&["a.txt"], EnvMarkers::default()),
             CliPlan::ForwardOrDetach {
-                paths: vec!["/home/dustin/proj/a.txt".into()]
+                paths: vec![native("/home/dustin/proj/a.txt")]
             }
         );
         assert_eq!(
@@ -477,7 +487,7 @@ mod tests {
                 }
             ),
             CliPlan::RunApp {
-                pending_paths: vec!["/home/dustin/proj/a.txt".into()]
+                pending_paths: vec![native("/home/dustin/proj/a.txt")]
             }
         );
     }
@@ -526,7 +536,7 @@ mod tests {
                 }
             ),
             CliPlan::RunApp {
-                pending_paths: vec!["/home/dustin/proj/a.txt".into()]
+                pending_paths: vec![native("/home/dustin/proj/a.txt")]
             }
         );
         // Neither marker: forward (or detach).
@@ -539,7 +549,7 @@ mod tests {
                 }
             ),
             CliPlan::ForwardOrDetach {
-                paths: vec!["/home/dustin/proj/a.txt".into()]
+                paths: vec![native("/home/dustin/proj/a.txt")]
             }
         );
     }
