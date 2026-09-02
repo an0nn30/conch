@@ -35,6 +35,10 @@ impl Drop for PtyBackend {
         // Sending SIGHUP explicitly to the child process group ensures the shell
         // and any child processes (e.g. `tmux attach`) still receive a proper
         // hangup signal.
+        // `libc` is a unix-only dependency, and process groups and SIGHUP are
+        // unix concepts — on Windows the child is torn down when the master
+        // handle closes.
+        #[cfg(unix)]
         if let Some(pid) = self.process_id {
             unsafe {
                 libc::kill(-(pid as libc::pid_t), libc::SIGHUP);
