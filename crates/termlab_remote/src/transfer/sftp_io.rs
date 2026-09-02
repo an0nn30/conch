@@ -1355,22 +1355,37 @@ mod tests {
     }
 
     #[test]
-    fn local_fingerprints_preserve_nanosecond_mtime_precision() {
-        let first =
-            fingerprint_local_parts(7, Some(UNIX_EPOCH + Duration::new(1_700_000_000, 123)));
-        let second =
-            fingerprint_local_parts(7, Some(UNIX_EPOCH + Duration::new(1_700_000_000, 124)));
+    fn local_fingerprints_preserve_sub_second_mtime_precision() {
+        // The nanosecond components are multiples of 100 on purpose. On Windows
+        // `SystemTime` is a FILETIME, which counts 100-nanosecond ticks, so a
+        // value like 123ns is not representable and silently truncates to 100 —
+        // this test used to assert on 123 and 124 and could only ever have
+        // passed on unix. 100ns apart is the finest gap every supported
+        // platform can actually represent, which is what the fingerprint has to
+        // distinguish.
+        let first = fingerprint_local_parts(
+            7,
+            Some(UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700)),
+        );
+        let second = fingerprint_local_parts(
+            7,
+            Some(UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_800)),
+        );
 
         assert_eq!(first.size, second.size);
         assert_eq!(
             first.modified_token.as_deref(),
-            Some("unixNs:1700000000000000123")
+            Some("unixNs:1700000000123456700"),
+            "token must keep the sub-second component, not round to whole seconds"
         );
         assert_eq!(
             second.modified_token.as_deref(),
-            Some("unixNs:1700000000000000124")
+            Some("unixNs:1700000000123456800")
         );
-        assert_ne!(first.modified_token, second.modified_token);
+        assert_ne!(
+            first.modified_token, second.modified_token,
+            "mtimes 100ns apart must produce different fingerprints"
+        );
     }
 
     #[test]
