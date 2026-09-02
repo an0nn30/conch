@@ -165,14 +165,22 @@ separate is the point.
 
 ### Serde conventions
 
-These are pinned explicitly and tested, rather than inherited from defaults:
+These are pinned explicitly and tested. The behaviors below were verified
+against mlua 0.10 with a characterization spike rather than assumed:
 
-| Case | Behavior |
-|---|---|
-| Empty Lua table `{}` | Serializes to `[]` (array), matching widget `children` |
-| Lua `nil` in a table | Key absent from output, not `null` |
-| JSON `null` → Lua | `nil` |
-| Integer-valued number | Preserved as integer, not coerced to float |
+| Case | Behavior | Source |
+|---|---|---|
+| Empty Lua table `{}` | Serializes to `{}` (object) | mlua default |
+| Lua `nil` in a table | Key absent from output, not `null` | mlua default |
+| JSON `null` → Lua | `nil` | requires `serialize_unit_to_null(false)` and `serialize_none_to_null(false)`; the default is a lightuserdata sentinel that is not `nil` |
+| Integer-valued number | Preserved as integer (`math.type` reports `integer`) | mlua default |
+| Array tables | No metatable attached | requires `set_array_metatable(false)` |
+| Lua function in a payload | Error: `unsupported value type 'function'` | mlua default; v1 silently emitted `null` |
+| Recursive table | Error: `recursive table detected` | mlua default; v1 recursed until the stack overflowed |
+| Sparse array `{[1]='a',[3]='c'}` | Truncates to `["a"]` at the first gap | mlua default; documented and tested as a known edge |
+
+The two error cases are improvements: both are plugin bugs that previously
+produced silent corruption or a crash.
 
 ### Errors that say where
 
