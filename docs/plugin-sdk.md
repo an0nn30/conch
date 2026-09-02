@@ -855,6 +855,7 @@ end
 | `ui.panel_toolbar(id?, items)` | id, items | Toolbar with buttons, separators, spacers, and text inputs |
 | `ui.panel_path_bar(id, segments)` **(pending)** | id, segments | Clickable breadcrumb path bar |
 | `ui.panel_tabs(id, active, tabs)` | id, active, tabs | Tabbed container (active is 0-based index) |
+| `ui.panel_html(content, css?)` | content, css | Raw HTML rendered in a Shadow DOM with theme variable access |
 
 **Layout containers:**
 
@@ -1103,7 +1104,7 @@ raises a Lua error rather than silently publishing a corrupted payload.
 `app.query_plugin(target, method, args)` — call a method on another plugin.
 `args` is converted to JSON: nested tables are preserved, `nil`-valued keys
 are omitted, and integers stay integers. Passing a function or a table
-containing a cycle raises a Lua error rather than silently publishing a
+containing a cycle raises a Lua error rather than silently sending a
 corrupted payload.
 
 #### `ui` table

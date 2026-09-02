@@ -123,6 +123,21 @@ mod tests {
     }
 
     #[test]
+    fn lua_table_float_value_is_preserved_as_json_float() {
+        let lua = lua();
+        // `4.0` is a Lua float (not an integer) even though it is numerically
+        // whole. It must serialize as a JSON float, not coerce into a JSON
+        // integer, mirroring `number_kinds_are_preserved` for the reverse
+        // (JSON->Lua) direction.
+        let json = to_json(&lua, "return {count = 4.0}").unwrap();
+        let count = json.get("count").expect("count key present");
+        assert!(
+            count.is_f64() && !count.is_i64(),
+            "expected count to serialize as a JSON float, got: {count}"
+        );
+    }
+
+    #[test]
     fn function_in_payload_is_an_error() {
         let lua = lua();
         let err = to_json(&lua, "return {f=function() end}").unwrap_err();
