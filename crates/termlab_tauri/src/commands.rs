@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use termlab_core::config;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use termlab_core::config;
 use ts_rs::TS;
 
 use crate::TauriState;

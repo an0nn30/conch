@@ -680,7 +680,10 @@ mod tests {
             .expect("v1 settings without pipeline fields must deserialize");
         assert_eq!(parsed.pipeline_depth, 16);
         assert_eq!(parsed.pipeline_chunk_bytes, 262144);
-        assert_eq!(parsed.max_queued, 2_000, "older settings gain the default queue ceiling");
+        assert_eq!(
+            parsed.max_queued, 2_000,
+            "older settings gain the default queue ceiling"
+        );
     }
 
     #[test]

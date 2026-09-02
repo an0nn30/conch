@@ -14,7 +14,9 @@ pub(crate) struct PositionalFile {
 
 impl PositionalFile {
     pub(crate) fn open_read(path: &Path) -> io::Result<Self> {
-        Ok(Self { file: Arc::new(std::fs::File::open(path)?) })
+        Ok(Self {
+            file: Arc::new(std::fs::File::open(path)?),
+        })
     }
 
     pub(crate) fn open_write(path: &Path, truncate: bool) -> io::Result<Self> {
@@ -23,7 +25,9 @@ impl PositionalFile {
             .write(true)
             .truncate(truncate)
             .open(path)?;
-        Ok(Self { file: Arc::new(file) })
+        Ok(Self {
+            file: Arc::new(file),
+        })
     }
 
     pub(crate) async fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -110,7 +114,10 @@ fn write_at_impl(file: &std::fs::File, data: &[u8], offset: u64) -> io::Result<(
     while written < data.len() {
         let n = file.seek_write(&data[written..], offset + written as u64)?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "seek_write wrote zero bytes"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "seek_write wrote zero bytes",
+            ));
         }
         written += n;
     }
@@ -142,8 +149,11 @@ mod tests {
         .expect("short reads are retried, not failed");
         assert_eq!(read, 10, "the loop must fill the whole buffer");
         assert_eq!(&buffer, source, "retried reads land at the right offsets");
-        assert_eq!(calls, vec![(0, 10), (3, 7), (6, 4), (9, 1)],
-            "each follow-up read resumes at offset + already-read, for the remainder");
+        assert_eq!(
+            calls,
+            vec![(0, 10), (3, 7), (6, 4), (9, 1)],
+            "each follow-up read resumes at offset + already-read, for the remainder"
+        );
     }
 
     #[test]
@@ -161,7 +171,10 @@ mod tests {
             0,
         )
         .expect("EOF is not an error here");
-        assert_eq!(read, 4, "EOF stops the loop and reports the bytes actually read");
+        assert_eq!(
+            read, 4,
+            "EOF stops the loop and reports the bytes actually read"
+        );
     }
 
     #[test]
@@ -198,14 +211,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("positional.bin");
         let writer = PositionalFile::open_write(&path, true).expect("open write");
-        writer.write_at(4, b"5678".to_vec()).await.expect("tail first");
-        writer.write_at(0, b"1234".to_vec()).await.expect("head second");
+        writer
+            .write_at(4, b"5678".to_vec())
+            .await
+            .expect("tail first");
+        writer
+            .write_at(0, b"1234".to_vec())
+            .await
+            .expect("head second");
         writer.sync().await.expect("sync");
 
         let reader = PositionalFile::open_read(&path).expect("open read");
         assert_eq!(reader.read_at(0, 8).await.expect("read all"), b"12345678");
-        assert_eq!(reader.read_at(6, 10).await.expect("short tail read"), b"78",
-            "reads at EOF return the available bytes");
+        assert_eq!(
+            reader.read_at(6, 10).await.expect("short tail read"),
+            b"78",
+            "reads at EOF return the available bytes"
+        );
     }
 
     #[tokio::test]
@@ -214,7 +236,10 @@ mod tests {
         let path = dir.path().join("resume.bin");
         std::fs::write(&path, b"keepme").expect("seed");
         let writer = PositionalFile::open_write(&path, false).expect("open resume");
-        writer.write_at(6, b"!".to_vec()).await.expect("append via offset");
+        writer
+            .write_at(6, b"!".to_vec())
+            .await
+            .expect("append via offset");
         writer.sync().await.expect("sync");
         assert_eq!(std::fs::read(&path).expect("read"), b"keepme!");
     }

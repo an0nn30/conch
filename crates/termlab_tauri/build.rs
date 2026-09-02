@@ -33,7 +33,10 @@ fn ensure_vendor_bundle() {
     use std::process::Command;
 
     let frontend = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend");
-    let bundle = frontend.join("vendor").join("codemirror").join("codemirror.js");
+    let bundle = frontend
+        .join("vendor")
+        .join("codemirror")
+        .join("codemirror.js");
     let inputs = [
         "vendor-entry.mjs",
         "package-lock.json",
@@ -49,7 +52,11 @@ fn ensure_vendor_bundle() {
     let bundle_mtime = std::fs::metadata(&bundle).and_then(|m| m.modified()).ok();
     let newest_input = inputs
         .iter()
-        .filter_map(|f| std::fs::metadata(frontend.join(f)).and_then(|m| m.modified()).ok())
+        .filter_map(|f| {
+            std::fs::metadata(frontend.join(f))
+                .and_then(|m| m.modified())
+                .ok()
+        })
         .max();
     let stale = match (bundle_mtime, newest_input) {
         (None, _) => true,

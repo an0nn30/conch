@@ -168,7 +168,11 @@ pub(crate) fn fresh_partial_open_flags() -> OpenFlags {
 /// shared by the sequential (`open_remote_partial`) and pipelined transfer
 /// paths so they can never drift apart.
 pub(crate) fn pipelined_remote_open_flags(resume: bool) -> OpenFlags {
-    if resume { resume_partial_open_flags() } else { fresh_partial_open_flags() }
+    if resume {
+        resume_partial_open_flags()
+    } else {
+        fresh_partial_open_flags()
+    }
 }
 
 fn remote_partial_open_flags(resume: bool) -> OpenFlags {
@@ -763,7 +767,10 @@ impl RawRemoteChunkFile {
         let size = attributes.size.ok_or_else(|| {
             RemoteError::Transfer("stat open remote source did not return a size".into())
         })?;
-        Ok(fingerprint_remote_parts(size, attributes.mtime.map(u64::from)))
+        Ok(fingerprint_remote_parts(
+            size,
+            attributes.mtime.map(u64::from),
+        ))
     }
 
     /// Best-effort close for error paths that must surface the primary error.
@@ -814,7 +821,11 @@ where
 impl ChunkSource for RawRemoteChunkFile {
     async fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
         read_exact_at(offset, len, |at, remaining| async move {
-            match self.session.read(self.handle.as_str(), at, remaining as u32).await {
+            match self
+                .session
+                .read(self.handle.as_str(), at, remaining as u32)
+                .await
+            {
                 Ok(data) => Ok(data.data),
                 // The engine's short-read/tail logic owns EOF handling; an SFTP
                 // EOF status is just an empty read, not a transport failure.
@@ -901,7 +912,10 @@ where
                 "open remote partial {remote_partial_path} failed: {error}"
             ))
         })?;
-    let sink = RawRemoteChunkFile { session: raw, handle: opened.handle };
+    let sink = RawRemoteChunkFile {
+        session: raw,
+        handle: opened.handle,
+    };
 
     let tuning = clamp_pipelined_chunk_bytes(tuning);
     let copy_result = pipelined_copy(&source, &sink, offset, total, tuning, control, progress)
@@ -952,7 +966,10 @@ where
         .open(remote_path, OpenFlags::READ, FileAttributes::empty())
         .await
         .map_err(|error| map_remote_source_open_error(remote_path, error))?;
-    let source = RawRemoteChunkFile { session: raw, handle: opened.handle };
+    let source = RawRemoteChunkFile {
+        session: raw,
+        handle: opened.handle,
+    };
 
     let fingerprint = match source.fingerprint(remote_path).await {
         Ok(fingerprint) => fingerprint,
@@ -1578,7 +1595,10 @@ mod tests {
             &sink,
             0,
             data.len() as u64,
-            PipelineTuning { depth: 4, chunk_bytes: 100 },
+            PipelineTuning {
+                depth: 4,
+                chunk_bytes: 100,
+            },
             || ControlDecision::Continue,
             |_, _| {},
         )
@@ -1587,10 +1607,16 @@ mod tests {
         sink.sync().await.expect("sync");
 
         assert_eq!(outcome, CopyOutcome::Completed { bytes: 1000 });
-        assert_eq!(std::fs::read(&path).expect("read back"), data,
-            "re-issued reads must land at offset + already-received, so the bytes stay in order");
-        assert_eq!(source.wire_reads(), 13,
-            "10 chunks plus one follow-up read for each of the 3 short answers");
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            data,
+            "re-issued reads must land at offset + already-received, so the bytes stay in order"
+        );
+        assert_eq!(
+            source.wire_reads(),
+            13,
+            "10 chunks plus one follow-up read for each of the 3 short answers"
+        );
     }
 
     #[tokio::test]
@@ -1604,8 +1630,11 @@ mod tests {
         })
         .await
         .expect("EOF is not an error");
-        assert_eq!(partial.len(), 4,
-            "an empty answer ends the loop so the engine's tail logic can judge the length");
+        assert_eq!(
+            partial.len(),
+            4,
+            "an empty answer ends the loop so the engine's tail logic can judge the length"
+        );
 
         let error = read_exact_at(0, 100, |_at, _remaining| async move {
             Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
@@ -1620,7 +1649,10 @@ mod tests {
         let data = read_exact_at(0, 4, |_at, _remaining| async move { Ok(vec![1u8; 16]) })
             .await
             .expect("over-answering server");
-        assert_eq!(data.len(), 4,
-            "an over-long server answer must not push overlapping bytes past the chunk");
+        assert_eq!(
+            data.len(),
+            4,
+            "an over-long server answer must not push overlapping bytes past the chunk"
+        );
     }
 }

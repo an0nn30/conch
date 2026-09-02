@@ -135,7 +135,11 @@ pub(crate) fn config_key_to_accelerator(key: &str) -> String {
 /// error that would fail the whole menu build.
 fn optional_accelerator(accel: &str) -> Option<&str> {
     let trimmed = accel.trim();
-    if trimmed.is_empty() { None } else { Some(accel) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(accel)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +168,13 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
 ) -> tauri::Result<Menu<R>> {
     let new_tab_accel = primary_accelerator("T");
     let new_plain_shell_tab_accel = config_key_to_accelerator(&keyboard.new_plain_shell_tab);
-    let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, optional_accelerator(&new_tab_accel))?;
+    let new_tab = MenuItem::with_id(
+        app,
+        MENU_NEW_TAB_ID,
+        "New Tab",
+        true,
+        optional_accelerator(&new_tab_accel),
+    )?;
     let new_plain_shell_tab = MenuItem::with_id(
         app,
         MENU_NEW_PLAIN_SHELL_TAB_ID,
@@ -301,7 +311,13 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         Some(&primary_accelerator("/")),
     )?;
     let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
-    let zen_mode = MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, optional_accelerator(&zen_accel))?;
+    let zen_mode = MenuItem::with_id(
+        app,
+        MENU_ZEN_MODE_ID,
+        "Zen Mode",
+        true,
+        optional_accelerator(&zen_accel),
+    )?;
     let zoom_in = MenuItem::with_id(
         app,
         MENU_ZOOM_IN_ID,
@@ -842,8 +858,13 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             Some(&primary_accelerator("/")),
         )?;
         let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
-        let zen_mode =
-            MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, optional_accelerator(&zen_accel))?;
+        let zen_mode = MenuItem::with_id(
+            app,
+            MENU_ZEN_MODE_ID,
+            "Zen Mode",
+            true,
+            optional_accelerator(&zen_accel),
+        )?;
         let zoom_in = MenuItem::with_id(
             app,
             MENU_ZOOM_IN_ID,

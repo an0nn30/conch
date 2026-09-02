@@ -1,10 +1,10 @@
 //! Settings dialog Tauri commands.
 
-use termlab_core::config::{self, UserConfig};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::Emitter;
+use termlab_core::config::{self, UserConfig};
 use ts_rs::TS;
 
 use crate::TauriState;

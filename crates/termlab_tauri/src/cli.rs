@@ -102,10 +102,14 @@ impl EnvMarkers {
 #[derive(Debug, PartialEq)]
 pub enum CliPlan {
     /// Boot the app in this process, seeding these paths as pending opens.
-    RunApp { pending_paths: Vec<String> },
+    RunApp {
+        pending_paths: Vec<String>,
+    },
     /// Try to hand these paths to a running instance over the IPC socket;
     /// if nothing answers, re-spawn detached and exit.
-    ForwardOrDetach { paths: Vec<String> },
+    ForwardOrDetach {
+        paths: Vec<String>,
+    },
     PrintHelp,
     PrintVersion,
     UnknownFlag(String),
@@ -121,20 +125,24 @@ pub fn plan(args: &[String], cwd: &Path, env: EnvMarkers) -> CliPlan {
     if env.app_running {
         // A restart: argv is a stale artifact of how the process was first
         // launched, not a request. Do not even parse it.
-        return CliPlan::RunApp { pending_paths: vec![] };
+        return CliPlan::RunApp {
+            pending_paths: vec![],
+        };
     }
 
     match evaluate(args, cwd) {
-        CliDecision::RunApp | CliDecision::ReservedSubcommand => {
-            CliPlan::RunApp { pending_paths: vec![] }
-        }
+        CliDecision::RunApp | CliDecision::ReservedSubcommand => CliPlan::RunApp {
+            pending_paths: vec![],
+        },
         CliDecision::PrintHelp => CliPlan::PrintHelp,
         CliDecision::PrintVersion => CliPlan::PrintVersion,
         CliDecision::UnknownFlag(f) => CliPlan::UnknownFlag(f),
         CliDecision::ForwardOrRun { paths } => {
             if env.detached {
                 // We are the re-spawn. Boot; never loop back to the socket.
-                CliPlan::RunApp { pending_paths: paths }
+                CliPlan::RunApp {
+                    pending_paths: paths,
+                }
             } else {
                 CliPlan::ForwardOrDetach { paths }
             }
@@ -274,7 +282,9 @@ fn forward_or_detach(paths: Vec<String>) -> CliAction {
                 let msg = serde_json::json!({"type": "open_path", "path": path});
                 if let Err(e) = writeln!(stream, "{msg}") {
                     log::error!("termlab: failed to forward path over IPC socket: {e}");
-                    return CliAction::RunApp { pending_paths: paths };
+                    return CliAction::RunApp {
+                        pending_paths: paths,
+                    };
                 }
             }
             let _ = stream.flush();
@@ -284,7 +294,9 @@ fn forward_or_detach(paths: Vec<String>) -> CliAction {
             Ok(()) => CliAction::Exit(0),
             Err(e) => {
                 log::error!("termlab: could not launch a detached instance: {e}");
-                CliAction::RunApp { pending_paths: paths }
+                CliAction::RunApp {
+                    pending_paths: paths,
+                }
             }
         },
     }
@@ -327,7 +339,9 @@ fn spawn_detached(paths: &[String]) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn forward_or_detach(paths: Vec<String>) -> CliAction {
-    CliAction::RunApp { pending_paths: paths }
+    CliAction::RunApp {
+        pending_paths: paths,
+    }
 }
 
 #[cfg(test)]
@@ -349,7 +363,9 @@ mod tests {
     fn relative_path_becomes_absolute_against_cwd() {
         assert_eq!(
             eval(&["notes.md"]),
-            CliDecision::ForwardOrRun { paths: vec!["/home/dustin/proj/notes.md".into()] }
+            CliDecision::ForwardOrRun {
+                paths: vec!["/home/dustin/proj/notes.md".into()]
+            }
         );
     }
 
@@ -357,7 +373,9 @@ mod tests {
     fn dot_segments_are_lexically_cleaned() {
         assert_eq!(
             eval(&["../other/./a.txt"]),
-            CliDecision::ForwardOrRun { paths: vec!["/home/dustin/other/a.txt".into()] }
+            CliDecision::ForwardOrRun {
+                paths: vec!["/home/dustin/other/a.txt".into()]
+            }
         );
     }
 
@@ -365,14 +383,21 @@ mod tests {
     fn absolute_path_untouched() {
         assert_eq!(
             eval(&["/tmp/x.txt"]),
-            CliDecision::ForwardOrRun { paths: vec!["/tmp/x.txt".into()] }
+            CliDecision::ForwardOrRun {
+                paths: vec!["/tmp/x.txt".into()]
+            }
         );
     }
 
     #[test]
     fn multiple_paths_keep_order() {
-        let CliDecision::ForwardOrRun { paths } = eval(&["a.txt", "/b.txt"]) else { panic!() };
-        assert_eq!(paths, vec!["/home/dustin/proj/a.txt".to_string(), "/b.txt".to_string()]);
+        let CliDecision::ForwardOrRun { paths } = eval(&["a.txt", "/b.txt"]) else {
+            panic!()
+        };
+        assert_eq!(
+            paths,
+            vec!["/home/dustin/proj/a.txt".to_string(), "/b.txt".to_string()]
+        );
     }
 
     #[test]
@@ -381,15 +406,23 @@ mod tests {
         assert_eq!(eval(&["-h"]), CliDecision::PrintHelp);
         assert_eq!(eval(&["--version"]), CliDecision::PrintVersion);
         assert_eq!(eval(&["-V"]), CliDecision::PrintVersion);
-        assert_eq!(eval(&["msg", "new-window"]), CliDecision::ReservedSubcommand);
-        assert_eq!(eval(&["--reuse-window", "a.txt"]), CliDecision::UnknownFlag("--reuse-window".into()));
+        assert_eq!(
+            eval(&["msg", "new-window"]),
+            CliDecision::ReservedSubcommand
+        );
+        assert_eq!(
+            eval(&["--reuse-window", "a.txt"]),
+            CliDecision::UnknownFlag("--reuse-window".into())
+        );
     }
 
     #[test]
     fn dot_dot_at_root_stays_at_root() {
         assert_eq!(
             eval(&["/../etc/passwd"]),
-            CliDecision::ForwardOrRun { paths: vec!["/etc/passwd".into()] }
+            CliDecision::ForwardOrRun {
+                paths: vec!["/etc/passwd".into()]
+            }
         );
     }
 
@@ -402,13 +435,12 @@ mod tests {
         assert_eq!(eval(&["-psn_0_123456"]), CliDecision::RunApp);
         assert_eq!(
             eval(&["-psn_0_123456", "notes.md"]),
-            CliDecision::ForwardOrRun { paths: vec!["/home/dustin/proj/notes.md".into()] }
+            CliDecision::ForwardOrRun {
+                paths: vec!["/home/dustin/proj/notes.md".into()]
+            }
         );
         // Real typos must still fail loudly.
-        assert_eq!(
-            eval(&["-psn"]),
-            CliDecision::UnknownFlag("-psn".into())
-        );
+        assert_eq!(eval(&["-psn"]), CliDecision::UnknownFlag("-psn".into()));
     }
 
     fn plan_for(args: &[&str], env: EnvMarkers) -> CliPlan {
@@ -420,11 +452,15 @@ mod tests {
     fn without_markers_paths_forward_or_detach() {
         assert_eq!(
             plan_for(&["a.txt"], EnvMarkers::default()),
-            CliPlan::ForwardOrDetach { paths: vec!["/home/dustin/proj/a.txt".into()] }
+            CliPlan::ForwardOrDetach {
+                paths: vec!["/home/dustin/proj/a.txt".into()]
+            }
         );
         assert_eq!(
             plan_for(&[], EnvMarkers::default()),
-            CliPlan::RunApp { pending_paths: vec![] }
+            CliPlan::RunApp {
+                pending_paths: vec![]
+            }
         );
     }
 
@@ -433,8 +469,16 @@ mod tests {
         // The detached re-spawn must NOT try the socket again and must NOT
         // re-spawn itself — that would recurse forever.
         assert_eq!(
-            plan_for(&["a.txt"], EnvMarkers { app_running: false, detached: true }),
-            CliPlan::RunApp { pending_paths: vec!["/home/dustin/proj/a.txt".into()] }
+            plan_for(
+                &["a.txt"],
+                EnvMarkers {
+                    app_running: false,
+                    detached: true
+                }
+            ),
+            CliPlan::RunApp {
+                pending_paths: vec!["/home/dustin/proj/a.txt".into()]
+            }
         );
     }
 
@@ -443,8 +487,16 @@ mod tests {
         // Tauri's restart re-execs with the ORIGINAL argv, which may still
         // carry paths. A restart must come back as a plain app.
         assert_eq!(
-            plan_for(&["a.txt", "b.txt"], EnvMarkers { app_running: true, detached: false }),
-            CliPlan::RunApp { pending_paths: vec![] }
+            plan_for(
+                &["a.txt", "b.txt"],
+                EnvMarkers {
+                    app_running: true,
+                    detached: false
+                }
+            ),
+            CliPlan::RunApp {
+                pending_paths: vec![]
+            }
         );
     }
 
@@ -453,18 +505,42 @@ mod tests {
         let paths = ["a.txt"];
         // APP_RUNNING wins over DETACHED.
         assert_eq!(
-            plan_for(&paths, EnvMarkers { app_running: true, detached: true }),
-            CliPlan::RunApp { pending_paths: vec![] }
+            plan_for(
+                &paths,
+                EnvMarkers {
+                    app_running: true,
+                    detached: true
+                }
+            ),
+            CliPlan::RunApp {
+                pending_paths: vec![]
+            }
         );
         // DETACHED wins over the socket-forward path.
         assert_eq!(
-            plan_for(&paths, EnvMarkers { app_running: false, detached: true }),
-            CliPlan::RunApp { pending_paths: vec!["/home/dustin/proj/a.txt".into()] }
+            plan_for(
+                &paths,
+                EnvMarkers {
+                    app_running: false,
+                    detached: true
+                }
+            ),
+            CliPlan::RunApp {
+                pending_paths: vec!["/home/dustin/proj/a.txt".into()]
+            }
         );
         // Neither marker: forward (or detach).
         assert_eq!(
-            plan_for(&paths, EnvMarkers { app_running: false, detached: false }),
-            CliPlan::ForwardOrDetach { paths: vec!["/home/dustin/proj/a.txt".into()] }
+            plan_for(
+                &paths,
+                EnvMarkers {
+                    app_running: false,
+                    detached: false
+                }
+            ),
+            CliPlan::ForwardOrDetach {
+                paths: vec!["/home/dustin/proj/a.txt".into()]
+            }
         );
     }
 
@@ -473,26 +549,50 @@ mod tests {
         // "ignore argv entirely" is literal: a restart must never print help
         // and exit, whatever the original argv was.
         assert_eq!(
-            plan_for(&["--help"], EnvMarkers { app_running: true, detached: false }),
-            CliPlan::RunApp { pending_paths: vec![] }
+            plan_for(
+                &["--help"],
+                EnvMarkers {
+                    app_running: true,
+                    detached: false
+                }
+            ),
+            CliPlan::RunApp {
+                pending_paths: vec![]
+            }
         );
         assert_eq!(
-            plan_for(&["--bogus"], EnvMarkers { app_running: true, detached: false }),
-            CliPlan::RunApp { pending_paths: vec![] }
+            plan_for(
+                &["--bogus"],
+                EnvMarkers {
+                    app_running: true,
+                    detached: false
+                }
+            ),
+            CliPlan::RunApp {
+                pending_paths: vec![]
+            }
         );
     }
 
     #[test]
     fn help_and_version_still_short_circuit_without_markers() {
-        assert_eq!(plan_for(&["--help"], EnvMarkers::default()), CliPlan::PrintHelp);
-        assert_eq!(plan_for(&["-V"], EnvMarkers::default()), CliPlan::PrintVersion);
+        assert_eq!(
+            plan_for(&["--help"], EnvMarkers::default()),
+            CliPlan::PrintHelp
+        );
+        assert_eq!(
+            plan_for(&["-V"], EnvMarkers::default()),
+            CliPlan::PrintVersion
+        );
         assert_eq!(
             plan_for(&["--bogus"], EnvMarkers::default()),
             CliPlan::UnknownFlag("--bogus".into())
         );
         assert_eq!(
             plan_for(&["msg", "new-window"], EnvMarkers::default()),
-            CliPlan::RunApp { pending_paths: vec![] }
+            CliPlan::RunApp {
+                pending_paths: vec![]
+            }
         );
     }
 
@@ -517,10 +617,16 @@ mod tests {
     fn env_markers_read_only_the_exact_marker_value() {
         assert_eq!(
             EnvMarkers::from_values(Some("1"), Some("1")),
-            EnvMarkers { app_running: true, detached: true }
+            EnvMarkers {
+                app_running: true,
+                detached: true
+            }
         );
         assert_eq!(EnvMarkers::from_values(None, None), EnvMarkers::default());
         // Anything other than "1" is not the marker.
-        assert_eq!(EnvMarkers::from_values(Some("0"), Some("")), EnvMarkers::default());
+        assert_eq!(
+            EnvMarkers::from_values(Some("0"), Some("")),
+            EnvMarkers::default()
+        );
     }
 }

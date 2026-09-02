@@ -189,7 +189,11 @@ fn foreground_pgid(_master: &Box<dyn MasterPty + Send>) -> Option<u32> {
 fn process_name_for_pid(pid: u32) -> Option<String> {
     let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     let name = comm.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -206,7 +210,11 @@ fn process_name_for_pid(pid: u32) -> Option<String> {
         return None;
     }
     let name = std::str::from_utf8(&buf[..rc as usize]).ok()?.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

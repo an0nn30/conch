@@ -266,8 +266,8 @@ pub fn save_config(config_dir: &Path, config: &SshConfig) {
 /// review finding I5).
 pub fn try_save_config(config_dir: &Path, config: &SshConfig) -> std::io::Result<()> {
     fs::create_dir_all(config_dir)?;
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let json =
+        serde_json::to_string_pretty(config).map_err(|e| std::io::Error::other(e.to_string()))?;
     let path = config_dir.join("servers.json");
     atomic_write(&path, json.as_bytes())
 }

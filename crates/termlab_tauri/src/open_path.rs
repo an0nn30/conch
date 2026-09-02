@@ -28,7 +28,12 @@ impl PendingOpens {
 
     #[cfg(test)]
     fn peek(&self, label: &str) -> Vec<String> {
-        self.0.lock().unwrap().get(label).cloned().unwrap_or_default()
+        self.0
+            .lock()
+            .unwrap()
+            .get(label)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -64,9 +69,7 @@ pub(crate) fn seed_then_build<E: std::fmt::Display>(
     seed_for_label(pending, label, vec![path.to_string()]);
     if let Err(e) = build() {
         let orphaned = pending.take(label);
-        log::error!(
-            "open-path: could not create window {label} for {orphaned:?}: {e}"
-        );
+        log::error!("open-path: could not create window {label} for {orphaned:?}: {e}");
     }
 }
 
@@ -126,11 +129,7 @@ pub(crate) fn open_in_running_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>, 
 
     // Seed BEFORE the emit for the same reason seed_then_build seeds before
     // the build: the drain must find the path no matter how fast it runs.
-    seed_for_label(
-        &app.state::<PendingOpens>(),
-        &label,
-        vec![path.to_string()],
-    );
+    seed_for_label(&app.state::<PendingOpens>(), &label, vec![path.to_string()]);
     let _ = window.emit(OPEN_PATHS_PENDING_EVENT, ());
     let _ = window.set_focus();
 }
@@ -211,10 +210,7 @@ mod tests {
             "a focused panel host must not swallow the open; the first full window wins"
         );
 
-        let focused = vec![
-            ("main".to_string(), false),
-            ("window-2".to_string(), true),
-        ];
+        let focused = vec![("main".to_string(), false), ("window-2".to_string(), true)];
         assert_eq!(
             pick_open_target(&focused),
             Some("window-2".to_string()),
