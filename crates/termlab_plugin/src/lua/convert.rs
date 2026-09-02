@@ -170,7 +170,10 @@ mod tests {
     #[test]
     fn json_null_becomes_nil_not_a_sentinel() {
         let lua = lua();
-        assert_eq!(describe(&lua, r#"null"#, "local v = ...; return type(v)"), "nil");
+        assert_eq!(
+            describe(&lua, r#"null"#, "local v = ...; return type(v)"),
+            "nil"
+        );
         assert_eq!(
             describe(&lua, r#"{"a":null}"#, "local v = ...; return type(v.a)"),
             "nil"

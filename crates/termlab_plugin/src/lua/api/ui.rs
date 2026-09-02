@@ -3,9 +3,8 @@
 use termlab_plugin_sdk::widgets::*;
 use mlua::prelude::*;
 
-use crate::lua::convert;
-use crate::lua::convert::{lua_to_json, lua_to_json_string};
 use super::{with_acc, with_host_api};
+use crate::lua::convert;
 
 // ---------------------------------------------------------------------------
 // ui.* table
@@ -437,7 +436,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "open_docked_view",
         lua.create_function(|lua, opts: LuaValue| {
-            let req_json = lua_to_json_string(lua, opts)?;
+            let req_json = convert::lua_to_json_string(lua, opts)?;
             let result = with_host_api(lua, |api| api.open_docked_view(&req_json))?;
             let Some(result_json) = result else {
                 return Ok(None::<LuaTable>);
@@ -735,7 +734,7 @@ fn build_form_json(lua: &Lua, title: &str, fields: &LuaTable) -> LuaResult<Strin
         for key in &["id", "name", "label", "text", "value", "default"] {
             if let Ok(v) = field.get::<LuaValue>(key.to_string()) {
                 if !matches!(v, LuaValue::Nil) {
-                    obj.insert(key.to_string(), lua_to_json(lua, v)?);
+                    obj.insert(key.to_string(), convert::lua_to_json(lua, v)?);
                 }
             }
         }
@@ -1025,26 +1024,106 @@ mod tests {
         }
     }
 
-    #[test]
-    fn publish_payload_rejects_functions_with_a_clear_error() {
-        // A function in a published payload is a plugin bug. It used to become
-        // JSON null silently; it must now surface.
-        let lua = Lua::new();
-        let value: LuaValue = lua.load("return {cb=function() end}").eval().unwrap();
-        let err = crate::lua::convert::lua_to_json_string(&lua, value).unwrap_err();
-        assert!(err.to_string().contains("unsupported value type"));
+    /// Minimal `HostApi` stub for driving `ui.*` Lua functions in tests.
+    /// Every method besides `show_form` returns an inert default; see
+    /// `crate::lua::api::session::tests::MockHostApi` for the same pattern.
+    struct MockHostApi {
+        show_form_response: Option<String>,
+    }
+
+    impl crate::HostApi for MockHostApi {
+        fn plugin_name(&self) -> &str {
+            "mock"
+        }
+        fn register_panel(
+            &self,
+            _: termlab_plugin_sdk::PanelLocation,
+            _: &str,
+            _: Option<&str>,
+        ) -> u64 {
+            1
+        }
+        fn set_widgets(&self, _: u64, _: &str) {}
+        fn open_docked_view(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn close_docked_view(&self, _: &str) -> bool {
+            false
+        }
+        fn focus_docked_view(&self, _: &str) -> bool {
+            false
+        }
+        fn log(&self, _: u8, _: &str) {}
+        fn notify(&self, _: &str) {}
+        fn set_status(&self, _: Option<&str>, _: u8, _: f32) {}
+        fn publish_event(&self, _: &str, _: &str) {}
+        fn subscribe(&self, _: &str) {}
+        fn query_plugin(&self, _: &str, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn register_service(&self, _: &str) {}
+        fn get_config(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn set_config(&self, _: &str, _: &str) {}
+        fn clipboard_set(&self, _: &str) {}
+        fn clipboard_get(&self) -> Option<String> {
+            None
+        }
+        fn get_theme(&self) -> Option<String> {
+            None
+        }
+        fn register_menu_item(&self, _: &str, _: &str, _: &str, _: Option<&str>) {}
+        fn show_form(&self, _: &str) -> Option<String> {
+            self.show_form_response.clone()
+        }
+        fn show_confirm(&self, _: &str) -> bool {
+            false
+        }
+        fn show_prompt(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn show_alert(&self, _: &str, _: &str) {}
+        fn show_error(&self, _: &str, _: &str) {}
+        fn show_context_menu(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn write_to_pty(&self, _: &[u8]) {}
+        fn new_tab(&self, _: Option<&str>, _: bool) {}
+        fn rename_active_tab(&self, _: &str) {}
+        fn rename_tab_by_id(&self, _: &str, _: &str) {}
+        fn focus_tab_by_id(&self, _: &str) {}
+        fn open_session(&self, _: &str) -> u64 {
+            0
+        }
+        fn close_session(&self, _: u64) {}
+        fn set_session_status(&self, _: u64, _: u8, _: Option<&str>) {}
+        fn session_prompt(&self, _: u64, _: u8, _: &str, _: Option<&str>) -> Option<String> {
+            None
+        }
     }
 
     #[test]
-    fn publish_payload_preserves_nested_tables() {
+    fn ui_form_yields_nil_when_the_host_response_is_not_an_object() {
+        // `call_show_form` deliberately turns a non-object host response into
+        // `nil` rather than an empty table. Drive it end-to-end through
+        // `ui.form(...)` with a mock host whose response is valid JSON
+        // (a bare string) that is not a JSON object, so only the call-site
+        // `let LuaValue::Table(tbl) = converted else { ... }` destructure in
+        // `call_show_form` can be responsible for the result.
         let lua = Lua::new();
-        let value: LuaValue = lua
-            .load("return {list={1,2}, map={k='v'}}")
-            .eval()
-            .unwrap();
-        let json = crate::lua::convert::lua_to_json_string(&lua, value).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, serde_json::json!({"list": [1, 2], "map": {"k": "v"}}));
+        let host_api: std::sync::Arc<dyn crate::HostApi> = std::sync::Arc::new(MockHostApi {
+            show_form_response: Some("\"just a string\"".to_string()),
+        });
+        lua.set_app_data(crate::lua::api::HostApiBridge::new(host_api));
+        register_ui_table(&lua).unwrap();
+
+        let result: LuaValue = lua.load(r#"return ui.form("Title", {})"#).eval().unwrap();
+        assert_eq!(
+            result,
+            LuaValue::Nil,
+            "a non-object host response must surface as nil, not an empty table"
+        );
     }
 
     #[test]

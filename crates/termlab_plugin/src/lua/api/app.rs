@@ -2,8 +2,8 @@
 
 use mlua::prelude::*;
 
-use crate::lua::convert::{lua_to_json, lua_to_json_string};
 use super::with_host_api;
+use crate::lua::convert::{lua_to_json, lua_to_json_string};
 
 // ---------------------------------------------------------------------------
 // app.* table

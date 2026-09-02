@@ -347,10 +347,15 @@ mod tests {
         .exec()
         .unwrap();
 
-        let event = PluginEvent::MenuAction { action: "trigger_notification".into() };
+        let event = PluginEvent::MenuAction {
+            action: "trigger_notification".into(),
+        };
         dispatch_event(&lua, &event);
 
-        assert_eq!(lua.globals().get::<String>("seen_kind").unwrap(), "menu_action");
+        assert_eq!(
+            lua.globals().get::<String>("seen_kind").unwrap(),
+            "menu_action"
+        );
         assert_eq!(
             lua.globals().get::<String>("seen_action").unwrap(),
             "trigger_notification"
@@ -416,8 +421,13 @@ mod tests {
         };
         dispatch_event(&lua, &event);
 
-        let keys: Vec<String> = lua.globals().get::<LuaTable>("keys").unwrap()
-            .sequence_values().collect::<LuaResult<_>>().unwrap();
+        let keys: Vec<String> = lua
+            .globals()
+            .get::<LuaTable>("keys")
+            .unwrap()
+            .sequence_values()
+            .collect::<LuaResult<_>>()
+            .unwrap();
         assert_eq!(keys, vec!["a\"b".to_string(), "c\nd".to_string()]);
     }
 
@@ -440,6 +450,30 @@ mod tests {
         dispatch_event(&lua, &event);
 
         assert!(lua.globals().get::<bool>("was_nil").unwrap());
+    }
+
+    #[test]
+    fn dispatch_event_json_raw_drops_malformed_json_without_calling_on_event() {
+        // The widget/Java-plugin event path (`PluginMail::WidgetEvent`) forwards
+        // `event_json` straight from frontend JavaScript with no validation, so
+        // malformed JSON is reachable here. A conversion failure must log and
+        // drop the event rather than deliver a raw JSON string to `on_event`.
+        let lua = sandboxed_lua();
+        lua.load(
+            r#"
+            on_event_called = false
+            function on_event(e) on_event_called = true end
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+        dispatch_event_json_raw(&lua, "{not json");
+
+        assert!(
+            !lua.globals().get::<bool>("on_event_called").unwrap(),
+            "on_event must not be invoked when the event payload fails to parse"
+        );
     }
 
     #[test]

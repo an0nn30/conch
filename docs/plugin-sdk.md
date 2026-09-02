@@ -1096,16 +1096,22 @@ app.get_setting_value(key) -> string|nil
 app.set_setting_draft(key, value?)        -- nil clears persisted value on Apply
 ```
 
-`app.publish(event_type, data)` — publish an event on the bus. `data` is
-converted to JSON: nested tables are preserved, `nil`-valued keys are omitted,
-and integers stay integers. Passing a function or a table containing a cycle
-raises a Lua error rather than silently publishing a corrupted payload.
+`app.publish(event_type, data)`, `app.query_plugin(target, method, args)`,
+and `app.register_settings_section(section)` all convert their table
+argument to JSON through the same Lua→JSON bridge: nested tables are
+preserved, `nil`-valued keys are omitted, and integers stay integers.
+Passing a function or a table containing a cycle raises a Lua error rather
+than silently sending a corrupted (or, for `register_settings_section`,
+silently dropped) payload. The same bridge and the same error behavior
+apply to `ui.form(...)` and `ui.open_docked_view(...)` below.
+
+`app.publish(event_type, data)` — publish an event on the bus.
 
 `app.query_plugin(target, method, args)` — call a method on another plugin.
-`args` is converted to JSON: nested tables are preserved, `nil`-valued keys
-are omitted, and integers stay integers. Passing a function or a table
-containing a cycle raises a Lua error rather than silently sending a
-corrupted payload.
+
+`app.register_settings_section(section)` — register a settings section for
+the host Settings UI. `section` must be a table/object; passing a non-table
+value raises a Lua error.
 
 #### `ui` table
 
@@ -1161,6 +1167,11 @@ ui.open_docked_view(opts) -> table|nil   -- { view_id, pane_id, tab_id }
 ui.close_docked_view(view_id) -> boolean
 ui.focus_docked_view(view_id) -> boolean
 ```
+
+`ui.form(title, fields)` and `ui.open_docked_view(opts)` convert their table
+argument to JSON through the same bridge as `app.publish` (see above): a
+function value or a cyclic table anywhere in `fields`/`opts` raises a Lua
+error rather than being silently dropped or corrupted.
 
 `ui.open_docked_view(opts)` accepts:
 
