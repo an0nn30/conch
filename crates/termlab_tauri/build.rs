@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .emit()?;
 
     ensure_vendor_bundle();
-    require_common_controls_v6_in_tests();
+    require_common_controls_v6();
 
     tauri_build::build();
     Ok(())
@@ -26,16 +26,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// The whole `termlab_tauri` lib test target was unrunnable on Windows because
 /// of it, on both x86_64 and aarch64.
-fn require_common_controls_v6_in_tests() {
+fn require_common_controls_v6() {
     let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
     if !(windows && msvc) {
         return;
     }
-    // `-tests` scopes this to test targets; the app binary is already covered
-    // by the manifest tauri_build embeds.
+    // Not `rustc-link-arg-tests`: that covers only integration tests under
+    // tests/, which this crate has none of, and cargo hard-errors on the
+    // instruction when no such target exists. The unscoped form reaches the
+    // lib's unit-test binary. It also reaches the app binary, which already
+    // carries this dependency from tauri_build — the linker merges the
+    // duplicate.
     println!(
-        "cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' \
+        "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' \
          name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
          processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
     );
