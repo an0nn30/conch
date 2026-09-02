@@ -3,6 +3,7 @@
 use termlab_plugin_sdk::widgets::*;
 use mlua::prelude::*;
 
+use crate::lua::convert;
 use crate::lua::convert::{lua_to_json, lua_to_json_string};
 use super::{with_acc, with_host_api};
 
@@ -443,7 +444,10 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
             };
             let value: serde_json::Value =
                 serde_json::from_str(&result_json).unwrap_or(serde_json::Value::Null);
-            let tbl = json_to_lua_table(lua, &value)?;
+            let converted = convert::json_to_lua(lua, &value)?;
+            let LuaValue::Table(tbl) = converted else {
+                return Ok(None);
+            };
             Ok(Some(tbl))
         })?,
     )?;
@@ -761,7 +765,10 @@ fn call_show_form(lua: &Lua, json: &str) -> LuaResult<Option<LuaTable>> {
 
     let json_value: serde_json::Value =
         serde_json::from_str(&result_str).unwrap_or(serde_json::Value::Null);
-    let tbl = json_to_lua_table(lua, &json_value)?;
+    let converted = convert::json_to_lua(lua, &json_value)?;
+    let LuaValue::Table(tbl) = converted else {
+        return Ok(None);
+    };
     Ok(Some(tbl))
 }
 
@@ -779,43 +786,6 @@ fn call_show_confirm(lua: &Lua, msg: &str) -> LuaResult<bool> {
 
 fn call_show_prompt(lua: &Lua, msg: &str, default: &str) -> LuaResult<Option<String>> {
     with_host_api(lua, |api| api.show_prompt(msg, default))
-}
-
-/// Convert a serde_json::Value to a Lua table.
-fn json_to_lua_table(lua: &Lua, value: &serde_json::Value) -> LuaResult<LuaTable> {
-    let tbl = lua.create_table()?;
-    if let serde_json::Value::Object(map) = value {
-        for (k, v) in map {
-            tbl.set(k.clone(), json_to_lua_value(lua, v)?)?;
-        }
-    }
-    Ok(tbl)
-}
-
-fn json_to_lua_value(lua: &Lua, value: &serde_json::Value) -> LuaResult<LuaValue> {
-    match value {
-        serde_json::Value::Null => Ok(LuaValue::Nil),
-        serde_json::Value::Bool(b) => Ok(LuaValue::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(LuaValue::Integer(i))
-            } else {
-                Ok(LuaValue::Number(n.as_f64().unwrap_or(0.0)))
-            }
-        }
-        serde_json::Value::String(s) => Ok(LuaValue::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let tbl = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                tbl.set(i + 1, json_to_lua_value(lua, v)?)?;
-            }
-            Ok(LuaValue::Table(tbl))
-        }
-        serde_json::Value::Object(_) => {
-            let tbl = json_to_lua_table(lua, value)?;
-            Ok(LuaValue::Table(tbl))
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1078,13 +1048,27 @@ mod tests {
     }
 
     #[test]
-    fn json_to_lua_roundtrip() {
+    fn host_json_responses_convert_to_native_lua() {
         let lua = Lua::new();
-        let json = serde_json::json!({"name": "test", "count": 42, "active": true});
-        let tbl = json_to_lua_table(&lua, &json).unwrap();
-        assert_eq!(tbl.get::<String>("name").unwrap(), "test");
-        assert_eq!(tbl.get::<i64>("count").unwrap(), 42);
-        assert!(tbl.get::<bool>("active").unwrap());
+        let json = serde_json::json!({
+            "id": "view-1",
+            "count": 3,
+            "ratio": 0.5,
+            "tags": ["a", "b"],
+            "missing": null
+        });
+        let value = crate::lua::convert::json_to_lua(&lua, &json).unwrap();
+        let summary: String = lua
+            .load(
+                r#"
+                local v = ...
+                return v.id .. '/' .. math.type(v.count) .. '/' .. math.type(v.ratio)
+                    .. '/' .. #v.tags .. '/' .. type(v.missing)
+            "#,
+            )
+            .call(value)
+            .unwrap();
+        assert_eq!(summary, "view-1/integer/float/2/nil");
     }
 
     #[test]
