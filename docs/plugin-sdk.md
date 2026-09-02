@@ -1193,6 +1193,10 @@ session.rename_tab_by_id(tab_id, title)
 session.focus_tab_by_id(tab_id)
 ```
 
+Fields from the host response are merged into the returned table. Nested
+objects and arrays are preserved — earlier versions dropped anything that was
+not a string, boolean, or number.
+
 #### `net` table
 
 ```lua

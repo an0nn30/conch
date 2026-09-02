@@ -3,6 +3,8 @@
 use mlua::prelude::*;
 use serde_json::Value as JsonValue;
 
+use crate::lua::convert::merge_json_into_table;
+
 use super::with_host_api;
 
 // ---------------------------------------------------------------------------
@@ -58,8 +60,10 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
             let tbl = lua.create_table()?;
             match with_host_api(lua, |api| api.exec_active_session(&cmd))? {
                 Some(json) => {
-                    if let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(&json) {
-                        set_lua_table_from_json_map(&tbl, map)?;
+                    if let Ok(value @ JsonValue::Object(_)) =
+                        serde_json::from_str::<JsonValue>(&json)
+                    {
+                        merge_json_into_table(lua, &tbl, &value)?;
                         if tbl.get::<Option<String>>("status")?.is_none() {
                             tbl.set("status", "ok")?;
                         }
@@ -97,9 +101,9 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
             };
 
             if let Some(json) = with_host_api(lua, |api| api.get_active_session())?
-                && let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(&json)
+                && let Ok(value @ JsonValue::Object(_)) = serde_json::from_str::<JsonValue>(&json)
             {
-                set_lua_table_from_json_map(&tbl, map)?;
+                merge_json_into_table(lua, &tbl, &value)?;
             }
 
             tbl.set("platform", platform)?;
@@ -236,27 +240,36 @@ fn exec_local_impl(lua: &Lua, cmd: &str) -> LuaResult<LuaTable> {
     }
 }
 
-fn set_lua_table_from_json_map(
-    tbl: &LuaTable,
-    map: serde_json::Map<String, JsonValue>,
-) -> LuaResult<()> {
-    for (k, v) in map {
-        match v {
-            JsonValue::String(s) => {
-                tbl.set(k, s)?;
-            }
-            JsonValue::Bool(b) => {
-                tbl.set(k, b)?;
-            }
-            JsonValue::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    tbl.set(k, i)?;
-                } else if let Some(f) = n.as_f64() {
-                    tbl.set(k, f)?;
-                }
-            }
-            _ => {}
-        }
+#[cfg(test)]
+mod tests {
+    use crate::lua::convert::merge_json_into_table;
+    use mlua::prelude::*;
+
+    #[test]
+    fn merge_preserves_caller_defaults_and_adds_nested_values() {
+        let lua = Lua::new();
+        let tbl = lua.create_table().unwrap();
+        tbl.set("platform", "macos").unwrap();
+
+        merge_json_into_table(
+            &lua,
+            &tbl,
+            &serde_json::json!({
+                "type": "ssh",
+                "host": "example.com",
+                "port": 22,
+                "forwards": [{"local_port": 8080}]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(tbl.get::<String>("platform").unwrap(), "macos");
+        assert_eq!(tbl.get::<String>("type").unwrap(), "ssh");
+        assert_eq!(tbl.get::<i64>("port").unwrap(), 22);
+
+        // Nested values used to be dropped entirely.
+        let forwards: LuaTable = tbl.get("forwards").unwrap();
+        let first: LuaTable = forwards.get(1).unwrap();
+        assert_eq!(first.get::<i64>("local_port").unwrap(), 8080);
     }
-    Ok(())
 }
