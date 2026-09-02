@@ -1095,6 +1095,17 @@ app.get_setting_value(key) -> string|nil
 app.set_setting_draft(key, value?)        -- nil clears persisted value on Apply
 ```
 
+`app.publish(event_type, data)` — publish an event on the bus. `data` is
+converted to JSON: nested tables are preserved, `nil`-valued keys are omitted,
+and integers stay integers. Passing a function or a table containing a cycle
+raises a Lua error rather than silently publishing a corrupted payload.
+
+`app.query_plugin(target, method, args)` — call a method on another plugin.
+`args` is converted to JSON: nested tables are preserved, `nil`-valued keys
+are omitted, and integers stay integers. Passing a function or a table
+containing a cycle raises a Lua error rather than silently publishing a
+corrupted payload.
+
 #### `ui` table
 
 ```lua

@@ -3,6 +3,7 @@
 use termlab_plugin_sdk::widgets::*;
 use mlua::prelude::*;
 
+use crate::lua::convert::{lua_to_json, lua_to_json_string};
 use super::{with_acc, with_host_api};
 
 // ---------------------------------------------------------------------------
@@ -392,7 +393,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "form",
         lua.create_function(|lua, (title, fields): (String, LuaTable)| {
-            let form_json = build_form_json(&title, &fields)?;
+            let form_json = build_form_json(lua, &title, &fields)?;
             let result = call_show_form(lua, &form_json)?;
             Ok(result)
         })?,
@@ -435,8 +436,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "open_docked_view",
         lua.create_function(|lua, opts: LuaValue| {
-            let req_json = serde_json::to_string(&lua_value_to_json(opts)?)
-                .unwrap_or_else(|_| "{}".to_string());
+            let req_json = lua_to_json_string(lua, opts)?;
             let result = with_host_api(lua, |api| api.open_docked_view(&req_json))?;
             let Some(result_json) = result else {
                 return Ok(None::<LuaTable>);
@@ -719,7 +719,7 @@ fn lua_to_tab_panes(tbl: &LuaTable) -> LuaResult<Vec<TabPane>> {
 // Dialog helpers — call through HostApi
 // ---------------------------------------------------------------------------
 
-fn build_form_json(title: &str, fields: &LuaTable) -> LuaResult<String> {
+fn build_form_json(lua: &Lua, title: &str, fields: &LuaTable) -> LuaResult<String> {
     let mut form_fields = Vec::new();
     for field in fields.clone().sequence_values::<LuaTable>() {
         let field = field?;
@@ -731,7 +731,7 @@ fn build_form_json(title: &str, fields: &LuaTable) -> LuaResult<String> {
         for key in &["id", "name", "label", "text", "value", "default"] {
             if let Ok(v) = field.get::<LuaValue>(key.to_string()) {
                 if !matches!(v, LuaValue::Nil) {
-                    obj.insert(key.to_string(), lua_value_to_json(v)?);
+                    obj.insert(key.to_string(), lua_to_json(lua, v)?);
                 }
             }
         }
@@ -815,38 +815,6 @@ fn json_to_lua_value(lua: &Lua, value: &serde_json::Value) -> LuaResult<LuaValue
             let tbl = json_to_lua_table(lua, value)?;
             Ok(LuaValue::Table(tbl))
         }
-    }
-}
-
-/// Convert a Lua value to serde_json::Value.
-pub(super) fn lua_value_to_json(value: LuaValue) -> LuaResult<serde_json::Value> {
-    match value {
-        LuaValue::Nil => Ok(serde_json::Value::Null),
-        LuaValue::Boolean(b) => Ok(serde_json::Value::Bool(b)),
-        LuaValue::Integer(i) => Ok(serde_json::json!(i)),
-        LuaValue::Number(n) => Ok(serde_json::json!(n)),
-        LuaValue::String(s) => Ok(serde_json::Value::String(s.to_str()?.to_string())),
-        LuaValue::Table(t) => {
-            // Check if this is an array (sequential integer keys from 1).
-            let len = t.raw_len();
-            if len > 0 {
-                let mut arr = Vec::new();
-                for v in t.clone().sequence_values::<LuaValue>() {
-                    arr.push(lua_value_to_json(v?)?);
-                }
-                if arr.len() == len {
-                    return Ok(serde_json::Value::Array(arr));
-                }
-            }
-            // Otherwise, treat as object.
-            let mut map = serde_json::Map::new();
-            for pair in t.pairs::<String, LuaValue>() {
-                let (k, v) = pair?;
-                map.insert(k, lua_value_to_json(v)?);
-            }
-            Ok(serde_json::Value::Object(map))
-        }
-        _ => Ok(serde_json::Value::Null),
     }
 }
 
@@ -1088,23 +1056,25 @@ mod tests {
     }
 
     #[test]
-    fn lua_value_to_json_primitives() {
-        assert_eq!(
-            lua_value_to_json(LuaValue::Nil).unwrap(),
-            serde_json::Value::Null
-        );
-        assert_eq!(
-            lua_value_to_json(LuaValue::Boolean(true)).unwrap(),
-            serde_json::Value::Bool(true)
-        );
-        assert_eq!(
-            lua_value_to_json(LuaValue::Integer(42)).unwrap(),
-            serde_json::json!(42)
-        );
-        assert_eq!(
-            lua_value_to_json(LuaValue::Number(1.5)).unwrap(),
-            serde_json::json!(1.5)
-        );
+    fn publish_payload_rejects_functions_with_a_clear_error() {
+        // A function in a published payload is a plugin bug. It used to become
+        // JSON null silently; it must now surface.
+        let lua = Lua::new();
+        let value: LuaValue = lua.load("return {cb=function() end}").eval().unwrap();
+        let err = crate::lua::convert::lua_to_json_string(&lua, value).unwrap_err();
+        assert!(err.to_string().contains("unsupported value type"));
+    }
+
+    #[test]
+    fn publish_payload_preserves_nested_tables() {
+        let lua = Lua::new();
+        let value: LuaValue = lua
+            .load("return {list={1,2}, map={k='v'}}")
+            .eval()
+            .unwrap();
+        let json = crate::lua::convert::lua_to_json_string(&lua, value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, serde_json::json!({"list": [1, 2], "map": {"k": "v"}}));
     }
 
     #[test]

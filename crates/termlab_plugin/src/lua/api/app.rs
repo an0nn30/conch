@@ -2,7 +2,7 @@
 
 use mlua::prelude::*;
 
-use super::ui::lua_value_to_json;
+use crate::lua::convert::{lua_to_json, lua_to_json_string};
 use super::with_host_api;
 
 // ---------------------------------------------------------------------------
@@ -55,8 +55,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "publish",
         lua.create_function(|lua, (event_type, data): (String, LuaValue)| {
-            let data_json = serde_json::to_string(&lua_value_to_json(data)?)
-                .unwrap_or_else(|_| "{}".to_string());
+            let data_json = lua_to_json_string(lua, data)?;
             with_host_api(lua, |api| api.publish_event(&event_type, &data_json))?;
             Ok(())
         })?,
@@ -168,7 +167,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     app.set(
         "register_settings_section",
         lua.create_function(|lua, section: LuaValue| {
-            let section_json_value = lua_value_to_json(section)?;
+            let section_json_value = lua_to_json(lua, section)?;
             if !section_json_value.is_object() {
                 return Err(LuaError::RuntimeError(
                     "register_settings_section expects a table/object".into(),
@@ -186,8 +185,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
         lua.create_function(
             |lua, (target, method, args): (String, String, Option<LuaValue>)| {
                 let args_json = match args {
-                    Some(v) => serde_json::to_string(&lua_value_to_json(v)?)
-                        .unwrap_or_else(|_| "null".to_string()),
+                    Some(v) => lua_to_json_string(lua, v)?,
                     None => "null".to_string(),
                 };
                 let result =
