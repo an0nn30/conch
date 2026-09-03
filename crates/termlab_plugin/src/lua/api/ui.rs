@@ -4,6 +4,7 @@ use mlua::prelude::*;
 use termlab_plugin_sdk::widgets::*;
 
 use super::{with_acc, with_host_api};
+use crate::lua::convert;
 
 // ---------------------------------------------------------------------------
 // ui.* table
@@ -392,7 +393,7 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "form",
         lua.create_function(|lua, (title, fields): (String, LuaTable)| {
-            let form_json = build_form_json(&title, &fields)?;
+            let form_json = build_form_json(lua, &title, &fields)?;
             let result = call_show_form(lua, &form_json)?;
             Ok(result)
         })?,
@@ -435,15 +436,17 @@ pub(super) fn register_ui_table(lua: &Lua) -> LuaResult<()> {
     ui.set(
         "open_docked_view",
         lua.create_function(|lua, opts: LuaValue| {
-            let req_json = serde_json::to_string(&lua_value_to_json(opts)?)
-                .unwrap_or_else(|_| "{}".to_string());
+            let req_json = convert::lua_to_json_string(lua, opts)?;
             let result = with_host_api(lua, |api| api.open_docked_view(&req_json))?;
             let Some(result_json) = result else {
                 return Ok(None::<LuaTable>);
             };
             let value: serde_json::Value =
                 serde_json::from_str(&result_json).unwrap_or(serde_json::Value::Null);
-            let tbl = json_to_lua_table(lua, &value)?;
+            let converted = convert::json_to_lua(lua, &value)?;
+            let LuaValue::Table(tbl) = converted else {
+                return Ok(None);
+            };
             Ok(Some(tbl))
         })?,
     )?;
@@ -719,7 +722,7 @@ fn lua_to_tab_panes(tbl: &LuaTable) -> LuaResult<Vec<TabPane>> {
 // Dialog helpers — call through HostApi
 // ---------------------------------------------------------------------------
 
-fn build_form_json(title: &str, fields: &LuaTable) -> LuaResult<String> {
+fn build_form_json(lua: &Lua, title: &str, fields: &LuaTable) -> LuaResult<String> {
     let mut form_fields = Vec::new();
     for field in fields.clone().sequence_values::<LuaTable>() {
         let field = field?;
@@ -731,7 +734,7 @@ fn build_form_json(title: &str, fields: &LuaTable) -> LuaResult<String> {
         for key in &["id", "name", "label", "text", "value", "default"] {
             if let Ok(v) = field.get::<LuaValue>(key.to_string()) {
                 if !matches!(v, LuaValue::Nil) {
-                    obj.insert(key.to_string(), lua_value_to_json(v)?);
+                    obj.insert(key.to_string(), convert::lua_to_json(lua, v)?);
                 }
             }
         }
@@ -761,7 +764,10 @@ fn call_show_form(lua: &Lua, json: &str) -> LuaResult<Option<LuaTable>> {
 
     let json_value: serde_json::Value =
         serde_json::from_str(&result_str).unwrap_or(serde_json::Value::Null);
-    let tbl = json_to_lua_table(lua, &json_value)?;
+    let converted = convert::json_to_lua(lua, &json_value)?;
+    let LuaValue::Table(tbl) = converted else {
+        return Ok(None);
+    };
     Ok(Some(tbl))
 }
 
@@ -779,75 +785,6 @@ fn call_show_confirm(lua: &Lua, msg: &str) -> LuaResult<bool> {
 
 fn call_show_prompt(lua: &Lua, msg: &str, default: &str) -> LuaResult<Option<String>> {
     with_host_api(lua, |api| api.show_prompt(msg, default))
-}
-
-/// Convert a serde_json::Value to a Lua table.
-fn json_to_lua_table(lua: &Lua, value: &serde_json::Value) -> LuaResult<LuaTable> {
-    let tbl = lua.create_table()?;
-    if let serde_json::Value::Object(map) = value {
-        for (k, v) in map {
-            tbl.set(k.clone(), json_to_lua_value(lua, v)?)?;
-        }
-    }
-    Ok(tbl)
-}
-
-fn json_to_lua_value(lua: &Lua, value: &serde_json::Value) -> LuaResult<LuaValue> {
-    match value {
-        serde_json::Value::Null => Ok(LuaValue::Nil),
-        serde_json::Value::Bool(b) => Ok(LuaValue::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(LuaValue::Integer(i))
-            } else {
-                Ok(LuaValue::Number(n.as_f64().unwrap_or(0.0)))
-            }
-        }
-        serde_json::Value::String(s) => Ok(LuaValue::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let tbl = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                tbl.set(i + 1, json_to_lua_value(lua, v)?)?;
-            }
-            Ok(LuaValue::Table(tbl))
-        }
-        serde_json::Value::Object(_) => {
-            let tbl = json_to_lua_table(lua, value)?;
-            Ok(LuaValue::Table(tbl))
-        }
-    }
-}
-
-/// Convert a Lua value to serde_json::Value.
-pub(super) fn lua_value_to_json(value: LuaValue) -> LuaResult<serde_json::Value> {
-    match value {
-        LuaValue::Nil => Ok(serde_json::Value::Null),
-        LuaValue::Boolean(b) => Ok(serde_json::Value::Bool(b)),
-        LuaValue::Integer(i) => Ok(serde_json::json!(i)),
-        LuaValue::Number(n) => Ok(serde_json::json!(n)),
-        LuaValue::String(s) => Ok(serde_json::Value::String(s.to_str()?.to_string())),
-        LuaValue::Table(t) => {
-            // Check if this is an array (sequential integer keys from 1).
-            let len = t.raw_len();
-            if len > 0 {
-                let mut arr = Vec::new();
-                for v in t.clone().sequence_values::<LuaValue>() {
-                    arr.push(lua_value_to_json(v?)?);
-                }
-                if arr.len() == len {
-                    return Ok(serde_json::Value::Array(arr));
-                }
-            }
-            // Otherwise, treat as object.
-            let mut map = serde_json::Map::new();
-            for pair in t.pairs::<String, LuaValue>() {
-                let (k, v) = pair?;
-                map.insert(k, lua_value_to_json(v)?);
-            }
-            Ok(serde_json::Value::Object(map))
-        }
-        _ => Ok(serde_json::Value::Null),
-    }
 }
 
 #[cfg(test)]
@@ -1087,34 +1024,130 @@ mod tests {
         }
     }
 
+    /// Minimal `HostApi` stub for driving `ui.*` Lua functions in tests.
+    /// Every method besides `show_form` returns an inert default; see
+    /// `crate::lua::api::session::tests::MockHostApi` for the same pattern.
+    struct MockHostApi {
+        show_form_response: Option<String>,
+    }
+
+    impl crate::HostApi for MockHostApi {
+        fn plugin_name(&self) -> &str {
+            "mock"
+        }
+        fn register_panel(
+            &self,
+            _: termlab_plugin_sdk::PanelLocation,
+            _: &str,
+            _: Option<&str>,
+        ) -> u64 {
+            1
+        }
+        fn set_widgets(&self, _: u64, _: &str) {}
+        fn open_docked_view(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn close_docked_view(&self, _: &str) -> bool {
+            false
+        }
+        fn focus_docked_view(&self, _: &str) -> bool {
+            false
+        }
+        fn log(&self, _: u8, _: &str) {}
+        fn notify(&self, _: &str) {}
+        fn set_status(&self, _: Option<&str>, _: u8, _: f32) {}
+        fn publish_event(&self, _: &str, _: &str) {}
+        fn subscribe(&self, _: &str) {}
+        fn query_plugin(&self, _: &str, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn register_service(&self, _: &str) {}
+        fn get_config(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn set_config(&self, _: &str, _: &str) {}
+        fn clipboard_set(&self, _: &str) {}
+        fn clipboard_get(&self) -> Option<String> {
+            None
+        }
+        fn get_theme(&self) -> Option<String> {
+            None
+        }
+        fn register_menu_item(&self, _: &str, _: &str, _: &str, _: Option<&str>) {}
+        fn show_form(&self, _: &str) -> Option<String> {
+            self.show_form_response.clone()
+        }
+        fn show_confirm(&self, _: &str) -> bool {
+            false
+        }
+        fn show_prompt(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn show_alert(&self, _: &str, _: &str) {}
+        fn show_error(&self, _: &str, _: &str) {}
+        fn show_context_menu(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn write_to_pty(&self, _: &[u8]) {}
+        fn new_tab(&self, _: Option<&str>, _: bool) {}
+        fn rename_active_tab(&self, _: &str) {}
+        fn rename_tab_by_id(&self, _: &str, _: &str) {}
+        fn focus_tab_by_id(&self, _: &str) {}
+        fn open_session(&self, _: &str) -> u64 {
+            0
+        }
+        fn close_session(&self, _: u64) {}
+        fn set_session_status(&self, _: u64, _: u8, _: Option<&str>) {}
+        fn session_prompt(&self, _: u64, _: u8, _: &str, _: Option<&str>) -> Option<String> {
+            None
+        }
+    }
+
     #[test]
-    fn lua_value_to_json_primitives() {
+    fn ui_form_yields_nil_when_the_host_response_is_not_an_object() {
+        // `call_show_form` deliberately turns a non-object host response into
+        // `nil` rather than an empty table. Drive it end-to-end through
+        // `ui.form(...)` with a mock host whose response is valid JSON
+        // (a bare string) that is not a JSON object, so only the call-site
+        // `let LuaValue::Table(tbl) = converted else { ... }` destructure in
+        // `call_show_form` can be responsible for the result.
+        let lua = Lua::new();
+        let host_api: std::sync::Arc<dyn crate::HostApi> = std::sync::Arc::new(MockHostApi {
+            show_form_response: Some("\"just a string\"".to_string()),
+        });
+        lua.set_app_data(crate::lua::api::HostApiBridge::new(host_api));
+        register_ui_table(&lua).unwrap();
+
+        let result: LuaValue = lua.load(r#"return ui.form("Title", {})"#).eval().unwrap();
         assert_eq!(
-            lua_value_to_json(LuaValue::Nil).unwrap(),
-            serde_json::Value::Null
-        );
-        assert_eq!(
-            lua_value_to_json(LuaValue::Boolean(true)).unwrap(),
-            serde_json::Value::Bool(true)
-        );
-        assert_eq!(
-            lua_value_to_json(LuaValue::Integer(42)).unwrap(),
-            serde_json::json!(42)
-        );
-        assert_eq!(
-            lua_value_to_json(LuaValue::Number(1.5)).unwrap(),
-            serde_json::json!(1.5)
+            result,
+            LuaValue::Nil,
+            "a non-object host response must surface as nil, not an empty table"
         );
     }
 
     #[test]
-    fn json_to_lua_roundtrip() {
+    fn host_json_responses_convert_to_native_lua() {
         let lua = Lua::new();
-        let json = serde_json::json!({"name": "test", "count": 42, "active": true});
-        let tbl = json_to_lua_table(&lua, &json).unwrap();
-        assert_eq!(tbl.get::<String>("name").unwrap(), "test");
-        assert_eq!(tbl.get::<i64>("count").unwrap(), 42);
-        assert!(tbl.get::<bool>("active").unwrap());
+        let json = serde_json::json!({
+            "id": "view-1",
+            "count": 3,
+            "ratio": 0.5,
+            "tags": ["a", "b"],
+            "missing": null
+        });
+        let value = crate::lua::convert::json_to_lua(&lua, &json).unwrap();
+        let summary: String = lua
+            .load(
+                r#"
+                local v = ...
+                return v.id .. '/' .. math.type(v.count) .. '/' .. math.type(v.ratio)
+                    .. '/' .. #v.tags .. '/' .. type(v.missing)
+            "#,
+            )
+            .call(value)
+            .unwrap();
+        assert_eq!(summary, "view-1/integer/float/2/nil");
     }
 
     #[test]
