@@ -1341,7 +1341,15 @@ Both plugin tiers share the same declarative widget system. Plugins return a JSO
 
 **Html widget details:**
 
-The `html` widget renders raw HTML inside a Shadow DOM for full CSS isolation. Theme variables (`--bg`, `--fg`, `--green`, `--red`, etc.) are forwarded into the shadow root so plugin styles stay on-theme. Elements with a `data-action="action_id"` attribute emit `button_click` events back to the plugin when clicked.
+The `html` widget renders HTML inside a Shadow DOM for full CSS isolation. Theme variables (`--bg`, `--fg`, `--green`, `--red`, etc.) are forwarded into the shadow root so plugin styles stay on-theme. Elements with a `data-action="action_id"` attribute emit `button_click` events back to the plugin when clicked.
+
+Content is sanitized against an allowlist before it is inserted — a shadow root isolates styles, not scripts, so unsanitized markup would let any plugin holding `ui.panel` run script in the host and bypass its declared capabilities. What survives:
+
+- **Elements:** common structural, text, list, and table tags, plus `button`, `img`, and inline `svg` (`g`, `path`, `circle`, `ellipse`, `rect`, `line`, `polyline`, `polygon`, `title`, `desc`).
+- **Attributes:** `class`, `id`, `title`, `style`, `dir`, `lang`, `role`, every `data-*` and `aria-*`, SVG presentation attributes, and a small per-element set (`href`, `src`, `alt`, `colspan`, …).
+- **URLs:** relative, `http:`, `https:`, `mailto:`, and base64 raster `data:image/*` on `img`.
+
+Dropped: `script`, `style`, `iframe`, `object`, `embed`, `form`, `input`, `template`, MathML, SVG `script` / `foreignObject` / `use` / animation elements, all `on*` handlers, and `javascript:`, `vbscript:`, `data:` (except raster images) and `data:image/svg+xml` URLs. The `css` argument is applied as a stylesheet and is not sanitized; CSS cannot execute script.
 
 | Field | Type | Description |
 |-------|------|-------------|
