@@ -14,17 +14,88 @@
 
 Every task's requirements implicitly include these. Values are copied verbatim from the spec.
 
-- **All registry keys are per-user, under `HKCU`.** No `HKLM` writes anywhere. Install scope is per-user, no admin, to `%LOCALAPPDATA%\Programs\TermLab`.
+- **All registry keys are per-user, under `HKCU`.** No `HKLM` writes anywhere. Install scope is per-user, no admin, to `%LOCALAPPDATA%\TermLab` (verified in Task 1 — *not* `%LOCALAPPDATA%\Programs\TermLab`, which earlier drafts of this plan assumed).
 - **The WiX fragment must use the WiX v3 schema** — `xmlns="http://schemas.microsoft.com/wix/2006/wi"`. Tauri v2's MSI bundler is WiX 3. The existing `packaging/windows/termlab.wxs` uses the v4 schema and cannot be reused.
 - **The context-menu substitution is capital `%V`**, not lowercase `%v`. Capital `%V` is the one that resolves correctly for `Directory\shell`, `Directory\Background\shell`, and `Drive\shell` alike.
 - **The context-menu label is exactly `Open TermLab here`**, set via the `MUIVerb` value.
 - **The three context-menu roots are** `Software\Classes\Directory\shell\TermLab`, `Software\Classes\Directory\Background\shell\TermLab`, and `Software\Classes\Drive\shell\TermLab`.
+- **The installed executable is `termlab.exe`, lowercase** (verified in Task 1). Tauri does not rename the Cargo binary to `productName` for this app. Every registry value, shortcut target and assertion uses `termlab.exe`.
+- **Nothing hardcodes `x64`.** The dev VM is ARM64 Windows on Apple Silicon, so its artifacts are named `*_arm64-*` while CI's are `*_x64-*`. Scripts detect or glob; they never assume.
 - **Release artifact names must not change.** `release.yml` uploads `TermLab_${VERSION}_x64-setup.exe` and `TermLab_${VERSION}_x64_en-US.msi` (plus `.sig` files), and `latest.json` / the auto-updater depend on the setup.exe name.
 - **`bundle.active` stays `false` in `tauri.conf.json`.** Bundling is switched on per-invocation via `--config '{"bundle":{"active":true}}'`.
 - **No `|| true`, no unchecked success messages.** Every build step is fatal on failure and verifies its own output exists before claiming success.
 - **Target VM:** `dustin@192.168.1.125`, Windows 11 build 26200, repo at `C:\Users\dustin\conch`. It has `cargo`, `node`, `npm`, `git`, `python`. It does **not** have `javac`, `jar`, `wix`, or `make`.
 - **Current version is `3.0.0-rc.2`.** MSI `ProductVersion` must be numeric (at most three dot-separated integers).
 - Per `CLAUDE.md`: never commit to `main`; all work stays on `feat/windows-installer-registration`. Never add `Co-Authored-By` trailers other than the one this session was told to use. Every behavior change gets tests where testable without a GUI.
+
+## Amendments after Task 1 (2026-09-03)
+
+Task 1 measured the real Windows pipeline and disproved four of this plan's
+assumptions. These amendments supersede the task text they name. Evidence for
+every claim here is in `docs/superpowers/plans/task-1-baseline.md`.
+
+**A1 — The installed exe is `termlab.exe`, not `TermLab.exe`.** Task 4's code
+blocks have been corrected in place. Nothing further to do.
+
+**A2 — The install directory is `%LOCALAPPDATA%\TermLab`.** Functionally this
+changes nothing, because every registry value uses `[INSTALLDIR]` / `$INSTDIR`
+rather than a literal path. Task 8's README text must state the real path.
+
+**A3 — MSI packaging rejects the pre-release version; NSIS accepts it.** The
+exact error is `optional pre-release identifier in app version must be
+numeric-only and cannot be greater than 65535 for msi target`, and the whole
+`cargo tauri build` aborts with no bundle directory produced at all. This
+supersedes **Task 5 Step 2**, whose stop-and-ask was predicated on the only fix
+being a global version strip that would rename the setup.exe and break the
+updater. That is not the only fix. Task 5 instead bundles in two invocations:
+
+- NSIS at the real version, so `TermLab_<version>_<arch>-setup.exe` and the
+  updater artifact keep their exact current names.
+- MSI in a separate invocation carrying a numeric-only `version` override, so an
+  MSI is still produced. Its filename will read `3.0.0` where the setup.exe reads
+  `3.0.0-rc.2`; MSI `ProductVersion` cannot encode a pre-release, so this is
+  inherent, not a defect.
+
+**A4 — `cargo tauri build` cannot run at all with the current config.**
+tauri-cli 2.11.4 hard-errors with `The configured frontendDist includes the
+["node_modules"] folder`, because `frontendDist: "frontend"` resolves to
+`crates/termlab_tauri/frontend`, which is also where `npm ci` installs
+`node_modules`. `release.yml` installs tauri-cli unpinned (`--version "^2"`), so
+**both the `windows` and `macos` release jobs are broken today, independent of
+this branch.** Task 5 must solve this or it cannot build anything. Preferred
+approach, in order:
+
+1. After the vendor build, stage a clean copy of the web assets (everything in
+   `frontend/` except `node_modules`) into a git-ignored directory, and point
+   `build.frontendDist` at it via the script's own `--config`. Non-destructive —
+   it does not touch the developer's `node_modules`.
+2. If staging breaks `bundle.resources` path resolution (`"frontend/themes/"` is
+   relative to the crate directory), fall back to deleting
+   `frontend/node_modules` after the vendor build and before bundling.
+
+Either way the script must also override `build.beforeBuildCommand` to `""` for
+the bundle invocation, or Tauri re-runs `npm ci` and recreates the very
+directory the fix removed. Verify which approach works on the VM rather than
+assuming.
+
+**A5 — A signing key is NOT needed to build installers.** It is required only
+because `bundle.createUpdaterArtifacts: true` asks for a signed `.sig`. The
+installer is fully written to disk *before* the signing step fails, so a build
+can exit non-zero with a perfectly good installer present. Task 5 therefore must
+not treat a non-zero exit as proof of failure without first checking whether the
+artifacts exist — and must not require a key from a developer who only wants an
+installer. Do not edit `tauri.conf.json` to disable updater artifacts globally;
+that would change what CI ships.
+
+**A6 — Task 6 verifies the NSIS setup.exe as its primary target.** The context
+menu hook lives in the NSIS installer, NSIS is what the updater ships, and an MSI
+may not exist at a pre-release version. The MSI is a secondary check when
+present. Task 6's registry assertions are unchanged — they are
+architecture-independent.
+
+**A7 — Task 7 must not upload an MSI unconditionally.** `release.yml` currently
+does, which is part of why a release tag at the current version would fail. The
+MSI upload becomes conditional on the artifact existing.
 
 ---
 
@@ -42,7 +113,7 @@ from the source tree, and guessing any of them wrong invalidates Tasks 4–6:
 
 **Interfaces:**
 - Produces: three verified constants used by every later task —
-  - `INSTALLED_EXE_NAME` (expected `TermLab.exe`, must be confirmed)
+  - `INSTALLED_EXE_NAME` (expected `TermLab.exe`, must be confirmed — came back `termlab.exe`)
   - `INSTALL_DIR` (expected `%LOCALAPPDATA%\Programs\TermLab`, must be confirmed)
   - `MSI_VERSION_OK` (boolean: does `3.0.0-rc.2` bundle without error)
 
@@ -123,7 +194,7 @@ Create `docs/superpowers/plans/task-1-baseline.md` recording, as plain statement
 - Bundle output paths: <the listing from Step 4>
 ```
 
-**If `INSTALLED_EXE_NAME` is not `TermLab.exe`, substitute the real name everywhere it appears in Tasks 4 and 6 before implementing them.**
+**RESOLVED:** `INSTALLED_EXE_NAME` came back as `termlab.exe` (lowercase). Task 4's code blocks have already been corrected in place; see Amendment A1.
 
 - [ ] **Step 8: Commit**
 
@@ -583,7 +654,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `crates/termlab_tauri/tauri.conf.json` (the `bundle` object)
 
 **Interfaces:**
-- Consumes from Task 1: `INSTALLED_EXE_NAME`. Everywhere `TermLab.exe` appears below, substitute the verified name if Task 1 found a different one.
+- Consumes from Task 1: `INSTALLED_EXE_NAME` = `termlab.exe` (lowercase), and `INSTALL_DIR` = `%LOCALAPPDATA%\TermLab`. The code blocks below already use the verified name — use them exactly as written and do not "correct" the casing to match `productName`.
 - Consumes from Task 2: the flag spelling `--working-directory`.
 - Produces: the registry key set that Task 6's verification script asserts, namely — `Software\Classes\Directory\shell\TermLab`, `Software\Classes\Directory\Background\shell\TermLab`, `Software\Classes\Drive\shell\TermLab` (each with a `\command` subkey), `Software\Clients\Terminal\TermLab\Capabilities`, `Software\RegisteredApplications`, and `Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe`.
 
@@ -786,26 +857,26 @@ Create `packaging/windows/registration.wxs`. Note the schema is WiX **v3** — `
       <Component Id="TermLabContextMenu" Guid="8f2c41d6-9b3e-4a17-8c05-6d1e2f7a9b34">
         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\TermLab" ForceDeleteOnUninstall="yes">
           <RegistryValue Name="MUIVerb" Type="string" Value="Open TermLab here" KeyPath="yes" />
-          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]TermLab.exe" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termlab.exe" />
         </RegistryKey>
         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\TermLab\command" ForceDeleteOnUninstall="yes">
-          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]TermLab.exe&quot; --working-directory &quot;%V&quot;" />
+          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termlab.exe&quot; --working-directory &quot;%V&quot;" />
         </RegistryKey>
 
         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\TermLab" ForceDeleteOnUninstall="yes">
           <RegistryValue Name="MUIVerb" Type="string" Value="Open TermLab here" />
-          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]TermLab.exe" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termlab.exe" />
         </RegistryKey>
         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\TermLab\command" ForceDeleteOnUninstall="yes">
-          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]TermLab.exe&quot; --working-directory &quot;%V&quot;" />
+          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termlab.exe&quot; --working-directory &quot;%V&quot;" />
         </RegistryKey>
 
         <RegistryKey Root="HKCU" Key="Software\Classes\Drive\shell\TermLab" ForceDeleteOnUninstall="yes">
           <RegistryValue Name="MUIVerb" Type="string" Value="Open TermLab here" />
-          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]TermLab.exe" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termlab.exe" />
         </RegistryKey>
         <RegistryKey Root="HKCU" Key="Software\Classes\Drive\shell\TermLab\command" ForceDeleteOnUninstall="yes">
-          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]TermLab.exe&quot; --working-directory &quot;%V&quot;" />
+          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termlab.exe&quot; --working-directory &quot;%V&quot;" />
         </RegistryKey>
       </Component>
 
@@ -816,7 +887,7 @@ Create `packaging/windows/registration.wxs`. Note the schema is WiX **v3** — `
         <RegistryKey Root="HKCU" Key="Software\Clients\Terminal\TermLab\Capabilities" ForceDeleteOnUninstall="yes">
           <RegistryValue Name="ApplicationName" Type="string" Value="TermLab" KeyPath="yes" />
           <RegistryValue Name="ApplicationDescription" Type="string" Value="A cross-platform terminal emulator and SSH client" />
-          <RegistryValue Name="ApplicationIcon" Type="string" Value="[INSTALLDIR]TermLab.exe,0" />
+          <RegistryValue Name="ApplicationIcon" Type="string" Value="[INSTALLDIR]termlab.exe,0" />
         </RegistryKey>
         <RegistryKey Root="HKCU" Key="Software\RegisteredApplications">
           <RegistryValue Name="TermLab" Type="string" Value="Software\Clients\Terminal\TermLab\Capabilities" />
@@ -826,7 +897,7 @@ Create `packaging/windows/registration.wxs`. Note the schema is WiX **v3** — `
       <!-- App Paths: makes Win+R "termlab" work without touching PATH. -->
       <Component Id="TermLabAppPaths" Guid="6d3a90f2-71c4-4e5b-9a38-b02f4c7d1e85">
         <RegistryKey Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe" ForceDeleteOnUninstall="yes">
-          <RegistryValue Type="string" Value="[INSTALLDIR]TermLab.exe" KeyPath="yes" />
+          <RegistryValue Type="string" Value="[INSTALLDIR]termlab.exe" KeyPath="yes" />
           <RegistryValue Name="Path" Type="string" Value="[INSTALLDIR]" />
         </RegistryKey>
       </Component>
@@ -855,25 +926,25 @@ Create `packaging/windows/installer-hooks.nsh`. `$INSTDIR` and `${MAINBINARYNAME
   ; Explorer "Open TermLab here". Capital %V is required: it is the
   ; substitution that resolves for all three roots below.
   WriteRegStr HKCU "Software\Classes\Directory\shell\TermLab" "MUIVerb" "Open TermLab here"
-  WriteRegStr HKCU "Software\Classes\Directory\shell\TermLab" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe"
-  WriteRegStr HKCU "Software\Classes\Directory\shell\TermLab\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" --working-directory "%V"'
+  WriteRegStr HKCU "Software\Classes\Directory\shell\TermLab" "Icon" "$INSTDIR\termlab.exe"
+  WriteRegStr HKCU "Software\Classes\Directory\shell\TermLab\command" "" '"$INSTDIR\termlab.exe" --working-directory "%V"'
 
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TermLab" "MUIVerb" "Open TermLab here"
-  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TermLab" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe"
-  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TermLab\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" --working-directory "%V"'
+  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TermLab" "Icon" "$INSTDIR\termlab.exe"
+  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TermLab\command" "" '"$INSTDIR\termlab.exe" --working-directory "%V"'
 
   WriteRegStr HKCU "Software\Classes\Drive\shell\TermLab" "MUIVerb" "Open TermLab here"
-  WriteRegStr HKCU "Software\Classes\Drive\shell\TermLab" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe"
-  WriteRegStr HKCU "Software\Classes\Drive\shell\TermLab\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" --working-directory "%V"'
+  WriteRegStr HKCU "Software\Classes\Drive\shell\TermLab" "Icon" "$INSTDIR\termlab.exe"
+  WriteRegStr HKCU "Software\Classes\Drive\shell\TermLab\command" "" '"$INSTDIR\termlab.exe" --working-directory "%V"'
 
   ; Default Programs: Settings > Default apps and "Open with".
   WriteRegStr HKCU "Software\Clients\Terminal\TermLab\Capabilities" "ApplicationName" "TermLab"
   WriteRegStr HKCU "Software\Clients\Terminal\TermLab\Capabilities" "ApplicationDescription" "A cross-platform terminal emulator and SSH client"
-  WriteRegStr HKCU "Software\Clients\Terminal\TermLab\Capabilities" "ApplicationIcon" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+  WriteRegStr HKCU "Software\Clients\Terminal\TermLab\Capabilities" "ApplicationIcon" "$INSTDIR\termlab.exe,0"
   WriteRegStr HKCU "Software\RegisteredApplications" "TermLab" "Software\Clients\Terminal\TermLab\Capabilities"
 
   ; App Paths: makes Win+R "termlab" work without touching PATH.
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe" "" "$INSTDIR\${MAINBINARYNAME}.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe" "" "$INSTDIR\termlab.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe" "Path" "$INSTDIR"
 !macroend
 
@@ -1332,7 +1403,7 @@ ssh dustin@192.168.1.125 'powershell -NoProfile -Command "cd C:\Users\dustin\con
 Expected: every check PASS and `All install verification checks passed.`
 
 Common real failures and what they mean:
-- *command target does not exist on disk* — `[INSTALLDIR]TermLab.exe` resolved wrongly. Re-read Task 1's `INSTALLED_EXE_NAME` and fix `registration.wxs`.
+- *command target does not exist on disk* — `[INSTALLDIR]termlab.exe` resolved wrongly. Re-read Task 1's `INSTALLED_EXE_NAME` and fix `registration.wxs`.
 - *key does not exist* — the `componentRefs` in `tauri.conf.json` do not match the `Component Id`s in `registration.wxs`.
 - *process exited immediately* — the flag reached a binary that does not understand it. Confirm Task 2 and 3 are in the build being installed.
 
