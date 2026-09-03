@@ -618,7 +618,11 @@ fn create_chooser_window<R: tauri::Runtime>(
     let persisted_state = config::load_persistent_state().unwrap_or_default();
     let (target_w, target_h) = clamped_chooser_size(&parent, persisted_state.chooser_window);
 
-    let title = if request.mode == "save" { "Save As" } else { "Open" };
+    let title = if request.mode == "save" {
+        "Save As"
+    } else {
+        "Open"
+    };
 
     let mut builder =
         WebviewWindowBuilder::new(app, chooser_label, WebviewUrl::App("chooser.html".into()))

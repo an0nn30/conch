@@ -35,6 +35,10 @@ impl Drop for PtyBackend {
         // Sending SIGHUP explicitly to the child process group ensures the shell
         // and any child processes (e.g. `tmux attach`) still receive a proper
         // hangup signal.
+        // `libc` is a unix-only dependency, and process groups and SIGHUP are
+        // unix concepts — on Windows the child is torn down when the master
+        // handle closes.
+        #[cfg(unix)]
         if let Some(pid) = self.process_id {
             unsafe {
                 libc::kill(-(pid as libc::pid_t), libc::SIGHUP);
@@ -185,7 +189,11 @@ fn foreground_pgid(_master: &Box<dyn MasterPty + Send>) -> Option<u32> {
 fn process_name_for_pid(pid: u32) -> Option<String> {
     let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     let name = comm.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -202,7 +210,11 @@ fn process_name_for_pid(pid: u32) -> Option<String> {
         return None;
     }
     let name = std::str::from_utf8(&buf[..rc as usize]).ok()?.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

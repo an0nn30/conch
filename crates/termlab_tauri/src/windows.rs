@@ -5,8 +5,8 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use termlab_core::config;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use termlab_core::config;
 
 // ---------------------------------------------------------------------------
 // Window ID counter
@@ -146,15 +146,14 @@ pub(crate) fn create_window_with_label<R: tauri::Runtime>(
     };
     let theme = appearance_to_theme(&user_cfg.colors.appearance_mode);
 
-    let new_win =
-        WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-            .title("TermLab")
-            .inner_size(w, h)
-            .resizable(true)
-            .decorations(dec)
-            .theme(theme)
-            .visible(false)
-            .build()?;
+    let new_win = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+        .title("TermLab")
+        .inner_size(w, h)
+        .resizable(true)
+        .decorations(dec)
+        .theme(theme)
+        .visible(false)
+        .build()?;
     // Same deal as the main window: this one is built hidden and shown by
     // app_ready once the frontend has sized it, so it needs the same rescue
     // timer for a frontend that never gets that far.

@@ -8,9 +8,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .emit()?;
 
     ensure_vendor_bundle();
+    require_common_controls_v6();
 
     tauri_build::build();
     Ok(())
+}
+
+/// Give Windows test binaries the same comctl32 v6 manifest the app gets.
+///
+/// `TaskDialogIndirect` is exported only by comctl32 version 6, which lives in
+/// WinSxS and is bound only for executables whose manifest declares a
+/// dependency on Microsoft.Windows.Common-Controls 6.0.0.0. `tauri_build`
+/// embeds that manifest into the app binary, but `cargo test` links a separate
+/// executable that never received it — so the loader bound
+/// System32\comctl32.dll (v5.82), found no `TaskDialogIndirect`, and killed the
+/// process at load with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before `main`.
+///
+/// The whole `termlab_tauri` lib test target was unrunnable on Windows because
+/// of it, on both x86_64 and aarch64.
+fn require_common_controls_v6() {
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if !(windows && msvc) {
+        return;
+    }
+    // Not `rustc-link-arg-tests`: that covers only integration tests under
+    // tests/, which this crate has none of, and cargo hard-errors on the
+    // instruction when no such target exists. The unscoped form reaches the
+    // lib's unit-test binary. It also reaches the app binary, which already
+    // carries this dependency from tauri_build — the linker merges the
+    // duplicate.
+    println!(
+        "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' \
+         name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+         processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+    );
 }
 
 /// Keep the generated CodeMirror bundle in step with its sources on every
@@ -33,7 +65,10 @@ fn ensure_vendor_bundle() {
     use std::process::Command;
 
     let frontend = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend");
-    let bundle = frontend.join("vendor").join("codemirror").join("codemirror.js");
+    let bundle = frontend
+        .join("vendor")
+        .join("codemirror")
+        .join("codemirror.js");
     let inputs = [
         "vendor-entry.mjs",
         "package-lock.json",
@@ -49,7 +84,11 @@ fn ensure_vendor_bundle() {
     let bundle_mtime = std::fs::metadata(&bundle).and_then(|m| m.modified()).ok();
     let newest_input = inputs
         .iter()
-        .filter_map(|f| std::fs::metadata(frontend.join(f)).and_then(|m| m.modified()).ok())
+        .filter_map(|f| {
+            std::fs::metadata(frontend.join(f))
+                .and_then(|m| m.modified())
+                .ok()
+        })
         .max();
     let stale = match (bundle_mtime, newest_input) {
         (None, _) => true,

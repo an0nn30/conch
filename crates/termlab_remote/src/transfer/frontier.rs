@@ -16,7 +16,10 @@ pub(crate) struct Frontier {
 
 impl Frontier {
     pub(crate) fn new(start: u64) -> Self {
-        Self { position: start, pending: BTreeMap::new() }
+        Self {
+            position: start,
+            pending: BTreeMap::new(),
+        }
     }
 
     pub(crate) fn position(&self) -> u64 {
@@ -71,10 +74,18 @@ mod tests {
     #[test]
     fn out_of_order_completions_wait_for_the_gap() {
         let mut frontier = Frontier::new(0);
-        assert_eq!(frontier.complete(200, 100), 0, "gap at 0..200 blocks the frontier");
+        assert_eq!(
+            frontier.complete(200, 100),
+            0,
+            "gap at 0..200 blocks the frontier"
+        );
         assert_eq!(frontier.complete(100, 100), 0, "gap at 0..100 still blocks");
         assert_eq!(frontier.pending(), 2);
-        assert_eq!(frontier.complete(0, 100), 300, "filling the gap folds all pending ranges");
+        assert_eq!(
+            frontier.complete(0, 100),
+            300,
+            "filling the gap folds all pending ranges"
+        );
         assert_eq!(frontier.pending(), 0);
     }
 
@@ -90,7 +101,11 @@ mod tests {
         let mut frontier = Frontier::new(0);
         frontier.complete(0, 100);
         assert_eq!(frontier.complete(0, 100), 100, "exact duplicate is a no-op");
-        assert_eq!(frontier.complete(50, 100), 150, "overlap only extends the uncovered part");
+        assert_eq!(
+            frontier.complete(50, 100),
+            150,
+            "overlap only extends the uncovered part"
+        );
     }
 
     #[test]

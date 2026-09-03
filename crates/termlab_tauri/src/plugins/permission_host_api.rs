@@ -6,9 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use parking_lot::{Mutex, RwLock};
 use termlab_plugin::HostApi;
 use termlab_plugin_sdk::PanelLocation;
-use parking_lot::{Mutex, RwLock};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PermissionProfile {

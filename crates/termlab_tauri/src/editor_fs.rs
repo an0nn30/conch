@@ -235,6 +235,57 @@ pub(crate) fn editor_temp_sweep() -> Result<(), String> {
     Ok(())
 }
 
+/// Largest image inlined into a preview. Images become base64 `data:` URIs, so
+/// the cost is ~4/3 of this in the webview per image; a cap keeps one oversized
+/// asset from stalling a render.
+pub(crate) const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn image_extension(name: &str) -> Option<String> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let dot = base.rfind('.')?;
+    if dot == 0 {
+        return None;
+    }
+    Some(base[dot + 1..].to_ascii_lowercase())
+}
+
+pub(crate) fn is_image_name(name: &str) -> bool {
+    matches!(
+        image_extension(name).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico")
+    )
+}
+
+pub(crate) fn check_image_size(bytes: u64) -> Result<(), String> {
+    if bytes > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "image is {bytes} bytes, over the {MAX_IMAGE_BYTES} byte preview limit"
+        ));
+    }
+    Ok(())
+}
+
+/// Read a local image for the markdown preview, base64-encoded.
+///
+/// Returns the payload only — the caller builds the `data:` URI, because it
+/// already knows the MIME type from the same filename.
+#[tauri::command]
+pub(crate) fn editor_read_image_base64(path: String) -> Result<String, String> {
+    use base64::Engine;
+
+    if !is_image_name(&path) {
+        return Err(format!("not a recognised image file: {path}"));
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a file"));
+    }
+    check_image_size(meta.len())?;
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,11 +333,17 @@ mod tests {
             let lower = format!("file.{ext}");
             let upper = format!("file.{}", ext.to_uppercase());
             assert!(
-                matches!(guard_openable(&lower, 10), Err(OpenRejection::BlockedExtension { .. })),
+                matches!(
+                    guard_openable(&lower, 10),
+                    Err(OpenRejection::BlockedExtension { .. })
+                ),
                 "{lower} should be blocked"
             );
             assert!(
-                matches!(guard_openable(&upper, 10), Err(OpenRejection::BlockedExtension { .. })),
+                matches!(
+                    guard_openable(&upper, 10),
+                    Err(OpenRejection::BlockedExtension { .. })
+                ),
                 "{upper} should be blocked"
             );
         }
@@ -294,7 +351,14 @@ mod tests {
 
     #[test]
     fn ordinary_names_are_allowed() {
-        for name in ["a.txt", "b.rs", "Makefile", ".gitignore", "a.tar.txt", "no_extension"] {
+        for name in [
+            "a.txt",
+            "b.rs",
+            "Makefile",
+            ".gitignore",
+            "a.tar.txt",
+            "no_extension",
+        ] {
             assert!(guard_openable(name, 10).is_ok(), "{name} should be allowed");
         }
     }
@@ -334,7 +398,10 @@ mod tests {
 
         assert_ne!(a.0, b.0, "different hosts must not share a directory");
         assert_eq!(a.0, c.0, "same host must share its directory");
-        assert_ne!(a.1, c.1, "different remote paths must not share a directory");
+        assert_ne!(
+            a.1, c.1,
+            "different remote paths must not share a directory"
+        );
         assert_eq!(a.2, "nginx.conf");
 
         assert_eq!(temp_path_parts("h", "/a/.bashrc").2, ".bashrc");
@@ -390,8 +457,144 @@ mod tests {
             .join("victim.txt");
 
         assert!(editor_temp_cleanup(escaping_path.to_string_lossy().into_owned()).is_err());
-        assert!(victim.exists(), "a path escaping the root via .. must survive");
+        assert!(
+            victim.exists(),
+            "a path escaping the root via .. must survive"
+        );
 
         let _ = std::fs::remove_dir_all(&escape_dir);
+    }
+
+    #[test]
+    fn image_extensions_are_recognised() {
+        for name in [
+            "a.png", "b.JPG", "c.jpeg", "d.gif", "e.webp", "f.svg", "g.bmp",
+        ] {
+            assert!(is_image_name(name), "{name} must be treated as an image");
+        }
+    }
+
+    #[test]
+    fn non_image_extensions_are_rejected() {
+        for name in ["a.txt", "b.rs", "c.md", "d", "e.png.exe"] {
+            assert!(
+                !is_image_name(name),
+                "{name} must not be treated as an image"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_images_are_refused() {
+        assert!(
+            check_image_size(MAX_IMAGE_BYTES + 1).is_err(),
+            "an image over the cap must be refused rather than inlined"
+        );
+        assert!(check_image_size(1024).is_ok());
+    }
+
+    /// Pins the command's full sequence end to end: extension gate -> metadata
+    /// -> is_file -> size cap -> read -> encode. The individual guards are
+    /// unit-tested above in isolation; this is the one place their ORDER is
+    /// exercised, which is the security-relevant property (see the oversized
+    /// test below).
+    #[test]
+    fn editor_read_image_base64_round_trips_real_bytes() {
+        let dir = std::env::temp_dir().join(format!("termlab-image-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let file = dir.join("pixel.png");
+        let bytes: &[u8] = b"\x89PNG\r\n\x1a\nnot a real png but real bytes";
+        fs::write(&file, bytes).expect("write test image");
+
+        let encoded = editor_read_image_base64(file.to_string_lossy().into_owned())
+            .expect("a real, appropriately-named, appropriately-sized file must read");
+        let decoded = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("command must return valid base64")
+        };
+        assert_eq!(
+            decoded, bytes,
+            "the decoded payload must be exactly the file's bytes"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_read_image_base64_refuses_wrong_extension_before_any_read() {
+        let dir = std::env::temp_dir().join(format!("termlab-image-ext-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let file = dir.join("secret.txt");
+        fs::write(&file, b"not an image").expect("write test file");
+
+        let error = editor_read_image_base64(file.to_string_lossy().into_owned())
+            .expect_err("a non-image extension must be refused");
+        assert!(
+            error.contains("not a recognised image file"),
+            "the message must say the extension was not recognised: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_read_image_base64_refuses_a_directory() {
+        let dir = std::env::temp_dir().join(format!("termlab-image-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let sub = dir.join("foo.png");
+        fs::create_dir_all(&sub).expect("create a directory named like an image");
+
+        let error = editor_read_image_base64(sub.to_string_lossy().into_owned())
+            .expect_err("a directory must be refused even with a recognised image extension");
+        assert!(
+            error.contains("not a file"),
+            "the message must say it is not a file: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_read_image_base64_refuses_a_missing_file() {
+        let missing =
+            std::env::temp_dir().join(format!("termlab-image-missing-{}.png", std::process::id()));
+        let _ = fs::remove_file(&missing);
+
+        assert!(editor_read_image_base64(missing.to_string_lossy().into_owned()).is_err());
+    }
+
+    /// The important case: the size cap must be enforced from `metadata`
+    /// BEFORE `std::fs::read` pulls bytes into memory. `set_len` makes this a
+    /// sparse file, so the size `metadata` reports is real but no bytes are
+    /// actually written to disk — this test stays fast and cheap despite
+    /// exceeding `MAX_IMAGE_BYTES`. If a refactor ever reordered the read
+    /// before the size check, this file is large enough that reading it in
+    /// full would be the observable difference (this test would slow down
+    /// dramatically rather than merely fail).
+    #[test]
+    fn editor_read_image_base64_refuses_an_oversized_file_from_metadata_alone() {
+        let dir =
+            std::env::temp_dir().join(format!("termlab-image-oversize-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let file = dir.join("huge.png");
+        let f = fs::File::create(&file).expect("create sparse file");
+        f.set_len(MAX_IMAGE_BYTES + 1)
+            .expect("set_len must be able to grow a sparse file");
+        drop(f);
+
+        let error = editor_read_image_base64(file.to_string_lossy().into_owned())
+            .expect_err("a file over the cap must be refused");
+        assert!(
+            error.contains("preview limit"),
+            "the message must mention the size limit: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

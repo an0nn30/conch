@@ -106,6 +106,14 @@
        run `npm run build:vendor` in frontend/ if this 404s. -->
   <script src="vendor/codemirror/codemirror.js"></script>
 
+  <!-- markdown-it + DOMPurify + the lezer highlight helpers, bundled by
+       frontend/build-vendor.mjs as the `MDLib` global. Generated and
+       git-ignored like the CodeMirror bundle above, but unlike it this one is
+       OPTIONAL at runtime: if it 404s the editor still works and the markdown
+       preview simply is not offered. Run `npm run build:vendor` in frontend/
+       to produce it. -->
+  <script src="vendor/markdown/markdown.js"></script>
+
   <script src="app/core/utils.js"></script>
   <script src="app/core/pane-title.js"></script>
   <script src="app/core/window-size.js"></script>
@@ -192,6 +200,16 @@
   <script src="app/panels/tunnels-panel.js"></script>
   <script src="app/panels/notifications-panel.js"></script>
   <script src="app/features/editor/language-map.js"></script>
+  <!-- The markdown preview. Order matters and there is no module system: each
+       of these reads language-map.js above and the two vendor bundles at the
+       top of this file, and preview-controller.js assembles the other four. -->
+  <script src="app/features/editor/preview/markdown-renderer.js"></script>
+  <script src="app/features/editor/preview/fence-highlight.js"></script>
+  <script src="app/features/editor/preview/image-resolver.js"></script>
+  <script src="app/features/editor/preview/preview-frame.js"></script>
+  <script src="app/features/editor/preview/preview-mode.js"></script>
+  <script src="app/features/editor/preview/preview-toolbar.js"></script>
+  <script src="app/features/editor/preview/preview-controller.js"></script>
   <script src="app/features/editor/theme.js"></script>
   <script src="app/features/editor/vim-mode.js"></script>
   <script src="app/features/editor/editor-pane.js"></script>

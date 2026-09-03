@@ -102,6 +102,11 @@
           { id: 'split-vertical', label: 'Split Pane Vertically', shortcut: shortcuts.split_vertical || `${ctrl}+D` },
           { id: 'split-horizontal', label: 'Split Pane Horizontally', shortcut: shortcuts.split_horizontal || `${ctrl}+Shift+D` },
           { id: 'close-pane', label: 'Close Pane', shortcut: shortcuts.close_pane || `${ctrl}+Shift+W` },
+          // noAccel: shown, not bound. shortcut-runtime.js already owns this
+          // combo and consumes it ONLY in a pane that has a markdown preview,
+          // dropping it everywhere else so a terminal still gets the key.
+          // Registering it here would consume it app-wide.
+          { id: 'toggle-preview', label: 'Toggle Markdown Preview', shortcut: shortcuts.toggle_preview || '', noAccel: true },
           { type: 'separator' },
           { id: 'focus-sessions', label: 'Toggle & Focus Sessions', shortcut: `${ctrl}+/` },
           { id: 'zen-mode', label: 'Zen Mode', shortcut: shortcuts.zen_mode || '' },

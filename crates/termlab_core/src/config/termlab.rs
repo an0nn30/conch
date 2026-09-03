@@ -124,6 +124,7 @@ pub struct KeyboardConfig {
     pub save_file: String,
     pub save_file_as: String,
     pub open_file: String,
+    pub toggle_preview: String,
     pub tool_window_shortcuts: HashMap<String, String>,
     pub plugin_shortcuts: HashMap<String, String>,
 }
@@ -159,6 +160,7 @@ impl Default for KeyboardConfig {
             save_file: "cmd+s".into(),
             save_file_as: "cmd+shift+s".into(),
             open_file: "cmd+o".into(),
+            toggle_preview: "cmd+shift+y".into(),
             tool_window_shortcuts: HashMap::new(),
             plugin_shortcuts: HashMap::new(),
         }
@@ -567,5 +569,16 @@ mod tests {
         let cfg: KeyboardConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.split_vertical, "cmd+d");
         assert_eq!(cfg.close_pane, "cmd+shift+w");
+    }
+
+    #[test]
+    fn toggle_preview_has_a_default_binding() {
+        // NOT cmd+shift+p: that combo is hard-wired to the command palette in
+        // frontend/app/shortcut-runtime.js, at a LOWER router priority than
+        // the handler that dispatches these config bindings — so binding it
+        // here would have made the palette unreachable. A default has to clear
+        // the frontend's hard-wired handlers and CodeMirror's own keymaps, not
+        // just this struct and menu.rs.
+        assert_eq!(KeyboardConfig::default().toggle_preview, "cmd+shift+y");
     }
 }

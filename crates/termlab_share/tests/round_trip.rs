@@ -305,13 +305,22 @@ fn full_round_trip_preserves_ids_and_materialises_keys() {
     );
 
     let mut sink = RecordingVaultSink::default();
-    let outcome = execute(import_plan_1, &mut config_b, key_dir_b.path(), Some(&mut sink)).unwrap();
+    let outcome = execute(
+        import_plan_1,
+        &mut config_b,
+        key_dir_b.path(),
+        Some(&mut sink),
+    )
+    .unwrap();
     assert!(
         !outcome.credentials_held_back,
         "a vault sink was supplied, credentials must not be held back"
     );
     assert_eq!(outcome.credentials, 3);
-    assert_eq!(outcome.servers, 4, "2 folder-nested + 2 ungrouped (bare key + bastion alias)");
+    assert_eq!(
+        outcome.servers, 4,
+        "2 folder-nested + 2 ungrouped (bare key + bastion alias)"
+    );
     assert_eq!(outcome.tunnels, 2);
 
     // --- Every server and tunnel arrives with the same ids ---------------
@@ -322,8 +331,14 @@ fn full_round_trip_preserves_ids_and_materialises_keys() {
     assert!(config_b.find_tunnel(&a.tunnel_alias_id).is_some());
     // The folder-nested servers actually stayed nested, not flattened.
     assert_eq!(config_b.folders.len(), 2);
-    assert_eq!(config_b.find_server_folder(&a.server_pw_id), Some("folder-ops"));
-    assert_eq!(config_b.find_server_folder(&a.server_key_id), Some("folder-db"));
+    assert_eq!(
+        config_b.find_server_folder(&a.server_pw_id),
+        Some("folder-ops")
+    );
+    assert_eq!(
+        config_b.find_server_folder(&a.server_key_id),
+        Some("folder-db")
+    );
 
     // --- Key file materialised in machine B's key dir, mode 0600, ---
     // --- byte-identical, and the account no longer points at A's path ---
@@ -344,7 +359,9 @@ fn full_round_trip_preserves_ids_and_materialises_keys() {
         "must not still point at machine A's original path"
     );
     assert!(
-        !key_account_path.to_string_lossy().contains("termlab-bundle:"),
+        !key_account_path
+            .to_string_lossy()
+            .contains("termlab-bundle:"),
         "the termlab-bundle:<id> marker must have been rewritten to a real path"
     );
     let materialised = std::fs::read(key_account_path).unwrap();
@@ -352,7 +369,10 @@ fn full_round_trip_preserves_ids_and_materialises_keys() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(key_account_path).unwrap().permissions().mode();
+        let mode = std::fs::metadata(key_account_path)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "key must be owner-read/write only");
     }
 
@@ -371,13 +391,20 @@ fn full_round_trip_preserves_ids_and_materialises_keys() {
     };
     assert!(barekey_account_path.starts_with(key_dir_b.path()));
     assert_ne!(barekey_account_path, &a.barekey_path);
-    assert!(!barekey_account_path.to_string_lossy().contains("termlab-bundle:"));
+    assert!(
+        !barekey_account_path
+            .to_string_lossy()
+            .contains("termlab-bundle:")
+    );
     let materialised_bare = std::fs::read(barekey_account_path).unwrap();
     assert_eq!(materialised_bare, a.barekey_bytes);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(barekey_account_path).unwrap().permissions().mode();
+        let mode = std::fs::metadata(barekey_account_path)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "key must be owner-read/write only");
     }
     // Its legacy key_path field itself is left exactly as it arrived —
@@ -395,19 +422,33 @@ fn full_round_trip_preserves_ids_and_materialises_keys() {
     let existing_account_ids: Vec<Uuid> = sink.accounts.iter().map(|acc| acc.id).collect();
     let import_plan_2 = plan_import(&bundle, &config_b, &existing_account_ids);
     assert!(import_plan_2.skipped.is_empty());
-    let outcome_2 = execute(import_plan_2, &mut config_b, key_dir_b.path(), Some(&mut sink)).unwrap();
+    let outcome_2 = execute(
+        import_plan_2,
+        &mut config_b,
+        key_dir_b.path(),
+        Some(&mut sink),
+    )
+    .unwrap();
 
     assert_eq!(outcome_2.servers, outcome.servers);
     assert_eq!(outcome_2.tunnels, outcome.tunnels);
     assert_eq!(outcome_2.credentials, outcome.credentials);
     assert_eq!(config_b.folders.len(), 2);
     assert_eq!(
-        config_b.folders.iter().map(|f| f.entries.len()).sum::<usize>(),
+        config_b
+            .folders
+            .iter()
+            .map(|f| f.entries.len())
+            .sum::<usize>(),
         2
     );
     assert_eq!(config_b.ungrouped.len(), 2);
     assert_eq!(config_b.tunnels.len(), 2);
-    assert_eq!(sink.accounts.len(), 3, "second import must replace, not duplicate");
+    assert_eq!(
+        sink.accounts.len(),
+        3,
+        "second import must replace, not duplicate"
+    );
     let key_files_in_b = std::fs::read_dir(key_dir_b.path()).unwrap().count();
     assert_eq!(
         key_files_in_b, 2,
@@ -581,12 +622,19 @@ fn conflicting_machine_b_produces_every_status_and_honours_overrides() {
         &FileKeyReader,
     );
     assert!(
-        export_plan.bundle.servers.iter().all(|s| s.id != "srv-ghost"),
+        export_plan
+            .bundle
+            .servers
+            .iter()
+            .all(|s| s.id != "srv-ghost"),
         "the declined dependency must never enter the bundle: {:?}",
         export_plan.bundle.servers
     );
     assert!(
-        export_plan.warnings.iter().any(|w| w.contains("ghost-host")),
+        export_plan
+            .warnings
+            .iter()
+            .any(|w| w.contains("ghost-host")),
         "the decline should be recorded as a warning: {:?}",
         export_plan.warnings
     );
@@ -658,7 +706,11 @@ fn conflicting_machine_b_produces_every_status_and_honours_overrides() {
     assert_eq!(label_collision_row.status, ConflictStatus::LabelCollision);
     assert_eq!(label_collision_row.action, ItemAction::Add);
 
-    let new_row = plan_1.servers.iter().find(|p| p.item.id == "srv-new").unwrap();
+    let new_row = plan_1
+        .servers
+        .iter()
+        .find(|p| p.item.id == "srv-new")
+        .unwrap();
     assert_eq!(new_row.status, ConflictStatus::New);
     assert_eq!(new_row.action, ItemAction::Add);
 
@@ -808,7 +860,10 @@ fn conflicting_machine_b_produces_every_status_and_honours_overrides() {
         outcome_final.servers, 2,
         "Skip writes nothing; the Rename and the plain New Add each write one"
     );
-    assert_eq!(outcome_final.tunnels, 1, "the ReferenceBroken tunnel is still excluded");
+    assert_eq!(
+        outcome_final.tunnels, 1,
+        "the ReferenceBroken tunnel is still excluded"
+    );
     assert_eq!(outcome_final.credentials, 1);
 }
 
