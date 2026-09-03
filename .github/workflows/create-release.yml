@@ -63,12 +63,6 @@ jobs:
               packaging/macos/Info.plist
           fi
 
-          # WiX installer
-          if [ -f packaging/windows/termlab.wxs ]; then
-            sed -i "s/Version=\"[0-9]*\.[0-9]*\.[0-9]*\"/Version=\"$VERSION\"/" \
-              packaging/windows/termlab.wxs
-          fi
-
           # Update Cargo.lock
           cargo update -w 2>/dev/null || true
 
