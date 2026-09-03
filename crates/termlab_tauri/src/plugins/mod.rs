@@ -9,12 +9,12 @@ pub(crate) mod tauri_host_api;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use termlab_plugin::bus::PluginBus;
-use termlab_plugin::jvm::runtime::JavaPluginManager;
-use termlab_plugin::lua::runner;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
+use termlab_plugin::bus::PluginBus;
+use termlab_plugin::jvm::runtime::JavaPluginManager;
+use termlab_plugin::lua::runner;
 use ts_rs::TS;
 
 use permission_host_api::{PermissionCheckedHostApi, PermissionProfile};

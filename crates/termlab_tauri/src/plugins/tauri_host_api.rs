@@ -8,12 +8,12 @@ use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use termlab_plugin::HostApi;
-use termlab_plugin::bus::PluginBus;
-use termlab_plugin_sdk::PanelLocation;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
+use termlab_plugin::HostApi;
+use termlab_plugin::bus::PluginBus;
+use termlab_plugin_sdk::PanelLocation;
 
 use super::{PanelInfo, PendingDialogs, PluginMenuItem, PluginSettingsSection, PluginViewInfo};
 

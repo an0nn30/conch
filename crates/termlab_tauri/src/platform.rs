@@ -44,11 +44,7 @@ fn linux_init() {
 /// spawned, or outlived the deadline. Every caller must be able to carry on
 /// without the value.
 #[cfg(target_os = "macos")]
-fn run_with_timeout(
-    program: &str,
-    args: &[&str],
-    timeout: std::time::Duration,
-) -> Option<String> {
+fn run_with_timeout(program: &str, args: &[&str], timeout: std::time::Duration) -> Option<String> {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
 

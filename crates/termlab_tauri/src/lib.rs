@@ -612,6 +612,9 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             menu::MENU_TOGGLE_BOTTOM_PANEL_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_BOTTOM_PANEL)
             }
+            menu::MENU_TOGGLE_PREVIEW_ID => {
+                menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_PREVIEW)
+            }
             menu::MENU_TOGGLE_RIGHT_PANEL_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_RIGHT_PANEL)
             }
@@ -997,6 +1000,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             editor_fs::editor_write_file,
             editor_fs::editor_temp_path,
             editor_fs::editor_temp_cleanup,
+            editor_fs::editor_read_image_base64,
             // editor_temp_sweep is deliberately absent, and is no longer a
             // #[tauri::command] at all: it deletes the entire remote-edit temp
             // root, which would destroy the backing file of every open remote

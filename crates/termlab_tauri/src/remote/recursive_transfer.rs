@@ -18,13 +18,13 @@ use termlab_remote::sftp::{DirEntryKind, list_dir_children};
 use uuid::Uuid;
 
 use super::RemoteState;
-use super::transfer_queue::{QUEUE_FULL_ERROR_PREFIX, TransferQueueHandle};
 use super::transfer_queue::batch::{BatchCancellation, BatchExpansion, BatchInfo};
 use super::transfer_queue::expansion::{
     DirectoryCreator, DiscoveredFile, ExpansionPlan, ExpansionSink, ExpansionTotals, TreeLister,
     WalkEntry, run_expansion,
 };
 use super::transfer_queue::model::{NewTransferJob, TransferDirection};
+use super::transfer_queue::{QUEUE_FULL_ERROR_PREFIX, TransferQueueHandle};
 
 type SshHandle = Arc<Handle<TermLabSshHandler>>;
 

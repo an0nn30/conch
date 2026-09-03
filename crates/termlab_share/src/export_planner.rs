@@ -349,7 +349,11 @@ fn resolve_tunnel_host(
 
 /// Whether `id` already names a server somewhere in the bundle being built
 /// — ungrouped or nested inside one of `bundle_folders`.
-fn host_already_bundled(id: &str, bundle_servers: &[ServerEntry], bundle_folders: &[ServerFolder]) -> bool {
+fn host_already_bundled(
+    id: &str,
+    bundle_servers: &[ServerEntry],
+    bundle_folders: &[ServerFolder],
+) -> bool {
     bundle_servers.iter().any(|s| s.id == id)
         || bundle_folders
             .iter()
@@ -970,7 +974,10 @@ mod tests {
             "the tunnel must not have pulled a duplicate ungrouped copy in: {:?}",
             plan.bundle.servers
         );
-        assert!(plan.auto_pulled.is_empty(), "an already-selected host is not an auto-pull");
+        assert!(
+            plan.auto_pulled.is_empty(),
+            "an already-selected host is not an auto-pull"
+        );
     }
 
     /// Closes a coverage gap in `resolve_tunnel_host`'s decline handling:
@@ -1121,9 +1128,7 @@ mod tests {
         );
         assert!(plan.auto_pulled.is_empty());
         assert!(
-            plan.warnings
-                .iter()
-                .any(|w| w.contains("declined-bastion")),
+            plan.warnings.iter().any(|w| w.contains("declined-bastion")),
             "warnings: {:?}",
             plan.warnings
         );

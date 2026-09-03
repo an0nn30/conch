@@ -179,7 +179,10 @@ impl CloseGuard {
 
 /// Called by the frontend once its `window-close-requested` listener is live.
 #[tauri::command]
-pub(crate) fn window_close_guard_arm(window: tauri::WebviewWindow, guard: tauri::State<'_, CloseGuard>) {
+pub(crate) fn window_close_guard_arm(
+    window: tauri::WebviewWindow,
+    guard: tauri::State<'_, CloseGuard>,
+) {
     guard.arm(window.label());
 }
 
@@ -201,11 +204,7 @@ pub(crate) fn confirm_window_close(
 
 /// The frontend's answer to `app-quit-requested`.
 #[tauri::command]
-pub(crate) fn quit_vote(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    allow: bool,
-) {
+pub(crate) fn quit_vote(app: tauri::AppHandle, window: tauri::WebviewWindow, allow: bool) {
     {
         let guard = app.state::<CloseGuard>();
         let state = guard.0.lock();
@@ -365,9 +364,15 @@ mod tests {
     fn armed_window_is_refused_until_confirmed() {
         let guard = CloseGuard::default();
         guard.arm("main");
-        assert!(!guard.take_permission("main"), "first attempt must be stopped");
+        assert!(
+            !guard.take_permission("main"),
+            "first attempt must be stopped"
+        );
         guard.confirm("main");
-        assert!(guard.take_permission("main"), "the confirmed close goes through");
+        assert!(
+            guard.take_permission("main"),
+            "the confirmed close goes through"
+        );
         assert!(
             !guard.take_permission("main"),
             "permission is spent, so a later close asks again"
@@ -399,7 +404,10 @@ mod tests {
             guard.forget("main"),
             "the caller must be told to advance, or the quit stalls forever"
         );
-        assert!(!guard.forget("window-1"), "and only for the window being asked");
+        assert!(
+            !guard.forget("window-1"),
+            "and only for the window being asked"
+        );
     }
 
     /// The whole poll, as `advance_quit` drives it: ask until nobody owes an
@@ -429,10 +437,7 @@ mod tests {
         let guard = CloseGuard::default();
         guard.arm("main");
         guard.arm("window-1");
-        assert!(guard.begin_exit(
-            vec!["main".into(), "window-1".into()],
-            ExitKind::Restart,
-        ));
+        assert!(guard.begin_exit(vec!["main".into(), "window-1".into()], ExitKind::Restart,));
 
         // Nothing may be reachable while a window still owes an answer.
         assert_eq!(guard.next_to_ask().as_deref(), Some("main"));
@@ -444,7 +449,11 @@ mod tests {
 
         let (asked, action) = drive_to_completion(&guard, true);
         assert_eq!(asked, vec!["window-1".to_string()]);
-        assert_eq!(action, Some(ExitKind::Restart), "and only then does it restart");
+        assert_eq!(
+            action,
+            Some(ExitKind::Restart),
+            "and only then does it restart"
+        );
     }
 
     #[test]
