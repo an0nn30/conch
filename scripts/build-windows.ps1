@@ -213,6 +213,18 @@ if ($HasSigningKey) {
     Write-Host '==> No TAURI_SIGNING_PRIVATE_KEY in the environment  -  disabling updater artifacts for this build' -ForegroundColor Yellow
 }
 
+# A .sig from an earlier build (e.g. a throwaway signing-key experiment) can
+# be left sitting next to the installer in target/release/bundle/ from a
+# previous run. If this run does not itself produce a fresh one, step 6 below
+# must never mistake that leftover for this build's signature -- a mismatched
+# .sig silently breaks the auto-updater for whoever receives it. Delete any
+# pre-existing .sig from both bundle output directories before building, so
+# anything found there afterward can only have been written by this run.
+$BundleRoot = Join-Path $RepoRoot 'target\release\bundle'
+Remove-Item -Path (Join-Path $BundleRoot 'nsis\*.sig') -Force -ErrorAction SilentlyContinue
+Remove-Item -Path (Join-Path $BundleRoot 'msi\*.sig')  -Force -ErrorAction SilentlyContinue
+$BuildStartTime = Get-Date
+
 # Runs one `cargo tauri build --config <file>` invocation. A non-zero exit
 # here is NOT immediately fatal: createUpdaterArtifacts can fail signing
 # *after* the installer has already been written to disk. The real
@@ -285,7 +297,6 @@ Remove-Item -Force $NsisConfigPath, $MsiConfigPath -ErrorAction SilentlyContinue
 # Never assume architecture: the dev VM is ARM64 Windows on Apple Silicon
 # (artifacts named *_arm64-*) while CI's GitHub-hosted runner is x64
 # (*_x64-*). Glob instead of hardcoding either.
-$BundleRoot = Join-Path $RepoRoot 'target\release\bundle'
 $Setup = Get-ChildItem -Path (Join-Path $BundleRoot 'nsis') -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
 $Msi   = Get-ChildItem -Path (Join-Path $BundleRoot 'msi')  -Filter '*.msi'       -ErrorAction SilentlyContinue | Select-Object -First 1
 
@@ -307,9 +318,26 @@ Copy-Item $Setup.FullName -Destination $OutPath -Force
 Copy-Item $Msi.FullName   -Destination $OutPath -Force
 
 # Updater .sig files, when produced, ride along next to their installer and
-# release.yml uploads them too  -  copy them if present.
-$SetupSig = Get-Item ($Setup.FullName + '.sig') -ErrorAction SilentlyContinue
-$MsiSig   = Get-Item ($Msi.FullName + '.sig')   -ErrorAction SilentlyContinue
+# release.yml uploads them too  -  copy them if present. Two independent
+# guards keep a stale signature from ever being collected: (1) with no
+# signing key this run, a .sig cannot legitimately exist for this build, so
+# the lookup is skipped entirely; (2) even with a key, only a .sig written
+# after this run started (i.e. after the pre-build cleanup above) qualifies
+# -- anything older is a leftover, not this run's output.
+$SetupSig = $null
+$MsiSig   = $null
+if ($HasSigningKey) {
+    $SetupSig = Get-Item ($Setup.FullName + '.sig') -ErrorAction SilentlyContinue
+    if ($SetupSig -and $SetupSig.LastWriteTime -lt $BuildStartTime) {
+        Write-Host "    ignoring $($SetupSig.Name): older than this build  -  stale signature, not copying" -ForegroundColor Yellow
+        $SetupSig = $null
+    }
+    $MsiSig = Get-Item ($Msi.FullName + '.sig') -ErrorAction SilentlyContinue
+    if ($MsiSig -and $MsiSig.LastWriteTime -lt $BuildStartTime) {
+        Write-Host "    ignoring $($MsiSig.Name): older than this build  -  stale signature, not copying" -ForegroundColor Yellow
+        $MsiSig = $null
+    }
+}
 if ($SetupSig) { Copy-Item $SetupSig.FullName -Destination $OutPath -Force }
 if ($MsiSig)   { Copy-Item $MsiSig.FullName   -Destination $OutPath -Force }
 

@@ -71,11 +71,13 @@
         hardcodes an architecture -- installers are located by glob, and
         every path used for assertions is read back out of the registry
         rather than assumed.
-    This script has not been run: the Windows VM used for prior tasks is
-    offline (confirmed 100% packet loss, no route to host) and this machine
-    has no pwsh to even syntax-check it against. It was written and manually
-    re-read for quoting/null-handling instead. Run it for real the moment the
-    VM is back -- see the task-6 report for a short checklist.
+      - The MSI's own uninstall-entry hive HAS since been measured: it
+        registers under a GUID-named subkey, under HKLM\WOW6432Node on the
+        build that produced it, not under a literal "TermLab" name the way
+        NSIS does. Get-UninstallEntryPath handles the two passes
+        differently for exactly this reason.
+    This script has been run end-to-end on the project's Windows ARM64 VM,
+    through both the NSIS and MSI passes.
 #>
 [CmdletBinding()]
 param(
@@ -109,11 +111,20 @@ $RegisteredAppsKey = 'Software\RegisteredApplications'
 
 # The standard per-user "Programs and Features" uninstall entry. This is
 # written by the bundler itself (NSIS/WiX boilerplate), not by our hooks.
-# task-1-baseline.md measured it under HKCU for the NSIS install; the MSI's
-# own uninstall-entry hive was never measured (Task 1 never got a working MSI
-# build), so the MSI pass also accepts HKLM here without failing -- only
-# "found in neither hive" is a failure.
+#
+# NSIS registers itself under a literal "TermLab" subkey (measured on a real
+# VM, present under HKCU). The MSI does not: it registers under a
+# GUID-named subkey -- and, on this WiX toolset/build, under WOW6432Node
+# even on an ARM64 host -- so the two passes need different lookup
+# strategies. $UninstallSubKey below is only ever used for the NSIS pass;
+# Get-UninstallEntryPath handles the MSI pass by searching for a matching
+# DisplayName instead of assuming a path.
 $UninstallSubKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\TermLab'
+$MsiUninstallSearchRoots = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+)
 
 # =============================================================================
 # Small helpers
@@ -130,15 +141,29 @@ function Assert-True {
     }
 }
 
-# Reads one named registry value safely. If the value does not exist,
-# Get-ItemProperty -Name emits no object at all (suppressed here), so this
-# returns plain $null instead of erroring on a missing property -- important
-# under Set-StrictMode -Version Latest, which would otherwise turn "this
-# value happens to be absent" into a script-ending error instead of a
-# reportable failed assertion.
+# Reads one named registry value safely, returning $null if either the key
+# or the value does not exist.
+#
+# Measured on a real VM: when the key does not exist, Get-ItemProperty -Name
+# emits no object at all (suppressed here). But when the key DOES exist and
+# merely lacks this particular value -- e.g. Software\RegisteredApplications,
+# a key shared with every other installed app, right after our own value has
+# been removed from it by an uninstaller -- Get-ItemProperty still returns
+# the key object populated with everyone else's properties, just not this
+# one. Dereferencing a genuinely absent property with .$Name on that real
+# object throws under Set-StrictMode -Version Latest (line 86) instead of
+# returning $null, turning a legitimate "value is gone" state into a
+# script-ending error. Checking PSObject.Properties.Name first avoids that
+# without swallowing other errors: -ErrorAction SilentlyContinue only
+# suppresses the "not found" case, so a genuine access failure (e.g. a
+# permissions error) still surfaces as a terminating error via
+# $ErrorActionPreference = 'Stop' at the top of this script.
 function Get-RegValue {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
-    return (Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue).$Name
+    $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+    if (-not $item) { return $null }
+    if ($item.PSObject.Properties.Name -notcontains $Name) { return $null }
+    return $item.$Name
 }
 
 # Extracts the leading quoted path out of a command-line-shaped value, e.g.
@@ -174,9 +199,27 @@ function Get-IconPath {
     return $v
 }
 
+# Locates the Programs-and-Features uninstall entry for the given pass.
+# NSIS writes a literal "TermLab" subkey (checked under both HKCU and HKLM).
+# MSI writes a GUID-named subkey under one of several plausible roots, so
+# it is found by DisplayName instead of by assumed path -- returns $null,
+# a clear "not found", if no match turns up anywhere searched.
 function Get-UninstallEntryPath {
-    if (Test-Path "HKCU:\$UninstallSubKey") { return "HKCU:\$UninstallSubKey" }
-    if (Test-Path "HKLM:\$UninstallSubKey") { return "HKLM:\$UninstallSubKey" }
+    param([Parameter(Mandatory)][string]$PassName)
+
+    if ($PassName -eq 'NSIS') {
+        if (Test-Path "HKCU:\$UninstallSubKey") { return "HKCU:\$UninstallSubKey" }
+        if (Test-Path "HKLM:\$UninstallSubKey") { return "HKLM:\$UninstallSubKey" }
+        return $null
+    }
+
+    foreach ($root in $MsiUninstallSearchRoots) {
+        if (-not (Test-Path $root)) { continue }
+        $match = Get-ChildItem -Path $root -ErrorAction SilentlyContinue | Where-Object {
+            (Get-RegValue -Path $_.PSPath -Name 'DisplayName') -eq 'TermLab'
+        } | Select-Object -First 1
+        if ($match) { return "$root\$($match.PSChildName)" }
+    }
     return $null
 }
 
@@ -208,13 +251,13 @@ function Wait-UntilRegValueAbsent {
 }
 
 function Wait-UntilUninstallEntryAbsent {
-    param([int]$TimeoutSeconds = 30)
+    param([Parameter(Mandatory)][string]$PassName, [int]$TimeoutSeconds = 30)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        if (-not (Test-Path "HKCU:\$UninstallSubKey") -and -not (Test-Path "HKLM:\$UninstallSubKey")) { return $true }
+        if (-not (Get-UninstallEntryPath -PassName $PassName)) { return $true }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
-    return (-not (Test-Path "HKCU:\$UninstallSubKey") -and -not (Test-Path "HKLM:\$UninstallSubKey"))
+    return (-not (Get-UninstallEntryPath -PassName $PassName))
 }
 
 # =============================================================================
@@ -286,9 +329,13 @@ function Test-Registration {
     Assert-True ($registered -eq 'Software\Clients\Terminal\TermLab\Capabilities') `
         "[$PassName] $RegisteredAppsKey\TermLab points at the Capabilities key (got '$registered')"
 
-    $entryPath = Get-UninstallEntryPath
+    $entryPath = Get-UninstallEntryPath -PassName $PassName
     if (-not $entryPath) {
-        Assert-True $false "[$PassName] $UninstallSubKey exists (checked HKCU and HKLM)"
+        if ($PassName -eq 'NSIS') {
+            Assert-True $false "[$PassName] $UninstallSubKey exists (checked HKCU and HKLM)"
+        } else {
+            Assert-True $false "[$PassName] Programs-and-Features uninstall entry with DisplayName 'TermLab' exists (searched HKLM, HKLM\WOW6432Node, and HKCU)"
+        }
     } else {
         $hive = ($entryPath -split ':')[0]
         Write-Host "  ($PassName uninstall entry found under $hive)"
@@ -365,8 +412,8 @@ function Test-Cleanup {
     Assert-True (Test-Path "HKCU:\$RegisteredAppsKey") `
         "[$PassName] $RegisteredAppsKey key itself still exists (it is shared with every other installed app, so it must survive)"
 
-    $entryGone = Wait-UntilUninstallEntryAbsent -TimeoutSeconds 30
-    Assert-True $entryGone "[$PassName] $UninstallSubKey removed on uninstall (checked both hives)"
+    $entryGone = Wait-UntilUninstallEntryAbsent -PassName $PassName -TimeoutSeconds 30
+    Assert-True $entryGone "[$PassName] Programs-and-Features uninstall entry removed on uninstall"
 }
 
 # =============================================================================
@@ -383,7 +430,7 @@ function Invoke-NsisInstall {
 }
 
 function Invoke-NsisUninstall {
-    $entryPath = Get-UninstallEntryPath
+    $entryPath = Get-UninstallEntryPath -PassName 'NSIS'
     $exePath = $null
     if ($entryPath) {
         $uninstallString = Get-RegValue -Path $entryPath -Name 'UninstallString'

@@ -135,7 +135,14 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: ./scripts/build-windows.ps1
+        # A freshly provisioned runner can default to the Restricted
+        # execution policy, which refuses to load any .ps1 at all. Override
+        # it for this process only (not machine-wide) before invoking the
+        # script, rather than relying on windows-latest happening to allow
+        # scripts already.
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          ./scripts/build-windows.ps1
 
       - name: Extract version
         id: version

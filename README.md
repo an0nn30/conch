@@ -211,17 +211,22 @@ context menu and other Windows registration baked in), run the same script
 CI uses:
 
 ```powershell
-powershell -File scripts\build-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 ```
 
-That's the PowerShell 5.1 invocation, which works out of the box on stock
-Windows 10/11; use `pwsh scripts/build-windows.ps1` instead if you have
-PowerShell 7 installed. Either way it produces the setup.exe and MSI under
-`target\release\bundle\`, so a local build matches a release build exactly.
-To verify an installer actually registers (and cleans up) correctly:
+`-ExecutionPolicy Bypass` is needed because a freshly provisioned Windows
+machine defaults to the `Restricted` execution policy, which refuses to load
+any `.ps1` file at all, signed or not; the flag overrides that for this one
+process only and changes no persistent system setting. That's the
+PowerShell 5.1 invocation, which works out of the box on stock Windows
+10/11; use `pwsh -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
+instead if you have PowerShell 7 installed. Either way it produces the
+setup.exe and MSI under `target\release\bundle\`, so a local build matches a
+release build exactly. To verify an installer actually registers (and
+cleans up) correctly:
 
 ```powershell
-powershell -File scripts\tests\verify-windows-install.ps1
+powershell -ExecutionPolicy Bypass -File scripts\tests\verify-windows-install.ps1
 ```
 
 ## Keyboard Shortcuts

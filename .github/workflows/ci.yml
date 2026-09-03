@@ -94,7 +94,14 @@ jobs:
       # This is what catches a broken WiX fragment or NSIS hook at PR time.
       - name: Build and test
         shell: pwsh
-        run: ./scripts/build-windows.ps1 -SkipBundle -Configuration Debug
+        # A freshly provisioned runner can default to the Restricted
+        # execution policy, which refuses to load any .ps1 at all. Override
+        # it for this process only (not machine-wide) before invoking the
+        # script, rather than relying on windows-latest happening to allow
+        # scripts already.
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          ./scripts/build-windows.ps1 -SkipBundle -Configuration Debug
 
       - name: Clippy
         run: cargo clippy --all-targets
