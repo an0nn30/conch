@@ -129,9 +129,12 @@ if (-not $SkipBundle) {
 }
 
 # --- 2. Frontend vendor bundle -------------------------------------------
-# Tauri's beforeBuildCommand also runs this, so in the bundling path it runs
-# twice. That redundancy is deliberate: -SkipBundle never invokes Tauri, and
-# a missing bundle ships an editor that shows the "bundle missing" toast.
+# This is the ONLY place vendor assets get built before bundling: the bundle
+# invocations below override build.beforeBuildCommand to "" (required to keep
+# Tauri from re-running npm ci into the staged frontendDist copy and undoing
+# the staging), so Tauri's own beforeBuildCommand never fires in this script.
+# -SkipBundle still runs this step so `cargo run`/`cargo build` afterward
+# don't ship an editor that shows the "bundle missing" toast.
 $FrontendDir = Join-Path $RepoRoot 'crates\termlab_tauri\frontend'
 Invoke-Checked 'Install frontend dependencies' { npm --prefix $FrontendDir ci }
 Invoke-Checked 'Build frontend vendor bundles' { npm --prefix $FrontendDir run build:vendor }
@@ -140,7 +143,7 @@ Invoke-Checked 'Build frontend vendor bundles' { npm --prefix $FrontendDir run b
 $ClassesDir = Join-Path $RepoRoot 'java-sdk\build\classes'
 New-Item -ItemType Directory -Force -Path $ClassesDir | Out-Null
 $JavaSources = Get-ChildItem (Join-Path $RepoRoot 'java-sdk\src\termlab\plugin\*.java')
-if ($JavaSources.Count -eq 0) {
+if (-not $JavaSources) {
     throw 'no Java SDK sources found under java-sdk/src/termlab/plugin/'
 }
 Invoke-Checked 'Compile the Java Plugin SDK' { javac -d $ClassesDir $JavaSources.FullName }
