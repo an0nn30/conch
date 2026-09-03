@@ -74,7 +74,9 @@ fn find_ps1_files() -> Vec<PathBuf> {
                 if !is_ignored_dir(&name) {
                     stack.push(path);
                 }
-            } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ps1") {
+            } else if file_type.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some("ps1")
+            {
                 found.push(path);
             }
         }
@@ -91,8 +93,8 @@ fn display(path: &Path, repo_root: &Path) -> String {
 }
 
 fn assert_hygienic(path: &Path, repo_root: &Path) {
-    let bytes = std::fs::read(path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let rel = display(path, repo_root);
 
     // --- No non-ASCII bytes ------------------------------------------------
@@ -157,7 +159,10 @@ mod teeth {
     use std::io::Write;
 
     fn scratch_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("termlab-ps1-hygiene-teeth-{name}-{}.ps1", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "termlab-ps1-hygiene-teeth-{name}-{}.ps1",
+            std::process::id()
+        ))
     }
 
     fn write_scratch(path: &std::path::Path, contents: &[u8]) {
@@ -169,9 +174,13 @@ mod teeth {
     fn catches_a_non_ascii_byte() {
         let path = scratch_path("emdash");
         // "packaging \xe2\x80\x94 numeric-only" — a real em-dash (U+2014).
-        write_scratch(&path, "Write-Host 'packaging \u{2014} numeric-only'".as_bytes());
+        write_scratch(
+            &path,
+            "Write-Host 'packaging \u{2014} numeric-only'".as_bytes(),
+        );
 
-        let result = std::panic::catch_unwind(|| super::assert_hygienic(&path, &super::repo_root()));
+        let result =
+            std::panic::catch_unwind(|| super::assert_hygienic(&path, &super::repo_root()));
         std::fs::remove_file(&path).ok();
 
         assert!(
@@ -188,12 +197,10 @@ mod teeth {
     #[test]
     fn catches_a_backslash_escaped_quote() {
         let path = scratch_path("backslash-quote");
-        write_scratch(
-            &path,
-            b"throw \"could not find a \\\"thing\\\" here\"",
-        );
+        write_scratch(&path, b"throw \"could not find a \\\"thing\\\" here\"");
 
-        let result = std::panic::catch_unwind(|| super::assert_hygienic(&path, &super::repo_root()));
+        let result =
+            std::panic::catch_unwind(|| super::assert_hygienic(&path, &super::repo_root()));
         std::fs::remove_file(&path).ok();
 
         assert!(
@@ -215,7 +222,8 @@ mod teeth {
             b"Write-Host 'packaging - numeric-only' -ForegroundColor Cyan\nthrow 'no embedded quotes here'\n",
         );
 
-        let result = std::panic::catch_unwind(|| super::assert_hygienic(&path, &super::repo_root()));
+        let result =
+            std::panic::catch_unwind(|| super::assert_hygienic(&path, &super::repo_root()));
         std::fs::remove_file(&path).ok();
 
         assert!(

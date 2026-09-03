@@ -229,8 +229,7 @@ pub fn evaluate(args: &[String], cwd: &Path) -> CliDecision {
         if arg == WORKING_DIRECTORY_FLAG {
             match args_iter.next() {
                 Some(value) if !value.is_empty() => {
-                    working_directory =
-                        Some(normalize_path(strip_trailing_quote(value), cwd));
+                    working_directory = Some(normalize_path(strip_trailing_quote(value), cwd));
                 }
                 _ => {
                     return CliDecision::UsageError(format!(
@@ -907,7 +906,9 @@ mod tests {
         let expected = cwd.join("C:").to_string_lossy().into_owned();
         assert_eq!(
             evaluate(&args, cwd),
-            CliDecision::RunAppInDirectory { directory: expected },
+            CliDecision::RunAppInDirectory {
+                directory: expected
+            },
             "a trailing quote left by Windows argv parsing must be stripped, \
              not carried into the launch directory"
         );
@@ -932,17 +933,35 @@ mod tests {
     fn working_directory_trailing_backslash_without_a_quote_is_left_alone() {
         // Only a trailing double quote is stripped. A path that legitimately
         // ends in a backslash (a normal, uncorrupted Windows path, not one
-        // that went through the Explorer-verb quoting bug) must pass through
-        // untouched. Build the expected value with the same cwd.join used
-        // internally so the assertion holds regardless of host path rules.
+        // that went through the Explorer-verb quoting bug) must come out
+        // exactly as `normalize_path` alone would produce it -- the quote fix
+        // must add nothing on top.
+        //
+        // The expected value goes through `normalize_path` itself rather than
+        // a bare `cwd.join`: on Windows `Path::components()` drops a trailing
+        // separator, so `C:\Users\dustin\` normalizes to `C:\Users\dustin`,
+        // while `cwd.join` keeps the trailing `\`. A literal or join-based
+        // expectation passes on macOS (where `\` is not a separator) and fails
+        // on Windows -- which is what shipped and broke the Windows build.
         let cwd = Path::new("/tmp");
         let value = "C:\\Users\\dustin\\";
         let args = vec!["--working-directory".to_string(), value.to_string()];
-        let expected = cwd.join(value).to_string_lossy().into_owned();
+        let expected = normalize_path(value, cwd);
         assert_eq!(
             evaluate(&args, cwd),
-            CliDecision::RunAppInDirectory { directory: expected },
+            CliDecision::RunAppInDirectory {
+                directory: expected.clone()
+            },
             "a trailing backslash with no quote must not be altered by the fix"
+        );
+        // Deliberately NOT asserted: that the trailing- and non-trailing-
+        // backslash forms resolve identically. That is only true where `\`
+        // is a path separator (Windows); on macOS/Linux it is an ordinary
+        // character and the two are genuinely different paths. Asserting it
+        // here would simply move the platform trap from Windows to macOS.
+        assert!(
+            !expected.contains('"'),
+            "a normalized directory must never carry a quote character"
         );
     }
 }
