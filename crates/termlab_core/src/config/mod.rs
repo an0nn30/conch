@@ -6,24 +6,24 @@
 
 mod colors;
 mod editor;
-mod termlab;
 mod font;
 mod persistent;
 mod terminal;
+mod termlab;
 mod window;
 
 pub use colors::*;
 pub use editor::*;
-pub use termlab::*;
 pub use font::*;
 pub use persistent::*;
 pub use terminal::*;
+pub use termlab::*;
 pub use window::*;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -324,8 +324,7 @@ fn save_persistent_state_at(path: &Path, state: &PersistentState) -> Result<()> 
         fs::create_dir_all(dir)?;
     }
     let contents = toml::to_string_pretty(state).context("Failed to serialize state")?;
-    atomic_write(path, contents.as_bytes())
-        .context("Failed to write state.toml atomically")?;
+    atomic_write(path, contents.as_bytes()).context("Failed to write state.toml atomically")?;
     Ok(())
 }
 
@@ -538,7 +537,9 @@ mod tests {
         // content, never a mix of two.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shared.toml");
-        let payloads: Vec<String> = (0..8).map(|i| format!("{}\n", "x".repeat(37 + i))).collect();
+        let payloads: Vec<String> = (0..8)
+            .map(|i| format!("{}\n", "x".repeat(37 + i)))
+            .collect();
 
         let handles: Vec<_> = payloads
             .iter()
@@ -627,7 +628,10 @@ mod tests {
         update_persistent_state_at(&path, |_state| false).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(before, after, "mutator returning false must skip the save entirely");
+        assert_eq!(
+            before, after,
+            "mutator returning false must skip the save entirely"
+        );
     }
 
     #[test]

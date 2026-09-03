@@ -189,7 +189,12 @@ pub fn execute(
 /// "prod" and "prod (broken reference)" both showing up under the same
 /// "Skipped" heading with no distinction would leave a user unable to tell
 /// a deliberate skip from a tunnel the planner could never have resolved.
-fn collect_skipped(out: &mut Vec<String>, label: &str, status: ConflictStatus, action: &ItemAction) {
+fn collect_skipped(
+    out: &mut Vec<String>,
+    label: &str,
+    status: ConflictStatus,
+    action: &ItemAction,
+) {
     if !matches!(action, ItemAction::Skip) {
         return;
     }

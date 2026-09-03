@@ -680,7 +680,10 @@ mod tests {
             .expect("v1 settings without pipeline fields must deserialize");
         assert_eq!(parsed.pipeline_depth, 16);
         assert_eq!(parsed.pipeline_chunk_bytes, 262144);
-        assert_eq!(parsed.max_queued, 2_000, "older settings gain the default queue ceiling");
+        assert_eq!(
+            parsed.max_queued, 2_000,
+            "older settings gain the default queue ceiling"
+        );
     }
 
     #[test]
@@ -860,7 +863,15 @@ mod tests {
             "/srv/second.csv",
         );
 
-        assert_eq!(first_host, "local:/tmp/report.csv");
+        // `uses_windows_path_semantics` is `cfg!(windows) || …` by design, so a
+        // native Windows build normalizes every local path with Windows rules.
+        // Both forms are the correct output for their platform.
+        let expected = if cfg!(windows) {
+            r"local:\tmp\report.csv"
+        } else {
+            "local:/tmp/report.csv"
+        };
+        assert_eq!(first_host, expected);
         assert_eq!(second_host, first_host);
         assert_ne!(other_destination, first_host);
     }

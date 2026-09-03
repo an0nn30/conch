@@ -7,9 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use termlab_plugin_sdk::widgets::{PluginEvent, Widget};
 use mlua::prelude::*;
 use mlua::{HookTriggers, StdLib};
+use termlab_plugin_sdk::widgets::{PluginEvent, Widget};
 use tokio::sync::mpsc;
 
 use crate::HostApi;

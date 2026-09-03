@@ -1,7 +1,7 @@
 //! `ui.*` Lua table — widget sugar, layout containers, and dialogs.
 
-use termlab_plugin_sdk::widgets::*;
 use mlua::prelude::*;
+use termlab_plugin_sdk::widgets::*;
 
 use super::{with_acc, with_host_api};
 

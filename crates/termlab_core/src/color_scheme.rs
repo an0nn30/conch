@@ -917,7 +917,8 @@ white   = "#ffffff"
         let themes = list_themes();
         let count = themes.keys().filter(|k| *k == "TermLab Light").count();
         assert_eq!(
-            count, 1,
+            count,
+            1,
             "expected 'TermLab Light' to be discoverable exactly once, found: {:?}",
             themes.keys().collect::<Vec<_>>()
         );
@@ -928,7 +929,8 @@ white   = "#ffffff"
         let themes = list_themes();
         let count = themes.keys().filter(|k| *k == "TermLab Dark").count();
         assert_eq!(
-            count, 1,
+            count,
+            1,
             "expected 'TermLab Dark' to be discoverable exactly once, found: {:?}",
             themes.keys().collect::<Vec<_>>()
         );

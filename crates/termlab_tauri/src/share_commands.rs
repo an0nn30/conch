@@ -67,13 +67,12 @@ pub(crate) struct FsKeyReader;
 impl KeyReader for FsKeyReader {
     fn read_key(&self, path: &str) -> Result<termlab_share::export_planner::KeyBytes, String> {
         let expanded = termlab_remote::ssh::expand_tilde(path);
-        let private = zeroize::Zeroizing::new(std::fs::read(&expanded).map_err(|e| {
-            match e.kind() {
+        let private =
+            zeroize::Zeroizing::new(std::fs::read(&expanded).map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => format!("Key file not found: {path}"),
                 std::io::ErrorKind::PermissionDenied => format!("Can't read key file: {path}"),
                 _ => format!("Can't read key file: {path} ({e})"),
-            }
-        })?);
+            })?);
         if !looks_like_private_key(&private) {
             return Err(format!("File doesn't look like a private key: {path}"));
         }
@@ -128,7 +127,12 @@ struct ExportSelection {
 /// import side already got this right (`import_executor::execute`'s
 /// `servers_count`); this mirrors it for the export summary/preview.
 fn count_bundled_servers(bundle: &termlab_share::ShareBundle) -> usize {
-    bundle.servers.len() + bundle.folders.iter().map(|f| f.entries.len()).sum::<usize>()
+    bundle.servers.len()
+        + bundle
+            .folders
+            .iter()
+            .map(|f| f.entries.len())
+            .sum::<usize>()
 }
 
 /// Run the export planner against `selection` and return the resulting
@@ -682,7 +686,10 @@ fn action_allowed_for_status(status: ConflictStatus, action: &ItemAction) -> boo
         ConflictStatus::New => matches!(action, ItemAction::Add | ItemAction::Skip),
         ConflictStatus::SameId => matches!(action, ItemAction::Replace | ItemAction::Skip),
         ConflictStatus::LabelCollision => {
-            matches!(action, ItemAction::Add | ItemAction::Rename(_) | ItemAction::Skip)
+            matches!(
+                action,
+                ItemAction::Add | ItemAction::Rename(_) | ItemAction::Skip
+            )
         }
         ConflictStatus::ReferenceBroken => matches!(action, ItemAction::Skip),
     }
