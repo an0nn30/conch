@@ -23,6 +23,33 @@ fn read(name: &str) -> String {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
+fn crate_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn tauri_conf() -> serde_json::Value {
+    let path = crate_dir().join("tauri.conf.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()))
+}
+
+/// Every `Component Id` declared in the WiX fragment.
+fn wix_component_ids(text: &str) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("<Component ") && !trimmed.starts_with("<Component>") {
+            continue;
+        }
+        let id = attribute(trimmed, "Id")
+            .unwrap_or_else(|| panic!("<Component> without an Id attribute: {trimmed}"));
+        ids.insert(id);
+    }
+    ids
+}
+
 /// Pull the value of `name="..."` out of a single line of XML.
 fn attribute(line: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=\"");
@@ -184,5 +211,90 @@ fn both_files_register_the_complete_required_key_set() {
         missing_from_nsis.is_empty(),
         "installer-hooks.nsh is missing required keys: {missing_from_nsis:?}; \
          the corresponding feature would not exist in the setup.exe at all"
+    );
+}
+
+/// Everything above this line proves the two registration *sources* agree
+/// with each other, but neither reads `tauri.conf.json` — the config that
+/// actually wires those sources into the bundlers. Deleting
+/// `bundle.windows.wix.fragmentPaths`, `componentRefs`, or
+/// `nsis.installerHooks` from that file leaves both installers registering
+/// nothing while every test above still passes.
+#[test]
+fn tauri_conf_wires_the_wix_fragment_into_the_bundle() {
+    let conf = tauri_conf();
+    let fragment_paths = conf["bundle"]["windows"]["wix"]["fragmentPaths"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "tauri.conf.json bundle.windows.wix.fragmentPaths is missing or not an array; \
+                 without it registration.wxs is never compiled into the MSI at all"
+            )
+        });
+    let declares_registration_wxs = fragment_paths
+        .iter()
+        .filter_map(|v| v.as_str())
+        .any(|p| p.ends_with("registration.wxs"));
+    assert!(
+        declares_registration_wxs,
+        "tauri.conf.json bundle.windows.wix.fragmentPaths does not reference \
+         registration.wxs (got {fragment_paths:?}); the MSI would ship with no \
+         context menu, no default-app entry, and no App Paths key"
+    );
+}
+
+#[test]
+fn tauri_conf_wires_the_nsis_hooks_into_the_bundle() {
+    let conf = tauri_conf();
+    let installer_hooks = conf["bundle"]["windows"]["nsis"]["installerHooks"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "tauri.conf.json bundle.windows.nsis.installerHooks is missing or not a \
+                 string; without it installer-hooks.nsh is never compiled into the \
+                 setup.exe at all"
+            )
+        });
+    assert!(
+        installer_hooks.ends_with("installer-hooks.nsh"),
+        "tauri.conf.json bundle.windows.nsis.installerHooks does not point at \
+         installer-hooks.nsh (got '{installer_hooks}'); the setup.exe would ship with \
+         no context menu, no default-app entry, and no App Paths key"
+    );
+}
+
+#[test]
+fn every_wix_component_is_referenced_by_component_refs_and_vice_versa() {
+    let conf = tauri_conf();
+    let component_refs: BTreeSet<String> = conf["bundle"]["windows"]["wix"]["componentRefs"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "tauri.conf.json bundle.windows.wix.componentRefs is missing or not an \
+                 array; with none referenced, none of registration.wxs's components \
+                 would be included in the MSI"
+            )
+        })
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(String::from)
+        .collect();
+
+    let components = wix_component_ids(&read("registration.wxs"));
+
+    let declared_but_missing: Vec<_> = components.difference(&component_refs).collect();
+    assert!(
+        declared_but_missing.is_empty(),
+        "registration.wxs declares components with no matching \
+         componentRefs entry in tauri.conf.json: {declared_but_missing:?}; \
+         a <Component> not referenced there is silently dropped from the MSI"
+    );
+
+    let referenced_but_absent: Vec<_> = component_refs.difference(&components).collect();
+    assert!(
+        referenced_but_absent.is_empty(),
+        "tauri.conf.json's componentRefs names components that do not exist in \
+         registration.wxs: {referenced_but_absent:?}; the MSI bundle would fail \
+         to build"
     );
 }

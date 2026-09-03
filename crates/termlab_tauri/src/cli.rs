@@ -229,7 +229,8 @@ pub fn evaluate(args: &[String], cwd: &Path) -> CliDecision {
         if arg == WORKING_DIRECTORY_FLAG {
             match args_iter.next() {
                 Some(value) if !value.is_empty() => {
-                    working_directory = Some(normalize_path(value, cwd));
+                    working_directory =
+                        Some(normalize_path(strip_trailing_quote(value), cwd));
                 }
                 _ => {
                     return CliDecision::UsageError(format!(
@@ -245,7 +246,7 @@ pub fn evaluate(args: &[String], cwd: &Path) -> CliDecision {
                     "{WORKING_DIRECTORY_FLAG} requires a directory"
                 ));
             }
-            working_directory = Some(normalize_path(value, cwd));
+            working_directory = Some(normalize_path(strip_trailing_quote(value), cwd));
             continue;
         }
         if arg.starts_with("-psn_") {
@@ -272,6 +273,29 @@ pub fn evaluate(args: &[String], cwd: &Path) -> CliDecision {
         None if paths.is_empty() => CliDecision::RunApp,
         None => CliDecision::ForwardOrRun { paths },
     }
+}
+
+/// Strip a single trailing `"` from a `--working-directory` value.
+///
+/// The Explorer verb template quotes `%V` (see
+/// `packaging/windows/registration.wxs` and
+/// `packaging/windows/installer-hooks.nsh`): `"<exe>" --working-directory
+/// "%V"`. For a drive root (always for `Drive\shell`, and for
+/// `Directory\Background\shell` at a drive root), `%V` expands to `C:\`, so
+/// the quoted value is `"C:\"`. Windows command-line argv parsing treats a
+/// single backslash immediately before a closing quote as escaping that
+/// quote rather than ending the quoted section, so the backslash is
+/// consumed and this process receives the value `C:"` — not `C:\`. Left
+/// alone, that trailing quote becomes part of the path and the directory
+/// change silently fails (see `main.rs`'s `set_current_dir` warning).
+///
+/// A double quote can never legally appear in a Windows path, so stripping
+/// one trailing quote here is always safe, and makes this robust regardless
+/// of exactly what Windows hands over — rather than patching the `.wxs`/
+/// `.nsh` command strings, which are asserted byte-identical to each other
+/// by `windows_registration_parity.rs`.
+fn strip_trailing_quote(value: &str) -> &str {
+    value.strip_suffix('"').unwrap_or(value)
 }
 
 /// Resolve `p` against `cwd` if it's relative, then lexically clean `.` and
@@ -864,6 +888,61 @@ mod tests {
         assert!(
             HELP_TEXT.contains("--working-directory"),
             "the flag must be discoverable from --help"
+        );
+    }
+
+    // --- trailing-quote stripping (drive-root %V corruption) ----------------
+
+    #[test]
+    fn working_directory_strips_a_trailing_quote_left_by_a_corrupted_drive_root() {
+        // Explorer's "Open TermLab here" verb on a drive (or a background
+        // click at a drive root) expands %V to `C:\`, and Windows argv
+        // parsing eats the backslash immediately before the closing quote,
+        // so this process actually receives the value `C:"` rather than
+        // `C:\`. The fix must strip that stray quote before normalizing;
+        // compute the expected value the same way normalize_path would
+        // (cwd.join) rather than hardcoding platform-specific separators.
+        let cwd = Path::new("/tmp");
+        let args = vec!["--working-directory".to_string(), "C:\"".to_string()];
+        let expected = cwd.join("C:").to_string_lossy().into_owned();
+        assert_eq!(
+            evaluate(&args, cwd),
+            CliDecision::RunAppInDirectory { directory: expected },
+            "a trailing quote left by Windows argv parsing must be stripped, \
+             not carried into the launch directory"
+        );
+    }
+
+    #[test]
+    fn working_directory_normal_path_has_no_quote_to_strip() {
+        let args = vec![
+            "--working-directory".to_string(),
+            "/home/dustin/proj".to_string(),
+        ];
+        assert_eq!(
+            evaluate(&args, Path::new("/tmp")),
+            CliDecision::RunAppInDirectory {
+                directory: native("/home/dustin/proj"),
+            },
+            "an ordinary path with no trailing quote must be unaffected"
+        );
+    }
+
+    #[test]
+    fn working_directory_trailing_backslash_without_a_quote_is_left_alone() {
+        // Only a trailing double quote is stripped. A path that legitimately
+        // ends in a backslash (a normal, uncorrupted Windows path, not one
+        // that went through the Explorer-verb quoting bug) must pass through
+        // untouched. Build the expected value with the same cwd.join used
+        // internally so the assertion holds regardless of host path rules.
+        let cwd = Path::new("/tmp");
+        let value = "C:\\Users\\dustin\\";
+        let args = vec!["--working-directory".to_string(), value.to_string()];
+        let expected = cwd.join(value).to_string_lossy().into_owned();
+        assert_eq!(
+            evaluate(&args, cwd),
+            CliDecision::RunAppInDirectory { directory: expected },
+            "a trailing backslash with no quote must not be altered by the fix"
         );
     }
 }

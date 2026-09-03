@@ -309,7 +309,8 @@ function Test-Registration {
             $cmd = Get-RegValue -Path $cmdKey -Name '(default)'
             # -clike (case-sensitive): both are literal tokens a real CLI
             # parser / Explorer substitution engine treats case-sensitively.
-            # clap (the Rust arg parser this flag reaches) will not match
+            # termlab's hand-rolled CLI parser (crates/termlab_tauri/src/cli.rs,
+            # not clap or any other arg-parsing crate) will not match
             # "--Working-Directory", and Explorer's shell substitution only
             # recognizes uppercase "%V" for this "current directory" form --
             # lowercase "%v" does not resolve here. A regression to either
@@ -412,11 +413,20 @@ function Test-Launch {
     # this check ever fails with a clean, immediate exit code, suspect the
     # --working-directory wiring (crates/termlab_tauri, Tasks 2/3) before
     # suspecting the installer.
+    #
+    # This is NOT a functional check of --working-directory itself: a bad or
+    # unreachable directory is deliberately non-fatal (main.rs logs a warning
+    # and falls back to the inherited cwd), so this assertion passes whether
+    # or not the flag actually changed anything. A real functional check
+    # would need to inspect the launched process's working directory on an
+    # interactive desktop, which this headless/SSH context cannot do. The
+    # PASS below only means "termlab.exe starts and stays up when given
+    # this flag", not "the flag took effect".
     $proc = Start-Process -FilePath $appPath -ArgumentList '--working-directory', 'C:\Windows' -PassThru
     Start-Sleep -Seconds 8
     $alive = -not $proc.HasExited
     if ($alive) {
-        Assert-True $true "[$PassName] termlab --working-directory C:\Windows is still running after 8s"
+        Assert-True $true "[$PassName] termlab --working-directory C:\Windows starts and stays running after 8s"
         try {
             $proc.Kill()
             $proc.WaitForExit()
@@ -424,7 +434,7 @@ function Test-Launch {
             Write-Host "  (warning: could not stop the launched termlab.exe process: $($_.Exception.Message))" -ForegroundColor Yellow
         }
     } else {
-        Assert-True $false "[$PassName] termlab --working-directory C:\Windows is still running after 8s (it exited immediately with code $($proc.ExitCode))"
+        Assert-True $false "[$PassName] termlab --working-directory C:\Windows starts and stays running after 8s (it exited immediately with code $($proc.ExitCode))"
     }
 }
 

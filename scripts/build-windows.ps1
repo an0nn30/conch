@@ -297,11 +297,24 @@ Remove-Item -Force $NsisConfigPath, $MsiConfigPath -ErrorAction SilentlyContinue
 # Never assume architecture: the dev VM is ARM64 Windows on Apple Silicon
 # (artifacts named *_arm64-*) while CI's GitHub-hosted runner is x64
 # (*_x64-*). Glob instead of hardcoding either.
-$Setup = Get-ChildItem -Path (Join-Path $BundleRoot 'nsis') -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-$Msi   = Get-ChildItem -Path (Join-Path $BundleRoot 'msi')  -Filter '*.msi'       -ErrorAction SilentlyContinue | Select-Object -First 1
+#
+# Invoke-Bundle deliberately swallows a non-zero `cargo tauri build` exit
+# (a signing-only failure can still leave a good installer on disk), which
+# means a genuine compile/bundle failure is otherwise silent here too: with
+# no freshness check, a stale installer left over from an earlier successful
+# run would still match the glob below and get reported as this run's
+# output. Require LastWriteTime -ge $BuildStartTime, the same guard already
+# used for .sig freshness further down, so only an artifact this invocation
+# actually produced can count.
+$Setup = Get-ChildItem -Path (Join-Path $BundleRoot 'nsis') -Filter '*-setup.exe' -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -ge $BuildStartTime } |
+    Select-Object -First 1
+$Msi   = Get-ChildItem -Path (Join-Path $BundleRoot 'msi')  -Filter '*.msi'       -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -ge $BuildStartTime } |
+    Select-Object -First 1
 
-if (-not $Setup) { throw "no NSIS setup.exe under $BundleRoot\nsis  -  the bundler reported success but produced nothing" }
-if (-not $Msi)   { throw "no MSI under $BundleRoot\msi  -  the bundler reported success but produced nothing" }
+if (-not $Setup) { throw "no NSIS setup.exe under $BundleRoot\nsis written since this build started ($BuildStartTime)  -  either the bundler produced nothing, or only a stale installer from an earlier run is present, and that does not count as success" }
+if (-not $Msi)   { throw "no MSI under $BundleRoot\msi written since this build started ($BuildStartTime)  -  either the bundler produced nothing, or only a stale installer from an earlier run is present, and that does not count as success" }
 
 # A truncated or stub installer is worse than a missing one, because it looks
 # like a successful build. TermLab's real installers are tens of megabytes.
@@ -348,3 +361,11 @@ Write-Host "  $($Msi.Name)  ($([math]::Round($Msi.Length / 1MB, 1)) MB)"
 if ($SetupSig) { Write-Host "  $($SetupSig.Name)" }
 if ($MsiSig)   { Write-Host "  $($MsiSig.Name)" }
 Write-Host "  copied to $OutPath"
+
+# $LASTEXITCODE can still hold cargo tauri build's non-zero exit from
+# Invoke-Bundle (tolerated above -- a signing-only failure can leave a good
+# installer on disk, and that has just been verified). GitHub Actions' pwsh
+# wrapper appends `exit $LASTEXITCODE` after this script returns, so without
+# an explicit success exit here, that tolerated, already-verified failure
+# would fail the release step anyway.
+exit 0

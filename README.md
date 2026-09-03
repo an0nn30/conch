@@ -113,9 +113,12 @@ See the **[VS Code extension](editors/vscode/)** or **[Neovim definitions](edito
 Download the latest release for your platform from the [Releases page](https://github.com/an0nn30/conch/releases).
 
 **Windows:** grab `TermLab_<version>_x64-setup.exe` (or the `.msi`). CI only
-builds x64; on Windows on ARM the setup.exe still runs fine under emulation,
-but there's no native ARM64 build yet. The installer is per-user and needs no
-administrator prompt — it installs to `%LOCALAPPDATA%\TermLab`.
+builds x64; native ARM64 builds aren't available yet, and running the x64
+setup.exe under Windows on ARM emulation hasn't been tested. The setup.exe is
+per-user and needs no administrator prompt — it installs to
+`%LOCALAPPDATA%\TermLab`. The MSI has no such scope override and installs
+per-machine instead: expect a UAC prompt, and its uninstall entry lives under
+`HKLM\WOW6432Node`, not per-user.
 
 The installer registers TermLab with Windows:
 
@@ -224,9 +227,12 @@ process only and changes no persistent system setting. That's the
 PowerShell 5.1 invocation, which works out of the box on stock Windows
 10/11; use `pwsh -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
 instead if you have PowerShell 7 installed. Either way it produces the
-setup.exe and MSI under `target\release\bundle\`, so a local build matches a
-release build exactly. To verify an installer actually registers (and
-cleans up) correctly:
+setup.exe and MSI under `target\release\bundle\`, built by the same script
+and from the same registration sources CI uses. It isn't byte-identical to
+a CI release build, though: without a signing key configured locally there's
+no `.sig` update-manifest signature, and the artifacts are built for
+whatever architecture the local machine is (CI only produces x64). To verify
+an installer actually registers (and cleans up) correctly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\tests\verify-windows-install.ps1

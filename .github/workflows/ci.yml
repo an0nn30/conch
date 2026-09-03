@@ -90,8 +90,14 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      # Same script the release job and the dev VM run, minus the bundling.
-      # This is what catches a broken WiX fragment or NSIS hook at PR time.
+      # Same script the release job and the dev VM run, minus the bundling
+      # (-SkipBundle): it compiles termlab_tauri and runs `cargo test`,
+      # which includes windows_registration_parity.rs's text-level checks on
+      # registration.wxs / installer-hooks.nsh / tauri.conf.json. It does
+      # NOT invoke WiX or NSIS, so nothing here actually compiles either
+      # file -- a syntax error only WiX's or NSIS's own compiler would catch
+      # (as opposed to the parity test's line-based parsing) would slip
+      # through PR CI and surface only in the release job's real bundle step.
       - name: Build and test
         shell: pwsh
         # A freshly provisioned runner can default to the Restricted
