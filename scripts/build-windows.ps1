@@ -31,12 +31,12 @@
     developer's real `node_modules` is never touched.
 
     The workspace version (3.0.0-rc.2 as of this writing) also fails MSI
-    packaging outright — MSI's ProductVersion must be numeric-only — while
+    packaging outright  -  MSI's ProductVersion must be numeric-only  -  while
     NSIS accepts it verbatim. So bundling happens in two separate
     `cargo tauri build` invocations: one for NSIS at the real version (so the
     updater-facing `TermLab_<version>_<arch>-setup.exe` name never changes),
     and one for MSI with a numeric-only `version` override (so its filename
-    reads `3.0.0` where the setup.exe reads `3.0.0-rc.2` — inherent to MSI,
+    reads `3.0.0` where the setup.exe reads `3.0.0-rc.2`  -  inherent to MSI,
     not a defect).
 
 .PARAMETER SkipTests
@@ -195,7 +195,7 @@ Get-ChildItem -Path $FrontendDir -Force |
         Copy-Item -Path $_.FullName -Destination (Join-Path $StagedFrontendDist $_.Name) -Recurse -Force
     }
 if (-not (Test-Path (Join-Path $StagedFrontendDist 'index.html'))) {
-    throw "staged frontendDist $StagedFrontendDist has no index.html — the staging copy is broken"
+    throw "staged frontendDist $StagedFrontendDist has no index.html  -  the staging copy is broken"
 }
 
 # --- 5b. Signing ------------------------------------------------------------
@@ -208,9 +208,9 @@ if (-not (Test-Path (Join-Path $StagedFrontendDist 'index.html'))) {
 # TAURI_SIGNING_PRIVATE_KEY) still gets the .sig files release.yml uploads.
 $HasSigningKey = [bool]$env:TAURI_SIGNING_PRIVATE_KEY
 if ($HasSigningKey) {
-    Write-Host '==> TAURI_SIGNING_PRIVATE_KEY is set — updater .sig files will be produced' -ForegroundColor Cyan
+    Write-Host '==> TAURI_SIGNING_PRIVATE_KEY is set  -  updater .sig files will be produced' -ForegroundColor Cyan
 } else {
-    Write-Host '==> No TAURI_SIGNING_PRIVATE_KEY in the environment — disabling updater artifacts for this build' -ForegroundColor Yellow
+    Write-Host '==> No TAURI_SIGNING_PRIVATE_KEY in the environment  -  disabling updater artifacts for this build' -ForegroundColor Yellow
 }
 
 # Runs one `cargo tauri build --config <file>` invocation. A non-zero exit
@@ -264,7 +264,7 @@ Invoke-Bundle -What 'Bundle NSIS installer' -ConfigPath $NsisConfigPath
 # never modified.
 $CargoVersion = (Select-String -Path (Join-Path $RepoRoot 'Cargo.toml') -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 if (-not $CargoVersion) {
-    throw "could not find a 'version = \"...\"' line in Cargo.toml"
+    throw 'could not find a version line (version = "...") in Cargo.toml'
 }
 $NumericVersion = ($CargoVersion -split '-')[0]
 Write-Host "==> Cargo version $CargoVersion, MSI ProductVersion $NumericVersion" -ForegroundColor Cyan
@@ -289,15 +289,15 @@ $BundleRoot = Join-Path $RepoRoot 'target\release\bundle'
 $Setup = Get-ChildItem -Path (Join-Path $BundleRoot 'nsis') -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
 $Msi   = Get-ChildItem -Path (Join-Path $BundleRoot 'msi')  -Filter '*.msi'       -ErrorAction SilentlyContinue | Select-Object -First 1
 
-if (-not $Setup) { throw "no NSIS setup.exe under $BundleRoot\nsis — the bundler reported success but produced nothing" }
-if (-not $Msi)   { throw "no MSI under $BundleRoot\msi — the bundler reported success but produced nothing" }
+if (-not $Setup) { throw "no NSIS setup.exe under $BundleRoot\nsis  -  the bundler reported success but produced nothing" }
+if (-not $Msi)   { throw "no MSI under $BundleRoot\msi  -  the bundler reported success but produced nothing" }
 
 # A truncated or stub installer is worse than a missing one, because it looks
 # like a successful build. TermLab's real installers are tens of megabytes.
 $MinBytes = 5MB
 foreach ($artifact in @($Setup, $Msi)) {
     if ($artifact.Length -lt $MinBytes) {
-        throw "$($artifact.Name) is only $($artifact.Length) bytes, well under the $MinBytes floor — treating as a failed build"
+        throw "$($artifact.Name) is only $($artifact.Length) bytes, well under the $MinBytes floor  -  treating as a failed build"
     }
 }
 
@@ -307,7 +307,7 @@ Copy-Item $Setup.FullName -Destination $OutPath -Force
 Copy-Item $Msi.FullName   -Destination $OutPath -Force
 
 # Updater .sig files, when produced, ride along next to their installer and
-# release.yml uploads them too — copy them if present.
+# release.yml uploads them too  -  copy them if present.
 $SetupSig = Get-Item ($Setup.FullName + '.sig') -ErrorAction SilentlyContinue
 $MsiSig   = Get-Item ($Msi.FullName + '.sig')   -ErrorAction SilentlyContinue
 if ($SetupSig) { Copy-Item $SetupSig.FullName -Destination $OutPath -Force }
