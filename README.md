@@ -126,7 +126,7 @@ The installer registers TermLab with Windows:
 
 Uninstalling removes all of these.
 
-Two current limitations:
+Three current limitations:
 
 - On Windows 11 the context-menu entry is under **"Show more options"**
   (or `Shift`+`F10`), not the top-level menu. A top-level entry requires a
@@ -136,6 +136,9 @@ Two current limitations:
   dropdown. That setting requires implementing ConPTY handoff
   (`ITerminalHandoff3`), which is separate from the default-app registration
   above.
+- An MSI-installed TermLab shows no icon next to its entry in Add/Remove
+  Programs (the setup.exe's entry does), since Tauri's WiX template doesn't
+  set an `ARPPRODUCTICON`.
 
 One filename quirk: at a pre-release version like the current `3.0.0-rc.2`,
 the MSI can't carry the `-rc.2` suffix — Windows Installer requires
