@@ -227,20 +227,43 @@ function Test-Registration {
         $key = "HKCU:\$root"
         Assert-True (Test-Path $key) "[$PassName] $root exists"
         if (Test-Path $key) {
+            # -ceq (case-sensitive): MUIVerb is a literal display string the
+            # installers write byte-for-byte ("Open TermLab here"). A
+            # regression to different casing is a real, visible defect the
+            # default case-insensitive -eq would silently miss.
             $label = Get-RegValue -Path $key -Name 'MUIVerb'
-            Assert-True ($label -eq 'Open TermLab here') "[$PassName] $root MUIVerb is 'Open TermLab here' (got '$label')"
+            Assert-True ($label -ceq 'Open TermLab here') "[$PassName] $root MUIVerb is exactly 'Open TermLab here' (got '$label')"
+
+            # Icon is written alongside MUIVerb on this same key (not on
+            # \command). A broken/missing icon path would otherwise go
+            # undetected -- Get-IconPath strips the optional quotes/",N"
+            # suffix this value could carry, though the source .wxs/.nsh
+            # write it as a bare path.
+            $icon = Get-RegValue -Path $key -Name 'Icon'
+            $iconPath = Get-IconPath $icon
+            Assert-True ([bool]$iconPath -and (Test-Path $iconPath)) "[$PassName] $root Icon target exists on disk (got '$icon')"
         }
 
         $cmdKey = "HKCU:\$root\command"
         Assert-True (Test-Path $cmdKey) "[$PassName] $root\command exists"
         if (Test-Path $cmdKey) {
             $cmd = Get-RegValue -Path $cmdKey -Name '(default)'
-            Assert-True ($cmd -like '*--working-directory*') "[$PassName] $root command passes --working-directory (got '$cmd')"
-            Assert-True ($cmd -like '*%V*') "[$PassName] $root command uses capital %V (got '$cmd')"
+            # -clike (case-sensitive): both are literal tokens a real CLI
+            # parser / Explorer substitution engine treats case-sensitively.
+            # clap (the Rust arg parser this flag reaches) will not match
+            # "--Working-Directory", and Explorer's shell substitution only
+            # recognizes uppercase "%V" for this "current directory" form --
+            # lowercase "%v" does not resolve here. A regression to either
+            # wrong case is a real functional break, not cosmetic, so the
+            # default case-insensitive -like would provide false assurance.
+            Assert-True ($cmd -clike '*--working-directory*') "[$PassName] $root command passes --working-directory (got '$cmd')"
+            Assert-True ($cmd -clike '*%V*') "[$PassName] $root command uses capital %V (got '$cmd')"
 
             # This is the assertion that catches a wrong install path or a
             # renamed binary: the command must point at a file that actually
             # exists on disk right now, not just look plausible as a string.
+            # (Case-insensitive Test-Path is correct here -- Windows paths
+            # are not case-sensitive.)
             $exe = Get-QuotedLeadingPath $cmd
             if ($exe) {
                 Assert-True (Test-Path $exe) "[$PassName] $root command target exists on disk: $exe"
@@ -254,6 +277,11 @@ function Test-Registration {
         Assert-True (Test-Path "HKCU:\$key") "[$PassName] $key exists"
     }
 
+    # -eq (deliberately case-insensitive): this value is itself a registry
+    # key path, and the Windows registry treats key/value names -- and any
+    # path segment referencing one -- case-insensitively. A casing difference
+    # here would still resolve to the exact same Capabilities key, so it is
+    # not a real regression the way the MUIVerb/%V/Publisher checks are.
     $registered = Get-RegValue -Path "HKCU:\$RegisteredAppsKey" -Name 'TermLab'
     Assert-True ($registered -eq 'Software\Clients\Terminal\TermLab\Capabilities') `
         "[$PassName] $RegisteredAppsKey\TermLab points at the Capabilities key (got '$registered')"
@@ -280,8 +308,12 @@ function Test-Registration {
             "[$PassName] uninstall entry has an UninstallString (got '$uninstallString')"
         Assert-True ([bool]$displayVersion) `
             "[$PassName] uninstall entry has a DisplayVersion (got '$displayVersion')"
-        Assert-True ($publisher -eq 'termlab') `
-            "[$PassName] uninstall entry Publisher is 'termlab' (got '$publisher')"
+        # -ceq (case-sensitive): the measured, required value is lowercase
+        # "termlab", specifically NOT "TermLab" or "an0nn30" -- exactly the
+        # kind of casing regression the default case-insensitive -eq would
+        # let through unnoticed.
+        Assert-True ($publisher -ceq 'termlab') `
+            "[$PassName] uninstall entry Publisher is exactly 'termlab' (got '$publisher')"
     }
 }
 
