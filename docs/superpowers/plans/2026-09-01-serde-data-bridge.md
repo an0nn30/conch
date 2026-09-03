@@ -1,5 +1,16 @@
 # Serde Data Bridge Implementation Plan
 
+> **Status: executed and merged in #108.** Kept as the record of how step 1 of
+> the v2 core was built. The unchecked boxes below are the plan as written, not
+> outstanding work.
+>
+> Two things diverged from the plan during execution, both corrected in the
+> spec: the task briefs predicted their new tests would fail before
+> implementation, but those tests call the bridge directly and pass as soon as
+> it exists — the real red signal was the compile error after deleting each old
+> converter. And a fourth converter, `set_lua_table_from_json_map` in
+> `session.rs`, was not in the original spec.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the four hand-rolled Lua↔JSON converters in `termlab_plugin` with a single serde-backed bridge, removing the Lua-source-codegen path that corrupts event delivery.

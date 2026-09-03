@@ -1,6 +1,6 @@
 # Lua Plugin API v2 — Core Design
 
-**Status:** approved design, not yet implemented
+**Status:** approved; step 1 of 6 implemented (see Sequencing)
 **Date:** 2026-09-01
 **Scope:** the plugin core — rendering, data bridge, events, packaging, config
 
@@ -134,8 +134,8 @@ but becomes a deliberate "focus this on open" rather than damage control.
 
 Reconciliation lives in JS because it owns DOM nodes. That requires a JS test
 harness, which the repo did not have; **vitest + jsdom** were added in
-`fix/plugin-widget-html-xss`. This work depends on that branch landing first —
-it also removes the `html` widget's sanitizer along with the widget itself.
+`fix/plugin-widget-html-xss` (merged in #107). Removing the `html` widget in
+the widget-schema step also removes that branch's sanitizer along with it.
 
 ### Removed
 
@@ -151,9 +151,14 @@ The widget accumulator and all `ui.panel_*` functions, `render_view`,
 
 **Data** — bus payloads, config values, service args and results, dialog
 payloads — goes through mlua's serde integration in both directions. This
-deletes all three hand-rolled converters: `json_value_to_lua_literal` in
-`runner.rs` (the injection vector) and `json_to_lua_value` / `lua_value_to_json`
-in `ui.rs`.
+deletes all four hand-rolled converters: `json_value_to_lua_literal` in
+`runner.rs` (the injection vector), `json_to_lua_value` / `lua_value_to_json`
+in `ui.rs`, and `set_lua_table_from_json_map` in `session.rs`.
+
+The fourth was found during planning, not when this spec was written. It
+copied only strings, booleans and numbers, so nested objects and arrays were
+silently dropped from `session.current()` and `session.exec_active()` — a data
+loss bug nobody had noticed.
 
 **Widgets** use a typed walker, because they carry Lua functions that serde
 cannot represent. `ui.button{…}` returns a table tagged `__widget = "button"`;
@@ -425,12 +430,18 @@ with no GUI.
 Six pieces, in dependency order. Each is independently reviewable and leaves the
 build green.
 
-1. Data bridge (serde) — closes the injection bug, unblocks everything else
+1. ~~Data bridge (serde)~~ — **done**, merged in #108. Plan:
+   `docs/superpowers/plans/2026-09-01-serde-data-bridge.md`
 2. Widget schema + walker — new constructors, deletions, typed errors
 3. Render loop + reconciler — invalidation, diffing, callback registry
 4. Events + timers — `host_events` module, capability gates, `host.tick` removal
 5. Packaging — manifest, directory discovery, scoped `require`
 6. Migration — in-repo plugins, editors, docs sweep
+
+Carried out of step 1 and still open: `handle_query` (`runner.rs`) hands
+`on_query` a hand-serialized JSON **string** and silently discards a malformed
+reply with `serde_json::from_str(&result).ok()`. It is the last hand-rolled
+JSON edge in the Lua runtime and belongs with the services work in step 4.
 
 This is a substantial build. Whether it lands as one long-lived branch or a
 sequence of six is a delivery decision to make before implementation starts;
