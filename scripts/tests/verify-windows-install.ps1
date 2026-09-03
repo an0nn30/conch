@@ -109,6 +109,19 @@ $OtherKeys = @(
 $AllCustomKeys = $ContextMenuRoots + $OtherKeys
 $RegisteredAppsKey = 'Software\RegisteredApplications'
 
+# The frontend-embedding regression this script failed to catch once
+# already: an installed build whose webview shows a bare `file://`
+# directory listing instead of the app UI still registers every key above
+# correctly and still keeps a process alive for 8 seconds (see Test-Launch's
+# own notes on why it cannot check for a painted window). See the matching,
+# longer explanation on the marker check in scripts/build-windows.ps1 (step
+# 6a) for why this is a file PATH and not JS source text (tauri's default
+# "compression" feature is active here, so brotli-compressed file contents
+# do not survive as a raw substring -- only each embedded asset's literal
+# path key does, per tauri-codegen's phf_map! codegen). Kept in sync with
+# that script by hand; if the marker there ever changes, change it here too.
+$FrontendMarker = 'features/editor/open-path-routing.js'
+
 # The standard per-user "Programs and Features" uninstall entry. This is
 # written by the bundler itself (NSIS/WiX boilerplate), not by our hooks.
 #
@@ -395,6 +408,31 @@ function Test-Registration {
     }
 }
 
+# Cheap, headless, and independent of Test-Launch's process-alive check
+# (which cannot tell a painted UI from a directory listing -- see its own
+# notes): reads the installed termlab.exe straight off disk, already
+# decompressed by the installer, and looks for $FrontendMarker as a raw
+# byte sequence. Absence means the frontend was never embedded into the
+# binary in the first place, which is a hard failure, not a warning.
+function Test-FrontendEmbedded {
+    param([Parameter(Mandatory)][string]$PassName)
+
+    $appPath = Get-RegValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe' -Name '(default)'
+    if (-not $appPath -or -not (Test-Path $appPath)) {
+        Assert-True $false "[$PassName] frontend embedding check: App Paths entry points at a real file (got '$appPath')"
+        return
+    }
+
+    # ISO-8859-1 (Latin-1) maps every byte 0-255 to one char with no
+    # substitution, so an ASCII marker's bytes survive the round-trip
+    # unchanged and a plain substring search finds it wherever it sits
+    # inside this mostly-binary file.
+    $bytes = [System.IO.File]::ReadAllBytes($appPath)
+    $text = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($bytes)
+    Assert-True $text.Contains($FrontendMarker) `
+        "[$PassName] installed termlab.exe contains frontend marker '$FrontendMarker' (frontend assets are embedded, not a bare file:// listing)"
+}
+
 function Test-Launch {
     param([Parameter(Mandatory)][string]$PassName)
 
@@ -516,6 +554,9 @@ function Invoke-VerificationPass {
 
     Write-Host "`n-- Install --" -ForegroundColor Cyan
     & $InstallAction
+
+    Write-Host "`n-- Frontend assets --" -ForegroundColor Cyan
+    Test-FrontendEmbedded -PassName $PassName
 
     Write-Host "`n-- Registration --" -ForegroundColor Cyan
     Test-Registration -PassName $PassName

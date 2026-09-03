@@ -198,6 +198,58 @@ if (-not (Test-Path (Join-Path $StagedFrontendDist 'index.html'))) {
     throw "staged frontendDist $StagedFrontendDist has no index.html  -  the staging copy is broken"
 }
 
+# The value handed to `build.frontendDist` in the --config payloads below
+# MUST be this RELATIVE path, never $StagedFrontendDist (absolute). This bit
+# a real shipped release once, so it gets its own variable instead of being
+# folded into $StagedFrontendDist, plus this explanation of the exact
+# mechanism (confirmed by reading tauri-utils 2.8.3 / tauri-codegen 2.5.5
+# source and reproducing it with the `url` crate directly, not guessed):
+#
+# `build.frontendDist` deserializes into tauri_utils::config::FrontendDist,
+# an untagged enum tried in THIS declared order: Url(url::Url), then
+# Directory(PathBuf), then Files(Vec<PathBuf>). A Windows absolute path
+# that starts with a drive letter, e.g.
+# 'C:\repo\crates\termlab_tauri\frontend-dist', is NOT rejected by
+# url::Url::parse -- verified directly: it parses successfully as an
+# opaque URL with scheme "c" (cannot-be-a-base, same class as
+# "mailto:..."), because a single letter is syntactically a valid URL
+# scheme. Serde's untagged matching takes the FIRST variant that parses
+# successfully, so an absolute Windows frontendDist silently becomes
+# FrontendDist::Url(<mangled "c:..." URL>), never FrontendDist::Directory,
+# with no error and no warning anywhere in the pipeline. Two things follow
+# purely from that mis-typing, both in tauri's own source: (1)
+# tauri-codegen's context.rs matches `FrontendDist::Url(_) =>
+# Default::default()` for the embedded assets -- nothing gets embedded,
+# at all; (2) tauri's manager/mod.rs get_app_url() matches
+# `Some(FrontendDist::Url(url)) => Some(url)` -- the window's start URL
+# becomes that literal mangled "c:\repo\...\frontend-dist" value instead
+# of the correct `tauri://localhost`/`https://tauri.localhost` custom
+# protocol. Windows then resolves that value as the literal filesystem
+# path, and the webview's Chromium engine renders its own built-in
+# directory-listing page for it -- exactly the "Index of C:\Users\..."
+# title from the shipped bug. cargo tauri build itself still exits 0
+# through all of this: none of it is an error, just a silent wrong turn
+# at deserialization.
+#
+# A RELATIVE value never hits this trap: url::Url::parse on a bare
+# 'frontend-dist' fails outright ("relative URL without a base"), so
+# serde's untagged matching correctly falls through to
+# FrontendDist::Directory('frontend-dist'). That Directory case is
+# resolved as `config_parent.join(path)`, where config_parent is the
+# directory containing tauri.conf.json (crates\termlab_tauri) -- this
+# resolution is anchored to tauri.conf.json's own location, not to this
+# script's $PWD (repo root) and not affected by beforeBuildCommand being
+# overridden to "" for these invocations (that setting only controls
+# whether a shell hook runs, never how frontendDist is resolved). Since
+# crates\termlab_tauri is exactly $StagedFrontendDist's parent,
+# 'frontend-dist' resolves to that same staged directory -- so this is a
+# pure string-form fix, not a location change. Do not "simplify" this
+# back to $StagedFrontendDist, and do not "fix" it by using any other
+# absolute path (a UNC path or a Unix-style absolute path would dodge
+# this specific drive-letter collision but there is no reason to use an
+# absolute path here at all).
+$FrontendDistConfigValue = 'frontend-dist'
+
 # --- 5b. Signing ------------------------------------------------------------
 # createUpdaterArtifacts: true (set in tauri.conf.json, unconditionally, for
 # CI's sake) asks the bundler to also emit a signed .sig update manifest. A
@@ -263,7 +315,7 @@ if (-not $HasSigningKey) {
 # it; the auto-updater depends on that name never changing.
 Write-JsonConfig -Path $NsisConfigPath -Object @{
     build  = @{
-        frontendDist       = $StagedFrontendDist
+        frontendDist       = $FrontendDistConfigValue
         beforeBuildCommand = ''
     }
     bundle = $NsisBundleConfig
@@ -284,7 +336,7 @@ Write-Host "==> Cargo version $CargoVersion, MSI ProductVersion $NumericVersion"
 Write-JsonConfig -Path $MsiConfigPath -Object @{
     version = $NumericVersion
     build   = @{
-        frontendDist       = $StagedFrontendDist
+        frontendDist       = $FrontendDistConfigValue
         beforeBuildCommand = ''
     }
     bundle  = $MsiBundleConfig
@@ -318,12 +370,93 @@ if (-not $Msi)   { throw "no MSI under $BundleRoot\msi written since this build 
 
 # A truncated or stub installer is worse than a missing one, because it looks
 # like a successful build. TermLab's real installers are tens of megabytes.
+# This is a coarse tripwire only, NOT the check that catches a wrong
+# frontendDist -- see the marker check right below, which is the real test.
 $MinBytes = 5MB
 foreach ($artifact in @($Setup, $Msi)) {
     if ($artifact.Length -lt $MinBytes) {
         throw "$($artifact.Name) is only $($artifact.Length) bytes, well under the $MinBytes floor  -  treating as a failed build"
     }
 }
+
+# --- 6a. Verify the frontend was actually embedded ------------------------
+# The regression this guards against shipped once already: an ABSOLUTE
+# build.frontendDist (see the long comment on $FrontendDistConfigValue
+# above) makes Tauri skip embedding the frontend into the binary entirely,
+# and nothing else in this script would have noticed. cargo tauri build
+# still exits 0, both installers still land on disk, and both are still
+# comfortably over the $MinBytes floor above (NSIS/WiX boilerplate plus the
+# WebView2 loader is itself several MB) -- the missing frontend is only a
+# few MB out of tens, not enough to trip a size floor without making that
+# floor brittle. The installed app still launches and stays running; it
+# just shows a bare `file://` directory listing instead of the UI. A size
+# check alone cannot tell "frontend embedded" from "frontend missing" here,
+# which is why this checks for actual frontend content, not just bytes.
+#
+# The check: read the compiled termlab.exe -- BEFORE NSIS/WiX compress it
+# into an installer, since NSIS's LZMA and the MSI's cabinet compression
+# would hide a plain-text marker from a raw byte search of the installer
+# itself -- and look for a string that only exists in the frontend source.
+#
+# Marker choice, and why it is a file PATH rather than JS source text:
+# termlab_tauri's `tauri = { version = "2", features = [] }` in Cargo.toml
+# does NOT set `default-features = false`, so tauri's default feature set
+# -- which includes "compression" (see tauri 2.10.3's own Cargo.toml
+# [features] default list) -- is still active. tauri-codegen therefore
+# brotli-compresses every embedded FILE'S CONTENTS at build time
+# (crates/tauri-codegen-2.5.5/src/embedded_assets.rs, compress_file, gated
+# on `cfg(feature = "compression")`), so a plain-text identifier from
+# inside a .js file's body (e.g. a variable name) does NOT survive into
+# termlab.exe as a raw substring -- this was verified directly: brotli-
+# compressing crates/termlab_tauri/frontend/app/features/editor/
+# open-path-routing.js at quality 2, 9, and 11 never reproduces the
+# variable name `termlabOpenPathRouting` in the compressed bytes.
+#
+# What DOES survive uncompressed is each embedded asset's KEY -- its
+# repo-relative path, e.g. "app/features/editor/open-path-routing.js" --
+# because tauri-codegen's `ToTokens` impl for `EmbeddedAssets` (same file,
+# `to_tokens`) emits the key as a literal `&str` in the generated
+# `phf::phf_map! { #key => ... }` source, with no `cfg(feature =
+# "compression")` guard anywhere near that emission. `phf::Map` (phf
+# 0.11.3's src/map.rs) stores `entries: &'static [(K, V)]`, i.e. the actual
+# key strings, not just a hash of them, so this literal path string is
+# live, referenced data in the final binary, not a compile-time-only
+# artifact rustc could discard. Only the bytes AFTER that key (the
+# brotli-compressed file body, reached via `include_bytes!`) are opaque.
+#
+# 'features/editor/open-path-routing.js' is used rather than the bare
+# filename or the full "app/..." key so the check is immune to any leading
+# "/" or "app/" prefix-formatting variance in how AssetKey normalizes
+# paths, while still being long enough to be distinctive: an
+# application-specific directory+file path with no reason to occur by
+# coincidence in Tauri/WRY/WebView2 runtime strings or unrelated Rust code
+# compiled into the same binary. The underlying file is loaded by
+# frontend/index.html as a plain <script src="app/features/editor/
+# open-path-routing.js"> tag, and nothing in this repo's build pipeline
+# (npm run build:vendor only touches vendored dependencies like CodeMirror)
+# renames or relocates first-party app files, so this path reaches
+# frontend-dist, and then the embedded asset key, unchanged. If this file
+# is ever renamed or moved, update the marker here in the same change, per
+# this repo's rule that plugin/frontend-surface changes and their checks
+# move together.
+$FrontendMarker = 'features/editor/open-path-routing.js'
+$TermlabExe = Join-Path $RepoRoot 'target\release\termlab.exe'
+if (-not (Test-Path $TermlabExe)) {
+    throw "expected compiled binary not found at $TermlabExe  -  cannot verify the frontend was embedded"
+}
+# Read raw bytes and decode as ISO-8859-1 (Latin-1), which maps every byte
+# value 0-255 to exactly one char with no substitution or multi-byte
+# decoding -- unlike UTF-8, it can never throw or lossily collapse bytes
+# that are not valid text, which matters because most of this file is
+# compiled machine code, not text. An ASCII marker's bytes survive that
+# round-trip completely unchanged, so a plain substring search on the
+# resulting string finds it wherever it sits inside the binary.
+$ExeBytes = [System.IO.File]::ReadAllBytes($TermlabExe)
+$ExeText  = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($ExeBytes)
+if (-not $ExeText.Contains($FrontendMarker)) {
+    throw "termlab.exe at $TermlabExe does not contain the frontend marker '$FrontendMarker'  -  the frontend assets were not embedded. Check that build.frontendDist in both --config payloads above is the RELATIVE value '$FrontendDistConfigValue', not an absolute path: an absolute frontendDist builds and bundles cleanly but ships an app that opens a directory listing instead of the UI."
+}
+Write-Host "==> Frontend marker '$FrontendMarker' found in $TermlabExe  -  frontend assets are embedded" -ForegroundColor Green
 
 $OutPath = Join-Path $RepoRoot $OutDir
 New-Item -ItemType Directory -Force -Path $OutPath | Out-Null
