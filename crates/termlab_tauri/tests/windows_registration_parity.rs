@@ -140,22 +140,49 @@ fn the_context_menu_invokes_the_flag_the_cli_actually_accepts() {
     }
 }
 
-#[test]
-fn all_three_context_menu_roots_are_registered() {
-    let wix = wix_keys(&read("registration.wxs"));
-    for root in [
+/// The complete key set the task requires both bundlers to declare:
+/// the three context-menu roots and their `\command` subkeys, plus the
+/// Default Programs, RegisteredApplications, and App Paths keys.
+///
+/// This is stated literally (not derived from either file) because
+/// `both_bundlers_register_the_same_keys` only diffs the two files' sets
+/// against *each other* — a key dropped from both files at once would
+/// shrink both sets identically and that test would still pass. Only an
+/// assertion against a hardcoded expected set catches that.
+fn required_keys() -> BTreeSet<String> {
+    [
         r"Software\Classes\Directory\shell\TermLab",
+        r"Software\Classes\Directory\shell\TermLab\command",
         r"Software\Classes\Directory\Background\shell\TermLab",
+        r"Software\Classes\Directory\Background\shell\TermLab\command",
         r"Software\Classes\Drive\shell\TermLab",
-    ] {
-        assert!(
-            wix.contains(root),
-            "missing context-menu root {root}; the entry would not appear \
-             for that kind of right-click"
-        );
-        assert!(
-            wix.contains(&format!(r"{root}\command")),
-            "missing command subkey for {root}; the entry would appear but do nothing"
-        );
-    }
+        r"Software\Classes\Drive\shell\TermLab\command",
+        r"Software\Clients\Terminal\TermLab\Capabilities",
+        r"Software\RegisteredApplications",
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+#[test]
+fn both_files_register_the_complete_required_key_set() {
+    let required = required_keys();
+    let wix = wix_keys(&read("registration.wxs"));
+    let nsis = nsis_keys(&read("installer-hooks.nsh"), "WriteRegStr");
+
+    let missing_from_wix: Vec<_> = required.difference(&wix).collect();
+    assert!(
+        missing_from_wix.is_empty(),
+        "registration.wxs is missing required keys: {missing_from_wix:?}; \
+         the corresponding feature would not exist in the MSI at all"
+    );
+
+    let missing_from_nsis: Vec<_> = required.difference(&nsis).collect();
+    assert!(
+        missing_from_nsis.is_empty(),
+        "installer-hooks.nsh is missing required keys: {missing_from_nsis:?}; \
+         the corresponding feature would not exist in the setup.exe at all"
+    );
 }
