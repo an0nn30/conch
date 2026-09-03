@@ -19,8 +19,7 @@ fn packaging_dir() -> PathBuf {
 
 fn read(name: &str) -> String {
     let path = packaging_dir().join(name);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
 fn crate_dir() -> PathBuf {
