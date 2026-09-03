@@ -112,6 +112,37 @@ See the **[VS Code extension](editors/vscode/)** or **[Neovim definitions](edito
 
 Download the latest release for your platform from the [Releases page](https://github.com/an0nn30/conch/releases).
 
+**Windows:** grab `TermLab_<version>_x64-setup.exe` (or the `.msi`). CI only
+builds x64; on Windows on ARM the setup.exe still runs fine under emulation,
+but there's no native ARM64 build yet. The installer is per-user and needs no
+administrator prompt — it installs to `%LOCALAPPDATA%\TermLab`.
+
+The installer registers TermLab with Windows:
+
+- **"Open TermLab here"** in the Explorer context menu, for folders, folder
+  backgrounds, and drives.
+- **Settings > Default apps**, so TermLab appears alongside other terminals.
+- **`Win+R` → `termlab`**, via an App Paths entry.
+
+Uninstalling removes all of these.
+
+Two current limitations:
+
+- On Windows 11 the context-menu entry is under **"Show more options"**
+  (or `Shift`+`F10`), not the top-level menu. A top-level entry requires a
+  signed sparse MSIX package with an `IExplorerCommand` handler, which
+  TermLab does not ship yet.
+- TermLab does not appear in Windows 11's **"Default terminal application"**
+  dropdown. That setting requires implementing ConPTY handoff
+  (`ITerminalHandoff3`), which is separate from the default-app registration
+  above.
+
+One filename quirk: at a pre-release version like the current `3.0.0-rc.2`,
+the MSI can't carry the `-rc.2` suffix — Windows Installer requires
+`ProductVersion` to be numeric-only — so the MSI ships named with the plain
+`3.0.0` while the setup.exe keeps the full `3.0.0-rc.2`. That mismatch is
+expected, not a packaging bug.
+
 ### Build from source
 
 #### Toolchain (all platforms)
@@ -174,6 +205,24 @@ cargo build --release -p termlab_tauri
 ```
 
 The binary is at `target/release/termlab`.
+
+To build the installer artifacts (the setup.exe and MSI, with the Explorer
+context menu and other Windows registration baked in), run the same script
+CI uses:
+
+```powershell
+powershell -File scripts\build-windows.ps1
+```
+
+That's the PowerShell 5.1 invocation, which works out of the box on stock
+Windows 10/11; use `pwsh scripts/build-windows.ps1` instead if you have
+PowerShell 7 installed. Either way it produces the setup.exe and MSI under
+`target\release\bundle\`, so a local build matches a release build exactly.
+To verify an installer actually registers (and cleans up) correctly:
+
+```powershell
+powershell -File scripts\tests\verify-windows-install.ps1
+```
 
 ## Keyboard Shortcuts
 

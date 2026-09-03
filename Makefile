@@ -20,8 +20,7 @@ help:
 	@echo "  package-macos  Build .app and .dmg automatically (shortcut)"
 	@echo "  deb            Build .deb package (run on Linux)"
 	@echo "  rpm            Build .rpm package (run on Linux)"
-	@echo "  msi            Build .msi installer (run on Windows)"
-	@echo "  exe            Build portable .exe (run on Windows)"
+	@echo "  (Windows)      Run scripts/build-windows.ps1 on Windows"
 	@echo ""
 	@echo "SDKs:"
 	@echo "  java-sdk       Build Java Plugin SDK (JAR + sources + javadoc)"
@@ -205,27 +204,6 @@ rpm: build
 	cp target/generate-rpm/*.rpm "$(DIST)/"
 	@echo "Built RPM in $(DIST)/"
 
-# ---------------------------------------------------------------------------
-# Windows — .msi installer (run on Windows)
-# ---------------------------------------------------------------------------
-.PHONY: msi
-msi: build
-	@mkdir -p "$(DIST)"
-	wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5 2>/dev/null || true
-	wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
-		-out "$(DIST)/TermLab-v$(VERSION)-installer.msi" \
-		"packaging/windows/termlab.wxs"
-	@echo "Built $(DIST)/TermLab-v$(VERSION)-installer.msi"
-
-# ---------------------------------------------------------------------------
-# Windows — portable .exe (run on Windows)
-# ---------------------------------------------------------------------------
-.PHONY: exe
-exe: build
-	@mkdir -p "$(DIST)"
-	cp target/release/termlab.exe "$(DIST)/TermLab-v$(VERSION)-portable.exe"
-	@echo "Built $(DIST)/TermLab-v$(VERSION)-portable.exe"
-
 # ===========================================================================
 # RELEASE & UTILITIES
 # ===========================================================================
@@ -246,15 +224,10 @@ endif
 	$(eval V_NUMERIC := $(shell echo "$(V)" | sed 's/-.*//'))
 	sed -i '' 's/^version = ".*"/version = "$(V)"/' Cargo.toml
 	python3 scripts/set_bundle_version.py "$(V)" "$(V_NUMERIC)"
-	python3 scripts/set_msi_version.py "$(V_NUMERIC)"
 	cargo check --workspace
 	@# Fail loudly rather than shipping a bundle that disagrees with the binary.
 	@grep -q "<string>$(V_NUMERIC)</string>" packaging/macos/Info.plist \
 		|| { echo "error: Info.plist was not updated to $(V_NUMERIC)"; exit 1; }
-	@grep -q 'Codepage="1252" Version="$(V_NUMERIC)"' packaging/windows/termlab.wxs \
-		|| { echo "error: termlab.wxs Package Version was not updated to $(V_NUMERIC)"; exit 1; }
-	@grep -q 'InstallerVersion="200"' packaging/windows/termlab.wxs \
-		|| { echo "error: InstallerVersion was clobbered — it declares the minimum Windows Installer version and must stay 200"; exit 1; }
 	@echo "Version bumped: Cargo=$(V), bundle short=$(V_NUMERIC). Review with 'git diff', then commit."
 
 .PHONY: release
@@ -264,7 +237,7 @@ ifndef V
 endif
 	@echo "Releasing v$(V)..."
 	$(MAKE) bump V=$(V)
-	git add Cargo.toml packaging/macos/Info.plist packaging/windows/termlab.wxs Cargo.lock
+	git add Cargo.toml packaging/macos/Info.plist Cargo.lock
 	git diff --cached --quiet || git commit -m "release: v$(V)"
 	git tag -a "v$(V)" -m "v$(V)" -f
 	git push origin main
