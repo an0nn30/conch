@@ -205,7 +205,9 @@ mod tests {
         let chooser_label = {
             let state = handle.state::<Mutex<ChooserRegistry>>();
             let mut guard = state.lock();
-            guard.open("window-1".into(), chooser_request()).window_label
+            guard
+                .open("window-1".into(), chooser_request())
+                .window_label
         };
         assert_eq!(
             effective_session_window_label(handle, &chooser_label),
@@ -216,7 +218,12 @@ mod tests {
             let state = handle.state::<Mutex<PanelHostRegistry>>();
             let mut guard = state.lock();
             guard
-                .open("window-2".into(), "ssh-sessions".into(), "SSH".into(), vec![])
+                .open(
+                    "window-2".into(),
+                    "ssh-sessions".into(),
+                    "SSH".into(),
+                    vec![],
+                )
                 .1
                 .window_label
         };
@@ -225,7 +232,10 @@ mod tests {
             "window-2"
         );
 
-        assert_eq!(effective_session_window_label(handle, "window-3"), "window-3");
+        assert_eq!(
+            effective_session_window_label(handle, "window-3"),
+            "window-3"
+        );
     }
 
     #[test]

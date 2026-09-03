@@ -4697,7 +4697,12 @@ mod tests {
         harness.events.clear();
 
         let requests: Vec<NewTransferJob> = (0..3u128)
-            .map(|index| new_job(Uuid::from_u128(0xA_100 + index), &format!("bulk-{index}.bin")))
+            .map(|index| {
+                new_job(
+                    Uuid::from_u128(0xA_100 + index),
+                    &format!("bulk-{index}.bin"),
+                )
+            })
             .collect();
         let expected_ids: Vec<Uuid> = requests.iter().map(|request| request.id).collect();
         let ids = harness.handle.enqueue_many(requests).await.unwrap();
@@ -4740,7 +4745,12 @@ mod tests {
         let harness = ActorHarness::with_document(document);
 
         let overflow: Vec<NewTransferJob> = (0..2u128)
-            .map(|index| new_job(Uuid::from_u128(0xB_100 + index), &format!("over-{index}.bin")))
+            .map(|index| {
+                new_job(
+                    Uuid::from_u128(0xB_100 + index),
+                    &format!("over-{index}.bin"),
+                )
+            })
             .collect();
         let error = harness.handle.enqueue_many(overflow).await.unwrap_err();
         assert!(

@@ -102,6 +102,10 @@ frontend/
   tunnel-manager.js   — SSH tunnel CRUD dialog
   plugin-widgets.js   — Widget JSON → HTML renderer, plugin dialog handlers
   plugin-manager.js   — Plugin discovery/enable/disable dialog
+  app/features/editor/          — Light editor: pane, open/save service, file dialog
+  app/features/editor/preview/  — Markdown preview: renderer, sanitizer policy,
+                                  fence highlighting, image resolver, sandboxed
+                                  frame, mode state, per-pane controller
   icons/              — PNG icon set (file, folder, server, navigation, etc.)
 ```
 
@@ -134,6 +138,9 @@ separate native plugins but were consolidated for reliability.
 - **Plugin menu items**: stored in shared state, native menu rebuilt dynamically after enable
 - **State persistence**: window size, panel widths, panel visibility, enabled plugins in `state.toml`
 - **Hot-reload**: `watcher.rs` polls config.toml + themes/ every 2s, emits `config-changed` event
+- **Markdown preview**: rendered HTML is sanitized and displayed in an iframe
+  sandboxed WITHOUT `allow-scripts` — never add it. `csp` is null app-wide, so
+  the sandbox is what keeps an opened `.md` file from reaching `__TAURI__`.
 
 ## Style Guide
 
@@ -170,6 +177,11 @@ separate native plugins but were consolidated for reliability.
 - Plugin config: `~/.config/termlab/plugins/{plugin_name}/{key}.json`
 - Keyboard shortcuts: configurable in `[termlab.keyboard]` section
 - Default shortcuts use `cmd+` prefix (maps to Cmd on macOS, Ctrl on Linux/Windows)
+- A new shortcut default must be checked for collisions against the frontend's
+  hard-wired handlers in `app/shortcut-runtime.js` (the command palette owns
+  `cmd+shift+p` there, at a LOWER router priority than the config bindings — so a
+  config binding silently wins) and against CodeMirror's loaded keymaps, not just
+  `KeyboardConfig` and `menu.rs`
 
 ### Testing Standards
 - `#[cfg(test)] mod tests` at the bottom of each file

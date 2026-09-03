@@ -19,6 +19,13 @@ export type KeyboardShortcuts = { new_plain_shell_tab: string, toggle_right_pane
  */
 new_file: string, open_file: string, save_file_as: string, 
 /**
+ * Display only, `noAccel`, for the same reason as `save_file_as` above and
+ * more strictly: shortcut-runtime.js consumes this combo ONLY in a pane
+ * that actually has a markdown preview and drops it everywhere else, so
+ * binding it in the titlebar would take it from the shell app-wide.
+ */
+toggle_preview: string, 
+/**
  * Same display-AND-accelerator contract as `new_file` above: these four
  * are configurable in `[termlab.keyboard]` and live titlebar bindings,
  * so the frontend must read them from this payload.

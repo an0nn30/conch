@@ -58,12 +58,34 @@
       // so gating it on already having one would make it unreachable from a
       // fresh window. The cost is that cmd+o no longer reaches the shell.
       open_file: 'open-file',
+      // Handled inline in runShortcutFallbacks rather than through
+      // handleMenuAction: it is not a menu item, and it is consumed only by a
+      // pane that has a preview (see togglePreviewOnFocusedPane).
+      toggle_preview: 'toggle-preview',
     };
 
     // Core actions that mean something only inside a focused editor pane. A
     // hit on one of these with any other pane focused is DROPPED rather than
     // consumed — see runShortcutFallbacks.
     const EDITOR_SCOPED_ACTIONS = ['save-file', 'save-file-as'];
+
+    // Cycle the focused pane's markdown preview, reporting whether there was
+    // one to cycle.
+    //
+    // Scoped more tightly than EDITOR_SCOPED_ACTIONS above, and for the same
+    // reason: this key means nothing outside a pane that actually has a
+    // preview, so everywhere else it must be DROPPED rather than swallowed —
+    // it still has to reach the shell in a terminal, and a tool window or
+    // plugin action the user bound to the same combo still has to run.
+    function togglePreviewOnFocusedPane() {
+      const pane = getCurrentPane();
+      const api = global.termlabEditorPane;
+      if (!pane || pane.kind !== 'editor' || !pane.view) return false;
+      if (!api || typeof api.togglePreview !== 'function') return false;
+      // null means the pane has no preview: not a markdown file, or the
+      // markdown vendor bundle is missing.
+      return api.togglePreview(pane.view) !== null;
+    }
 
     function navigatePane(direction) {
       const tab = getActiveTab();
@@ -260,6 +282,17 @@
             suppressedCoreAction = coreHit.action;
             coreHit = null;
           }
+        }
+        // Same drop-don't-consume treatment as the saves above. Recording the
+        // suppression matters here for a second reason: 'toggle-preview' is
+        // not a menu action, so a bare `coreHit = null` would let the
+        // function-key table below hand it to handleMenuAction, which knows
+        // nothing about it — reachable today by binding toggle_preview to an
+        // F-key.
+        if (coreHit && coreHit.action === 'toggle-preview') {
+          if (togglePreviewOnFocusedPane()) return true;
+          suppressedCoreAction = coreHit.action;
+          coreHit = null;
         }
         if (coreHit) {
           if (coreHit.action === 'select-tab-left') cycleTab(-1);

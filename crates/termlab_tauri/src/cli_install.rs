@@ -71,11 +71,7 @@ pub(crate) enum LinkProbe {
 /// exactly `termlab` — and it isn't already `current_exe`. Any other
 /// symlink target is `Foreign`. A non-symlink entry (`LinkProbe::Other`) is
 /// unconditionally `Foreign`, regardless of what the link path is named.
-pub(crate) fn classify_link(
-    probe: &LinkProbe,
-    current_exe: &Path,
-    link_path: &Path,
-) -> LinkState {
+pub(crate) fn classify_link(probe: &LinkProbe, current_exe: &Path, link_path: &Path) -> LinkState {
     let target = match probe {
         LinkProbe::Missing => return LinkState::Missing,
         LinkProbe::Other => return LinkState::Foreign(link_path.to_path_buf()),
@@ -253,9 +249,7 @@ mod unix_impl {
         let probe = read_link_target(link_path);
 
         match classify_link(&probe, &exe, link_path) {
-            LinkState::PointsToUs => {
-                Ok(format!("'termlab' is already installed at {LINK_PATH}"))
-            }
+            LinkState::PointsToUs => Ok(format!("'termlab' is already installed at {LINK_PATH}")),
             LinkState::Foreign(p) => Err(format!(
                 "{LINK_PATH} already exists and isn't a TermLab install ({}); refusing to overwrite it",
                 p.display()
@@ -309,9 +303,10 @@ mod unix_impl {
             // Already gone — something removed it between classify_link and
             // here. That is the outcome uninstall wanted, so report success
             // rather than escalating (see `should_escalate_unlink`).
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok(format!("'termlab' was not installed at {}", link_path.display()))
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(format!(
+                "'termlab' was not installed at {}",
+                link_path.display()
+            )),
             Err(e) if should_escalate_unlink(e.kind()) => {
                 let action = format!("rm -f {}", shell_quote(link_path));
                 escalate("Uninstalling 'termlab'", action)?;
@@ -320,10 +315,7 @@ mod unix_impl {
                     link_path.display()
                 ))
             }
-            Err(e) => Err(format!(
-                "Failed to remove {}: {e}",
-                link_path.display()
-            )),
+            Err(e) => Err(format!("Failed to remove {}: {e}", link_path.display())),
         }
     }
 }
@@ -503,15 +495,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_quote_escapes_embedded_single_quotes() {
-        assert_eq!(shell_quote(Path::new("/Apps/it's here/termlab")), "'/Apps/it'\\''s here/termlab'");
+        assert_eq!(
+            shell_quote(Path::new("/Apps/it's here/termlab")),
+            "'/Apps/it'\\''s here/termlab'"
+        );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn admin_command_escapes_quotes() {
-        let cmd = admin_shell_command(
-            "ln -sf '/Apps/Term \"Lab\".app/x' '/usr/local/bin/termlab'",
-        );
+        let cmd = admin_shell_command("ln -sf '/Apps/Term \"Lab\".app/x' '/usr/local/bin/termlab'");
         // The osascript payload must survive both quoting layers: the inner
         // shell string and the AppleScript string literal around it.
         assert!(cmd.contains("with administrator privileges"));

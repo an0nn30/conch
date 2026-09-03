@@ -140,13 +140,19 @@ console.log('titlebar accelerators: the other configurable File-menu entries rea
 
 // Same defect class as new-file, one case per remaining entry that is both
 // user-configurable in [termlab.keyboard] and a live accelerator here. Each
-// rebinding is deliberately NOT the default, and deliberately avoids every
-// other hardcoded combo in the menu, so a collision cannot mask a regression.
+// rebinding is deliberately NOT that entry's own default, and differs from the
+// other accelerators in this menu, so a collision cannot mask a regression.
+//
+// These are fixtures, not a claim that the combo is free app-wide: this file
+// exercises the titlebar's own matcher and never reaches the shortcut router.
+// (`cmd+shift+e` below is in fact the shipped toggle_left_panel default.) So
+// do not read a value here as evidence that a NEW shortcut default may take
+// it — check app/shortcut-runtime.js and KeyboardConfig for that.
 const CONFIGURABLE_ENTRIES = [
   {
     id: 'new-tab', key: 'new_tab',
-    rebind: 'cmd+shift+y',
-    reboundEvent: keyEvent({ ctrlKey: true, shiftKey: true, key: 'y', code: 'KeyY' }),
+    rebind: 'cmd+shift+g',
+    reboundEvent: keyEvent({ ctrlKey: true, shiftKey: true, key: 'g', code: 'KeyG' }),
     defaultEvent: keyEvent({ ctrlKey: true, key: 't', code: 'KeyT' }),
     defaultName: 'Ctrl+T',
   },
