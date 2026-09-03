@@ -530,6 +530,20 @@ if ($HasSigningKey) {
         $MsiSig = $null
     }
 }
+# The freshness guard above only decides what gets COPIED in. It says nothing
+# about a .sig already sitting in the output directory from an earlier run,
+# which would otherwise survive next to this build's installer -- the exact
+# stale-signature pairing that breaks the auto-updater. Clear both first so
+# the output directory can only ever hold a .sig produced by this build.
+foreach ($stale in @(
+    (Join-Path $OutPath ($Setup.Name + '.sig')),
+    (Join-Path $OutPath ($Msi.Name + '.sig'))
+)) {
+    if (Test-Path $stale) {
+        Write-Host "    removing stale $([System.IO.Path]::GetFileName($stale)) from $OutPath" -ForegroundColor Yellow
+        Remove-Item -Force $stale
+    }
+}
 if ($SetupSig) { Copy-Item $SetupSig.FullName -Destination $OutPath -Force }
 if ($MsiSig)   { Copy-Item $MsiSig.FullName   -Destination $OutPath -Force }
 
