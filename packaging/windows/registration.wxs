@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows registration for the MSI, consumed via bundle.windows.wix.fragmentPaths.
+
+  Its twin is packaging/windows/installer-hooks.nsh, which does the same for the
+  NSIS setup.exe. The two are asserted to declare identical keys by
+  crates/termlab_tauri/tests/windows_registration_parity.rs — edit both or
+  neither.
+
+  All keys are HKCU: the installer is per-user and takes no UAC prompt.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="TARGETDIR">
+
+      <!-- Explorer "Open TermLab here". Capital %V is required: it is the
+           substitution that resolves for all three roots below. -->
+      <Component Id="TermLabContextMenu" Guid="8f2c41d6-9b3e-4a17-8c05-6d1e2f7a9b34">
+        <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\TermLab" ForceDeleteOnUninstall="yes">
+          <RegistryValue Name="MUIVerb" Type="string" Value="Open TermLab here" KeyPath="yes" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termlab.exe" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\TermLab\command" ForceDeleteOnUninstall="yes">
+          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termlab.exe&quot; --working-directory &quot;%V&quot;" />
+        </RegistryKey>
+
+        <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\TermLab" ForceDeleteOnUninstall="yes">
+          <RegistryValue Name="MUIVerb" Type="string" Value="Open TermLab here" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termlab.exe" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\TermLab\command" ForceDeleteOnUninstall="yes">
+          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termlab.exe&quot; --working-directory &quot;%V&quot;" />
+        </RegistryKey>
+
+        <RegistryKey Root="HKCU" Key="Software\Classes\Drive\shell\TermLab" ForceDeleteOnUninstall="yes">
+          <RegistryValue Name="MUIVerb" Type="string" Value="Open TermLab here" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termlab.exe" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Classes\Drive\shell\TermLab\command" ForceDeleteOnUninstall="yes">
+          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termlab.exe&quot; --working-directory &quot;%V&quot;" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Default Programs: puts TermLab in Settings > Default apps and in
+           "Open with". Note this is NOT the Windows 11 "Default terminal
+           application" setting, which requires ConPTY handoff. -->
+      <Component Id="TermLabDefaultApp" Guid="2b5e7c14-3f68-4d92-a0b7-51c9e8f36a2d">
+        <RegistryKey Root="HKCU" Key="Software\Clients\Terminal\TermLab\Capabilities" ForceDeleteOnUninstall="yes">
+          <RegistryValue Name="ApplicationName" Type="string" Value="TermLab" KeyPath="yes" />
+          <RegistryValue Name="ApplicationDescription" Type="string" Value="A cross-platform terminal emulator and SSH client" />
+          <RegistryValue Name="ApplicationIcon" Type="string" Value="[INSTALLDIR]termlab.exe,0" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\RegisteredApplications">
+          <RegistryValue Name="TermLab" Type="string" Value="Software\Clients\Terminal\TermLab\Capabilities" />
+        </RegistryKey>
+      </Component>
+
+      <!-- App Paths: makes Win+R "termlab" work without touching PATH. -->
+      <Component Id="TermLabAppPaths" Guid="6d3a90f2-71c4-4e5b-9a38-b02f4c7d1e85">
+        <RegistryKey Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\termlab.exe" ForceDeleteOnUninstall="yes">
+          <RegistryValue Type="string" Value="[INSTALLDIR]termlab.exe" KeyPath="yes" />
+          <RegistryValue Name="Path" Type="string" Value="[INSTALLDIR]" />
+        </RegistryKey>
+      </Component>
+
+    </DirectoryRef>
+  </Fragment>
+</Wix>

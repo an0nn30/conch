@@ -32,6 +32,16 @@
     ],
     "resources": {
       "frontend/themes/": "themes/"
+    },
+    "windows": {
+      "wix": {
+        "fragmentPaths": ["../../packaging/windows/registration.wxs"],
+        "componentRefs": ["TermLabContextMenu", "TermLabDefaultApp", "TermLabAppPaths"]
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "../../packaging/windows/installer-hooks.nsh"
+      }
     }
   },
   "plugins": {
