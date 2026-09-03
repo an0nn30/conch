@@ -80,19 +80,21 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build Java SDK JAR (embedded in binary)
-        run: |
-          mkdir -p java-sdk/build/classes
-          javac -d java-sdk/build/classes java-sdk/src/termlab/plugin/*.java
-          jar cf java-sdk/build/termlab-plugin-sdk.jar -C java-sdk/build/classes .
-
-      - name: Test
-        run: cargo test --workspace
+      # Same script the release job and the dev VM run, minus the bundling.
+      # This is what catches a broken WiX fragment or NSIS hook at PR time.
+      - name: Build and test
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -SkipBundle -Configuration Debug
 
       - name: Clippy
         run: cargo clippy --all-targets

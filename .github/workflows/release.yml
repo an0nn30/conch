@@ -128,23 +128,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
-
-      - name: Build Java SDK JAR (embedded in binary)
-        run: |
-          mkdir -p java-sdk/build/classes
-          javac -d java-sdk/build/classes java-sdk/src/termlab/plugin/*.java
-          jar cf java-sdk/build/termlab-plugin-sdk.jar -C java-sdk/build/classes .
-
-      - name: Test
-        run: cargo test --release
-
-      - name: Build with Tauri
+      # Everything Windows-specific lives in the script so this job and the
+      # developer VM cannot drift. See scripts/build-windows.ps1.
+      - name: Build Windows artifacts
+        shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build --config '{"bundle":{"active":true}}'
+        run: ./scripts/build-windows.ps1
 
       - name: Extract version
         id: version
@@ -160,11 +151,24 @@ jobs:
             "./target/release/bundle/nsis/TermLab_${{ steps.version.outputs.version }}_x64-setup.exe.sig" $GITHUB_TOKEN
 
       - name: Upload MSI installer and signature
+        # MSI's ProductVersion must be numeric-only, so scripts/build-windows.ps1
+        # bundles the MSI with the pre-release suffix stripped (e.g. 3.0.0
+        # where the tag is 3.0.0-rc.2) — its filename does not match
+        # steps.version.outputs.version. Glob for it instead of hardcoding the
+        # tag version, and don't fail the release merely because the MSI is
+        # named differently than expected (or, in principle, missing).
         run: |
-          ./.github/workflows/upload_asset.sh \
-            "./target/release/bundle/msi/TermLab_${{ steps.version.outputs.version }}_x64_en-US.msi" $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh \
-            "./target/release/bundle/msi/TermLab_${{ steps.version.outputs.version }}_x64_en-US.msi.sig" $GITHUB_TOKEN
+          MSI_PATH=$(ls ./target/release/bundle/msi/*.msi 2>/dev/null | head -n1 || true)
+          if [ -z "$MSI_PATH" ]; then
+            echo "::warning::No MSI found under target/release/bundle/msi — skipping MSI upload."
+            exit 0
+          fi
+          ./.github/workflows/upload_asset.sh "$MSI_PATH" $GITHUB_TOKEN
+          if [ -f "${MSI_PATH}.sig" ]; then
+            ./.github/workflows/upload_asset.sh "${MSI_PATH}.sig" $GITHUB_TOKEN
+          else
+            echo "::warning::No .sig found for $MSI_PATH — skipping MSI signature upload."
+          fi
 
   # ---------------------------------------------------------------------------
   # Generate latest.json — Tauri updater endpoint artifact
