@@ -56,10 +56,5 @@ crates/termlab_tauri/frontend/node_modules/
 crates/termlab_tauri/frontend/vendor/codemirror/
 crates/termlab_tauri/frontend/vendor/markdown/
 
-# scripts/build-windows.ps1 stages a node_modules-free copy of frontend/ here
-# so cargo tauri build (which refuses a frontendDist containing node_modules)
-# has somewhere clean to point at, without touching the real frontend/.
-crates/termlab_tauri/frontend-dist/
-
 # Node / JS test harness
 node_modules/

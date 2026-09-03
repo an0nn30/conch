@@ -25,10 +25,12 @@
     same directory `npm ci` installs `node_modules` into, `cargo tauri build`
     cannot run at all against the committed config (tauri-cli 2.11.4 refuses
     to bundle a frontendDist that contains a `node_modules` folder). This
-    script works around that non-destructively: it stages a copy of
-    `frontend/` (minus `node_modules`) into a git-ignored directory and points
-    `build.frontendDist` at the copy for the bundle invocations only. A
-    developer's real `node_modules` is never touched.
+    script works around that non-destructively: it MOVES
+    `frontend\node_modules` out of the way for the duration of the bundle
+    invocations only (never overriding `build.frontendDist` itself -- see the
+    long comment above $NodeModulesDir below for why that override is a
+    trap), then moves it back afterward via try/finally. A developer's real
+    `node_modules` is restored even if the build fails partway through.
 
     The workspace version (3.0.0-rc.2 as of this writing) also fails MSI
     packaging outright  -  MSI's ProductVersion must be numeric-only  -  while
@@ -131,10 +133,11 @@ if (-not $SkipBundle) {
 # --- 2. Frontend vendor bundle -------------------------------------------
 # This is the ONLY place vendor assets get built before bundling: the bundle
 # invocations below override build.beforeBuildCommand to "" (required to keep
-# Tauri from re-running npm ci into the staged frontendDist copy and undoing
-# the staging), so Tauri's own beforeBuildCommand never fires in this script.
-# -SkipBundle still runs this step so `cargo run`/`cargo build` afterward
-# don't ship an editor that shows the "bundle missing" toast.
+# Tauri from re-running npm ci -- which would recreate frontend/node_modules
+# right after step 5a moves it out of the way, undoing that move), so
+# Tauri's own beforeBuildCommand never fires in this script. -SkipBundle
+# still runs this step so `cargo run`/`cargo build` afterward don't ship an
+# editor that shows the "bundle missing" toast.
 $FrontendDir = Join-Path $RepoRoot 'crates\termlab_tauri\frontend'
 Invoke-Checked 'Install frontend dependencies' { npm --prefix $FrontendDir ci }
 Invoke-Checked 'Build frontend vendor bundles' { npm --prefix $FrontendDir run build:vendor }
@@ -173,177 +176,195 @@ if ($SkipBundle) {
     exit 0
 }
 
-# --- 5a. Stage a clean frontendDist ---------------------------------------
+# --- 5a. Relocate node_modules for the duration of the bundle -------------
 # tauri-cli 2.11.4 hard-errors if frontendDist contains a `node_modules`
 # folder, which the committed `frontendDist: "frontend"` always will once
-# `npm ci` has run. Stage everything else into a git-ignored sibling
-# directory and point the bundle invocations at that copy instead. This is
-# non-destructive: the developer's real frontend/node_modules is left alone.
+# `npm ci` has run (step 2 above). The fix is to get node_modules out of
+# frontend/ for the bundle invocations below, then put it back -- NOT to
+# override `build.frontendDist` to point somewhere else.
+#
+# An earlier version of this script did override frontendDist: it staged a
+# copy of frontend/ (minus node_modules) into a git-ignored
+# crates/termlab_tauri/frontend-dist/ and pointed build.frontendDist at that
+# copy. That shipped a real regression. `build.frontendDist` deserializes
+# into tauri_utils::config::FrontendDist, an untagged enum tried in THIS
+# declared order: Url(url::Url), then Directory(PathBuf), then
+# Files(Vec<PathBuf>). A Windows ABSOLUTE path such as
+# 'C:\repo\crates\termlab_tauri\frontend-dist' is not rejected by
+# url::Url::parse -- verified directly: it parses successfully as an opaque
+# URL with scheme "c" (cannot-be-a-base, same class as "mailto:..."),
+# because a single letter is syntactically a valid URL scheme. Serde's
+# untagged matching takes the FIRST variant that parses, so an absolute
+# frontendDist silently became FrontendDist::Url, never
+# FrontendDist::Directory, with no error anywhere in the pipeline. Two
+# things follow purely from that mis-typing, both in tauri's own source:
+# (1) tauri-codegen's context.rs matches `FrontendDist::Url(_) =>
+# Default::default()` for embedded assets -- nothing gets embedded, at all;
+# (2) tauri's manager/mod.rs get_app_url() matches
+# `Some(FrontendDist::Url(url)) => Some(url)` -- the window's start URL
+# becomes that literal mangled path instead of the correct
+# `tauri://localhost` custom protocol, and the webview's Chromium engine
+# renders its own built-in directory-listing page for it. cargo tauri build
+# still exits 0 through all of this, and both installers still clear a
+# naive size floor (NSIS/WiX boilerplate plus the WebView2 loader is itself
+# several MB) -- this is exactly the shipped "Index of C:\Users\..." bug. A
+# later attempt fixed the immediate crash by making the override value
+# RELATIVE ('frontend-dist') instead of absolute, which does avoid this
+# specific url::Url trap, but the deeper problem is overriding
+# build.frontendDist AT ALL: it is a code path this project never otherwise
+# exercises, sitting directly on a serde-untagged parsing hazard, for no
+# benefit over simply keeping node_modules out of the way.
+#
+# The approach below was run end-to-end on real Windows (ARM64, tauri-cli
+# 2.11.4) against the STOCK, unmodified frontendDist: "frontend" and
+# produced a working installer with the frontend actually embedded (see
+# docs/superpowers/plans/task-1-baseline.md, step 5 and "Surprising
+# findings": TermLab_3.0.0-rc.2_arm64-setup.exe at 9,778,153 bytes, versus
+# 5,968,724 bytes from the broken frontendDist-override build -- the
+# ~3.8 MB delta is the missing embedded frontend). It never touches
+# build.frontendDist.
+#
+# node_modules is MOVED, not deleted or copied: this is a developer's
+# working tree, not a disposable CI checkout, and `npm ci` regenerating it
+# can take real time. It is moved under target\, which is already
+# git-ignored and guaranteed to sit outside the frontend/ subtree tauri-cli
+# inspects, rather than under $env:TEMP: a same-volume Move-Item is a fast
+# rename, while $env:TEMP can be a different volume or a redirected
+# profile path on some Windows setups, which would silently turn this into
+# a slow copy-then-delete.
 #
 # bundle.resources ("frontend/themes/": "themes/") is resolved relative to
-# this tauri.conf.json's own directory (crates/termlab_tauri), independent of
-# frontendDist, so redirecting frontendDist does not disturb it.
-$StagedFrontendDist = Join-Path $RepoRoot 'crates\termlab_tauri\frontend-dist'
-Write-Host "==> Stage frontend assets (excluding node_modules) into $StagedFrontendDist" -ForegroundColor Cyan
-if (Test-Path $StagedFrontendDist) {
-    Remove-Item -Recurse -Force $StagedFrontendDist
-}
-New-Item -ItemType Directory -Force -Path $StagedFrontendDist | Out-Null
-Get-ChildItem -Path $FrontendDir -Force |
-    Where-Object { $_.Name -ne 'node_modules' } |
-    ForEach-Object {
-        Copy-Item -Path $_.FullName -Destination (Join-Path $StagedFrontendDist $_.Name) -Recurse -Force
-    }
-if (-not (Test-Path (Join-Path $StagedFrontendDist 'index.html'))) {
-    throw "staged frontendDist $StagedFrontendDist has no index.html  -  the staging copy is broken"
-}
+# tauri.conf.json's own directory (crates/termlab_tauri), independent of
+# frontendDist, so none of this disturbs it.
+$NodeModulesDir    = Join-Path $FrontendDir 'node_modules'
+$NodeModulesBackup = Join-Path $RepoRoot 'target\windows-build-node_modules-backup'
+$NodeModulesMoved  = $false
 
-# The value handed to `build.frontendDist` in the --config payloads below
-# MUST be this RELATIVE path, never $StagedFrontendDist (absolute). This bit
-# a real shipped release once, so it gets its own variable instead of being
-# folded into $StagedFrontendDist, plus this explanation of the exact
-# mechanism (confirmed by reading tauri-utils 2.8.3 / tauri-codegen 2.5.5
-# source and reproducing it with the `url` crate directly, not guessed):
-#
-# `build.frontendDist` deserializes into tauri_utils::config::FrontendDist,
-# an untagged enum tried in THIS declared order: Url(url::Url), then
-# Directory(PathBuf), then Files(Vec<PathBuf>). A Windows absolute path
-# that starts with a drive letter, e.g.
-# 'C:\repo\crates\termlab_tauri\frontend-dist', is NOT rejected by
-# url::Url::parse -- verified directly: it parses successfully as an
-# opaque URL with scheme "c" (cannot-be-a-base, same class as
-# "mailto:..."), because a single letter is syntactically a valid URL
-# scheme. Serde's untagged matching takes the FIRST variant that parses
-# successfully, so an absolute Windows frontendDist silently becomes
-# FrontendDist::Url(<mangled "c:..." URL>), never FrontendDist::Directory,
-# with no error and no warning anywhere in the pipeline. Two things follow
-# purely from that mis-typing, both in tauri's own source: (1)
-# tauri-codegen's context.rs matches `FrontendDist::Url(_) =>
-# Default::default()` for the embedded assets -- nothing gets embedded,
-# at all; (2) tauri's manager/mod.rs get_app_url() matches
-# `Some(FrontendDist::Url(url)) => Some(url)` -- the window's start URL
-# becomes that literal mangled "c:\repo\...\frontend-dist" value instead
-# of the correct `tauri://localhost`/`https://tauri.localhost` custom
-# protocol. Windows then resolves that value as the literal filesystem
-# path, and the webview's Chromium engine renders its own built-in
-# directory-listing page for it -- exactly the "Index of C:\Users\..."
-# title from the shipped bug. cargo tauri build itself still exits 0
-# through all of this: none of it is an error, just a silent wrong turn
-# at deserialization.
-#
-# A RELATIVE value never hits this trap: url::Url::parse on a bare
-# 'frontend-dist' fails outright ("relative URL without a base"), so
-# serde's untagged matching correctly falls through to
-# FrontendDist::Directory('frontend-dist'). That Directory case is
-# resolved as `config_parent.join(path)`, where config_parent is the
-# directory containing tauri.conf.json (crates\termlab_tauri) -- this
-# resolution is anchored to tauri.conf.json's own location, not to this
-# script's $PWD (repo root) and not affected by beforeBuildCommand being
-# overridden to "" for these invocations (that setting only controls
-# whether a shell hook runs, never how frontendDist is resolved). Since
-# crates\termlab_tauri is exactly $StagedFrontendDist's parent,
-# 'frontend-dist' resolves to that same staged directory -- so this is a
-# pure string-form fix, not a location change. Do not "simplify" this
-# back to $StagedFrontendDist, and do not "fix" it by using any other
-# absolute path (a UNC path or a Unix-style absolute path would dodge
-# this specific drive-letter collision but there is no reason to use an
-# absolute path here at all).
-$FrontendDistConfigValue = 'frontend-dist'
-
-# --- 5b. Signing ------------------------------------------------------------
-# createUpdaterArtifacts: true (set in tauri.conf.json, unconditionally, for
-# CI's sake) asks the bundler to also emit a signed .sig update manifest. A
-# developer who just wants an installer should not be forced to generate a
-# signing key, so when no key is present in the environment this script
-# disables updater artifacts for its own local bundle invocations only, via
-# --config. tauri.conf.json itself is never touched, so CI (which does export
-# TAURI_SIGNING_PRIVATE_KEY) still gets the .sig files release.yml uploads.
-$HasSigningKey = [bool]$env:TAURI_SIGNING_PRIVATE_KEY
-if ($HasSigningKey) {
-    Write-Host '==> TAURI_SIGNING_PRIVATE_KEY is set  -  updater .sig files will be produced' -ForegroundColor Cyan
+if (Test-Path $NodeModulesBackup) {
+    Remove-Item -Recurse -Force $NodeModulesBackup
+}
+if (Test-Path $NodeModulesDir) {
+    Write-Host "==> Relocating $NodeModulesDir out of frontendDist for the bundle" -ForegroundColor Cyan
+    Move-Item -Path $NodeModulesDir -Destination $NodeModulesBackup
+    $NodeModulesMoved = $true
 } else {
-    Write-Host '==> No TAURI_SIGNING_PRIVATE_KEY in the environment  -  disabling updater artifacts for this build' -ForegroundColor Yellow
+    Write-Host "==> No node_modules under $FrontendDir to relocate (unexpected after npm ci, but not fatal)" -ForegroundColor Yellow
 }
 
-# A .sig from an earlier build (e.g. a throwaway signing-key experiment) can
-# be left sitting next to the installer in target/release/bundle/ from a
-# previous run. If this run does not itself produce a fresh one, step 6 below
-# must never mistake that leftover for this build's signature -- a mismatched
-# .sig silently breaks the auto-updater for whoever receives it. Delete any
-# pre-existing .sig from both bundle output directories before building, so
-# anything found there afterward can only have been written by this run.
-$BundleRoot = Join-Path $RepoRoot 'target\release\bundle'
-Remove-Item -Path (Join-Path $BundleRoot 'nsis\*.sig') -Force -ErrorAction SilentlyContinue
-Remove-Item -Path (Join-Path $BundleRoot 'msi\*.sig')  -Force -ErrorAction SilentlyContinue
-$BuildStartTime = Get-Date
+try {
+    # --- 5b. Signing ---------------------------------------------------------
+    # createUpdaterArtifacts: true (set in tauri.conf.json, unconditionally,
+    # for CI's sake) asks the bundler to also emit a signed .sig update
+    # manifest. A developer who just wants an installer should not be forced
+    # to generate a signing key, so when no key is present in the
+    # environment this script disables updater artifacts for its own local
+    # bundle invocations only, via --config. tauri.conf.json itself is never
+    # touched, so CI (which does export TAURI_SIGNING_PRIVATE_KEY) still
+    # gets the .sig files release.yml uploads.
+    $HasSigningKey = [bool]$env:TAURI_SIGNING_PRIVATE_KEY
+    if ($HasSigningKey) {
+        Write-Host '==> TAURI_SIGNING_PRIVATE_KEY is set  -  updater .sig files will be produced' -ForegroundColor Cyan
+    } else {
+        Write-Host '==> No TAURI_SIGNING_PRIVATE_KEY in the environment  -  disabling updater artifacts for this build' -ForegroundColor Yellow
+    }
 
-# Runs one `cargo tauri build --config <file>` invocation. A non-zero exit
-# here is NOT immediately fatal: createUpdaterArtifacts can fail signing
-# *after* the installer has already been written to disk. The real
-# pass/fail check is the artifact-existence verification in step 6, which
-# runs after both invocations regardless of their exit codes.
-function Invoke-Bundle {
-    param(
-        [Parameter(Mandatory)][string]$What,
-        [Parameter(Mandatory)][string]$ConfigPath
-    )
-    Write-Host "==> $What" -ForegroundColor Cyan
-    cargo tauri build --config $ConfigPath
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "    cargo tauri build exited $LASTEXITCODE for '$What'; continuing, since a signing-only failure can leave a good installer on disk. Verified in the next step." -ForegroundColor Yellow
+    # A .sig from an earlier build (e.g. a throwaway signing-key experiment)
+    # can be left sitting next to the installer in target/release/bundle/
+    # from a previous run. If this run does not itself produce a fresh one,
+    # step 6 below must never mistake that leftover for this build's
+    # signature -- a mismatched .sig silently breaks the auto-updater for
+    # whoever receives it. Delete any pre-existing .sig from both bundle
+    # output directories before building, so anything found there
+    # afterward can only have been written by this run.
+    $BundleRoot = Join-Path $RepoRoot 'target\release\bundle'
+    Remove-Item -Path (Join-Path $BundleRoot 'nsis\*.sig') -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path (Join-Path $BundleRoot 'msi\*.sig')  -Force -ErrorAction SilentlyContinue
+    $BuildStartTime = Get-Date
+
+    # Runs one `cargo tauri build --config <file>` invocation. A non-zero
+    # exit here is NOT immediately fatal: createUpdaterArtifacts can fail
+    # signing *after* the installer has already been written to disk. The
+    # real pass/fail check is the artifact-existence verification in step
+    # 6, which runs after both invocations regardless of their exit codes.
+    function Invoke-Bundle {
+        param(
+            [Parameter(Mandatory)][string]$What,
+            [Parameter(Mandatory)][string]$ConfigPath
+        )
+        Write-Host "==> $What" -ForegroundColor Cyan
+        cargo tauri build --config $ConfigPath
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    cargo tauri build exited $LASTEXITCODE for '$What'; continuing, since a signing-only failure can leave a good installer on disk. Verified in the next step." -ForegroundColor Yellow
+        }
+    }
+
+    $NsisConfigPath = Join-Path $env:TEMP 'termlab-build-windows-nsis-config.json'
+    $MsiConfigPath  = Join-Path $env:TEMP 'termlab-build-windows-msi-config.json'
+
+    $NsisBundleConfig = @{
+        active  = $true
+        targets = @('nsis')
+    }
+    $MsiBundleConfig = @{
+        active  = $true
+        targets = @('msi')
+    }
+    if (-not $HasSigningKey) {
+        $NsisBundleConfig['createUpdaterArtifacts'] = $false
+        $MsiBundleConfig['createUpdaterArtifacts'] = $false
+    }
+
+    # --- NSIS, at the real (possibly pre-release) version ------------------
+    # This keeps TermLab_<version>_<arch>-setup.exe exactly as CI already
+    # uploads it; the auto-updater depends on that name never changing.
+    # beforeBuildCommand is still overridden to "" here: without it, Tauri
+    # would re-run `npm ci` itself before bundling and recreate
+    # node_modules inside frontend/, right back in the way it was just
+    # moved out of. frontendDist is deliberately absent -- the stock
+    # tauri.conf.json value ("frontend") is used as-is.
+    Write-JsonConfig -Path $NsisConfigPath -Object @{
+        build  = @{
+            beforeBuildCommand = ''
+        }
+        bundle = $NsisBundleConfig
+    }
+    Invoke-Bundle -What 'Bundle NSIS installer' -ConfigPath $NsisConfigPath
+
+    # --- MSI, with a numeric-only version override --------------------------
+    # MSI ProductVersion must be at most three dot-separated integers, so
+    # the pre-release suffix is stripped for this invocation only.
+    # Cargo.toml is never modified.
+    $CargoVersion = (Select-String -Path (Join-Path $RepoRoot 'Cargo.toml') -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+    if (-not $CargoVersion) {
+        throw 'could not find a version line (version = "...") in Cargo.toml'
+    }
+    $NumericVersion = ($CargoVersion -split '-')[0]
+    Write-Host "==> Cargo version $CargoVersion, MSI ProductVersion $NumericVersion" -ForegroundColor Cyan
+
+    Write-JsonConfig -Path $MsiConfigPath -Object @{
+        version = $NumericVersion
+        build   = @{
+            beforeBuildCommand = ''
+        }
+        bundle  = $MsiBundleConfig
+    }
+    Invoke-Bundle -What 'Bundle MSI installer' -ConfigPath $MsiConfigPath
+
+    Remove-Item -Force $NsisConfigPath, $MsiConfigPath -ErrorAction SilentlyContinue
+} finally {
+    # Always restore node_modules, even if a step above threw or the script
+    # was interrupted. A developer left without node_modules because a
+    # build failed midway is a bad outcome, but a recoverable one -- `npm
+    # ci` regenerates it -- so this is a best-effort restore, not a second
+    # source of fatal errors.
+    if ($NodeModulesMoved) {
+        Write-Host "==> Restoring $NodeModulesDir" -ForegroundColor Cyan
+        if (Test-Path $NodeModulesDir) {
+            Remove-Item -Recurse -Force $NodeModulesDir
+        }
+        Move-Item -Path $NodeModulesBackup -Destination $NodeModulesDir
     }
 }
-
-$NsisConfigPath = Join-Path $env:TEMP 'termlab-build-windows-nsis-config.json'
-$MsiConfigPath  = Join-Path $env:TEMP 'termlab-build-windows-msi-config.json'
-
-$NsisBundleConfig = @{
-    active  = $true
-    targets = @('nsis')
-}
-$MsiBundleConfig = @{
-    active  = $true
-    targets = @('msi')
-}
-if (-not $HasSigningKey) {
-    $NsisBundleConfig['createUpdaterArtifacts'] = $false
-    $MsiBundleConfig['createUpdaterArtifacts'] = $false
-}
-
-# --- NSIS, at the real (possibly pre-release) version ----------------------
-# This keeps TermLab_<version>_<arch>-setup.exe exactly as CI already uploads
-# it; the auto-updater depends on that name never changing.
-Write-JsonConfig -Path $NsisConfigPath -Object @{
-    build  = @{
-        frontendDist       = $FrontendDistConfigValue
-        beforeBuildCommand = ''
-    }
-    bundle = $NsisBundleConfig
-}
-Invoke-Bundle -What 'Bundle NSIS installer' -ConfigPath $NsisConfigPath
-
-# --- MSI, with a numeric-only version override -----------------------------
-# MSI ProductVersion must be at most three dot-separated integers, so the
-# pre-release suffix is stripped for this invocation only. Cargo.toml is
-# never modified.
-$CargoVersion = (Select-String -Path (Join-Path $RepoRoot 'Cargo.toml') -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-if (-not $CargoVersion) {
-    throw 'could not find a version line (version = "...") in Cargo.toml'
-}
-$NumericVersion = ($CargoVersion -split '-')[0]
-Write-Host "==> Cargo version $CargoVersion, MSI ProductVersion $NumericVersion" -ForegroundColor Cyan
-
-Write-JsonConfig -Path $MsiConfigPath -Object @{
-    version = $NumericVersion
-    build   = @{
-        frontendDist       = $FrontendDistConfigValue
-        beforeBuildCommand = ''
-    }
-    bundle  = $MsiBundleConfig
-}
-Invoke-Bundle -What 'Bundle MSI installer' -ConfigPath $MsiConfigPath
-
-Remove-Item -Force $NsisConfigPath, $MsiConfigPath -ErrorAction SilentlyContinue
 
 # --- 6. Verify and collect ------------------------------------------------
 # Never assume architecture: the dev VM is ARM64 Windows on Apple Silicon
@@ -370,8 +391,9 @@ if (-not $Msi)   { throw "no MSI under $BundleRoot\msi written since this build 
 
 # A truncated or stub installer is worse than a missing one, because it looks
 # like a successful build. TermLab's real installers are tens of megabytes.
-# This is a coarse tripwire only, NOT the check that catches a wrong
-# frontendDist -- see the marker check right below, which is the real test.
+# This is a coarse tripwire only, NOT the check that catches a missing
+# frontend -- see the size sanity check (6a) and the marker check (6b) below,
+# which are the real tests for that specific regression.
 $MinBytes = 5MB
 foreach ($artifact in @($Setup, $Msi)) {
     if ($artifact.Length -lt $MinBytes) {
@@ -379,19 +401,44 @@ foreach ($artifact in @($Setup, $Msi)) {
     }
 }
 
-# --- 6a. Verify the frontend was actually embedded ------------------------
+# --- 6a. Size sanity check (secondary signal, not the primary gate) -------
+# The exact regression this branch shipped once already: a broken build (an
+# overridden build.frontendDist that silently swallowed the embedded
+# frontend -- see the long comment in step 5a above) produced a real,
+# installable, non-empty NSIS installer -- TermLab_3.0.0-rc.2_arm64-setup.exe
+# at 5,968,724 bytes -- versus a known-good build of the identical version,
+# with the frontend actually embedded, at 9,778,153 bytes (both measured on
+# the same Windows ARM64 VM; see docs/superpowers/plans/task-1-baseline.md).
+# Both sizes clear the coarse $MinBytes floor above, so that floor alone
+# would never have caught this. A floor set between the two -- well above
+# the broken size, comfortably below the good one -- would have.
+#
+# This is deliberately a SECOND, independent signal alongside the marker
+# check in 6b below, not the primary gate: installer size drifts with
+# unrelated changes (a new vendored dependency, new plugin sources) in ways
+# a marker string does not, so a genuine size increase over time is
+# expected and should not need to keep raising this floor. Treat a future
+# failure here as reason to re-check with the marker test first, not to
+# reflexively raise the floor. Applies to the NSIS setup.exe only -- it is
+# the artifact this size was actually measured against; the MSI's own
+# baseline size was not.
+$FrontendEmbeddedSizeFloor = 8MB
+if ($Setup.Length -lt $FrontendEmbeddedSizeFloor) {
+    throw "$($Setup.Name) is only $($Setup.Length) bytes, under the $FrontendEmbeddedSizeFloor floor set between the known-good (9,778,153 bytes) and known-broken (5,968,724 bytes) sizes for the missing-frontend regression  -  treating as a failed build"
+}
+
+# --- 6b. Verify the frontend was actually embedded -------------------------
 # The regression this guards against shipped once already: an ABSOLUTE
-# build.frontendDist (see the long comment on $FrontendDistConfigValue
-# above) makes Tauri skip embedding the frontend into the binary entirely,
-# and nothing else in this script would have noticed. cargo tauri build
-# still exits 0, both installers still land on disk, and both are still
-# comfortably over the $MinBytes floor above (NSIS/WiX boilerplate plus the
-# WebView2 loader is itself several MB) -- the missing frontend is only a
-# few MB out of tens, not enough to trip a size floor without making that
-# floor brittle. The installed app still launches and stays running; it
-# just shows a bare `file://` directory listing instead of the UI. A size
-# check alone cannot tell "frontend embedded" from "frontend missing" here,
-# which is why this checks for actual frontend content, not just bytes.
+# build.frontendDist override (see the long comment in step 5a above) made
+# Tauri skip embedding the frontend into the binary entirely, and nothing
+# else in this script would have noticed. cargo tauri build still exits 0,
+# both installers still land on disk, and both are still comfortably over
+# the $MinBytes floor above (NSIS/WiX boilerplate plus the WebView2 loader
+# is itself several MB) -- the missing frontend is only a few MB out of
+# tens, which is why 6a's floor is needed in addition to $MinBytes, and
+# why this marker check exists as the real test: a size floor alone cannot
+# tell "frontend embedded" from "frontend missing" as reliably as checking
+# for actual frontend content.
 #
 # The check: read the compiled termlab.exe -- BEFORE NSIS/WiX compress it
 # into an installer, since NSIS's LZMA and the MSI's cabinet compression
@@ -434,11 +481,10 @@ foreach ($artifact in @($Setup, $Msi)) {
 # frontend/index.html as a plain <script src="app/features/editor/
 # open-path-routing.js"> tag, and nothing in this repo's build pipeline
 # (npm run build:vendor only touches vendored dependencies like CodeMirror)
-# renames or relocates first-party app files, so this path reaches
-# frontend-dist, and then the embedded asset key, unchanged. If this file
-# is ever renamed or moved, update the marker here in the same change, per
-# this repo's rule that plugin/frontend-surface changes and their checks
-# move together.
+# renames or relocates first-party app files, so this path reaches the
+# embedded asset key unchanged. If this file is ever renamed or moved,
+# update the marker here in the same change, per this repo's rule that
+# plugin/frontend-surface changes and their checks move together.
 $FrontendMarker = 'features/editor/open-path-routing.js'
 $TermlabExe = Join-Path $RepoRoot 'target\release\termlab.exe'
 if (-not (Test-Path $TermlabExe)) {
@@ -454,7 +500,7 @@ if (-not (Test-Path $TermlabExe)) {
 $ExeBytes = [System.IO.File]::ReadAllBytes($TermlabExe)
 $ExeText  = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($ExeBytes)
 if (-not $ExeText.Contains($FrontendMarker)) {
-    throw "termlab.exe at $TermlabExe does not contain the frontend marker '$FrontendMarker'  -  the frontend assets were not embedded. Check that build.frontendDist in both --config payloads above is the RELATIVE value '$FrontendDistConfigValue', not an absolute path: an absolute frontendDist builds and bundles cleanly but ships an app that opens a directory listing instead of the UI."
+    throw "termlab.exe at $TermlabExe does not contain the frontend marker '$FrontendMarker'  -  the frontend assets were not embedded. Check that build.frontendDist is not being overridden in either --config payload above: this script relies on the stock tauri.conf.json frontendDist ('frontend'), since overriding it at all risks the FrontendDist::Url mis-parse described in step 5a, which builds and bundles cleanly but ships an app that opens a directory listing instead of the UI."
 }
 Write-Host "==> Frontend marker '$FrontendMarker' found in $TermlabExe  -  frontend assets are embedded" -ForegroundColor Green
 
