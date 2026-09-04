@@ -112,6 +112,43 @@ See the **[VS Code extension](editors/vscode/)** or **[Neovim definitions](edito
 
 Download the latest release for your platform from the [Releases page](https://github.com/an0nn30/conch/releases).
 
+**Windows:** grab `TermLab_<version>_x64-setup.exe` (or the `.msi`). CI only
+builds x64; native ARM64 builds aren't available yet, and running the x64
+setup.exe under Windows on ARM emulation hasn't been tested. The setup.exe is
+per-user and needs no administrator prompt — it installs to
+`%LOCALAPPDATA%\TermLab`. The MSI has no such scope override and installs
+per-machine instead: expect a UAC prompt, and its uninstall entry lives under
+`HKLM\WOW6432Node`, not per-user.
+
+The installer registers TermLab with Windows:
+
+- **"Open TermLab here"** in the Explorer context menu, for folders, folder
+  backgrounds, and drives.
+- **Settings > Default apps**, so TermLab appears alongside other terminals.
+- **`Win+R` → `termlab`**, via an App Paths entry.
+
+Uninstalling removes all of these.
+
+Three current limitations:
+
+- On Windows 11 the context-menu entry is under **"Show more options"**
+  (or `Shift`+`F10`), not the top-level menu. A top-level entry requires a
+  signed sparse MSIX package with an `IExplorerCommand` handler, which
+  TermLab does not ship yet.
+- TermLab does not appear in Windows 11's **"Default terminal application"**
+  dropdown. That setting requires implementing ConPTY handoff
+  (`ITerminalHandoff3`), which is separate from the default-app registration
+  above.
+- An MSI-installed TermLab shows no icon next to its entry in Add/Remove
+  Programs (the setup.exe's entry does), since Tauri's WiX template doesn't
+  set an `ARPPRODUCTICON`.
+
+One filename quirk: at a pre-release version like the current `3.0.0-rc.2`,
+the MSI can't carry the `-rc.2` suffix — Windows Installer requires
+`ProductVersion` to be numeric-only — so the MSI ships named with the plain
+`3.0.0` while the setup.exe keeps the full `3.0.0-rc.2`. That mismatch is
+expected, not a packaging bug.
+
 ### Build from source
 
 #### Toolchain (all platforms)
@@ -174,6 +211,32 @@ cargo build --release -p termlab_tauri
 ```
 
 The binary is at `target/release/termlab`.
+
+To build the installer artifacts (the setup.exe and MSI, with the Explorer
+context menu and other Windows registration baked in), run the same script
+CI uses:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+```
+
+`-ExecutionPolicy Bypass` is needed because a freshly provisioned Windows
+machine defaults to the `Restricted` execution policy, which refuses to load
+any `.ps1` file at all, signed or not; the flag overrides that for this one
+process only and changes no persistent system setting. That's the
+PowerShell 5.1 invocation, which works out of the box on stock Windows
+10/11; use `pwsh -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
+instead if you have PowerShell 7 installed. Either way it produces the
+setup.exe and MSI under `target\release\bundle\`, built by the same script
+and from the same registration sources CI uses. It isn't byte-identical to
+a CI release build, though: without a signing key configured locally there's
+no `.sig` update-manifest signature, and the artifacts are built for
+whatever architecture the local machine is (CI only produces x64). To verify
+an installer actually registers (and cleans up) correctly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\tests\verify-windows-install.ps1
+```
 
 ## Keyboard Shortcuts
 

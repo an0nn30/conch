@@ -17,6 +17,25 @@ fn main() {
     let pending_paths = match termlab_tauri::cli::run_cli_if_requested() {
         termlab_tauri::cli::CliAction::Exit(code) => std::process::exit(code),
         termlab_tauri::cli::CliAction::RunApp { pending_paths } => pending_paths,
+        termlab_tauri::cli::CliAction::RunAppInDirectory { directory } => {
+            // The Explorer "Open TermLab here" verb. Moving the process is
+            // the entire implementation: PtyBackend spawns the shell with the
+            // inherited cwd, and get_workspace_dir reports the launch cwd for
+            // tab titles, so both follow from this one call. It must happen
+            // before platform::init(), which spawns environment probes.
+            //
+            // A directory that no longer exists must not be fatal: a stale
+            // context-menu entry should still get the user an app window.
+            if let Err(e) = std::env::set_current_dir(&directory) {
+                log::warn!(
+                    "startup: could not enter --working-directory {directory}: {e}; \
+                     launching in the inherited directory instead"
+                );
+            } else {
+                log::info!("startup: working directory set to {directory}");
+            }
+            Vec::new()
+        }
     };
 
     // We are past CLI dispatch and committed to booting the app, and nothing
