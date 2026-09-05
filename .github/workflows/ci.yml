@@ -29,6 +29,26 @@ jobs:
       - name: Audit dependencies
         run: cargo audit || true
 
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install test dependencies
+        run: npm ci
+
+      # Covers the plugin widget HTML sanitizer and icon-name validation,
+      # which stand between an untrusted plugin and the Tauri bridge. These
+      # existed but nothing in CI ran them.
+      - name: Run frontend tests
+        run: npm test
+
   ubuntu:
     runs-on: ubuntu-22.04
     steps:
