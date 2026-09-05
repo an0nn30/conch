@@ -1,0 +1,93 @@
+/* Markdown preview. Loaded INSIDE the sandboxed frame, where design tokens do
+   not cascade in from the parent — preview-frame.js writes resolved values
+   into a :root block ahead of this sheet. */
+.md-preview-body {
+  margin: 0;
+  padding: 20px 28px;
+  background: var(--tl-bg);
+  color: var(--tl-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: break-word;
+}
+.md-preview-body h1, .md-preview-body h2 {
+  border-bottom: 1px solid var(--tl-border);
+  padding-bottom: 0.3em;
+}
+.md-preview-body h1 { font-size: 1.9em; margin: 0.6em 0 0.5em; }
+.md-preview-body h2 { font-size: 1.5em; margin: 1.2em 0 0.5em; }
+.md-preview-body h3 { font-size: 1.25em; margin: 1.1em 0 0.4em; }
+.md-preview-body a { color: var(--tl-accent); }
+.md-preview-body blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 1em;
+  border-left: 3px solid var(--tl-border);
+  color: var(--tl-fg-muted);
+}
+.md-preview-body table { border-collapse: collapse; margin: 1em 0; display: block; overflow-x: auto; }
+.md-preview-body th, .md-preview-body td { border: 1px solid var(--tl-border); padding: 6px 12px; }
+.md-preview-body th { background: var(--tl-row-hover); font-weight: 600; }
+.md-preview-body tr:nth-child(2n) td { background: var(--tl-row-hover); }
+.md-preview-body img { max-width: 100%; }
+.md-preview-body hr { border: 0; border-top: 1px solid var(--tl-border); margin: 1.5em 0; }
+.md-preview-body code {
+  font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--tl-row-hover);
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+}
+.md-preview-body pre.md-code {
+  background: var(--tl-terminal-bg, var(--tl-bg));
+  border: 1px solid var(--tl-border);
+  border-radius: 4px;
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+.md-preview-body pre.md-code code { background: none; padding: 0; font-size: 0.875em; }
+
+/* An image the sanitizer refused to load. Named rather than silent so the
+   reader can tell a blocked remote image from a broken local path. */
+.md-preview-body .md-img-blocked {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px dashed var(--tl-border);
+  border-radius: 3px;
+  color: var(--tl-fg-muted);
+  font-size: 0.85em;
+}
+
+/* A failed parse is reported as CONTENT rather than as a toast (see
+   markdown-renderer.js), so it needs to read as a deliberate message instead
+   of as unstyled fallback text in the middle of the document. */
+.md-preview-body .md-render-error {
+  margin: 1em 0;
+  padding: 10px 14px;
+  border: 1px solid var(--tl-danger);
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: var(--tl-row-hover);
+  color: var(--tl-fg);
+}
+.md-preview-body .md-render-error pre {
+  margin: 0.6em 0 0;
+  white-space: pre-wrap;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  color: var(--tl-fg-muted);
+}
+
+/* Syntax classes emitted by lezer's classHighlighter. Mirrors the tag->colour
+   choices in features/editor/theme.js so a fence and the editor agree. */
+.md-preview-body .tok-keyword { color: var(--tl-accent); }
+.md-preview-body .tok-string { color: var(--green, var(--tl-accent)); }
+.md-preview-body .tok-comment { color: var(--tl-fg-muted); font-style: italic; }
+.md-preview-body .tok-number,
+.md-preview-body .tok-bool { color: var(--yellow, var(--tl-accent)); }
+.md-preview-body .tok-variableName { color: var(--tl-fg); }
+.md-preview-body .tok-function { color: var(--blue, var(--tl-fg)); }
+.md-preview-body .tok-typeName,
+.md-preview-body .tok-className { color: var(--cyan, var(--tl-accent)); }
+.md-preview-body .tok-operator { color: var(--tl-fg-muted); }
+.md-preview-body .tok-invalid { color: var(--tl-danger); }

@@ -855,6 +855,7 @@ end
 | `ui.panel_toolbar(id?, items)` | id, items | Toolbar with buttons, separators, spacers, and text inputs |
 | `ui.panel_path_bar(id, segments)` **(pending)** | id, segments | Clickable breadcrumb path bar |
 | `ui.panel_tabs(id, active, tabs)` | id, active, tabs | Tabbed container (active is 0-based index) |
+| `ui.panel_html(content, css?)` | content, css | Raw HTML rendered in a Shadow DOM with theme variable access |
 
 **Layout containers:**
 
@@ -1095,6 +1096,23 @@ app.get_setting_value(key) -> string|nil
 app.set_setting_draft(key, value?)        -- nil clears persisted value on Apply
 ```
 
+`app.publish(event_type, data)`, `app.query_plugin(target, method, args)`,
+and `app.register_settings_section(section)` all convert their table
+argument to JSON through the same Lua→JSON bridge: nested tables are
+preserved, `nil`-valued keys are omitted, and integers stay integers.
+Passing a function or a table containing a cycle raises a Lua error rather
+than silently sending a corrupted (or, for `register_settings_section`,
+silently dropped) payload. The same bridge and the same error behavior
+apply to `ui.form(...)` and `ui.open_docked_view(...)` below.
+
+`app.publish(event_type, data)` — publish an event on the bus.
+
+`app.query_plugin(target, method, args)` — call a method on another plugin.
+
+`app.register_settings_section(section)` — register a settings section for
+the host Settings UI. `section` must be a table/object; passing a non-table
+value raises a Lua error.
+
 #### `ui` table
 
 ```lua
@@ -1150,6 +1168,11 @@ ui.close_docked_view(view_id) -> boolean
 ui.focus_docked_view(view_id) -> boolean
 ```
 
+`ui.form(title, fields)` and `ui.open_docked_view(opts)` convert their table
+argument to JSON through the same bridge as `app.publish` (see above): a
+function value or a cyclic table anywhere in `fields`/`opts` raises a Lua
+error rather than being silently dropped or corrupted.
+
 `ui.open_docked_view(opts)` accepts:
 
 ```lua
@@ -1181,6 +1204,11 @@ session.rename_tab(title)
 session.rename_tab_by_id(tab_id, title)
 session.focus_tab_by_id(tab_id)
 ```
+
+For `session.current()` and `session.exec_active()`, fields from the host
+response are merged into the returned table. Nested objects and arrays are
+preserved — earlier versions dropped anything that was not a string,
+boolean, or number.
 
 #### `net` table
 
@@ -1313,7 +1341,15 @@ Both plugin tiers share the same declarative widget system. Plugins return a JSO
 
 **Html widget details:**
 
-The `html` widget renders raw HTML inside a Shadow DOM for full CSS isolation. Theme variables (`--bg`, `--fg`, `--green`, `--red`, etc.) are forwarded into the shadow root so plugin styles stay on-theme. Elements with a `data-action="action_id"` attribute emit `button_click` events back to the plugin when clicked.
+The `html` widget renders HTML inside a Shadow DOM for full CSS isolation. Theme variables (`--bg`, `--fg`, `--green`, `--red`, etc.) are forwarded into the shadow root so plugin styles stay on-theme. Elements with a `data-action="action_id"` attribute emit `button_click` events back to the plugin when clicked.
+
+Content is sanitized against an allowlist before it is inserted — a shadow root isolates styles, not scripts, so unsanitized markup would let any plugin holding `ui.panel` run script in the host and bypass its declared capabilities. What survives:
+
+- **Elements:** common structural, text, list, and table tags, plus `button`, `img`, and inline `svg` (`g`, `path`, `circle`, `ellipse`, `rect`, `line`, `polyline`, `polygon`, `title`, `desc`).
+- **Attributes:** `class`, `id`, `title`, `style`, `dir`, `lang`, `role`, every `data-*` and `aria-*`, SVG presentation attributes, and a small per-element set (`href`, `src`, `alt`, `colspan`, …).
+- **URLs:** relative, `http:`, `https:`, `mailto:`, and base64 raster `data:image/*` on `img`.
+
+Dropped: `script`, `style`, `iframe`, `object`, `embed`, `form`, `input`, `template`, MathML, SVG `script` / `foreignObject` / `use` / animation elements, all `on*` handlers, and `javascript:`, `vbscript:`, `data:` (except raster images) and `data:image/svg+xml` URLs. The `css` argument is applied as a stylesheet and is not sanitized; CSS cannot execute script.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1371,6 +1407,14 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 | `bus_query` | `method`, `args` | Direct RPC queries are routed to query callbacks (`on_query` / `onQuery`) rather than `on_event` |
 | `theme_changed` | `theme_json` | Reserved event kind in the shared schema (not currently emitted by the host) |
 | `shutdown` | -- | Reserved event kind in the shared schema (plugins are currently shut down via `teardown()`) |
+
+Event payloads are converted from JSON to native Lua values by the host. A JSON
+`null` arrives as Lua `nil` (so `if e.data.field == nil then` works as written),
+integers stay integers, and arrays arrive as plain tables with no metatable.
+
+If a payload cannot be converted, the event is dropped and the reason is logged.
+Plugins never receive a partially converted payload, and never receive a raw
+JSON string in place of a table.
 
 ### Event JSON Examples
 

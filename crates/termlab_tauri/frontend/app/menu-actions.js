@@ -112,6 +112,21 @@
         });
         return;
       }
+      if (action === 'toggle-preview') {
+        // The same cycle cmd+shift+y runs, through the same function — the
+        // menu must not become a second implementation of the mode change.
+        //
+        // Scoped like save-file-as, and harmlessly: this route has no keyboard
+        // guard in front of it, so it re-checks the focused pane itself.
+        // termlabEditorPane.togglePreview returns null for a pane with no
+        // preview (not markdown, or the markdown bundle is missing), which is
+        // exactly the no-op wanted here.
+        const pane = getCurrentPane();
+        const api = global.termlabEditorPane;
+        if (!pane || pane.kind !== 'editor' || !pane.view) return;
+        if (api && typeof api.togglePreview === 'function') api.togglePreview(pane.view);
+        return;
+      }
       if (action === 'open-file') {
         // Unscoped on purpose (see shortcut-runtime.js): the chooser opens
         // from a terminal too. Routing and error reporting live in the

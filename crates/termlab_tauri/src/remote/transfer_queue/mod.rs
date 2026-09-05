@@ -9,7 +9,7 @@ pub mod runner;
 pub mod scheduler;
 pub mod store;
 
-pub(crate) use engine::{QueueActor, QueueCommand, TransferQueueHandle};
+pub(crate) use engine::{QUEUE_FULL_ERROR_PREFIX, QueueActor, QueueCommand, TransferQueueHandle};
 pub(crate) use events::{
     QueueEventPayload, QueueSummaryPayload, RunnerEvent, TauriTransferEventSink, TransferEventSink,
 };

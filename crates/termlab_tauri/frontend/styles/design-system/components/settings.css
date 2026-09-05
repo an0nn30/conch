@@ -277,6 +277,44 @@
   user-select: none;
 }
 .tl-settings__shortcut-key:hover { border-color: var(--tl-accent); }
+
+/* Key box + its per-row clear button (renderers.js makeShortcutKeyBox). */
+.tl-settings__shortcut-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+}
+.tl-settings__shortcut-clear {
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--tl-fg-muted);
+  font: 400 12px var(--tl-font-ui);
+  cursor: pointer;
+  line-height: 1;
+}
+.tl-settings__shortcut-clear:hover { color: var(--tl-danger); }
+.tl-settings__shortcut-clear:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
+
+/* Keymap section header row with the reset-all action. */
+.tl-settings__shortcut-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--tl-space-2);
+}
+.tl-settings__shortcut-reset {
+  flex: 0 0 auto;
+  padding: 2px var(--tl-space-2);
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  background: transparent;
+  color: var(--tl-fg-muted);
+  font: 400 11px var(--tl-font-ui);
+  cursor: pointer;
+}
+.tl-settings__shortcut-reset:hover { color: var(--tl-fg); border-color: var(--tl-accent); }
+.tl-settings__shortcut-reset:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
 .tl-settings__shortcut-key:focus-visible { outline: 1px solid var(--tl-accent); outline-offset: 1px; }
 .tl-settings__shortcut-key.is-recording {
   border-color: var(--tl-accent);

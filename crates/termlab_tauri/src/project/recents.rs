@@ -251,8 +251,14 @@ mod tests {
         layouts.insert("/a".to_string(), LayoutConfig::default());
         layouts.insert("/b".to_string(), LayoutConfig::default());
         let recents = vec![
-            RecentProject { path: "/a".into(), last_opened_ms: 1 },
-            RecentProject { path: "/b".into(), last_opened_ms: 2 },
+            RecentProject {
+                path: "/a".into(),
+                last_opened_ms: 1,
+            },
+            RecentProject {
+                path: "/b".into(),
+                last_opened_ms: 2,
+            },
         ];
         prune_layouts_to_recents(&mut layouts, &recents);
         assert_eq!(layouts.len(), 2);
@@ -271,7 +277,10 @@ mod tests {
 
         let changed = record_recent_changed(&mut list, &mut layouts, "/repo", 2, all_exist);
 
-        assert!(changed, "pruning a stale project_layouts entry is a real change");
+        assert!(
+            changed,
+            "pruning a stale project_layouts entry is a real change"
+        );
         assert!(
             !layouts.contains_key("/stale"),
             "the layout for a project no longer in recents disappears on the next remember()"
@@ -281,12 +290,21 @@ mod tests {
     #[test]
     fn record_recent_changed_reports_true_when_the_order_actually_changes() {
         let mut list = vec![
-            RecentProject { path: "/a".into(), last_opened_ms: 1 },
-            RecentProject { path: "/b".into(), last_opened_ms: 2 },
+            RecentProject {
+                path: "/a".into(),
+                last_opened_ms: 1,
+            },
+            RecentProject {
+                path: "/b".into(),
+                last_opened_ms: 2,
+            },
         ];
         let mut layouts = HashMap::new();
         let changed = record_recent_changed(&mut list, &mut layouts, "/b", 3, all_exist);
-        assert!(changed, "moving /b to the front is a real, save-worthy change");
+        assert!(
+            changed,
+            "moving /b to the front is a real, save-worthy change"
+        );
     }
 
     #[test]
@@ -318,7 +336,10 @@ mod tests {
         // unfiltered: no stat happens here at all.
         let state = config::PersistentState {
             recent_projects: vec![
-                RecentProject { path: "/a".into(), last_opened_ms: 1 },
+                RecentProject {
+                    path: "/a".into(),
+                    last_opened_ms: 1,
+                },
                 RecentProject {
                     path: "/definitely/does/not/exist/anywhere".into(),
                     last_opened_ms: 2,

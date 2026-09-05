@@ -29,6 +29,8 @@
       new_tab: 'new-tab',
       new_plain_shell_tab: 'new-plain-shell-tab',
       close_tab: 'close-tab',
+      select_tab_left: 'select-tab-left',
+      select_tab_right: 'select-tab-right',
       rename_tab: 'rename-tab',
       new_window: 'new-window',
       manage_tunnels: 'manage-tunnels',
@@ -64,6 +66,10 @@
       editor_next_problem: 'editor-next-problem',
       editor_previous_problem: 'editor-previous-problem',
       search_in_project: 'search-in-project',
+      // Handled inline in runShortcutFallbacks rather than through
+      // handleMenuAction: it is not a menu item, and it is consumed only by a
+      // pane that has a preview (see togglePreviewOnFocusedPane).
+      toggle_preview: 'toggle-preview',
     };
 
     // Core actions that mean something only inside a focused editor pane. A
@@ -108,7 +114,9 @@
     }
 
     function runCoreAction(action) {
-      if (action === 'navigate-pane-up') navigatePane('up');
+      if (action === 'select-tab-left') cycleTab(-1);
+      else if (action === 'select-tab-right') cycleTab(1);
+      else if (action === 'navigate-pane-up') navigatePane('up');
       else if (action === 'navigate-pane-down') navigatePane('down');
       else if (action === 'navigate-pane-left') navigatePane('left');
       else if (action === 'navigate-pane-right') navigatePane('right');
@@ -117,12 +125,42 @@
       } else handleMenuAction(action);
     }
 
+    // Cycle the focused pane's markdown preview, reporting whether there was
+    // one to cycle.
+    //
+    // Scoped more tightly than EDITOR_SCOPED_ACTIONS above, and for the same
+    // reason: this key means nothing outside a pane that actually has a
+    // preview, so everywhere else it must be DROPPED rather than swallowed —
+    // it still has to reach the shell in a terminal, and a tool window or
+    // plugin action the user bound to the same combo still has to run.
+    function togglePreviewOnFocusedPane() {
+      const pane = getCurrentPane();
+      const api = global.termlabEditorPane;
+      if (!pane || pane.kind !== 'editor' || !pane.view) return false;
+      if (!api || typeof api.togglePreview !== 'function') return false;
+      // null means the pane has no preview: not a markdown file, or the
+      // markdown vendor bundle is missing.
+      return api.togglePreview(pane.view) !== null;
+    }
+
     function navigatePane(direction) {
       const tab = getActiveTab();
       const focusedPaneId = getFocusedPaneId();
       if (!tab || focusedPaneId == null) return;
       const adj = findAdjacentPane(focusedPaneId, direction, tab.containerEl);
       if (adj != null) setFocusedPane(adj);
+    }
+
+    // Select the tab `delta` positions from the active one, wrapping at both
+    // ends so cycling never dead-ends.
+    function cycleTab(delta) {
+      const tabIds = getTabIds() || [];
+      if (tabIds.length < 2) return;
+      const tab = getActiveTab();
+      const index = tab ? tabIds.indexOf(tab.id) : -1;
+      if (index < 0) return;
+      const next = (index + delta + tabIds.length) % tabIds.length;
+      activateTab(tabIds[next]);
     }
 
     // Config files and the shipped defaults spell arrows "left"/"up"/…, while
@@ -302,6 +340,17 @@
           }
         }
         if (coreHit && PROJECT_SCOPED_ACTIONS.indexOf(coreHit.action) !== -1 && !hasProject()) {
+          suppressedCoreAction = coreHit.action;
+          coreHit = null;
+        }
+        // Same drop-don't-consume treatment as the saves above. Recording the
+        // suppression matters here for a second reason: 'toggle-preview' is
+        // not a menu action, so a bare `coreHit = null` would let the
+        // function-key table below hand it to handleMenuAction, which knows
+        // nothing about it — reachable today by binding toggle_preview to an
+        // F-key.
+        if (coreHit && coreHit.action === 'toggle-preview') {
+          if (togglePreviewOnFocusedPane()) return true;
           suppressedCoreAction = coreHit.action;
           coreHit = null;
         }

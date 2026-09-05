@@ -82,10 +82,69 @@ pub(crate) fn seed_then_build<E: std::fmt::Display>(
     seed_for_label(pending, label, vec![path.to_string()]);
     if let Err(e) = build() {
         let orphaned = pending.take(label);
-        log::error!(
-            "open-path: could not create window {label} for {orphaned:?}: {e}"
-        );
+        log::error!("open-path: could not create window {label} for {orphaned:?}: {e}");
     }
+}
+
+/// Event that tells an already-running window it has queued open paths to
+/// drain (via `take_pending_open_paths`).
+pub(crate) const OPEN_PATHS_PENDING_EVENT: &str = "open-paths-pending";
+
+/// Whether this window label belongs to a full app window (terminal/editor
+/// chrome) that can route an open-path request into an editor tab. Panel
+/// hosts and choosers boot without the editor runtime, so seeding their
+/// queue would strand the path forever.
+fn label_can_open_paths(label: &str) -> bool {
+    label == "main" || label.starts_with("window-")
+}
+
+/// Pick which running window should receive an open-path request: the
+/// focused full app window, else any full app window, else none (caller
+/// falls back to building a fresh window). Pure over (label, focused) pairs
+/// so the preference order is unit-testable without a window server.
+pub(crate) fn pick_open_target(windows: &[(String, bool)]) -> Option<String> {
+    let candidates: Vec<&(String, bool)> = windows
+        .iter()
+        .filter(|(label, _)| label_can_open_paths(label))
+        .collect();
+    candidates
+        .iter()
+        .find(|(_, focused)| *focused)
+        .or_else(|| candidates.first())
+        .map(|(label, _)| label.clone())
+}
+
+/// Open `path` in the running app: as a new editor tab in an existing window
+/// when one is up (the focused one wins), and only in a fresh window when no
+/// full app window exists — `termlab notes.md` next to a running instance
+/// should read as "open a tab here", not "spawn another app window".
+pub(crate) fn open_in_running_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>, path: &str) {
+    use tauri::{Emitter, Manager};
+
+    let windows = app.webview_windows();
+    let candidates: Vec<(String, bool)> = windows
+        .values()
+        .map(|window| {
+            (
+                window.label().to_string(),
+                window.is_focused().unwrap_or(false),
+            )
+        })
+        .collect();
+    let Some(label) = pick_open_target(&candidates) else {
+        open_in_new_window(app, path);
+        return;
+    };
+    let Some(window) = windows.get(&label) else {
+        open_in_new_window(app, path);
+        return;
+    };
+
+    // Seed BEFORE the emit for the same reason seed_then_build seeds before
+    // the build: the drain must find the path no matter how fast it runs.
+    seed_for_label(&app.state::<PendingOpens>(), &label, vec![path.to_string()]);
+    let _ = window.emit(OPEN_PATHS_PENDING_EVENT, ());
+    let _ = window.set_focus();
 }
 
 pub(crate) fn open_in_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, path: &str) {
@@ -179,6 +238,35 @@ pub(crate) fn take_pending_open_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_target_prefers_focused_full_windows_and_ignores_hosts() {
+        let windows = vec![
+            ("panelhost-main-1".to_string(), true),
+            ("main".to_string(), false),
+            ("window-2".to_string(), false),
+        ];
+        assert_eq!(
+            pick_open_target(&windows),
+            Some("main".to_string()),
+            "a focused panel host must not swallow the open; the first full window wins"
+        );
+
+        let focused = vec![("main".to_string(), false), ("window-2".to_string(), true)];
+        assert_eq!(
+            pick_open_target(&focused),
+            Some("window-2".to_string()),
+            "the focused full window wins over earlier unfocused ones"
+        );
+
+        let hosts_only = vec![("panelhost-main-1".to_string(), true)];
+        assert_eq!(
+            pick_open_target(&hosts_only),
+            None,
+            "no full app window means the caller builds a fresh one"
+        );
+        assert_eq!(pick_open_target(&[]), None);
+    }
 
     #[test]
     fn take_returns_and_clears_per_label() {

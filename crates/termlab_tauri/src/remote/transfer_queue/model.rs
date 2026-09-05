@@ -357,6 +357,10 @@ fn default_pipeline_chunk_bytes() -> usize {
     256 * 1024
 }
 
+fn default_max_queued() -> usize {
+    2_000
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -369,6 +373,11 @@ pub struct QueueSettings {
     /// Requested bytes per chunk; clamped to the server limit at attempt time.
     #[serde(default = "default_pipeline_chunk_bytes")]
     pub pipeline_chunk_bytes: usize,
+    /// Ceiling on non-terminal jobs held in the queue at once. Folder
+    /// expansion throttles against this instead of flooding the document,
+    /// and direct enqueues beyond it are refused.
+    #[serde(default = "default_max_queued")]
+    pub max_queued: usize,
 }
 
 impl Default for QueueSettings {
@@ -378,6 +387,7 @@ impl Default for QueueSettings {
             per_host_limit: 2,
             pipeline_depth: default_pipeline_depth(),
             pipeline_chunk_bytes: default_pipeline_chunk_bytes(),
+            max_queued: default_max_queued(),
         }
     }
 }
@@ -394,6 +404,9 @@ pub(super) fn validate_queue_settings(settings: &QueueSettings) -> Result<(), St
     }
     if !(32 * 1024..=1024 * 1024).contains(&settings.pipeline_chunk_bytes) {
         return Err("pipeline chunk size must be between 32 KiB and 1 MiB".into());
+    }
+    if !(100..=50_000).contains(&settings.max_queued) {
+        return Err("maximum queued transfers must be between 100 and 50000".into());
     }
     Ok(())
 }
@@ -648,6 +661,7 @@ mod tests {
                 per_host_limit: 2,
                 pipeline_depth: 16,
                 pipeline_chunk_bytes: 256 * 1024,
+                max_queued: 2_000,
             }
         );
         assert!(doc.jobs.is_empty());
@@ -666,6 +680,29 @@ mod tests {
             .expect("v1 settings without pipeline fields must deserialize");
         assert_eq!(parsed.pipeline_depth, 16);
         assert_eq!(parsed.pipeline_chunk_bytes, 262144);
+        assert_eq!(
+            parsed.max_queued, 2_000,
+            "older settings gain the default queue ceiling"
+        );
+    }
+
+    #[test]
+    fn queue_settings_max_queued_validation_bounds() {
+        let mut settings = QueueSettings::default();
+        settings.max_queued = 99;
+        assert!(
+            validate_queue_settings(&settings).is_err(),
+            "a ceiling below 100 is rejected"
+        );
+        settings.max_queued = 50_001;
+        assert!(
+            validate_queue_settings(&settings).is_err(),
+            "a ceiling above 50000 is rejected"
+        );
+        settings.max_queued = 100;
+        assert!(validate_queue_settings(&settings).is_ok());
+        settings.max_queued = 50_000;
+        assert!(validate_queue_settings(&settings).is_ok());
     }
 
     #[test]
@@ -826,7 +863,15 @@ mod tests {
             "/srv/second.csv",
         );
 
-        assert_eq!(first_host, "local:/tmp/report.csv");
+        // `uses_windows_path_semantics` is `cfg!(windows) || …` by design, so a
+        // native Windows build normalizes every local path with Windows rules.
+        // Both forms are the correct output for their platform.
+        let expected = if cfg!(windows) {
+            r"local:\tmp\report.csv"
+        } else {
+            "local:/tmp/report.csv"
+        };
+        assert_eq!(first_host, expected);
         assert_eq!(second_host, first_host);
         assert_ne!(other_destination, first_host);
     }

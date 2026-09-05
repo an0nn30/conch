@@ -8,6 +8,8 @@
     new_tab: 'New Tab',
     new_plain_shell_tab: 'New Plain Shell Tab',
     close_tab: 'Close Tab',
+    select_tab_left: 'Select Tab to the Left',
+    select_tab_right: 'Select Tab to the Right',
     rename_tab: 'Rename Tab',
     new_window: 'New Window',
     manage_tunnels: 'Manage SSH Tunnels',
@@ -35,12 +37,16 @@
     editor_navigate_forward: 'Navigate Forward',
     editor_next_problem: 'Next Problem',
     editor_previous_problem: 'Previous Problem',
+    toggle_preview: 'Toggle Markdown Preview',
   };
 
   const KEYBOARD_CORE_GROUPS = [
     {
       label: 'Tab & Window',
-      keys: ['new_tab', 'new_plain_shell_tab', 'close_tab', 'rename_tab', 'new_window', 'quit'],
+      keys: [
+        'new_tab', 'new_plain_shell_tab', 'close_tab', 'select_tab_left',
+        'select_tab_right', 'rename_tab', 'new_window', 'quit',
+      ],
     },
     {
       label: 'Editor',
@@ -49,6 +55,7 @@
         'open_file',
         'save_file',
         'save_file_as',
+        'toggle_preview',
         'editor_completion',
         'editor_signature_help',
         'editor_go_to_definition',
@@ -398,6 +405,18 @@
       return pendingSettings.termlab.keyboard[ref.key] || '';
     }
 
+    // Replace the pending keymap with the shipped defaults (fetched from
+    // Rust — one source of truth). Override maps empty out: plugins fall
+    // back to their manifest keybinds, tool windows to unassigned. Only
+    // pendingSettings changes; the user still Applies (or cancels) as usual.
+    function resetKeyboardToDefaults(defaults) {
+      if (!pendingSettings?.termlab || !defaults || typeof defaults !== 'object') return;
+      const next = JSON.parse(JSON.stringify(defaults));
+      next.plugin_shortcuts = {};
+      next.tool_window_shortcuts = {};
+      pendingSettings.termlab.keyboard = next;
+    }
+
     function setShortcutValue(ref, value) {
       if (!pendingSettings?.termlab?.keyboard || !ref) return;
       if (ref.kind === 'tool-window') {
@@ -465,6 +484,7 @@
       getSidebarSearchResults,
       getShortcutValue,
       setShortcutValue,
+      resetKeyboardToDefaults,
     };
   }
 

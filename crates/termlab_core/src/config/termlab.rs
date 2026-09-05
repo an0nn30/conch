@@ -100,6 +100,8 @@ pub struct KeyboardConfig {
     pub new_tab: String,
     pub new_plain_shell_tab: String,
     pub close_tab: String,
+    pub select_tab_left: String,
+    pub select_tab_right: String,
     pub quit: String,
     pub new_window: String,
     pub manage_tunnels: String,
@@ -130,6 +132,7 @@ pub struct KeyboardConfig {
     pub editor_next_problem: String,
     pub editor_previous_problem: String,
     pub search_in_project: String,
+    pub toggle_preview: String,
     pub tool_window_shortcuts: HashMap<String, String>,
     pub plugin_shortcuts: HashMap<String, String>,
 }
@@ -140,6 +143,10 @@ impl Default for KeyboardConfig {
             new_tab: "cmd+t".into(),
             new_plain_shell_tab: "cmd+shift+t".into(),
             close_tab: "cmd+w".into(),
+            // Spelled as the physical keys: shift+[ types "{", and the
+            // shortcut router normalizes by KeyboardEvent.code.
+            select_tab_left: "cmd+shift+[".into(),
+            select_tab_right: "cmd+shift+]".into(),
             quit: "cmd+q".into(),
             new_window: "cmd+shift+n".into(),
             manage_tunnels: "cmd+shift+m".into(),
@@ -169,6 +176,7 @@ impl Default for KeyboardConfig {
             editor_next_problem: "f8".into(),
             editor_previous_problem: "shift+f8".into(),
             search_in_project: "cmd+shift+f".into(),
+            toggle_preview: "cmd+shift+y".into(),
             tool_window_shortcuts: HashMap::new(),
             plugin_shortcuts: HashMap::new(),
         }
@@ -246,6 +254,23 @@ mod tests {
         // opens the file chooser from anywhere, so it consumes cmd+o in a
         // terminal too. Deliberate — see shortcut-runtime.js.
         assert_eq!(k.open_file, "cmd+o");
+    }
+
+    #[test]
+    fn tab_cycle_shortcuts_have_the_documented_defaults() {
+        let k = KeyboardConfig::default();
+        // cmd+shift+{ / cmd+shift+} on the keycap — the router matches by
+        // physical key, so the config spells the unshifted characters.
+        assert_eq!(k.select_tab_left, "cmd+shift+[");
+        assert_eq!(k.select_tab_right, "cmd+shift+]");
+    }
+
+    #[test]
+    fn keyboard_config_without_tab_cycle_keys_gains_the_defaults() {
+        let parsed: KeyboardConfig = toml::from_str(r#"new_tab = "cmd+t""#).unwrap();
+        assert_eq!(parsed.select_tab_left, "cmd+shift+[");
+        assert_eq!(parsed.select_tab_right, "cmd+shift+]");
+        assert_eq!(parsed.new_tab, "cmd+t");
     }
 
     #[test]
@@ -560,5 +585,16 @@ mod tests {
         let cfg: KeyboardConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.split_vertical, "cmd+d");
         assert_eq!(cfg.close_pane, "cmd+shift+w");
+    }
+
+    #[test]
+    fn toggle_preview_has_a_default_binding() {
+        // NOT cmd+shift+p: that combo is hard-wired to the command palette in
+        // frontend/app/shortcut-runtime.js, at a LOWER router priority than
+        // the handler that dispatches these config bindings — so binding it
+        // here would have made the palette unreachable. A default has to clear
+        // the frontend's hard-wired handlers and CodeMirror's own keymaps, not
+        // just this struct and menu.rs.
+        assert_eq!(KeyboardConfig::default().toggle_preview, "cmd+shift+y");
     }
 }

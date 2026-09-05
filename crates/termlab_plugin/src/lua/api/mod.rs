@@ -12,8 +12,8 @@ mod ui;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use termlab_plugin_sdk::widgets::*;
 use mlua::prelude::*;
+use termlab_plugin_sdk::widgets::*;
 
 use crate::HostApi;
 

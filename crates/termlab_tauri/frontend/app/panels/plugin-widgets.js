@@ -769,8 +769,11 @@
     style.textContent = vars + '\n' + (w.css || '');
     shadow.appendChild(style);
 
+    // Plugin HTML is untrusted — see html-sanitizer.js. Never assign it to
+    // innerHTML: the shadow root isolates styles, not scripts, and an inline
+    // event handler here would run with access to the Tauri invoke bridge.
     const container = document.createElement('div');
-    container.innerHTML = w.content;
+    container.appendChild(window.htmlSanitizer.sanitizeToFragment(w.content, document));
     shadow.appendChild(container);
 
     // Wire up data-action click events.
@@ -1007,21 +1010,9 @@
   }
 
   /// Map a plugin icon name to an <img> tag using the PNG icon set.
+  /** Delegates to widget-icons.js, which validates plugin-supplied names. */
   function iconHtml(name, size) {
-    if (!name) return '';
-    size = size || 14;
-    // Map icon names to filenames (dark variants for dark theme).
-    const map = {
-      'file': 'file-dark', 'folder': 'folder', 'folder-open': 'folder-open',
-      'server': 'server', 'network-server': 'network-server', 'terminal': 'terminal',
-      'go-home': 'go-home-dark', 'go-next': 'go-next-dark', 'go-previous': 'go-previous-dark',
-      'refresh': 'view-refresh-dark', 'folder-new': 'folder-new-dark',
-      'transfer-up': 'transfer-up-dark', 'transfer-down': 'transfer-down-dark',
-      'tab-close': 'tab-close-dark', 'computer': 'computer-dark',
-      'locked': 'locked-dark', 'unlocked': 'unlocked-dark', 'eye': 'eye-dark',
-    };
-    const file = map[name] || name;
-    return `<img src="icons/${file}.png" width="${size}" height="${size}" style="vertical-align:middle;margin-right:3px">`;
+    return window.widgetIcons.iconHtml(name, size);
   }
 
   function getMenuItems() { return pluginMenuItems.slice(); }

@@ -162,7 +162,11 @@ pub trait DirectoryCreator: Send + Sync {
 /// and expansion state onto the batch record.
 #[async_trait]
 pub trait ExpansionSink: Send + Sync {
-    async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String>;
+    /// Deliver a chunk of discovered files. Chunks arrive once per
+    /// coalescing window — never once per file — so a sink backed by the
+    /// durable queue commits once per chunk. A chunk is accepted or refused
+    /// whole.
+    async fn enqueue_files(&self, files: Vec<DiscoveredFile>) -> Result<(), String>;
 
     async fn record_batch(
         &self,
@@ -180,15 +184,18 @@ pub struct ExpansionPlan {
     pub remote_dest: bool,
 }
 
-/// Entries walked between two batch-record writes. Expansion can discover
-/// thousands of files, and every write is a full durable document commit, so
-/// totals are coalesced instead of persisted per entry.
+/// Entries walked between two sink deliveries. Expansion can discover
+/// thousands of files, and every delivery is a full durable document commit,
+/// so both the member enqueues and the totals are coalesced into one chunk
+/// per window instead of one commit per entry.
 const UPDATE_COALESCE_ENTRIES: u64 = 25;
 
 #[derive(Default)]
 struct ExpansionState {
     totals: ExpansionTotals,
     since_update: u64,
+    /// Files discovered but not yet delivered to the sink.
+    pending: Vec<DiscoveredFile>,
 }
 
 type EntryFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
@@ -228,6 +235,18 @@ pub async fn run_expansion(
         Err(error) => Err(error),
     };
 
+    // Deliver whatever the walk buffered after its last flush. A cancelled
+    // batch would refuse the members anyway, so the leftovers are dropped.
+    let walked = if cancellation.is_cancelled() {
+        walked
+    } else {
+        let leftover = std::mem::take(&mut state.lock().pending);
+        match (walked, flush_files(sink, leftover).await) {
+            (Ok(()), Err(reason)) => Err(reason),
+            (walked, _) => walked,
+        }
+    };
+
     let totals = state.lock().totals.clone();
     // Cancellation outranks whatever the walk's proximate error was: a cancel
     // that lands mid-flight makes the queue refuse the member the walk was
@@ -264,13 +283,12 @@ async fn expand_entry(
         }
         WalkEntry::File { path, size } => {
             let destination = map_entry(plan, &path)?;
-            sink.enqueue_file(DiscoveredFile {
+            let mut state = state.lock();
+            state.pending.push(DiscoveredFile {
                 source_path: normalize_entry_path(&path),
                 dest_path: destination,
                 size,
-            })
-            .await?;
-            let mut state = state.lock();
+            });
             state.totals.discovered_files += 1;
             state.totals.discovered_bytes = state.totals.discovered_bytes.saturating_add(size);
         }
@@ -294,14 +312,24 @@ async fn expand_entry(
         state.since_update >= UPDATE_COALESCE_ENTRIES
     };
     if due {
-        let totals = {
+        let (files, totals) = {
             let mut state = state.lock();
             state.since_update = 0;
-            state.totals.clone()
+            (std::mem::take(&mut state.pending), state.totals.clone())
         };
+        // Members land before the totals that count them, so the batch
+        // record never reports files the queue has not accepted yet.
+        flush_files(sink, files).await?;
         sink.record_batch(BatchExpansion::Running, &totals).await?;
     }
     Ok(())
+}
+
+async fn flush_files(sink: &dyn ExpansionSink, files: Vec<DiscoveredFile>) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    sink.enqueue_files(files).await
 }
 
 fn map_entry(plan: &ExpansionPlan, entry_path: &str) -> Result<String, String> {
@@ -750,19 +778,19 @@ mod tests {
         }
     }
 
-    /// Enqueues every discovered file as an upload member of `batch_id` and
+    /// Enqueues every discovered chunk as upload members of `batch_id` and
     /// mirrors expansion state onto the batch record, exactly as the Tauri
     /// expansion task does.
     struct QueueSink {
         handle: TransferQueueHandle,
         batch_id: Uuid,
-        /// Cancels the batch from inside the first enqueue, which is how the
-        /// cancellation test reaches a mid-walk cancel deterministically.
-        cancel_on_first_file: bool,
-        /// Cancels the batch *before* the first enqueue is attempted, staging
+        /// Cancels the batch right after the first chunk lands, which is how
+        /// the cancellation test reaches a mid-walk cancel deterministically.
+        cancel_after_first_chunk: bool,
+        /// Cancels the batch *before* the first chunk is attempted, staging
         /// the hostile mailbox order: the walk decided to enqueue, the actor
         /// processed the cancel first, and the enqueue arrives afterwards.
-        cancel_before_first_file: bool,
+        cancel_before_first_chunk: bool,
         enqueued: Mutex<Vec<Uuid>>,
     }
 
@@ -771,68 +799,70 @@ mod tests {
             Self {
                 handle,
                 batch_id,
-                cancel_on_first_file: false,
-                cancel_before_first_file: false,
+                cancel_after_first_chunk: false,
+                cancel_before_first_chunk: false,
                 enqueued: Mutex::new(Vec::new()),
             }
         }
 
-        fn cancelling_on_first_file(mut self) -> Self {
-            self.cancel_on_first_file = true;
+        fn cancelling_after_first_chunk(mut self) -> Self {
+            self.cancel_after_first_chunk = true;
             self
         }
 
-        fn cancelling_before_first_file(mut self) -> Self {
-            self.cancel_before_first_file = true;
+        fn cancelling_before_first_chunk(mut self) -> Self {
+            self.cancel_before_first_chunk = true;
             self
         }
     }
 
     #[async_trait]
     impl ExpansionSink for QueueSink {
-        async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String> {
-            if self.cancel_before_first_file && self.enqueued.lock().unwrap().is_empty() {
+        async fn enqueue_files(&self, files: Vec<DiscoveredFile>) -> Result<(), String> {
+            let first_chunk = self.enqueued.lock().unwrap().is_empty();
+            if self.cancel_before_first_chunk && first_chunk {
                 self.handle.cancel_batch(self.batch_id).await?;
             }
-            let id = Uuid::new_v4();
-            let host_key = build_host_key(&TransferEndpoint::Configured {
+            let endpoint = TransferEndpoint::Configured {
                 server_entry_id: "server-1".into(),
                 label: "Production".into(),
-            });
-            let destination_key = build_destination_key(
-                &host_key,
-                &TransferDirection::Upload,
-                &file.source_path,
-                &file.dest_path,
-            );
-            let file_name = file
-                .source_path
-                .rsplit('/')
-                .find(|component| !component.is_empty())
-                .unwrap_or(&file.source_path)
-                .to_string();
-            self.handle
-                .enqueue(NewTransferJob {
-                    id,
-                    protocol: TransferProtocol::Sftp,
-                    direction: TransferDirection::Upload,
-                    origin: TransferOrigin::FilesPanel,
-                    endpoint: TransferEndpoint::Configured {
-                        server_entry_id: "server-1".into(),
-                        label: "Production".into(),
-                    },
-                    local_path: file.source_path.clone(),
-                    remote_path: file.dest_path.clone(),
-                    file_name,
-                    batch_id: Some(self.batch_id),
-                    priority: TransferPriority::Normal,
-                    host_key,
-                    destination_key,
-                    conflict_policy: ConflictPolicy::Ask,
+            };
+            let host_key = build_host_key(&endpoint);
+            let requests: Vec<NewTransferJob> = files
+                .into_iter()
+                .map(|file| {
+                    let destination_key = build_destination_key(
+                        &host_key,
+                        &TransferDirection::Upload,
+                        &file.source_path,
+                        &file.dest_path,
+                    );
+                    let file_name = file
+                        .source_path
+                        .rsplit('/')
+                        .find(|component| !component.is_empty())
+                        .unwrap_or(&file.source_path)
+                        .to_string();
+                    NewTransferJob {
+                        id: Uuid::new_v4(),
+                        protocol: TransferProtocol::Sftp,
+                        direction: TransferDirection::Upload,
+                        origin: TransferOrigin::FilesPanel,
+                        endpoint: endpoint.clone(),
+                        local_path: file.source_path.clone(),
+                        remote_path: file.dest_path.clone(),
+                        file_name,
+                        batch_id: Some(self.batch_id),
+                        priority: TransferPriority::Normal,
+                        host_key: host_key.clone(),
+                        destination_key,
+                        conflict_policy: ConflictPolicy::Ask,
+                    }
                 })
-                .await?;
-            self.enqueued.lock().unwrap().push(id);
-            if self.cancel_on_first_file && self.enqueued.lock().unwrap().len() == 1 {
+                .collect();
+            let ids = self.handle.enqueue_many(requests).await?;
+            self.enqueued.lock().unwrap().extend(ids);
+            if self.cancel_after_first_chunk && first_chunk {
                 self.handle.cancel_batch(self.batch_id).await?;
             }
             Ok(())
@@ -1023,14 +1053,38 @@ mod tests {
         ));
     }
 
+    /// A root wide enough that the first coalescing window flushes mid-walk,
+    /// before the trailing subdirectory is ever listed.
+    fn wide_tree() -> BTreeMap<String, Vec<WalkEntry>> {
+        let mut root: Vec<WalkEntry> = (0..super::UPDATE_COALESCE_ENTRIES)
+            .map(|index| WalkEntry::File {
+                path: format!("/src/f{index}.txt"),
+                size: 1,
+            })
+            .collect();
+        root.push(WalkEntry::Dir {
+            path: "/src/sub".into(),
+        });
+        let mut tree = BTreeMap::new();
+        tree.insert("/src".to_string(), root);
+        tree.insert(
+            "/src/sub".to_string(),
+            vec![WalkEntry::File {
+                path: "/src/sub/late.txt".into(),
+                size: 1,
+            }],
+        );
+        tree
+    }
+
     #[tokio::test]
     async fn cancel_batch_cancels_members_and_stops_expansion() {
         let (_directory, handle) = queue_handle().await;
         let batch_id = Uuid::from_u128(0xB3);
         let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
-        let lister = FakeLister::new(expansion_tree());
+        let lister = FakeLister::new(wide_tree());
         let creator = RecordingDirCreator::default();
-        let sink = QueueSink::new(handle.clone(), batch_id).cancelling_on_first_file();
+        let sink = QueueSink::new(handle.clone(), batch_id).cancelling_after_first_chunk();
 
         let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
 
@@ -1047,11 +1101,17 @@ mod tests {
         );
 
         let snapshot = handle.snapshot();
-        assert_eq!(snapshot.jobs.len(), 1, "only the first file was enqueued");
+        assert_eq!(
+            snapshot.jobs.len(),
+            super::UPDATE_COALESCE_ENTRIES as usize,
+            "only the first flushed chunk was enqueued"
+        );
         assert!(
-            matches!(snapshot.jobs[0].state, TransferJobState::Cancelled { .. }),
-            "the member is cancelled through the existing per-job path, got {:?}",
-            snapshot.jobs[0].state
+            snapshot
+                .jobs
+                .iter()
+                .all(|job| matches!(job.state, TransferJobState::Cancelled { .. })),
+            "every member is cancelled through the existing bulk path"
         );
         assert_eq!(
             snapshot.batches[0].info.expansion,
@@ -1069,7 +1129,7 @@ mod tests {
         let cancellation = handle.create_batch(batch_info(batch_id)).await.unwrap();
         let lister = FakeLister::new(expansion_tree());
         let creator = RecordingDirCreator::default();
-        let sink = QueueSink::new(handle.clone(), batch_id).cancelling_before_first_file();
+        let sink = QueueSink::new(handle.clone(), batch_id).cancelling_before_first_chunk();
 
         let outcome = run_expansion(&lister, &creator, &sink, &upload_plan(), &cancellation).await;
 

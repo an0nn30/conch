@@ -146,7 +146,7 @@ fn ipc_listen_loop(listener: std::os::unix::net::UnixListener, app: tauri::AppHa
                             );
                         }
                         Ok(IpcMessage::OpenPath { path }) => {
-                            crate::open_path::open_in_new_window(&app, &path);
+                            crate::open_path::open_in_running_app(&app, &path);
                         }
                         Err(e) => {
                             log::warn!("Invalid IPC message: {e}");

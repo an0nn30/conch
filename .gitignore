@@ -68,3 +68,7 @@ packaging/lsp/.previous.*
 # Frontend vendor build (esbuild-generated CodeMirror bundle)
 crates/termlab_tauri/frontend/node_modules/
 crates/termlab_tauri/frontend/vendor/codemirror/
+crates/termlab_tauri/frontend/vendor/markdown/
+
+# Node / JS test harness
+node_modules/

@@ -268,7 +268,10 @@ pub(crate) fn get_local_pane_process(
             cwd: pty.current_dir(),
             program: pty.foreground_program(),
         },
-        None => PaneProcessInfo { cwd: None, program: None },
+        None => PaneProcessInfo {
+            cwd: None,
+            program: None,
+        },
     }
 }
 

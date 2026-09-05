@@ -646,6 +646,9 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             menu::MENU_TOGGLE_BOTTOM_PANEL_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_BOTTOM_PANEL)
             }
+            menu::MENU_TOGGLE_PREVIEW_ID => {
+                menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_PREVIEW)
+            }
             menu::MENU_TOGGLE_RIGHT_PANEL_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_TOGGLE_RIGHT_PANEL)
             }
@@ -952,6 +955,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 cli_install::uninstall_cli_symlink,
                 settings::get_all_settings,
                 settings::save_settings,
+                settings::default_keyboard_config,
                 theme_catalog::list_terminal_themes,
                 fonts::list_system_fonts,
                 remote::ssh_commands::ssh_connect,
@@ -1005,6 +1009,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 remote::transfer_commands::transfer_pause_all,
                 remote::transfer_commands::transfer_resume_all,
                 remote::transfer_commands::transfer_cancel,
+                remote::transfer_commands::transfer_cancel_all,
                 remote::transfer_commands::transfer_retry,
                 remote::transfer_commands::transfer_resolve,
                 remote::transfer_commands::transfer_reorder,

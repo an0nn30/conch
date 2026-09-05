@@ -38,6 +38,7 @@ pub(crate) const MENU_SPLIT_VERTICAL_ID: &str = "view.split_vertical";
 pub(crate) const MENU_SPLIT_HORIZONTAL_ID: &str = "view.split_horizontal";
 pub(crate) const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 pub(crate) const MENU_TOGGLE_BOTTOM_PANEL_ID: &str = "view.toggle_bottom_panel";
+pub(crate) const MENU_TOGGLE_PREVIEW_ID: &str = "view.toggle_preview";
 pub(crate) const MENU_RENAME_TAB_ID: &str = "file.rename_tab";
 pub(crate) const MENU_NEW_FILE_ID: &str = "file.new_file";
 pub(crate) const MENU_OPEN_FILE_ID: &str = "file.open_file";
@@ -96,6 +97,7 @@ pub(crate) const MENU_ACTION_OPEN_FILE: &str = "open-file";
 pub(crate) const MENU_ACTION_OPEN_FOLDER: &str = "open-folder";
 pub(crate) const MENU_ACTION_SAVE_FILE_AS: &str = "save-file-as";
 pub(crate) const MENU_ACTION_TOGGLE_BOTTOM_PANEL: &str = "toggle-bottom-panel";
+pub(crate) const MENU_ACTION_TOGGLE_PREVIEW: &str = "toggle-preview";
 pub(crate) const MENU_ACTION_CHECK_UPDATES: &str = "check-for-updates";
 pub(crate) const MENU_ACTION_ABOUT: &str = "about";
 pub(crate) const MENU_ACTION_OPEN_DEVTOOLS: &str = "open-devtools";
@@ -142,6 +144,19 @@ pub(crate) fn config_key_to_accelerator(key: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("+")
+}
+
+/// A menu item's accelerator slot for a possibly-unset config binding. The
+/// settings UI can clear a shortcut to the empty string, and the native menu
+/// builder must then get `None` — an empty accelerator string is a parse
+/// error that would fail the whole menu build.
+fn optional_accelerator(accel: &str) -> Option<&str> {
+    let trimmed = accel.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(accel)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +213,7 @@ fn quit_item<R: tauri::Runtime>(
         MENU_QUIT_ID,
         "Quit TermLab",
         true,
-        Some(&config_key_to_accelerator(&keyboard.quit)),
+        optional_accelerator(&config_key_to_accelerator(&keyboard.quit)),
     )
 }
 
@@ -208,13 +223,19 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
 ) -> tauri::Result<Menu<R>> {
     let new_tab_accel = primary_accelerator("T");
     let new_plain_shell_tab_accel = config_key_to_accelerator(&keyboard.new_plain_shell_tab);
-    let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some(&new_tab_accel))?;
+    let new_tab = MenuItem::with_id(
+        app,
+        MENU_NEW_TAB_ID,
+        "New Tab",
+        true,
+        optional_accelerator(&new_tab_accel),
+    )?;
     let new_plain_shell_tab = MenuItem::with_id(
         app,
         MENU_NEW_PLAIN_SHELL_TAB_ID,
         "New Plain Shell Tab",
         true,
-        Some(&new_plain_shell_tab_accel),
+        optional_accelerator(&new_plain_shell_tab_accel),
     )?;
     let close_tab = MenuItem::with_id(
         app,
@@ -236,7 +257,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_NEW_FILE_ID,
         "New File",
         true,
-        Some(&new_file_accel),
+        optional_accelerator(&new_file_accel),
     )?;
     let open_file_accel = config_key_to_accelerator(&keyboard.open_file);
     let open_file = MenuItem::with_id(
@@ -244,7 +265,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_OPEN_FILE_ID,
         "Open File\u{2026}",
         true,
-        Some(&open_file_accel),
+        optional_accelerator(&open_file_accel),
     )?;
     // No accelerator: opening a project is a deliberate, infrequent act, and a
     // native accelerator here would be consumed by AppKit before the webview
@@ -281,7 +302,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_RENAME_TAB_ID,
         "Rename Tab",
         true,
-        Some(&rename_tab_accel),
+        optional_accelerator(&rename_tab_accel),
     )?;
     let ssh_export = MenuItem::with_id(
         app,
@@ -340,7 +361,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_TOGGLE_LEFT_PANEL_ID,
         "Toggle Left Panel",
         true,
-        Some(&toggle_left_accel),
+        optional_accelerator(&toggle_left_accel),
     )?;
     let toggle_right_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
     let toggle_right = MenuItem::with_id(
@@ -348,7 +369,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_TOGGLE_RIGHT_PANEL_ID,
         "Toggle Right Panel",
         true,
-        Some(&toggle_right_accel),
+        optional_accelerator(&toggle_right_accel),
     )?;
     let focus_sessions = MenuItem::with_id(
         app,
@@ -358,7 +379,13 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         Some(&primary_accelerator("/")),
     )?;
     let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
-    let zen_mode = MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
+    let zen_mode = MenuItem::with_id(
+        app,
+        MENU_ZEN_MODE_ID,
+        "Zen Mode",
+        true,
+        optional_accelerator(&zen_accel),
+    )?;
     let zoom_in = MenuItem::with_id(
         app,
         MENU_ZOOM_IN_ID,
@@ -386,7 +413,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_TOGGLE_BOTTOM_PANEL_ID,
         "Toggle Bottom Panel",
         true,
-        Some(&toggle_bottom_accel),
+        optional_accelerator(&toggle_bottom_accel),
     )?;
     let split_v_accel = config_key_to_accelerator(&keyboard.split_vertical);
     let split_v = MenuItem::with_id(
@@ -394,7 +421,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_SPLIT_VERTICAL_ID,
         "Split Pane Vertically",
         true,
-        Some(&split_v_accel),
+        optional_accelerator(&split_v_accel),
     )?;
     let split_h_accel = config_key_to_accelerator(&keyboard.split_horizontal);
     let split_h = MenuItem::with_id(
@@ -402,7 +429,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_SPLIT_HORIZONTAL_ID,
         "Split Pane Horizontally",
         true,
-        Some(&split_h_accel),
+        optional_accelerator(&split_h_accel),
     )?;
     let close_pane_accel = config_key_to_accelerator(&keyboard.close_pane);
     let close_pane_item = MenuItem::with_id(
@@ -410,7 +437,24 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_CLOSE_PANE_ID,
         "Close Pane",
         true,
-        Some(&close_pane_accel),
+        optional_accelerator(&close_pane_accel),
+    )?;
+    // Deliberately NO accelerator, for the same reason as Save File As… above
+    // and more sharply: a native menu accelerator is consumed by AppKit before
+    // the webview sees the key, and this one is scoped tighter than any other
+    // — shortcut-runtime.js consumes it ONLY in a pane that actually has a
+    // markdown preview, and drops it everywhere else so it still reaches the
+    // shell in a terminal. Binding the configured `toggle_preview` combo here
+    // would take it from the shell in every pane in the app. The keystroke is
+    // still handled by that guard and Settings > Keymap still lists it; this
+    // item is the discoverable, always-safe route (menu-actions.js re-checks
+    // the focused pane before acting).
+    let toggle_preview = MenuItem::with_id(
+        app,
+        MENU_TOGGLE_PREVIEW_ID,
+        "Toggle Markdown Preview",
+        true,
+        None::<&str>,
     )?;
     let view_menu = Submenu::with_items(
         app,
@@ -424,6 +468,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             &split_v,
             &split_h,
             &close_pane_item,
+            &toggle_preview,
             &PredefinedMenuItem::separator(app)?,
             &focus_sessions,
             &zen_mode,
@@ -447,14 +492,14 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         MENU_MANAGE_TUNNELS_ID,
         "Manage SSH Tunnels\u{2026}",
         true,
-        Some(&manage_tunnels_accel),
+        optional_accelerator(&manage_tunnels_accel),
     )?;
     let credential_vault = MenuItem::with_id(
         app,
         MENU_VAULT_ID,
         "Credential Vault\u{2026}",
         true,
-        Some(&config_key_to_accelerator(&keyboard.vault_open)),
+        optional_accelerator(&config_key_to_accelerator(&keyboard.vault_open)),
     )?;
     let generate_ssh_key = MenuItem::with_id(
         app,
@@ -635,7 +680,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_MANAGE_TUNNELS_ID,
             "Manage SSH Tunnels\u{2026}",
             true,
-            Some(&config_key_to_accelerator(&keyboard.manage_tunnels)),
+            optional_accelerator(&config_key_to_accelerator(&keyboard.manage_tunnels)),
         )?;
         tools_items.push(Box::new(manage_tunnels));
 
@@ -646,7 +691,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_VAULT_ID,
             "Credential Vault\u{2026}",
             true,
-            Some(&config_key_to_accelerator(&keyboard.vault_open)),
+            optional_accelerator(&config_key_to_accelerator(&keyboard.vault_open)),
         )?));
         tools_items.push(Box::new(MenuItem::with_id(
             app,
@@ -756,7 +801,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_NEW_PLAIN_SHELL_TAB_ID,
             "New Plain Shell Tab",
             true,
-            Some(&new_plain_shell_tab_accel),
+            optional_accelerator(&new_plain_shell_tab_accel),
         )?;
         let close_tab = MenuItem::with_id(
             app,
@@ -771,7 +816,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_RENAME_TAB_ID,
             "Rename Tab",
             true,
-            Some(&rename_tab_accel),
+            optional_accelerator(&rename_tab_accel),
         )?;
         let new_file_accel = config_key_to_accelerator(&keyboard.new_file);
         let new_file = MenuItem::with_id(
@@ -779,7 +824,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_NEW_FILE_ID,
             "New File",
             true,
-            Some(&new_file_accel),
+            optional_accelerator(&new_file_accel),
         )?;
         let open_file_accel = config_key_to_accelerator(&keyboard.open_file);
         let open_file = MenuItem::with_id(
@@ -787,7 +832,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_OPEN_FILE_ID,
             "Open File\u{2026}",
             true,
-            Some(&open_file_accel),
+            optional_accelerator(&open_file_accel),
         )?;
         // No accelerator — see MENU_OPEN_FOLDER_ID definition in build_app_menu above.
         let open_folder = MenuItem::with_id(
@@ -866,7 +911,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_TOGGLE_LEFT_PANEL_ID,
             "Toggle Left Panel",
             true,
-            Some(&toggle_left_accel),
+            optional_accelerator(&toggle_left_accel),
         )?;
         let toggle_right_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
         let toggle_right = MenuItem::with_id(
@@ -874,7 +919,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_TOGGLE_RIGHT_PANEL_ID,
             "Toggle Right Panel",
             true,
-            Some(&toggle_right_accel),
+            optional_accelerator(&toggle_right_accel),
         )?;
         let toggle_bottom_accel = config_key_to_accelerator(&keyboard.toggle_bottom_panel);
         let toggle_bottom = MenuItem::with_id(
@@ -882,7 +927,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_TOGGLE_BOTTOM_PANEL_ID,
             "Toggle Bottom Panel",
             true,
-            Some(&toggle_bottom_accel),
+            optional_accelerator(&toggle_bottom_accel),
         )?;
         let focus_sessions = MenuItem::with_id(
             app,
@@ -892,8 +937,13 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             Some(&primary_accelerator("/")),
         )?;
         let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
-        let zen_mode =
-            MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
+        let zen_mode = MenuItem::with_id(
+            app,
+            MENU_ZEN_MODE_ID,
+            "Zen Mode",
+            true,
+            optional_accelerator(&zen_accel),
+        )?;
         let zoom_in = MenuItem::with_id(
             app,
             MENU_ZOOM_IN_ID,
@@ -921,7 +971,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_SPLIT_VERTICAL_ID,
             "Split Pane Vertically",
             true,
-            Some(&split_v_accel),
+            optional_accelerator(&split_v_accel),
         )?;
         let split_h_accel = config_key_to_accelerator(&keyboard.split_horizontal);
         let split_h = MenuItem::with_id(
@@ -929,7 +979,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_SPLIT_HORIZONTAL_ID,
             "Split Pane Horizontally",
             true,
-            Some(&split_h_accel),
+            optional_accelerator(&split_h_accel),
         )?;
         let close_pane_accel = config_key_to_accelerator(&keyboard.close_pane);
         let close_pane_item = MenuItem::with_id(
@@ -937,7 +987,15 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_CLOSE_PANE_ID,
             "Close Pane",
             true,
-            Some(&close_pane_accel),
+            optional_accelerator(&close_pane_accel),
+        )?;
+        // No accelerator — see build_app_menu above.
+        let toggle_preview = MenuItem::with_id(
+            app,
+            MENU_TOGGLE_PREVIEW_ID,
+            "Toggle Markdown Preview",
+            true,
+            None::<&str>,
         )?;
         let view_menu = Submenu::with_items(
             app,
@@ -951,6 +1009,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 &split_v,
                 &split_h,
                 &close_pane_item,
+                &toggle_preview,
                 &PredefinedMenuItem::separator(app)?,
                 &focus_sessions,
                 &zen_mode,

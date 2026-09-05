@@ -45,9 +45,36 @@
       return false;
     }
 
+    const headingRow = document.createElement('div');
+    headingRow.className = 'tl-settings__shortcut-heading-row';
     const heading = document.createElement('h3');
     heading.textContent = 'Keyboard Shortcuts';
-    container.appendChild(heading);
+    headingRow.appendChild(heading);
+    // Restores the shipped defaults into the PENDING settings only — the
+    // user still Applies or cancels, like any other edit.
+    if (typeof d.resetKeyboardToDefaults === 'function') {
+      const resetButton = document.createElement('button');
+      resetButton.type = 'button';
+      resetButton.className = 'tl-settings__shortcut-reset';
+      resetButton.textContent = 'Reset all to defaults';
+      resetButton.setAttribute('data-settings-action', 'reset-shortcuts');
+      resetButton.addEventListener('click', async () => {
+        try {
+          await d.resetKeyboardToDefaults();
+        } catch (error) {
+          if (global.toast && typeof global.toast.error === 'function') {
+            global.toast.error('Settings Error', 'Could not load default shortcuts: ' + String(error));
+          }
+          return;
+        }
+        if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function') {
+          document.dispatchEvent(new CustomEvent('termlab-settings-changed'));
+        }
+        renderCurrentSection();
+      });
+      headingRow.appendChild(resetButton);
+    }
+    container.appendChild(headingRow);
 
     addSearchInput(container, 'Search shortcuts', getKeyboardSearchQuery(), (value) => {
       setKeyboardSearchQuery(value);

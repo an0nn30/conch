@@ -359,6 +359,15 @@ pub(crate) async fn transfer_resume_all(
     queue.resume_all().await
 }
 
+/// Cancel every non-terminal transfer and stop every running folder
+/// expansion. Returns how many transfers were cancelled.
+#[tauri::command]
+pub(crate) async fn transfer_cancel_all(
+    queue: tauri::State<'_, TransferQueueHandle>,
+) -> Result<usize, String> {
+    queue.cancel_all().await
+}
+
 #[tauri::command]
 pub(crate) async fn transfer_retry(
     queue: tauri::State<'_, TransferQueueHandle>,
@@ -603,7 +612,14 @@ mod tests {
             }
         );
         assert_eq!(request.host_key, "adhoc:dustin@shell.example.com:2202");
-        assert_eq!(request.destination_key, "local:/tmp/downloads/report.csv");
+        // Download destination keys normalize the local path with the host
+        // platform's rules — see `uses_windows_path_semantics`.
+        let expected_destination = if cfg!(windows) {
+            r"local:\tmp\downloads\report.csv"
+        } else {
+            "local:/tmp/downloads/report.csv"
+        };
+        assert_eq!(request.destination_key, expected_destination);
         assert_eq!(request.conflict_policy, ConflictPolicy::Overwrite);
     }
 

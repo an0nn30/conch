@@ -137,6 +137,30 @@
     return handleRef.current;
   }
 
+  function showCancelAll(activeCount, invoker, onConfirm) {
+    const handleRef = { current: null };
+    const count = Number(activeCount) || 0;
+    handleRef.current = openDialog({
+      title: 'Cancel all transfers?',
+      ariaLabel: 'Confirm cancel all transfers',
+      size: 'sm',
+      body(bodyEl) {
+        append(bodyEl, 'p', '', 'This stops every running transfer and cancels everything waiting in the queue. Files already transferred stay in place.');
+        append(
+          bodyEl,
+          'p',
+          'tl-transfer-dialog__filename',
+          `${count} ${count === 1 ? 'transfer' : 'transfers'} will be cancelled`,
+        );
+      },
+      buttons: [
+        { label: 'Keep transfers', onSelect: () => handleRef.current && handleRef.current.close('cancel') },
+        { label: 'Cancel all', danger: true, onSelect: () => closeAfter(handleRef, onConfirm) },
+      ],
+    }, invoker);
+    return handleRef.current;
+  }
+
   function showDetails(job, invoker) {
     const handleRef = { current: null };
     const state = (job && job.state) || {};
@@ -294,6 +318,7 @@
     let hostInput = null;
     let depthInput = null;
     let chunkInput = null;
+    let maxQueuedInput = null;
     let errorEl = null;
 
     function limitField(bodyEl, label, dataName, value, min, max) {
@@ -331,6 +356,10 @@
         // silently accepting a value it will not use.
         chunkInput = limitField(bodyEl, 'Chunk size (KiB, servers may cap at 255)', 'pipeline-chunk-kib',
           Math.round((current.pipelineChunkBytes || 262144) / 1024), 32, 1024);
+        // Folder expansion throttles against this ceiling instead of
+        // flooding the queue, so raising it trades memory for fewer waits.
+        maxQueuedInput = limitField(bodyEl, 'Max queued transfers', 'max-queued',
+          current.maxQueued || 2000, 100, 50000);
         errorEl = append(bodyEl, 'div', 'tl-field__error', "Enter whole numbers within each field's range.");
         errorEl.setAttribute('data-transfer-error', 'concurrency');
         errorEl.setAttribute('role', 'alert');
@@ -346,7 +375,9 @@
             const perHostLimit = integerLimit(hostInput, 1, 32);
             const pipelineDepth = integerLimit(depthInput, 1, 64);
             const chunkKib = integerLimit(chunkInput, 32, 1024);
-            if (globalLimit === null || perHostLimit === null || pipelineDepth === null || chunkKib === null) {
+            const maxQueued = integerLimit(maxQueuedInput, 100, 50000);
+            if (globalLimit === null || perHostLimit === null || pipelineDepth === null
+                || chunkKib === null || maxQueued === null) {
               if (errorEl) errorEl.hidden = false;
               return Promise.resolve();
             }
@@ -355,6 +386,7 @@
               globalLimit, perHostLimit,
               pipelineDepth,
               pipelineChunkBytes: chunkKib * 1024,
+              maxQueued,
             });
           },
         },
@@ -405,6 +437,7 @@
   global.termlabTransferDialogs = {
     showCancel,
     showCancelBatch,
+    showCancelAll,
     showDetails,
     showConflict,
     showConcurrency,

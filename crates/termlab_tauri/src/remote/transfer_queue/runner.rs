@@ -4850,24 +4850,26 @@ mod tests {
 
     #[async_trait]
     impl ExpansionSink for DirectCopySink {
-        async fn enqueue_file(&self, file: DiscoveredFile) -> Result<(), String> {
-            if self.upload {
-                let bytes = tokio::fs::read(&file.source_path)
-                    .await
-                    .map_err(|error| format!("read fixture file {}: {error}", file.source_path))?;
-                write_live_remote(&self.session, &file.dest_path, &bytes).await?;
-            } else {
-                let bytes = read_live_remote(&self.session, &file.source_path).await?;
-                if let Some(parent) = std::path::Path::new(&file.dest_path).parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|error| format!("{parent:?}: {error}"))?;
-                }
-                tokio::fs::write(&file.dest_path, &bytes)
-                    .await
-                    .map_err(|error| {
-                        format!("write downloaded file {}: {error}", file.dest_path)
+        async fn enqueue_files(&self, files: Vec<DiscoveredFile>) -> Result<(), String> {
+            for file in files {
+                if self.upload {
+                    let bytes = tokio::fs::read(&file.source_path).await.map_err(|error| {
+                        format!("read fixture file {}: {error}", file.source_path)
                     })?;
+                    write_live_remote(&self.session, &file.dest_path, &bytes).await?;
+                } else {
+                    let bytes = read_live_remote(&self.session, &file.source_path).await?;
+                    if let Some(parent) = std::path::Path::new(&file.dest_path).parent() {
+                        tokio::fs::create_dir_all(parent)
+                            .await
+                            .map_err(|error| format!("{parent:?}: {error}"))?;
+                    }
+                    tokio::fs::write(&file.dest_path, &bytes)
+                        .await
+                        .map_err(|error| {
+                            format!("write downloaded file {}: {error}", file.dest_path)
+                        })?;
+                }
             }
             Ok(())
         }

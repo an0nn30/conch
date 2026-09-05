@@ -64,6 +64,15 @@ impl TransferQueueHandle {
             .await
     }
 
+    /// Enqueue a chunk of jobs through one durable commit and one event
+    /// delta. This is what folder expansion uses: committing per member made
+    /// large folders quadratic in disk writes and flooded the UI with one
+    /// event per file.
+    pub async fn enqueue_many(&self, requests: Vec<NewTransferJob>) -> Result<Vec<Uuid>, String> {
+        self.request(|reply| QueueCommand::EnqueueMany { requests, reply })
+            .await
+    }
+
     pub fn snapshot(&self) -> TransferQueueSnapshot {
         self.snapshot.read().clone()
     }
@@ -89,6 +98,13 @@ impl TransferQueueHandle {
 
     pub async fn cancel(&self, id: Uuid) -> Result<bool, String> {
         self.request(|reply| QueueCommand::Cancel { id, reply })
+            .await
+    }
+
+    /// Cancel every non-terminal job and stop every running expansion, all
+    /// through one durable commit. Returns how many jobs were cancelled.
+    pub async fn cancel_all(&self) -> Result<usize, String> {
+        self.request(|reply| QueueCommand::CancelAll { reply })
             .await
     }
 
@@ -180,6 +196,13 @@ pub enum QueueCommand {
     Enqueue {
         request: NewTransferJob,
         reply: oneshot::Sender<Result<Uuid, String>>,
+    },
+    EnqueueMany {
+        requests: Vec<NewTransferJob>,
+        reply: oneshot::Sender<Result<Vec<Uuid>, String>>,
+    },
+    CancelAll {
+        reply: oneshot::Sender<Result<usize, String>>,
     },
     Pause {
         id: Uuid,
@@ -479,6 +502,14 @@ impl QueueActor {
 
     async fn handle_command(&mut self, command: QueueCommand) {
         match command {
+            QueueCommand::EnqueueMany { requests, reply } => {
+                let result = self.enqueue_many(requests).await;
+                let _ = reply.send(result);
+            }
+            QueueCommand::CancelAll { reply } => {
+                let result = self.cancel_all().await;
+                let _ = reply.send(result);
+            }
             QueueCommand::Enqueue { request, reply } => {
                 let result = self.enqueue(request).await;
                 let _ = reply.send(result);
@@ -1365,87 +1396,74 @@ impl QueueActor {
     }
 
     async fn enqueue(&mut self, request: NewTransferJob) -> Result<Uuid, String> {
-        validate_new_job(&request)?;
-        if self.document.jobs.iter().any(|job| job.id == request.id) {
-            return Err(format!("transfer job {} already exists", request.id));
+        let ids = self.enqueue_many(vec![request]).await?;
+        ids.into_iter()
+            .next()
+            .ok_or_else(|| "transfer enqueue produced no job".to_string())
+    }
+
+    /// Enqueue every request through one durable commit, or refuse them all.
+    /// A chunk is all-or-nothing: expansion retries a refused chunk intact,
+    /// so accepting half of one would duplicate members on the retry.
+    async fn enqueue_many(&mut self, requests: Vec<NewTransferJob>) -> Result<Vec<Uuid>, String> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
         }
-        // An expansion task decides to enqueue before the actor sees the
-        // decision. A cancel that was already sitting in the mailbox is
-        // processed first, finds no such member, and cancels nothing — so
-        // without this guard that file would transfer after the user
-        // cancelled its batch, with no row left to cancel it from. The actor
-        // is the only place where the two orders are comparable.
-        if let Some(batch_id) = request.batch_id
-            && self.batch_is_cancelled(batch_id)
-        {
-            return Err(format!("transfer batch {batch_id} was cancelled"));
+        let non_terminal = self
+            .document
+            .jobs
+            .iter()
+            .filter(|job| !job.state.is_terminal())
+            .count();
+        let max_queued = self.document.settings.max_queued;
+        if non_terminal + requests.len() > max_queued {
+            return Err(format!(
+                "{QUEUE_FULL_ERROR_PREFIX}: {max_queued} transfers are already queued"
+            ));
+        }
+
+        let existing_ids: HashSet<Uuid> = self.document.jobs.iter().map(|job| job.id).collect();
+        let mut chunk_ids = HashSet::new();
+        for request in &requests {
+            validate_new_job(request)?;
+            if existing_ids.contains(&request.id) || !chunk_ids.insert(request.id) {
+                return Err(format!("transfer job {} already exists", request.id));
+            }
+            // An expansion task decides to enqueue before the actor sees the
+            // decision. A cancel that was already sitting in the mailbox is
+            // processed first, finds no such member, and cancels nothing — so
+            // without this guard that file would transfer after the user
+            // cancelled its batch, with no row left to cancel it from. The
+            // actor is the only place where the two orders are comparable.
+            if let Some(batch_id) = request.batch_id
+                && self.batch_is_cancelled(batch_id)
+            {
+                return Err(format!("transfer batch {batch_id} was cancelled"));
+            }
         }
 
         let now_ms = self.clock.now_ms();
-        let queue_order = self
+        let mut queue_order = self
             .document
             .jobs
             .iter()
             .map(|job| job.queue_order)
             .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| "transfer queue order is exhausted".to_string())?;
-        let NewTransferJob {
-            id,
-            protocol,
-            direction,
-            origin,
-            endpoint,
-            local_path,
-            remote_path,
-            file_name,
-            batch_id,
-            priority,
-            host_key,
-            destination_key,
-            conflict_policy,
-        } = request;
-        let job = TransferJob {
-            id,
-            protocol,
-            direction,
-            origin,
-            endpoint,
-            local_path,
-            remote_path,
-            file_name,
-            batch_id,
-            priority,
-            queue_order,
-            host_key,
-            destination_key,
-            state: TransferJobState::Queued,
-            source_fingerprint: None,
-            durable_checkpoint: 0,
-            bytes_transferred: 0,
-            total_bytes: 0,
-            speed_bytes_per_second: 0,
-            eta_seconds: None,
-            retry_attempt: 0,
-            max_attempts: 3,
-            conflict_policy,
-            artifacts: None,
-            commit_phase: CommitPhase::None,
-            commit_backup_expected: None,
-            created_at_ms: now_ms,
-            updated_at_ms: now_ms,
-            started_at_ms: None,
-            finished_at_ms: None,
-        };
-
+            .unwrap_or(0);
         let mut next = self.document.clone();
-        next.jobs.push(job);
+        let mut ids = Vec::with_capacity(requests.len());
+        for request in requests {
+            queue_order = queue_order
+                .checked_add(1)
+                .ok_or_else(|| "transfer queue order is exhausted".to_string())?;
+            ids.push(request.id);
+            next.jobs.push(build_job(request, queue_order, now_ms));
+        }
         self.commit(next).await?;
         if self.startup_suspended && self.document.queue_paused {
-            self.startup_authorized.insert(id);
+            self.startup_authorized.extend(ids.iter().copied());
         }
-        Ok(id)
+        Ok(ids)
     }
 
     async fn apply_job_event(&mut self, id: Uuid, event: JobEvent) -> Result<(), String> {
@@ -1823,25 +1841,22 @@ impl QueueActor {
             .filter(|job| job.batch_id == Some(id) && !job.state.is_terminal())
             .map(|job| job.id)
             .collect();
-        let mut failures = Vec::new();
-        for member in members {
-            if let Err(error) = self.cancel(member).await {
-                log::warn!("could not cancel batch member {member}: {error}");
-                failures.push(error);
-            }
-        }
-
-        if matches!(
-            self.document.batches.get(&id).map(|batch| &batch.expansion),
-            Some(BatchExpansion::Running)
-        ) {
-            let mut next = self.document.clone();
-            if let Some(batch) = next.batches.get_mut(&id) {
-                batch.expansion = BatchExpansion::Interrupted {
-                    reason: BATCH_CANCELLED_REASON.to_string(),
-                };
-            }
-            self.commit(next).await?;
+        let failures = self
+            .cancel_members(&members, |next| {
+                let batch = next.batches.get_mut(&id);
+                match batch {
+                    Some(batch) if batch.expansion == BatchExpansion::Running => {
+                        batch.expansion = BatchExpansion::Interrupted {
+                            reason: BATCH_CANCELLED_REASON.to_string(),
+                        };
+                        true
+                    }
+                    _ => false,
+                }
+            })
+            .await?;
+        for failure in &failures {
+            log::warn!("could not cancel a batch member: {failure}");
         }
 
         // The walk polls its own clone of the flag, and `batch_is_cancelled`
@@ -1853,6 +1868,125 @@ impl QueueActor {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// Cancel every non-terminal job in the queue and stop every running
+    /// expansion. This is the recovery hatch for a botched bulk transfer:
+    /// one durable commit regardless of how many members are queued.
+    async fn cancel_all(&mut self) -> Result<usize, String> {
+        for cancellation in self.batch_cancellations.values() {
+            cancellation.cancel();
+        }
+
+        let members: Vec<Uuid> = self
+            .document
+            .jobs
+            .iter()
+            .filter(|job| !job.state.is_terminal())
+            .map(|job| job.id)
+            .collect();
+        let requested = members.len();
+        let failures = self
+            .cancel_members(&members, |next| {
+                let mut changed = false;
+                for batch in next.batches.values_mut() {
+                    if batch.expansion == BatchExpansion::Running {
+                        batch.expansion = BatchExpansion::Interrupted {
+                            reason: BATCH_CANCELLED_REASON.to_string(),
+                        };
+                        changed = true;
+                    }
+                }
+                changed
+            })
+            .await?;
+        for failure in &failures {
+            log::warn!("cancel all could not cancel a transfer: {failure}");
+        }
+        // Every walk is stopped and every batch record now says cancelled,
+        // so no flag has a reader left.
+        self.batch_cancellations.clear();
+        Ok(requested.saturating_sub(failures.len()))
+    }
+
+    /// Cancel `members` through at most one durable commit, applying
+    /// `mutate` to the same commit. Active members hand ownership to
+    /// cancellation cleanup, checkpointed members join the pending cleanup
+    /// set, and pristine members are reduced directly. Cancelling per member
+    /// committed the whole document once per job, which is quadratic in
+    /// queue size — exactly the shape a botched folder transfer leaves
+    /// behind. Returns per-member failures; an `Err` is a commit failure.
+    async fn cancel_members(
+        &mut self,
+        members: &[Uuid],
+        mutate: impl FnOnce(&mut TransferQueueDocument) -> bool,
+    ) -> Result<Vec<String>, String> {
+        let mut failures = Vec::new();
+        let mut skip: HashSet<Uuid> = HashSet::new();
+        for &member in members {
+            if self.cancellation_cleanup_owns(member) {
+                skip.insert(member);
+                continue;
+            }
+            if self.artifact_resolution_owns(member) {
+                failures.push(format!(
+                    "artifact resolution cleanup owns transfer job {member} until runner acknowledgement"
+                ));
+                skip.insert(member);
+                continue;
+            }
+            if self.active.contains_key(&member) {
+                self.active
+                    .get_mut(&member)
+                    .expect("active transfer was just found")
+                    .ownership = JobOwnership::CancellationCleanup;
+                if let Err(error) = self.request_runner_control(member, RunnerControlState::Cancel)
+                {
+                    failures.push(error);
+                }
+                skip.insert(member);
+            }
+        }
+
+        let member_set: HashSet<Uuid> = members
+            .iter()
+            .copied()
+            .filter(|member| !skip.contains(member))
+            .collect();
+        let now_ms = self.clock.now_ms();
+        let mut next = self.document.clone();
+        let mut changed = mutate(&mut next);
+        let mut needs_cleanup = Vec::new();
+        for job in &mut next.jobs {
+            if !member_set.contains(&job.id) || job.state.is_terminal() {
+                continue;
+            }
+            if job.artifacts.is_some()
+                || job.durable_checkpoint != 0
+                || job.commit_phase != CommitPhase::None
+            {
+                if self.runner.is_none() {
+                    failures.push("transfer runner is unavailable".into());
+                } else {
+                    needs_cleanup.push(job.id);
+                }
+                continue;
+            }
+            match reduce_job(job, JobEvent::Cancel(None), now_ms) {
+                Ok(cancelled) => {
+                    *job = cancelled;
+                    changed = true;
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        for id in needs_cleanup {
+            self.pending_cancel_cleanup.insert(id);
+        }
+        if changed {
+            self.commit(next).await?;
+        }
+        Ok(failures)
     }
 
     async fn update_settings(&mut self, settings: QueueSettings) -> Result<(), String> {
@@ -1921,22 +2055,24 @@ fn queue_delta(
     previous: &TransferQueueDocument,
     next: &TransferQueueDocument,
 ) -> QueueEventPayload {
+    // Indexed by id: a linear scan per job made every commit quadratic in
+    // queue size, which is what large folder expansions are made of.
+    let previous_by_id: HashMap<Uuid, &TransferJob> = previous
+        .jobs
+        .iter()
+        .map(|previous_job| (previous_job.id, previous_job))
+        .collect();
+    let next_ids: HashSet<Uuid> = next.jobs.iter().map(|next_job| next_job.id).collect();
     let upserts = next
         .jobs
         .iter()
-        .filter(|job| {
-            previous
-                .jobs
-                .iter()
-                .find(|previous_job| previous_job.id == job.id)
-                != Some(*job)
-        })
+        .filter(|job| previous_by_id.get(&job.id).copied() != Some(*job))
         .cloned()
         .collect();
     let removed_ids = previous
         .jobs
         .iter()
-        .filter(|job| !next.jobs.iter().any(|next_job| next_job.id == job.id))
+        .filter(|job| !next_ids.contains(&job.id))
         .map(|job| job.id)
         .collect();
 
@@ -1947,6 +2083,61 @@ fn queue_delta(
         queue_paused: next.queue_paused,
         settings: next.settings.clone(),
         batches: derive_batch_aggregates(&next.batches, &next.jobs),
+    }
+}
+
+/// Prefix of the refusal returned when the queue holds `max_queued`
+/// non-terminal jobs. Expansion backpressure matches on it to wait for
+/// capacity instead of failing the batch.
+pub(crate) const QUEUE_FULL_ERROR_PREFIX: &str = "transfer queue is full";
+
+fn build_job(request: NewTransferJob, queue_order: u64, now_ms: u64) -> TransferJob {
+    let NewTransferJob {
+        id,
+        protocol,
+        direction,
+        origin,
+        endpoint,
+        local_path,
+        remote_path,
+        file_name,
+        batch_id,
+        priority,
+        host_key,
+        destination_key,
+        conflict_policy,
+    } = request;
+    TransferJob {
+        id,
+        protocol,
+        direction,
+        origin,
+        endpoint,
+        local_path,
+        remote_path,
+        file_name,
+        batch_id,
+        priority,
+        queue_order,
+        host_key,
+        destination_key,
+        state: TransferJobState::Queued,
+        source_fingerprint: None,
+        durable_checkpoint: 0,
+        bytes_transferred: 0,
+        total_bytes: 0,
+        speed_bytes_per_second: 0,
+        eta_seconds: None,
+        retry_attempt: 0,
+        max_attempts: 3,
+        conflict_policy,
+        artifacts: None,
+        commit_phase: CommitPhase::None,
+        commit_backup_expected: None,
+        created_at_ms: now_ms,
+        updated_at_ms: now_ms,
+        started_at_ms: None,
+        finished_at_ms: None,
     }
 }
 
@@ -4498,6 +4689,209 @@ mod tests {
         // Batchless work and other batches are unaffected by the guard.
         harness.handle.enqueue(sample_new_job()).await.unwrap();
         assert_eq!(harness.handle.snapshot().jobs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn enqueue_many_commits_one_revision_with_one_atomic_delta() {
+        let harness = ActorHarness::new();
+        harness.events.clear();
+
+        let requests: Vec<NewTransferJob> = (0..3u128)
+            .map(|index| {
+                new_job(
+                    Uuid::from_u128(0xA_100 + index),
+                    &format!("bulk-{index}.bin"),
+                )
+            })
+            .collect();
+        let expected_ids: Vec<Uuid> = requests.iter().map(|request| request.id).collect();
+        let ids = harness.handle.enqueue_many(requests).await.unwrap();
+
+        assert_eq!(ids, expected_ids, "ids come back in discovery order");
+        let deltas = harness.events.take_deltas();
+        assert_eq!(deltas.len(), 1, "a chunk lands as one atomic delta");
+        assert_eq!(deltas[0].upserts.len(), 3);
+
+        let snapshot = harness.handle.snapshot();
+        assert_eq!(snapshot.jobs.len(), 3);
+        let orders: Vec<u64> = snapshot.jobs.iter().map(|job| job.queue_order).collect();
+        assert_eq!(orders, vec![1, 2, 3], "members keep discovery order");
+    }
+
+    #[tokio::test]
+    async fn enqueue_many_is_refused_whole_at_the_max_queued_ceiling() {
+        let mut jobs: Vec<TransferJob> = (0..99u128)
+            .map(|index| {
+                stored_job(
+                    Uuid::from_u128(0xB_000 + index),
+                    TransferJobState::Queued,
+                    index as u64 + 1,
+                )
+            })
+            .collect();
+        // Terminal history must not consume queue capacity.
+        jobs.push(stored_job(
+            Uuid::from_u128(0xB_0FF),
+            TransferJobState::Completed {
+                result: CompletionResult::Transferred,
+            },
+            0,
+        ));
+        let mut document = document_with(jobs);
+        document.settings = QueueSettings {
+            max_queued: 100,
+            ..QueueSettings::default()
+        };
+        let harness = ActorHarness::with_document(document);
+
+        let overflow: Vec<NewTransferJob> = (0..2u128)
+            .map(|index| {
+                new_job(
+                    Uuid::from_u128(0xB_100 + index),
+                    &format!("over-{index}.bin"),
+                )
+            })
+            .collect();
+        let error = harness.handle.enqueue_many(overflow).await.unwrap_err();
+        assert!(
+            error.starts_with(super::QUEUE_FULL_ERROR_PREFIX),
+            "the refusal is recognizable for backpressure: {error}"
+        );
+        assert_eq!(
+            harness.handle.snapshot().jobs.len(),
+            100,
+            "a refused chunk adds nothing"
+        );
+
+        // Exactly one slot is free, so a single transfer still fits...
+        harness
+            .handle
+            .enqueue(new_job(Uuid::from_u128(0xB_200), "fits.bin"))
+            .await
+            .unwrap();
+        // ...and the queue is now at its ceiling.
+        let full = harness
+            .handle
+            .enqueue(new_job(Uuid::from_u128(0xB_201), "beyond.bin"))
+            .await
+            .unwrap_err();
+        assert!(full.starts_with(super::QUEUE_FULL_ERROR_PREFIX), "{full}");
+    }
+
+    #[tokio::test]
+    async fn cancel_all_cancels_every_non_terminal_job_in_one_commit() {
+        let batch_id = Uuid::from_u128(0xC_001);
+        let queued_id = Uuid::from_u128(0xC_002);
+        let paused_id = Uuid::from_u128(0xC_003);
+        let done_id = Uuid::from_u128(0xC_004);
+        let harness = ActorHarness::with_document(document_with(vec![
+            stored_job(queued_id, TransferJobState::Queued, 1),
+            stored_job(paused_id, TransferJobState::Paused, 2),
+            stored_job(
+                done_id,
+                TransferJobState::Completed {
+                    result: CompletionResult::Transferred,
+                },
+                0,
+            ),
+        ]));
+        harness
+            .handle
+            .create_batch(new_batch(batch_id))
+            .await
+            .unwrap();
+        harness.events.clear();
+
+        let cancelled = harness.handle.cancel_all().await.unwrap();
+
+        assert_eq!(cancelled, 2, "both non-terminal jobs were cancelled");
+        let deltas = harness.events.take_deltas();
+        assert_eq!(deltas.len(), 1, "bulk cancellation is one atomic commit");
+        assert_eq!(deltas[0].upserts.len(), 2);
+
+        let snapshot = harness.handle.snapshot();
+        let state_of = |id: Uuid| {
+            snapshot
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .unwrap()
+                .state
+                .clone()
+        };
+        assert!(matches!(
+            state_of(queued_id),
+            TransferJobState::Cancelled { .. }
+        ));
+        assert!(matches!(
+            state_of(paused_id),
+            TransferJobState::Cancelled { .. }
+        ));
+        assert!(matches!(
+            state_of(done_id),
+            TransferJobState::Completed { .. }
+        ));
+        assert_eq!(
+            snapshot.batches[0].info.expansion,
+            BatchExpansion::Interrupted {
+                reason: BATCH_CANCELLED_REASON.to_string(),
+            },
+            "a running expansion is interrupted by cancel all"
+        );
+
+        // The walk's hostile late enqueue is still refused afterwards.
+        let mut late = new_job(Uuid::from_u128(0xC_005), "late.bin");
+        late.batch_id = Some(batch_id);
+        let error = harness.handle.enqueue(late).await.unwrap_err();
+        assert!(error.contains(&batch_id.to_string()), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cancel_all_hands_active_transfers_to_cancellation_cleanup() {
+        let running_id = Uuid::from_u128(0xC_101);
+        let queued_id = Uuid::from_u128(0xC_102);
+        let mut document = document_with(vec![
+            stored_job(running_id, TransferJobState::Queued, 1),
+            on_host_with_destination(
+                stored_job(queued_id, TransferJobState::Queued, 2),
+                "configured:server-2",
+                "configured:server-2:/srv/other.bin",
+            ),
+        ]);
+        document.settings = QueueSettings {
+            global_limit: 1,
+            per_host_limit: 1,
+            ..QueueSettings::default()
+        };
+        let runner = Arc::new(GatedRunner::default());
+        let release = runner.gate(running_id);
+        let harness = ActorHarness::with_runner(document, runner.clone());
+
+        harness.handle.resume_all().await.unwrap();
+        wait_for_starts(&runner, 1).await;
+
+        let cancelled = harness.handle.cancel_all().await.unwrap();
+        assert_eq!(cancelled, 2);
+
+        assert_eq!(
+            runner.control_state(running_id),
+            RunnerControlState::Cancel,
+            "the active transfer is told to stop instead of being reduced under the runner"
+        );
+        wait_for_job(&harness.handle, queued_id, |job| {
+            matches!(job.state, TransferJobState::Cancelled { .. })
+        })
+        .await;
+
+        release
+            .send(RunnerResult::Cancelled {
+                cleanup_error: None,
+            })
+            .unwrap();
+        wait_for_job(&harness.handle, running_id, |job| {
+            matches!(job.state, TransferJobState::Cancelled { .. })
+        })
+        .await;
     }
 
     #[tokio::test]

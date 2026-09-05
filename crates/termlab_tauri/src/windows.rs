@@ -5,8 +5,8 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use termlab_core::config;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use termlab_core::config;
 
 // ---------------------------------------------------------------------------
 // Window ID counter

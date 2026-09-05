@@ -85,7 +85,14 @@
     if (typeof global.__termlabCreateEditorTab !== 'function') {
       throw new Error('editor tabs are unavailable (app not composed yet)');
     }
-    return global.__termlabCreateEditorTab(options);
+    const tabId = global.__termlabCreateEditorTab(options);
+    // The tab manager focuses the pane it just built before returning, so
+    // currentPane() is that pane. Seeding the preview here rather than in the
+    // tab manager keeps "which files get a preview" a question about file
+    // meaning, which is this module's job and not the tab manager's — and it
+    // covers all three creation paths (local, remote, untitled) at once.
+    applyPreviewMode(currentPane());
+    return tabId;
   }
 
   function currentPane() {
@@ -1273,6 +1280,78 @@
     pane.setLanguage(view, filename);
   }
 
+  // What a pane's file is CALLED, which is the only thing the preview and the
+  // language map ever need. A remote pane's `filePath` is the local temp file
+  // it is staged in, so the remote path is what names it.
+  function paneFilename(pane) {
+    if (pane.remote && pane.remote.remotePath) return basename(pane.remote.remotePath);
+    return pane.filePath ? basename(pane.filePath) : '';
+  }
+
+  // `[editor] preview_default_mode`, which seeds a markdown pane's view mode.
+  //
+  // Read off get_all_settings rather than get_app_config, which does not carry
+  // it: threading a fifth setting through the startup → compose → tab-manager
+  // chain to reach this file would be a lot of plumbing for a value only this
+  // one call site wants. Read per markdown pane rather than cached, so editing
+  // config.toml takes effect on the next file opened instead of the next
+  // restart; a non-markdown pane never issues the call at all.
+  async function previewDefaultMode() {
+    try {
+      const settings = await invoke('get_all_settings');
+      const editor = settings && settings.editor;
+      const mode = editor && editor.preview_default_mode;
+      return typeof mode === 'string' ? mode : 'editor';
+    } catch (error) {
+      // A settings read that fails must not stop a file from opening. Editor
+      // mode is both the fallback and the shipped default, so this costs the
+      // user nothing they asked for.
+      return 'editor';
+    }
+  }
+
+  // Offer (or withdraw) the markdown preview for a pane. Called when a pane is
+  // created and again after Save As rebinds one — which is what makes
+  // `notes.md` saved as `notes.txt` leave preview mode.
+  function applyPreviewMode(pane) {
+    const api = global.termlabEditorPane;
+    if (!pane || pane.kind !== 'editor' || !pane.view) return;
+    if (!api || typeof api.setPreviewMode !== 'function') return;
+    const map = global.termlabEditorLanguageMap;
+    if (!map || typeof map.isMarkdown !== 'function') return;
+
+    const describe = () => ({
+      filename: paneFilename(pane),
+      docPath: pane.filePath || '',
+      binding: pane.remote || null,
+    });
+    const source = describe();
+
+    // Synchronous on purpose: leaving the preview must not wait on an IPC
+    // round trip, or a pane renamed away from markdown would go on rendering
+    // the file it no longer shows.
+    if (!map.isMarkdown(source.filename)) {
+      api.setPreviewMode(pane.view, 'editor', source);
+      return;
+    }
+
+    // A pane that is already previewing keeps the mode the user put it in;
+    // only a pane that is GAINING one is seeded from config.
+    const current = typeof api.previewMode === 'function' ? api.previewMode(pane.view) : null;
+    if (current) {
+      api.setPreviewMode(pane.view, current, source);
+      return;
+    }
+
+    previewDefaultMode().then((mode) => {
+      // Re-described, not reused: the pane may have been renamed again while
+      // the settings read was in flight, and setPreviewMode re-checks the name
+      // it is handed — so a pane that stopped being markdown meanwhile still
+      // gets no preview.
+      api.setPreviewMode(pane.view, mode, describe());
+    }).catch(() => {});
+  }
+
   // Two editors on one path is the exact state focusExistingEditor exists to
   // prevent — each holds its own doc and the last save silently wins. Opening
   // cannot produce it; Save As could, by aiming a pane at a path another tab
@@ -1421,6 +1500,10 @@
       try {
         refreshTabLabel(pane);
         setPaneLanguage(pane.view, displayName);
+        // Same event, same reasoning as the language above: the pane's name has
+        // changed, so what it renders as has to change with it. `notes.md` saved
+        // as `notes.txt` drops out of preview here.
+        applyPreviewMode(pane);
       } catch (error) {
         console.error('Save As: relabelling the rebound pane failed', error);
       }

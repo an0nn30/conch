@@ -16,6 +16,88 @@
   outline: none;
 }
 
+/* Markdown preview layout.
+   The CodeMirror host and the preview host are absolutely positioned SIBLINGS
+   inside the pane, so switching modes is a class change on the pane and never
+   a re-parent — the EditorView is never detached, which is what keeps the undo
+   history, the selection and the scroll position across a toggle.
+   The preview's own typography lives in markdown-preview.css, which is loaded
+   by the frame itself; these rules are only about where the frame sits. */
+
+.md-preview-host {
+  position: absolute;
+  inset: 0;
+  display: none;
+  overflow: hidden;
+  background: var(--tl-bg);
+}
+
+.md-preview-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* md-mode-editor needs no rules: it is the pane exactly as it is without a
+   preview, and the class exists so the current mode is legible in the DOM. */
+
+.md-mode-split > .editor-pane-host {
+  right: 50%;
+}
+
+.md-mode-split > .md-preview-host {
+  left: 50%;
+  display: block;
+  border-left: 1px solid var(--tl-border);
+}
+
+.md-mode-preview > .editor-pane-host {
+  display: none;
+}
+
+.md-mode-preview > .md-preview-host {
+  display: block;
+}
+
+/* Markdown mode control (preview/preview-toolbar.js).
+   Lives HERE and not in markdown-preview.css: that stylesheet is fetched and
+   inlined into the sandboxed frame, and this is app-document chrome floating
+   over the pane. Above the frame (which establishes no stacking context of its
+   own) and visible in every mode, editor mode included — being findable
+   without knowing the shortcut is the entire point of it. */
+
+.md-preview-toolbar {
+  position: absolute;
+  top: var(--tl-space-1);
+  right: var(--tl-space-1);
+  z-index: 2;
+  display: flex;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--tl-border);
+  border-radius: var(--tl-radius);
+  background: var(--tl-panel-bg);
+  color: var(--tl-fg-muted);
+}
+
+/* The glyphs are inline SVG drawn in currentColor, so the button's colour is
+   what themes them. */
+.md-preview-toolbar__btn {
+  color: inherit;
+  cursor: default;
+}
+
+.md-preview-toolbar__btn.is-active {
+  background: var(--tl-tab-active-bg);
+  color: var(--tl-fg);
+}
+
+.md-preview-toolbar__btn:focus-visible {
+  outline: 1px solid var(--tl-accent);
+  outline-offset: -1px;
+}
+
 /* The modified marker in the tab label. */
 .tab-dirty-marker {
   margin-left: var(--tl-space-1);

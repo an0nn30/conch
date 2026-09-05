@@ -226,6 +226,9 @@
       if (recordingEl) {
         recordingEl.classList.remove('is-recording');
         recordingEl.textContent = shortcutText(d.getShortcutValue(recordingRef));
+        // Keep the row's clear button in step with whatever the recording
+        // left behind (a new binding shows it; an unset hides it).
+        if (typeof recordingEl.__syncClear === 'function') recordingEl.__syncClear();
       }
       if (typeof recordingUnregister === 'function') {
         recordingUnregister();
@@ -263,6 +266,16 @@
           return true;
         }
 
+        // Delete/Backspace while recording unsets the binding entirely.
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          d.setShortcutValue(settingsRef, '');
+          if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function') {
+            document.dispatchEvent(new CustomEvent('termlab-settings-changed'));
+          }
+          stopRecording();
+          return true;
+        }
+
         const combo = normalizeKeyEvent(e);
         if (!combo) return true; // bare modifier, keep waiting
 
@@ -283,6 +296,9 @@
     }
 
     function makeShortcutKeyBox(ref) {
+      const wrap = document.createElement('span');
+      wrap.className = 'tl-settings__shortcut-controls';
+
       const keyBox = document.createElement('span');
       keyBox.className = 'tl-settings__shortcut-key';
       keyBox.setAttribute('role', 'button');
@@ -295,7 +311,33 @@
         event.preventDefault();
         startRecording(keyBox, ref);
       });
-      return keyBox;
+
+      const clearButton = document.createElement('button');
+      clearButton.type = 'button';
+      clearButton.className = 'tl-settings__shortcut-clear';
+      clearButton.textContent = '×';
+      clearButton.title = 'Remove shortcut';
+      clearButton.setAttribute('aria-label', 'Remove shortcut');
+      clearButton.hidden = !d.getShortcutValue(ref);
+      clearButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        d.setShortcutValue(ref, '');
+        keyBox.textContent = shortcutText('');
+        clearButton.hidden = true;
+        if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function') {
+          document.dispatchEvent(new CustomEvent('termlab-settings-changed'));
+        }
+      });
+
+      // stopRecording() calls this so the button tracks recorder edits too
+      // (rows are not re-rendered after a recording lands).
+      keyBox.__syncClear = () => {
+        clearButton.hidden = !d.getShortcutValue(ref);
+      };
+
+      wrap.appendChild(keyBox);
+      wrap.appendChild(clearButton);
+      return wrap;
     }
 
     return {
@@ -679,6 +721,10 @@
           applyRowSearchHighlight,
           addDivider,
           makeShortcutKeyBox: (ref) => recorder.makeShortcutKeyBox(ref),
+          resetKeyboardToDefaults: async () => {
+            const defaults = await d.getInvoke()('default_keyboard_config');
+            store.resetKeyboardToDefaults(defaults);
+          },
           getToolWindowItems: () => (
             global.toolWindowManager && typeof global.toolWindowManager.listWindows === 'function'
               ? global.toolWindowManager.listWindows().slice().sort((a, b) => {

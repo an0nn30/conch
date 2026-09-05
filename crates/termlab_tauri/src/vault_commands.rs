@@ -1,9 +1,9 @@
-use termlab_vault::keygen::{KeyGenOptions, KeyType, generate_key, save_key_to_disk};
-use termlab_vault::{AuthMethod, GeneratedKeyEntry, VaultAccount, VaultManager, VaultSettings};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use termlab_vault::keygen::{KeyGenOptions, KeyType, generate_key, save_key_to_disk};
+use termlab_vault::{AuthMethod, GeneratedKeyEntry, VaultAccount, VaultManager, VaultSettings};
 use ts_rs::TS;
 use uuid::Uuid;
 
