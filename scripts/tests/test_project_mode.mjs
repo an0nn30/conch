@@ -991,6 +991,77 @@ check('a file under the root adopts the project root as its LSP context', () => 
     'no project means no adoption');
 });
 
+// The bug this pins: a Rust file whose project has exactly one Cargo.toml
+// gives the manager one clear candidate, so it never asks which root — the
+// document goes straight to `untrusted` with an INFERRED root and no
+// remembered binding. Gating adoption on `choosingProject` alone skipped
+// exactly those documents, so nothing in the project window was ever bound to
+// the project root, and the banner's project-wide trust decision (recorded
+// against that root) had no bound document to start. The design spec is
+// unconditional: opening a project IS choosing the LSP root for every file
+// under it.
+check('a file under the root adopts the project root even when discovery already inferred one', () => {
+  const sandbox = load([MODE, LSP_ROOT]);
+  const mode = sandbox.termlabProjectMode;
+  mode.set({ root: '/repo', name: 'repo' });
+  const should = sandbox.termlabProjectLspRoot.shouldAdoptRoot;
+  const untrusted = { documentId: 'doc-1', status: { state: 'untrusted' } };
+  assert.strictEqual(should(untrusted, '/repo/src/main.rs', mode), true,
+    'an unambiguous single-crate root still has to be bound to the project root');
+  assert.strictEqual(should(untrusted, '/elsewhere/lib.rs', mode), false,
+    'a file outside the root keeps the loose-file behaviour: no prompt, no attach');
+  assert.strictEqual(
+    should({ documentId: 'doc-1', status: { state: 'disabled' } }, '/repo/src/main.rs', mode),
+    false,
+    '"Edit without language features" is a deliberate opt-out, not a root still to be chosen',
+  );
+});
+
+// Drives the whole click -> bridge -> manager sequence the user performs, over
+// ONE shared fake bridge: the document is bound to the project root by
+// lsp-root.js, and only then does the banner's decision have something to act
+// on. Asserting the two calls together is what catches a regression where each
+// half still looks correct on its own.
+check('clicking Trust project records the same root the open documents were bound to', async () => {
+  const sandbox = load([MODE, LSP_ROOT, BANNER]);
+  sandbox.termlabProjectMode.set({ root: '/repo', name: 'repo' });
+  const contexts = [];
+  const trusts = [];
+  const bridge = {
+    trustedProjects: async () => [],
+    setProjectContext: async (documentId, context) => { contexts.push([documentId, context]); },
+    setProjectTrust: async (root, adapterId, decision) => { trusts.push([root, adapterId, decision]); },
+  };
+  let listener = null;
+  sandbox.termlabProjectLspRoot.install({
+    state: { subscribe: (fn) => { listener = fn; return () => {}; } },
+    bridge,
+    mode: sandbox.termlabProjectMode,
+  });
+  // The Rust file comes up untrusted with an inferred root — the manager never
+  // asked, so nothing but this adoption can bind it to the project root.
+  listener(
+    { kind: 'editor', remote: null, filePath: '/repo/src/main.rs' },
+    { documentId: 'doc-rs', status: { state: 'untrusted' } },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const host = sandbox.document.createElement('div');
+  sandbox.document.body.appendChild(host);
+  const handle = sandbox.termlabProjectTrustBanner.mount({
+    host, root: '/repo', name: 'repo', bridge, onDecision: () => {},
+  });
+  await handle.ready;
+  const trust = host.querySelector('[data-project-trust="trust"]');
+  trust.dispatchEvent({ type: 'click', target: trust });
+  await handle.settled();
+
+  deepEq(contexts, [['doc-rs', { kind: 'root', root: '/repo' }]],
+    'the open document must be bound to the project root before the banner is answered');
+  deepEq(trusts, [['/repo', null, 'trusted']],
+    'the banner must trust exactly the root those documents were bound to');
+});
+
 check('install sets the context exactly once per document', async () => {
   const sandbox = load([MODE, LSP_ROOT]);
   sandbox.termlabProjectMode.set({ root: '/repo', name: 'repo' });

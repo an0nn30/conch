@@ -7835,6 +7835,61 @@ mod tests {
         );
     }
 
+    // What the project banner sends: one decision for the whole project root,
+    // with NO adapter id, while documents under that root are already open and
+    // waiting on trust. Scoping the reconciliation in `set_project_trust` to
+    // adapter-specific records — or skipping the reevaluation of documents an
+    // adapter-less decision covers — would leave those documents untrusted and
+    // make the banner look like it did nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_project_wide_decision_starts_the_documents_already_waiting_under_that_root() {
+        let harness = ManagerHarness::new();
+        let root = harness.root.clone();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let path = harness.file("src/main.rs", "fn main() {}");
+        let document = harness.open(&path, "main", "pane").await;
+        // The project window chooses the root for every document under it, so
+        // by the time the banner is answered the document is bound and waiting.
+        harness
+            .manager
+            .set_project_context(document, ProjectContextChoice::from(root.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Untrusted,
+            "a bound but untrusted document is what the banner is asked about"
+        );
+
+        harness
+            .manager
+            .set_project_trust(root.clone(), None, TrustDecision::Trusted)
+            .await
+            .unwrap();
+        spin().await;
+
+        assert_eq!(
+            harness.factory.launch_count("rust", &root),
+            1,
+            "an adapter-less project decision must start the waiting document's session"
+        );
+        assert_eq!(
+            harness
+                .manager
+                .status_snapshot(Some(document))
+                .await
+                .unwrap()[0]
+                .state,
+            LspSessionState::Ready,
+            "the document must leave the untrusted state once its project is trusted"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn nested_roots_and_different_adapters_get_separate_sessions() {
         let harness = ManagerHarness::new();
