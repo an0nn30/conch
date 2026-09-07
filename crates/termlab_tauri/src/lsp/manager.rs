@@ -32,7 +32,8 @@ use super::types::{
     DiagnosticSeverity, DiagnosticSnapshot, DiagnosticUpdate, DocumentId, EditorPosition,
     HoverResponse, LspCapabilities, LspChangeBatch, LspSessionState, LspStatus,
     LspUnavailableReason, NegotiatedTriggers, OpenDocumentResponse, ProjectCandidate,
-    ReservationId, ReserveResult, ResyncDocumentResponse, SignatureHelpResponse,
+    ReferencesResponse, ReservationId, ReserveResult, ResyncDocumentResponse,
+    SignatureHelpResponse,
 };
 
 const COMMAND_CAPACITY: usize = 64;
@@ -297,6 +298,12 @@ pub(crate) trait SessionClient: Send + Sync + 'static {
         position: lsp::Position,
         source_version: i32,
     ) -> Result<DefinitionResponse, String>;
+    async fn references(
+        &self,
+        document_id: &str,
+        position: lsp::Position,
+        source_version: i32,
+    ) -> Result<ReferencesResponse, String>;
     async fn pull_diagnostics(
         &self,
         document_id: &str,
@@ -418,6 +425,18 @@ impl SessionClient for RealSessionClient {
     ) -> Result<DefinitionResponse, String> {
         self.0
             .definition(document_id, position)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn references(
+        &self,
+        document_id: &str,
+        position: lsp::Position,
+        _source_version: i32,
+    ) -> Result<ReferencesResponse, String> {
+        self.0
+            .references(document_id, position)
             .await
             .map_err(|error| error.to_string())
     }
@@ -741,6 +760,21 @@ impl LspManagerHandle {
         result.await.map_err(|_| ManagerError::ActorStopped)?
     }
 
+    pub(crate) async fn references(
+        &self,
+        document_id: DocumentId,
+        position: EditorPosition,
+    ) -> Result<ReferencesResponse, ManagerError> {
+        let (reply, result) = oneshot::channel();
+        self.send(ManagerCommand::References {
+            document_id,
+            position,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| ManagerError::ActorStopped)?
+    }
+
     pub(crate) async fn problems_snapshot(
         &self,
         root: Option<PathBuf>,
@@ -918,6 +952,11 @@ enum ManagerCommand {
         position: EditorPosition,
         reply: oneshot::Sender<Result<DefinitionResponse, ManagerError>>,
     },
+    References {
+        document_id: DocumentId,
+        position: EditorPosition,
+        reply: oneshot::Sender<Result<ReferencesResponse, ManagerError>>,
+    },
     ProblemsSnapshot {
         root: Option<PathBuf>,
         reply: oneshot::Sender<Result<DiagnosticSnapshot, ManagerError>>,
@@ -993,6 +1032,7 @@ enum RequestKind {
     Hover,
     SignatureHelp,
     Definition,
+    References,
 }
 
 enum PendingReply {
@@ -1001,6 +1041,7 @@ enum PendingReply {
     Hover(oneshot::Sender<Result<HoverResponse, ManagerError>>),
     SignatureHelp(oneshot::Sender<Result<SignatureHelpResponse, ManagerError>>),
     Definition(oneshot::Sender<Result<DefinitionResponse, ManagerError>>),
+    References(oneshot::Sender<Result<ReferencesResponse, ManagerError>>),
 }
 
 impl PendingReply {
@@ -1021,6 +1062,9 @@ impl PendingReply {
             Self::Definition(reply) => {
                 let _ = reply.send(Err(error));
             }
+            Self::References(reply) => {
+                let _ = reply.send(Err(error));
+            }
         }
     }
 }
@@ -1033,6 +1077,7 @@ enum RequestResult {
     Hover(Result<HoverResponse, String>),
     SignatureHelp(Result<SignatureHelpResponse, String>),
     Definition(Result<DefinitionResponse, String>),
+    References(Result<ReferencesResponse, String>),
 }
 
 struct PendingRequest {
@@ -2063,6 +2108,17 @@ impl LspManager {
                 None,
                 RequestKind::Definition,
                 PendingReply::Definition(reply),
+            ),
+            ManagerCommand::References {
+                document_id,
+                position,
+                reply,
+            } => self.start_request(
+                document_id,
+                position,
+                None,
+                RequestKind::References,
+                PendingReply::References(reply),
             ),
             ManagerCommand::ProblemsSnapshot { root, reply } => {
                 let snapshot = self.state.diagnostics.snapshot(root.as_deref());
@@ -5263,6 +5319,16 @@ impl LspManager {
                     });
                 let _ = reply.send(result);
             }
+            (PendingReply::References(reply), RequestResult::References(result)) => {
+                let result = result
+                    .map_err(ManagerError::Infrastructure)
+                    .and_then(|response| {
+                        (response.source_version == pending.version)
+                            .then_some(response)
+                            .ok_or(ManagerError::StaleResponse)
+                    });
+                let _ = reply.send(result);
+            }
             (reply, _) => reply.send_error(ManagerError::Infrastructure(
                 "language server returned the wrong response kind".into(),
             )),
@@ -5724,6 +5790,7 @@ fn capabilities(ready: bool) -> LspCapabilities {
         hover: ready,
         signature_help: ready,
         definition: ready,
+        references: ready,
         diagnostics: ready,
     }
 }
@@ -6423,6 +6490,11 @@ fn spawn_session_worker(
                                         .definition(&document_id, position, source_version)
                                         .await,
                                 ),
+                                RequestKind::References => RequestResult::References(
+                                    client
+                                        .references(&document_id, position, source_version)
+                                        .await,
+                                ),
                             }
                         };
                         tokio::select! {
@@ -6544,6 +6616,7 @@ mod tests {
         Hover(String),
         Signature(String),
         Definition(String),
+        References(String),
         PullDiagnostics(String),
         Shutdown,
     }
@@ -6749,6 +6822,7 @@ mod tests {
                 hover: true,
                 signature_help: true,
                 definition: true,
+                references: true,
                 diagnostics: true,
             }
         }
@@ -6933,6 +7007,27 @@ mod tests {
             self.factory
                 .record(&self.key, Observation::Definition(document_id.into()));
             Ok(crate::lsp::types::DefinitionResponse {
+                document_id: document_id.into(),
+                source_version,
+                locations: Vec::new(),
+            })
+        }
+
+        async fn references(
+            &self,
+            document_id: &str,
+            _position: lsp::Position,
+            source_version: i32,
+        ) -> Result<crate::lsp::types::ReferencesResponse, String> {
+            self.factory
+                .record(&self.key, Observation::References(document_id.into()));
+            self.factory
+                .wait_if_held(
+                    &self.factory.block_requests,
+                    &self.factory.requests_released,
+                )
+                .await;
+            Ok(crate::lsp::types::ReferencesResponse {
                 document_id: document_id.into(),
                 source_version,
                 locations: Vec::new(),
@@ -8703,6 +8798,64 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn references_reach_the_session_and_are_discarded_when_the_document_moves_on() {
+        let harness = ManagerHarness::new();
+        let path = harness.file("a.ts", "let value = 1;");
+        let document = harness.open(&path, "main", "pane").await;
+        let root = harness.root.clone();
+        harness
+            .choose_and_trust(document, &root, "typescript")
+            .await;
+
+        let response = harness
+            .manager
+            .references(
+                document,
+                EditorPosition {
+                    line: 0,
+                    character: 4,
+                },
+            )
+            .await
+            .expect("an attached document answers references through its session");
+        assert_eq!(response.source_version, 1);
+        assert!(
+            harness
+                .factory
+                .observations(&key("typescript", &root))
+                .iter()
+                .any(|observation| matches!(observation, Observation::References(_))),
+            "the request really reached the session client"
+        );
+
+        // Same discipline as every other positional request: an answer that
+        // describes a version the buffer has left is stale, not a result.
+        harness.factory.hold_requests();
+        let pending = tokio::spawn({
+            let manager = harness.manager.clone();
+            async move {
+                manager
+                    .references(
+                        document,
+                        EditorPosition {
+                            line: 0,
+                            character: 4,
+                        },
+                    )
+                    .await
+            }
+        });
+        spin().await;
+        harness
+            .manager
+            .apply_changes(document, batch(document, 1, 2, "z"))
+            .await
+            .unwrap();
+        harness.factory.release_requests();
+        assert_eq!(pending.await.unwrap(), Err(ManagerError::StaleResponse));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn interactive_requests_flush_cancel_same_kind_and_discard_stale_results() {
         let harness = ManagerHarness::new();
         let path = harness.file("a.ts", "let value = 1;");
@@ -9336,6 +9489,7 @@ mod tests {
             hover: true,
             signature_help: false,
             definition: true,
+            references: true,
             diagnostics: false,
         };
         harness

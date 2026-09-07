@@ -1,10 +1,11 @@
-// Go to Definition, the multiple-definition chooser, and this window's
+// Go to Definition, Find References, the candidate chooser, and this window's
 // back/forward navigation history.
 //
 // Three responsibilities, one small module:
 //
-//   * ask for a definition (through editor-service's requestFeature, which owns
-//     the flush/version barrier — never through Tauri directly);
+//   * ask for a definition or a reference list (through editor-service's
+//     requestFeature, which owns the flush/version barrier — never through
+//     Tauri directly);
 //   * take the user there THROUGH editor-service, which is the app-wide
 //     ownership authority: it focuses an already open tab, reserves an unopened
 //     file, and hands a document another WINDOW owns to Rust to focus instead
@@ -32,6 +33,10 @@
   'use strict';
 
   const PREVIEW_LIMIT = 120;
+  // How many references the chooser will list. A rename candidate in a large
+  // codebase can return thousands, and a tooltip is not a search panel: past
+  // this the list says how many it left out instead of trying to draw them.
+  const REFERENCE_LIMIT = 500;
 
   let paneForViewHook = null;
   let currentPaneHook = null;
@@ -94,14 +99,14 @@
   // A pane that may be asked for a definition: a local editor with a committed
   // document whose session advertises the feature. Remote panes are excluded
   // here as well as in Rust — a remote buffer never enters the registry.
-  function documentStateFor(pane) {
+  function documentStateFor(pane, feature) {
     if (!pane || pane.kind !== 'editor' || !pane.view || pane.remote) return null;
     const store = global.termlabLspState;
     if (!store || typeof store.get !== 'function') return null;
     const state = store.get(pane);
     if (!state || !state.documentId) return null;
     const capabilities = state.capabilities || (state.status && state.status.capabilities) || {};
-    if (capabilities.definition !== true) return null;
+    if (capabilities[feature || 'definition'] !== true) return null;
     return state;
   }
 
@@ -177,6 +182,31 @@
       return text ? text.slice(0, PREVIEW_LIMIT) : null;
     }
     return null;
+  }
+
+  // The deepest directory every one of these paths lives under. A reference
+  // list spans files, so a bare basename is ambiguous ("index.ts" three times);
+  // naming each row relative to the shared root is what makes the list
+  // readable without printing an absolute path on every line. With one file
+  // the shared root is its own directory, so the row is just the file name.
+  function commonDirectory(paths) {
+    if (!paths.length) return '';
+    let prefix = dirname(paths[0]).split('/');
+    for (const value of paths) {
+      const parts = dirname(value).split('/');
+      let index = 0;
+      while (index < prefix.length && index < parts.length && prefix[index] === parts[index]) {
+        index += 1;
+      }
+      prefix = prefix.slice(0, index);
+    }
+    return prefix.join('/');
+  }
+
+  function relativeName(filePath, root) {
+    const value = String(filePath);
+    if (!root || root === '/') return value.slice(1) || value;
+    return value.indexOf(`${root}/`) === 0 ? value.slice(root.length + 1) : value;
   }
 
   // Server locations -> what the chooser and the jump both consume. Rust has
@@ -310,9 +340,9 @@
     return list ? list.render(value, view) : doc().createElement('div');
   }
 
-  function openChooser(view, targets, pos, origin) {
+  function openChooser(view, targets, pos, origin, options) {
     const list = chooser();
-    return !!list && list.open(view, targets, pos, origin);
+    return !!list && list.open(view, targets, pos, origin, options);
   }
 
   function moveChooser(view, delta) {
@@ -345,13 +375,13 @@
     return entry;
   }
 
-  function requestFeature(pane, position) {
+  function requestFeature(pane, kind, position) {
     if (typeof requestFeatureHook === 'function') {
-      return Promise.resolve(requestFeatureHook(pane, 'definition', position, null));
+      return Promise.resolve(requestFeatureHook(pane, kind, position, null));
     }
     const service = editorService();
     if (!service || typeof service.requestFeature !== 'function') return Promise.resolve(null);
-    return Promise.resolve(service.requestFeature(pane, 'definition', position, null));
+    return Promise.resolve(service.requestFeature(pane, kind, position, null));
   }
 
   // Only a jump that actually moved THIS window is history. A target another
@@ -446,7 +476,7 @@
 
     let response = null;
     try {
-      response = await requestFeature(pane, positionAt(target.state.doc, at));
+      response = await requestFeature(pane, 'definition', positionAt(target.state.doc, at));
     } catch (error) {
       status('Cannot Navigate', String(error));
       return 'failed';
@@ -474,6 +504,70 @@
     const outcome = await jumpTo(targets[0]);
     if (outcome === 'navigated') record(origin);
     return outcome;
+  }
+
+  // Find References. Deliberately NOT a definition jump with a different
+  // request: references are a LIST by nature, so the chooser is ALWAYS shown —
+  // a single result included — and nothing is navigated until the user picks a
+  // row. Everything else (the request discipline, the stale rejection, the
+  // jump path, the history entry) is the definition path exactly.
+  async function findReferences(view, pos) {
+    const target = viewOrCurrent(view);
+    if (!target || !target.state) return 'unavailable';
+    const pane = paneForView(target) || currentPane();
+    const state = documentStateFor(pane, 'references');
+    if (!state) return 'unavailable';
+    const at = Number.isInteger(pos)
+      ? clamp(pos, 0, target.state.doc.length)
+      : target.state.selection.main.head;
+    const origin = captureLocation(pane, at);
+
+    const entry = entryFor(target);
+    entry.sequence += 1;
+    const sequence = entry.sequence;
+    const documentId = state.documentId;
+
+    let response = null;
+    try {
+      response = await requestFeature(pane, 'references', positionAt(target.state.doc, at));
+    } catch (error) {
+      status('Cannot Find References', String(error));
+      return 'failed';
+    }
+    if (entryFor(target).sequence !== sequence) return 'stale';
+    if (!response || response.documentId !== documentId) return 'none';
+
+    const { targets, rejected } = normalizeLocations(response);
+    if (!targets.length) {
+      if (rejected) {
+        status(
+          'References Not Available',
+          'Those references are outside the local filesystem, so they cannot be opened here.',
+        );
+        return 'unsupported';
+      }
+      status('No References Found', 'The language server reported no references for this symbol.');
+      return 'none';
+    }
+
+    // One file at a time, in file order, ascending by position inside it —
+    // the order a reader scans a result list in, and the order a second run of
+    // the same query has to produce.
+    targets.sort((left, right) => (
+      left.path === right.path
+        ? (left.line - right.line) || (left.column - right.column)
+        : (left.path < right.path ? -1 : 1)
+    ));
+    const root = commonDirectory(targets.map((item) => item.path));
+    for (const item of targets) item.name = relativeName(item.path, root);
+
+    const shown = targets.slice(0, REFERENCE_LIMIT);
+    const hidden = targets.length - shown.length;
+    const opened = openChooser(target, shown, at, origin, {
+      label: 'References',
+      footer: hidden > 0 ? `+${hidden} more` : null,
+    });
+    return opened ? 'chooser' : 'unavailable';
   }
 
   // --- back and forward -----------------------------------------------------------------------
@@ -586,14 +680,16 @@
 
   // --- lifecycle ---------------------------------------------------------------------------------
 
-  // F12, Ctrl-minus and Ctrl-Shift-minus arrive as window events
+  // F12, Shift-F12, Ctrl-minus and Ctrl-Shift-minus arrive as window events
   // (shortcut-runtime dispatches `termlab:editor-go-to-definition`,
-  // `termlab:editor-navigate-back` and `termlab:editor-navigate-forward` after
-  // it has decided the pane scope), so a terminal pane keeps those keys.
+  // `termlab:editor-find-references`, `termlab:editor-navigate-back` and
+  // `termlab:editor-navigate-forward` after it has decided the pane scope), so
+  // a terminal pane keeps those keys.
   function installWindowHandlers() {
     if (windowHandlers || typeof global.addEventListener !== 'function') return;
     windowHandlers = {
       'termlab:editor-go-to-definition': () => { goToDefinition(); },
+      'termlab:editor-find-references': () => { findReferences(); },
       'termlab:editor-navigate-back': () => { navigateBack(); },
       'termlab:editor-navigate-forward': () => { navigateForward(); },
     };
@@ -627,6 +723,7 @@
     dispose,
     extensions,
     goToDefinition,
+    findReferences,
     navigateBack,
     navigateForward,
     recordJump,

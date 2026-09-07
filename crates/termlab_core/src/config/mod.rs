@@ -698,6 +698,7 @@ mod tests {
         assert!(cfg.editor.lsp.languages.java);
         assert_eq!(cfg.termlab.keyboard.editor_completion, "ctrl+space");
         assert_eq!(cfg.termlab.keyboard.editor_go_to_definition, "f12");
+        assert_eq!(cfg.termlab.keyboard.editor_find_references, "shift+f12");
     }
 
     #[test]

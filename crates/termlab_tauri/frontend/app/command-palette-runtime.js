@@ -150,6 +150,15 @@
         () => {
           global.dispatchEvent(new global.CustomEvent('termlab:editor-show-hover'));
         });
+      // Find References has a chord (shift+F12) and a vim key (gr); the
+      // palette entry is what makes it discoverable, and it goes through the
+      // same window event both of those do. lsp-navigation.js listens for it
+      // and no-ops outside an LSP-capable editor.
+      add('core:editor-find-references', 'Find References', 'Editor',
+        'references usages find all callers lsp language server symbol',
+        () => {
+          global.dispatchEvent(new global.CustomEvent('termlab:editor-find-references'));
+        });
       // The vim <C-o>/<C-i> jump-trail diagnostic
       // (features/editor/vim-jump-trace.js). Palette-only on purpose: these
       // read a running app, they are not keys anyone should bind, and the

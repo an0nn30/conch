@@ -325,3 +325,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* The overflow row of a capped reference list. Not an option: it is never
+   highlighted and never picked, so it reads as a note, not as a target. */
+.tl-definition-chooser__more {
+  padding: var(--tl-space-1) var(--tl-space-2);
+  color: var(--tl-fg-muted);
+  font-style: italic;
+}

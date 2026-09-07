@@ -159,6 +159,7 @@
   // sequences.
   //
   //   gd, gD, <C-]>  go to definition   (nothing in the package binds these)
+  //   gr             find references    (the package binds no gr either)
   //   <C-o>, <C-i>   back / forward     (remapped, see absorbJumpList below)
   //   K              hover              (the package binds no K)
   //   ]d, [d         next/prev problem  (mapCommand unshifts, so these beat
@@ -205,6 +206,12 @@
     // definition payload folds declaration into definition, and the package
     // binds neither.
     map(['gd', 'gD', '<C-]>'], 'termlabGoToDefinition', d.goToDefinition, true);
+    // `gr`. Unlike gd this NEVER navigates on its own — it opens the reference
+    // list and waits for a pick — so it is mapped only where the feature is
+    // wired, like every optional key below it.
+    if (typeof d.findReferences === 'function') {
+      map(['gr'], 'termlabFindReferences', d.findReferences, true);
+    }
     if (typeof d.navigateBack === 'function') {
       map(['<C-o>'], 'termlabJumpBack', () => d.navigateBack(), false);
     }

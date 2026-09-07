@@ -348,6 +348,7 @@ async fn run_script(
                         "diagnostic",
                         "hover",
                         "publishDiagnostics",
+                        "references",
                         "signatureHelp",
                         "synchronization",
                     ]
@@ -368,6 +369,7 @@ async fn run_script(
                     "hover",
                     "signatureHelp",
                     "definition",
+                    "references",
                     "diagnostic",
                 ] {
                     assert!(
@@ -397,6 +399,7 @@ async fn run_script(
                     "hoverProvider": true,
                     "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
                     "definitionProvider": true,
+                    "referencesProvider": true,
                     "diagnosticProvider": {
                         "interFileDependencies": true,
                         "workspaceDiagnostics": false
@@ -798,6 +801,29 @@ async fn run_script(
                             "end": { "line": 0, "character": 3 }
                         }
                     }]),
+                )
+                .await?;
+            }
+            (_, "textDocument/references") => {
+                write_response(
+                    &mut writer,
+                    id.unwrap(),
+                    json!([
+                        {
+                            "uri": message["params"]["textDocument"]["uri"],
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 3 }
+                            }
+                        },
+                        {
+                            "uri": message["params"]["textDocument"]["uri"],
+                            "range": {
+                                "start": { "line": 4, "character": 2 },
+                                "end": { "line": 4, "character": 5 }
+                            }
+                        }
+                    ]),
                 )
                 .await?;
             }

@@ -475,7 +475,8 @@
       });
     }
 
-    // `gd`/`gD` -> Go to Definition. Registered against the vim engine rather
+    // `gd`/`gD` -> Go to Definition, `gr` -> Find References. Registered
+    // against the vim engine rather
     // than as a key handler, because in normal mode vim owns the keystroke —
     // and unconditionally, like the ex commands, because the binding lives on
     // the engine and must be in place before the first editor pane exists and
@@ -500,6 +501,13 @@
           const navigation = navigator();
           if (!navigation || typeof navigation.goToDefinition !== 'function') return null;
           return navigation.goToDefinition(view);
+        },
+        // `gr`. Same seam as gd, and the same guard: a window whose navigation
+        // module is missing gets no dead key.
+        findReferences: (view) => {
+          const navigation = navigator();
+          if (!navigation || typeof navigation.findReferences !== 'function') return null;
+          return navigation.findReferences(view);
         },
         // Ctrl-O / Ctrl-I. vim's own jumplist holds per-document bookmarks and
         // cannot cross files, so these walk the window's history instead — and

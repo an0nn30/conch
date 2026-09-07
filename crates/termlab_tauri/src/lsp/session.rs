@@ -28,13 +28,14 @@ use tower::ServiceBuilder;
 use super::catalog::{AdapterDescriptor, ResolvedServerCommand};
 use super::client::{
     ClientEvent, ClientState, EventSink, SessionCapabilityState, SyncPolicy, normalize_completion,
-    normalize_definition, normalize_diagnostics, normalize_hover, normalize_resolved_completion,
-    normalize_signature_help,
+    normalize_definition, normalize_diagnostics, normalize_hover, normalize_references,
+    normalize_resolved_completion, normalize_signature_help,
 };
 use super::document::{DocumentError, VersionedDocument};
 use super::types::{
     CompletionItem, CompletionResponse, DefinitionResponse, Diagnostic, HoverResponse,
-    LspCapabilities, LspChangeBatch, NegotiatedTriggers, SignatureHelpResponse, normalize_triggers,
+    LspCapabilities, LspChangeBatch, NegotiatedTriggers, ReferencesResponse, SignatureHelpResponse,
+    normalize_triggers,
 };
 
 const SHORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -958,6 +959,31 @@ impl LspSession {
         Ok(normalize_definition(document_id, version, response))
     }
 
+    pub(crate) async fn references(
+        &self,
+        document_id: &str,
+        position: lsp::Position,
+    ) -> Result<ReferencesResponse, SessionError> {
+        let (uri, version) = self.document_snapshot(document_id).await?;
+        let params = lsp::ReferenceParams {
+            text_document_position: text_document_position(uri, position),
+            // The symbol's own declaration is one of its references: a user
+            // asking "where is this used" wants the whole set in one list, and
+            // leaving it out would make the list disagree with `gd`.
+            context: lsp::ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let response = self
+            .request(DEFINITION_TIMEOUT, "references", move |server| {
+                server.references(params)
+            })
+            .await?;
+        Ok(normalize_references(document_id, version, response))
+    }
+
     pub(crate) async fn pull_diagnostics(
         &self,
         document_id: &str,
@@ -1104,6 +1130,7 @@ fn initialize_params(descriptor: &AdapterDescriptor, root: &Path) -> lsp::Initia
             "definition": {
                 "linkSupport": true
             },
+            "references": {},
             "publishDiagnostics": {
                 "relatedInformation": true,
                 "versionSupport": true
@@ -1220,11 +1247,16 @@ fn normalized_capabilities(capabilities: &lsp::ServerCapabilities) -> LspCapabil
         .definition_provider
         .as_ref()
         .is_some_and(|provider| !matches!(provider, lsp::OneOf::Left(false)));
+    let references = capabilities
+        .references_provider
+        .as_ref()
+        .is_some_and(|provider| !matches!(provider, lsp::OneOf::Left(false)));
     LspCapabilities {
         completion: capabilities.completion_provider.is_some(),
         hover,
         signature_help: capabilities.signature_help_provider.is_some(),
         definition,
+        references,
         diagnostics: capabilities.diagnostic_provider.is_some(),
     }
 }
@@ -1336,6 +1368,7 @@ mod tests {
                 hover: true,
                 signature_help: true,
                 definition: true,
+                references: true,
                 diagnostics: true,
             }
         );
@@ -1410,6 +1443,14 @@ mod tests {
                 .locations
                 .is_empty()
         );
+        // References are a list by nature, and the declaration is one of them:
+        // the mock answers with the declaration plus a use in a second file.
+        let references = session
+            .references("doc-1", Position::new(0, 3))
+            .await
+            .unwrap();
+        assert_eq!(references.locations.len(), 2);
+        assert_eq!(references.locations[1].range.start.line, 4);
         let (result_id, diagnostics) = session.pull_diagnostics("doc-1", None).await.unwrap();
         assert_eq!(result_id.as_deref(), Some("diagnostics-1"));
         assert_eq!(diagnostics[0].message, "pull error");
@@ -1446,6 +1487,7 @@ mod tests {
             "textDocument/hover",
             "textDocument/signatureHelp",
             "textDocument/definition",
+            "textDocument/references",
             "textDocument/diagnostic",
             "textDocument/didClose",
             "shutdown",

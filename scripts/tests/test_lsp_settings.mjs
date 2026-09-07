@@ -73,7 +73,7 @@ function makeSandbox() {
   assert.equal(pendingSettings.editor.lsp.enabled, false, 'the master control changes the saved draft');
 }
 
-// Keyboard settings expose the seven editor actions but deliberately omit
+// Keyboard settings expose the eight editor actions but deliberately omit
 // hover: it remains command-palette-only until multi-step chords exist.
 {
   const { sandbox } = makeSandbox();
@@ -87,6 +87,7 @@ function makeSandbox() {
     'editor_completion',
     'editor_signature_help',
     'editor_go_to_definition',
+    'editor_find_references',
     'editor_navigate_back',
     'editor_navigate_forward',
     'editor_next_problem',

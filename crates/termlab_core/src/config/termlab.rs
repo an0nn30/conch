@@ -127,6 +127,7 @@ pub struct KeyboardConfig {
     pub editor_completion: String,
     pub editor_signature_help: String,
     pub editor_go_to_definition: String,
+    pub editor_find_references: String,
     pub editor_navigate_back: String,
     pub editor_navigate_forward: String,
     pub editor_next_problem: String,
@@ -171,6 +172,12 @@ impl Default for KeyboardConfig {
             editor_completion: "ctrl+space".into(),
             editor_signature_help: "cmd+shift+space".into(),
             editor_go_to_definition: "f12".into(),
+            // VS Code's own Find All References chord. Checked for collisions
+            // against the other keyboard defaults, shortcut-runtime.js's
+            // hard-wired handlers, menu.rs's accelerators (F12 there is the
+            // debug-only devtools item, unshifted) and CodeMirror's loaded
+            // keymaps: nothing else claims shift+F12.
+            editor_find_references: "shift+f12".into(),
             editor_navigate_back: "ctrl+-".into(),
             editor_navigate_forward: "ctrl+shift+-".into(),
             editor_next_problem: "f8".into(),

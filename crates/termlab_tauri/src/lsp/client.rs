@@ -13,8 +13,8 @@ use super::types::{
     CompletionItem, CompletionResponse, CompletionTextEdit, CompletionUnsupportedEffect,
     DefinitionResponse, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
     EditorLocation, EditorPosition, EditorRange, EditorTextEdit, HoverBlock, HoverResponse,
-    LspCapabilities, NegotiatedTriggers, SignatureHelpResponse, SignatureInformation,
-    SignatureParameter,
+    LspCapabilities, NegotiatedTriggers, ReferencesResponse, SignatureHelpResponse,
+    SignatureInformation, SignatureParameter,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +123,7 @@ impl Default for SessionCapabilityState {
                 hover: false,
                 signature_help: false,
                 definition: false,
+                references: false,
                 diagnostics: false,
             },
             triggers: NegotiatedTriggers::default(),
@@ -860,6 +861,26 @@ pub(crate) fn normalize_definition(
     }
 }
 
+/// `textDocument/references` answers with a plain location list (or nothing),
+/// so there is no link form to collapse — only the same `file:`-scheme filter
+/// the definition path applies, for the same reason: a `jdt:` or `untitled:`
+/// target is not a path this app can open.
+pub(crate) fn normalize_references(
+    document_id: &str,
+    source_version: i32,
+    response: Option<Vec<lsp::Location>>,
+) -> ReferencesResponse {
+    ReferencesResponse {
+        document_id: document_id.to_owned(),
+        source_version,
+        locations: response
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(normalize_location)
+            .collect(),
+    }
+}
+
 fn normalize_location(location: lsp::Location) -> Option<EditorLocation> {
     (location.uri.scheme() == "file").then(|| EditorLocation {
         uri: location.uri.to_string(),
@@ -938,7 +959,7 @@ mod tests {
 
     use super::{
         ProgressPayload, normalize_completion, normalize_definition, normalize_diagnostics,
-        normalize_hover, normalize_progress, normalize_resolved_completion,
+        normalize_hover, normalize_progress, normalize_references, normalize_resolved_completion,
         normalize_signature_help, resolve_workspace_configuration,
     };
     use crate::lsp::types::{CompletionTextEdit, CompletionUnsupportedEffect, DiagnosticSeverity};
@@ -1122,6 +1143,65 @@ mod tests {
         );
         assert!(!signature.signatures[0].documentation[0].markdown);
         assert!(signature.signatures[0].parameters[0].documentation[0].markdown);
+    }
+
+    #[test]
+    fn references_normalize_to_locations_across_files_including_the_declaration() {
+        // A real `textDocument/references` answer with `includeDeclaration`:
+        // the declaration site itself is the first entry, the call sites
+        // follow, and they span more than one file.
+        let raw: Vec<lsp::Location> = serde_json::from_value(json!([
+            {
+                "uri": "file:///repo/src/fmt.ts",
+                "range": {
+                    "start": { "line": 0, "character": 16 },
+                    "end": { "line": 0, "character": 22 }
+                }
+            },
+            {
+                "uri": "file:///repo/src/main.ts",
+                "range": {
+                    "start": { "line": 1, "character": 14 },
+                    "end": { "line": 1, "character": 20 }
+                }
+            },
+            {
+                "uri": "file:///repo/src/main.ts",
+                "range": {
+                    "start": { "line": 6, "character": 2 },
+                    "end": { "line": 6, "character": 8 }
+                }
+            },
+            {
+                "uri": "untitled:Untitled-1",
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 1 }
+                }
+            }
+        ]))
+        .unwrap();
+
+        let references = normalize_references("doc-1", 7, Some(raw));
+        assert_eq!(references.document_id, "doc-1");
+        assert_eq!(references.source_version, 7);
+        assert_eq!(
+            references.locations.len(),
+            3,
+            "a non-file URI is dropped here exactly as it is for definitions"
+        );
+        assert_eq!(
+            references.locations[0].uri, "file:///repo/src/fmt.ts",
+            "includeDeclaration means the declaration is one of the results"
+        );
+        assert_eq!(references.locations[0].range.start.character, 16);
+        assert_eq!(references.locations[2].range.start.line, 6);
+        assert_eq!(references.locations[2].range.end.character, 8);
+
+        assert!(
+            normalize_references("doc-1", 7, None).locations.is_empty(),
+            "a server that answers null has no references, not an error"
+        );
     }
 
     #[test]

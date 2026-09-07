@@ -208,6 +208,10 @@
     hover: (documentId, position) => invoke('lsp_hover', { documentId, position }),
     signatureHelp: (documentId, position, trigger) => invoke('lsp_signature_help', { documentId, position, trigger }),
     definition: (documentId, position) => invoke('lsp_definition', { documentId, position }),
+    // `textDocument/references`, asked with includeDeclaration — the answer is
+    // the same location list a definition returns, so the frontend reads both
+    // through one normalizer.
+    references: (documentId, position) => invoke('lsp_references', { documentId, position }),
     problemsSnapshot: (root) => invoke('lsp_problems_snapshot', { root: root || null }),
     statusSnapshot: (documentId) => invoke('lsp_status_snapshot', { documentId: documentId || null }),
     restartSession: (adapterId, root) => invoke('lsp_restart_session', { adapterId, root }),

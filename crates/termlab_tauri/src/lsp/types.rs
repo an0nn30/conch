@@ -229,6 +229,19 @@ pub(crate) struct DefinitionResponse {
     pub locations: Vec<EditorLocation>,
 }
 
+/// `textDocument/references`. Deliberately its own type rather than a reuse of
+/// `DefinitionResponse`: the payloads are shaped alike, but they answer
+/// different questions, and the Tauri contract names the type the frontend
+/// gets back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferencesResponse {
+    pub document_id: String,
+    pub source_version: i32,
+    pub locations: Vec<EditorLocation>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, rename_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
@@ -362,6 +375,7 @@ pub(crate) struct LspCapabilities {
     pub hover: bool,
     pub signature_help: bool,
     pub definition: bool,
+    pub references: bool,
     pub diagnostics: bool,
 }
 
@@ -448,8 +462,8 @@ mod tests {
         ApplyChangesResponse, CompletionItem, CompletionTextEdit, CompletionUnsupportedEffect,
         Diagnostic, DiagnosticCounts, DiagnosticSnapshot, DiagnosticUpdate, EditorLocation,
         EditorPosition, EditorRange, HoverBlock, LspCapabilities, LspChangeBatch, LspSessionState,
-        LspStatus, LspTextChange, LspUnavailableReason, ProjectCandidate, SignatureHelpResponse,
-        normalize_triggers,
+        LspStatus, LspTextChange, LspUnavailableReason, ProjectCandidate, ReferencesResponse,
+        SignatureHelpResponse, normalize_triggers,
     };
     use ts_rs::TS;
 
@@ -587,6 +601,7 @@ mod tests {
                 hover: false,
                 signature_help: false,
                 definition: false,
+                references: false,
                 diagnostics: false,
             },
             completion_trigger_characters: Vec::new(),
@@ -607,7 +622,7 @@ mod tests {
                 "state": "unavailable",
                 "message": null,
                 "unavailableReason": { "kind": "notBundledYet", "adapterId": "json" },
-                "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "diagnostics": false },
+                "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "references": false, "diagnostics": false },
                 "completionTriggerCharacters": [],
                 "signatureHelpTriggerCharacters": [],
                 "signatureHelpRetriggerCharacters": [],
@@ -630,6 +645,7 @@ mod tests {
                 hover: false,
                 signature_help: false,
                 definition: false,
+                references: false,
                 diagnostics: false,
             },
             completion_trigger_characters: Vec::new(),
@@ -649,7 +665,7 @@ mod tests {
                 "projectRootUri": null,
                 "state": "disabled",
                 "message": null,
-                "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "diagnostics": false },
+                "capabilities": { "completion": false, "hover": false, "signatureHelp": false, "definition": false, "references": false, "diagnostics": false },
                 "completionTriggerCharacters": [],
                 "signatureHelpTriggerCharacters": [],
                 "signatureHelpRetriggerCharacters": [],
@@ -796,6 +812,7 @@ mod tests {
                 "hover": true,
                 "signatureHelp": true,
                 "definition": true,
+                "references": true,
                 "diagnostics": true,
             },
             "errorCount": 0,
@@ -806,6 +823,46 @@ mod tests {
         assert!(restored.completion_trigger_characters.is_empty());
         assert!(restored.signature_help_trigger_characters.is_empty());
         assert!(restored.signature_help_retrigger_characters.is_empty());
+    }
+
+    #[test]
+    fn references_response_serializes_the_same_location_shape_as_a_definition() {
+        let response = ReferencesResponse {
+            document_id: "doc-1".into(),
+            source_version: 4,
+            locations: vec![EditorLocation {
+                uri: "file:///repo/src/fmt.ts".into(),
+                range: EditorRange {
+                    start: EditorPosition {
+                        line: 0,
+                        character: 16,
+                    },
+                    end: EditorPosition {
+                        line: 0,
+                        character: 22,
+                    },
+                },
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::json!({
+                "documentId": "doc-1",
+                "sourceVersion": 4,
+                "locations": [{
+                    "uri": "file:///repo/src/fmt.ts",
+                    "range": {
+                        "start": { "line": 0, "character": 16 },
+                        "end": { "line": 0, "character": 22 },
+                    },
+                }],
+            })
+        );
+        assert_eq!(
+            ReferencesResponse::decl(&ts_rs::Config::default()),
+            "type ReferencesResponse = { documentId: string, sourceVersion: number, locations: Array<EditorLocation>, };"
+        );
     }
 
     #[test]

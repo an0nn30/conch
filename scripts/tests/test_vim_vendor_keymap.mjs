@@ -92,9 +92,12 @@ function harness(options = {}) {
   vm.runInContext(fs.readFileSync(VIM_JUMP_TRACE, 'utf8'), sandbox, { filename: VIM_JUMP_TRACE });
   vm.runInContext(fs.readFileSync(VIM_MODE, 'utf8'), sandbox, { filename: VIM_MODE });
 
-  const calls = { back: 0, forward: 0, definitions: [] };
+  const calls = {
+    back: 0, forward: 0, definitions: [], references: [],
+  };
   const deps = {
     goToDefinition: (view) => { calls.definitions.push(view); return Promise.resolve('navigated'); },
+    findReferences: (view) => { calls.references.push(view); return Promise.resolve('chooser'); },
     navigateBack: () => { calls.back += 1; return Promise.resolve('navigated'); },
     navigateForward: () => { calls.forward += 1; return Promise.resolve('navigated'); },
   };
@@ -174,6 +177,36 @@ check('gd still resolves against the shipped bundle, the key that does work toda
   command();
   await tick();
   assert.deepStrictEqual(h.calls.definitions, [view]);
+});
+
+check('gr resolves to Find References against the shipped bundle', async () => {
+  const h = harness();
+  const view = { id: 'gr-view' };
+  const adapter = vimAdapter(view);
+  h.Vim.findKey(adapter, 'g', 'test');
+  const command = h.Vim.findKey(adapter, 'r', 'test');
+  assert.strictEqual(
+    typeof command, 'function',
+    'the engine matched gr — the bundle binds nothing else to it, and mapCommand unshifts ours',
+  );
+  command();
+  await tick();
+  assert.deepStrictEqual(h.calls.references, [view]);
+  assert.deepStrictEqual(h.calls.definitions, [], 'gr is not gd');
+});
+
+check('a window without the references feature leaves gr unmapped', async () => {
+  const h = harness({ omit: ['findReferences'] });
+  assert.strictEqual(h.registered, true, 'the other keys are still registered');
+  const adapter = vimAdapter({ id: 'view' });
+  h.Vim.findKey(adapter, 'g', 'test');
+  const command = h.Vim.findKey(adapter, 'r', 'test');
+  if (typeof command === 'function') command();
+  await tick();
+  assert.deepStrictEqual(
+    h.calls.references, [],
+    'mapping a key to nothing is worse than leaving it to vim',
+  );
 });
 
 let failed = 0;

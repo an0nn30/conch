@@ -12,8 +12,8 @@ use super::trust::TrustDecision;
 use super::types::{
     ApplyChangesResponse, CompletionItem, CompletionResponse, DefinitionResponse,
     DiagnosticSnapshot, DocumentId, EditorPosition, HoverResponse, LspChangeBatch, LspStatus,
-    OpenDocumentResponse, ProjectCandidate, ReservationId, ReserveResult, ResyncDocumentResponse,
-    SignatureHelpResponse,
+    OpenDocumentResponse, ProjectCandidate, ReferencesResponse, ReservationId, ReserveResult,
+    ResyncDocumentResponse, SignatureHelpResponse,
 };
 
 pub(crate) const SESSION_STATUS_EVENT: &str = "lsp-session-status";
@@ -40,6 +40,7 @@ pub(crate) fn invoke_handler<R: Runtime>()
         lsp_hover,
         lsp_signature_help,
         lsp_definition,
+        lsp_references,
         lsp_problems_snapshot,
         lsp_status_snapshot,
         lsp_restart_session,
@@ -151,6 +152,11 @@ pub(crate) const LSP_COMMAND_CONTRACTS: &[CommandContract] = &[
         name: "lsp_definition",
         args: &["documentId", "position"],
         result: "DefinitionResponse",
+    },
+    CommandContract {
+        name: "lsp_references",
+        args: &["documentId", "position"],
+        result: "ReferencesResponse",
     },
     CommandContract {
         name: "lsp_problems_snapshot",
@@ -490,6 +496,19 @@ pub(crate) async fn lsp_definition(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn lsp_references(
+    document_id: DocumentId,
+    position: EditorPosition,
+    state: tauri::State<'_, LspState>,
+) -> Result<ReferencesResponse, String> {
+    state
+        .manager
+        .references(document_id, position)
+        .await
+        .map_err(command_error)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lsp_problems_snapshot(
     root: Option<String>,
     state: tauri::State<'_, LspState>,
@@ -704,6 +723,11 @@ mod tests {
                 &["documentId", "position"][..],
                 "DefinitionResponse",
             ),
+            (
+                "lsp_references",
+                &["documentId", "position"][..],
+                "ReferencesResponse",
+            ),
             ("lsp_problems_snapshot", &["root"][..], "DiagnosticSnapshot"),
             ("lsp_status_snapshot", &["documentId"][..], "LspStatus[]"),
             ("lsp_restart_session", &["adapterId", "root"][..], "void"),
@@ -719,7 +743,7 @@ mod tests {
                 "void",
             ),
         ];
-        assert_eq!(LSP_COMMAND_CONTRACTS.len(), 23);
+        assert_eq!(LSP_COMMAND_CONTRACTS.len(), 24);
         for (contract, (name, args, result)) in LSP_COMMAND_CONTRACTS.iter().zip(expected) {
             assert_eq!(
                 (contract.name, contract.args, contract.result),
@@ -835,6 +859,10 @@ mod tests {
                 "lsp_definition",
                 serde_json::json!({ "documentId": document, "position": position }),
             ),
+            (
+                "lsp_references",
+                serde_json::json!({ "documentId": document, "position": position }),
+            ),
             ("lsp_problems_snapshot", serde_json::json!({ "root": null })),
             (
                 "lsp_status_snapshot",
@@ -854,7 +882,7 @@ mod tests {
                 serde_json::json!({ "root": root, "adapterId": "typescript" }),
             ),
         ];
-        assert_eq!(cases.len(), 22);
+        assert_eq!(cases.len(), 23);
         for (command, body) in cases {
             let response = tauri::test::get_ipc_response(
                 &webview,

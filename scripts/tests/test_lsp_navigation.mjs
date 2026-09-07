@@ -183,7 +183,12 @@ function load(files, extra, cm) {
 }
 
 const CAPABILITIES = {
-  completion: true, hover: true, signatureHelp: true, definition: true, diagnostics: true,
+  completion: true,
+  hover: true,
+  signatureHelp: true,
+  definition: true,
+  references: true,
+  diagnostics: true,
 };
 
 const ORIGIN_TEXT = 'import { format } from "./fmt";\nconst value = format(1);\n';
@@ -606,6 +611,181 @@ check('clicking a row chooses it', async () => {
   assert.deepStrictEqual(h.opens.map((entry) => entry.filePath), ['/repo/src/fmt.ts']);
 });
 
+// --- find references ---------------------------------------------------------------
+//
+// References differ from definitions in exactly one way, and every check below
+// is about that difference: the answer is a LIST by nature, so the chooser is
+// always shown — one result included — rather than jumped to.
+
+const MAIN_URI = 'file:///repo/src/main.ts';
+const TEST_URI = 'file:///repo/test/fmt.test.ts';
+
+check('a single reference still opens the chooser rather than jumping', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  const status = await h.navigation.findReferences(h.origin.view, 45);
+  assert.strictEqual(status, 'chooser');
+  assert.strictEqual(h.opens.length, 0, 'a reference list is never auto-navigated');
+  const chooser = h.chooser();
+  assert.strictEqual(chooser.open, true);
+  assert.strictEqual(chooser.items.length, 1);
+});
+
+check('the references request is made at the requested position, with no trigger', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  await h.navigation.findReferences(h.origin.view, 45);
+  assert.strictEqual(h.requests.length, 1);
+  assert.strictEqual(h.requests[0].kind, 'references', 'the bridge route is textDocument/references');
+  assert.strictEqual(h.requests[0].trigger, null);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.requests[0].position)), { line: 1, character: 13 },
+  );
+});
+
+check('results are grouped by file and ordered by line inside each file', async () => {
+  const h = harness({
+    respond: () => definitionResponse([
+      location(MAIN_URI, 6, 2, 8),
+      location(TEST_URI, 3, 4, 10),
+      location(FMT_URI, 0, 16, 22),
+      location(MAIN_URI, 1, 14, 20),
+    ]),
+  });
+  await h.navigation.findReferences(h.origin.view, 45);
+  const items = h.chooser().items;
+  assert.deepStrictEqual(
+    items.map((item) => `${item.name}:${item.line}`),
+    ['src/fmt.ts:1', 'src/main.ts:2', 'src/main.ts:7', 'test/fmt.test.ts:4'],
+    'one file at a time, ascending by line, named relative to the shared root',
+  );
+});
+
+check('a reference list inside one directory falls back to bare file names', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location(FMT_URI, 0, 16, 22), location(MAIN_URI, 1, 14, 20)]),
+  });
+  await h.navigation.findReferences(h.origin.view, 45);
+  assert.deepStrictEqual(
+    h.chooser().items.map((item) => item.name), ['fmt.ts', 'main.ts'],
+  );
+});
+
+check('the preview line is shown for files this window has open', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location(FMT_URI, 0, 16, 22), location(TEST_URI, 3, 4, 10)]),
+  });
+  h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  await h.navigation.findReferences(h.origin.view, 45);
+  const items = h.chooser().items;
+  assert.strictEqual(items[0].preview, 'export function format(value: number): string {');
+  assert.strictEqual(items[1].preview, null, 'a file this window has not opened has no preview');
+  assert.strictEqual(items[1].context, '/repo/test', 'so the row shows where the file lives');
+});
+
+check('a very large result set is capped with a visible +N more row', async () => {
+  const many = [];
+  for (let line = 0; line < 640; line += 1) many.push(location(MAIN_URI, line, 0, 4));
+  const h = harness({ respond: () => definitionResponse(many) });
+  await h.navigation.findReferences(h.origin.view, 45);
+  const state = h.chooser();
+  assert.strictEqual(state.items.length, 500, 'the list is capped');
+  const value = h.sandbox.termlabLspNavigationChooser.valueOf(h.origin.view);
+  assert.strictEqual(value.footer, '+140 more', 'and the user is told how many were left out');
+  const node = h.navigation.renderChooser(value);
+  assert.ok(textOf(node).indexOf('+140 more') >= 0, 'the row is actually rendered');
+});
+
+check('an uncapped result set renders no more row', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  await h.navigation.findReferences(h.origin.view, 45);
+  const value = h.sandbox.termlabLspNavigationChooser.valueOf(h.origin.view);
+  assert.strictEqual(value.footer, null);
+});
+
+check('Enter on a reference jumps through the same path and records the trail', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location(FMT_URI, 0, 16, 22), location(MAIN_URI, 6, 2, 8)]),
+  });
+  const target = h.addPane('/repo/src/fmt.ts', TARGET_TEXT);
+  h.setOpen(() => ({ status: 'opened', pane: target, revealed: true }));
+  await h.navigation.findReferences(h.origin.view, 45);
+  assert.strictEqual(h.navigation.handleKeydown({ key: 'Enter' }, h.origin.view), true);
+  await sleep(5);
+  assert.strictEqual(h.chooser().open, false);
+  assert.deepStrictEqual(h.opens.map((entry) => entry.filePath), ['/repo/src/fmt.ts']);
+  assert.strictEqual(h.history().back.length, 1, 'Ctrl-O comes back from a chosen reference');
+  assert.strictEqual(h.history().back[0].uri, 'file:///repo/src/main.ts');
+});
+
+check('Escape closes the reference list without navigating', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location(FMT_URI, 0, 16, 22), location(MAIN_URI, 6, 2, 8)]),
+  });
+  await h.navigation.findReferences(h.origin.view, 45);
+  assert.strictEqual(h.navigation.handleKeydown({ key: 'Escape' }, h.origin.view), true);
+  assert.strictEqual(h.chooser().open, false);
+  assert.strictEqual(h.opens.length, 0);
+  assert.deepStrictEqual(h.history().back, []);
+});
+
+check('no references reports it quietly and opens nothing', async () => {
+  const h = harness({ respond: () => definitionResponse([]) });
+  const status = await h.navigation.findReferences(h.origin.view, 45);
+  assert.strictEqual(status, 'none');
+  assert.strictEqual(h.chooser().open, false, 'an empty list is a toast, not an empty box');
+  assert.strictEqual(h.opens.length, 0);
+  assert.strictEqual(h.toasts.length, 1);
+  assert.strictEqual(h.toasts[0][0], 'info');
+  assert.strictEqual(h.toasts[0][1], 'No References Found');
+});
+
+check('references outside the local filesystem are dropped and reported', async () => {
+  const h = harness({
+    respond: () => definitionResponse([
+      location('jdt://contents/rt.jar', 1, 2),
+      location('untitled:Untitled-1', 0, 0),
+    ]),
+  });
+  assert.strictEqual(await h.navigation.findReferences(h.origin.view, 45), 'unsupported');
+  assert.strictEqual(h.chooser().open, false);
+  assert.strictEqual(h.toasts.length, 1);
+});
+
+check('a superseded references answer is discarded', async () => {
+  const pending = [];
+  const h = harness({
+    respond: () => new Promise((resolve) => { pending.push(resolve); }),
+  });
+  const first = h.navigation.findReferences(h.origin.view, 45);
+  const second = h.navigation.findReferences(h.origin.view, 20);
+  pending[0](definitionResponse([location(FMT_URI, 0, 16, 22)]));
+  assert.strictEqual(await first, 'stale', 'the answer describes a caret the user has left');
+  assert.strictEqual(h.chooser().open, false, 'and no list is opened from it');
+  pending[1](definitionResponse([location(MAIN_URI, 6, 2, 8)]));
+  assert.strictEqual(await second, 'chooser');
+});
+
+check('a references answer for another document is rejected', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)], 'doc-other'),
+  });
+  assert.strictEqual(await h.navigation.findReferences(h.origin.view, 45), 'none');
+  assert.strictEqual(h.chooser().open, false);
+});
+
+check('a session that cannot do references is never asked', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  h.states.get(h.origin).capabilities = { ...CAPABILITIES, references: false };
+  assert.strictEqual(await h.navigation.findReferences(h.origin.view, 45), 'unavailable');
+  assert.strictEqual(h.requests.length, 0);
+});
+
+check('a remote pane is never asked for references', async () => {
+  const h = harness({ respond: () => definitionResponse([location(FMT_URI, 0, 16, 22)]) });
+  h.origin.remote = { sessionId: 'ssh-1' };
+  assert.strictEqual(await h.navigation.findReferences(h.origin.view, 45), 'unavailable');
+  assert.strictEqual(h.requests.length, 0);
+});
+
 // --- history ---------------------------------------------------------------------------
 
 check('the source location is captured before navigation, not after it', async () => {
@@ -965,6 +1145,7 @@ function withVim(h) {
   vm.runInContext(fs.readFileSync(VIM_MODE, 'utf8'), h.sandbox, { filename: VIM_MODE });
   h.sandbox.termlabVimMode.registerNavigationCommands({
     goToDefinition: (view) => h.navigation.goToDefinition(view),
+    findReferences: (view) => h.navigation.findReferences(view),
     navigateBack: () => h.navigation.navigateBack(),
     navigateForward: () => h.navigation.navigateForward(),
     recordJump: (view, position) => h.navigation.recordJump(view, position),
@@ -1010,6 +1191,20 @@ check('gd into another file, then Ctrl-O, returns to the exact pre-jump position
   press(['<C-i>'], h.origin.view);
   await sleep(10);
   assert.strictEqual(h.opens[2].filePath, '/repo/src/fmt.ts', 'Ctrl-I re-jumps');
+});
+
+check('gr opens the reference list against the real vim engine', async () => {
+  const h = harness({
+    respond: () => definitionResponse([location(FMT_URI, 0, 16, 22), location(MAIN_URI, 6, 2, 8)]),
+  });
+  const press = withVim(h);
+  h.origin.view.dispatch({ selection: { anchor: 45 } });
+  press(['g', 'r'], h.origin.view);
+  await sleep(10);
+  assert.strictEqual(h.requests.length, 1, 'gr asked for references');
+  assert.strictEqual(h.requests[0].kind, 'references');
+  assert.strictEqual(h.chooser().open, true, 'and put the results on screen');
+  assert.strictEqual(h.opens.length, 0, 'without navigating anywhere on its own');
 });
 
 check('a vim jump motion inside a file joins the same trail', async () => {
@@ -1241,6 +1436,7 @@ function shortcutHarness(pane) {
   }
   const keyboard = {
     editor_go_to_definition: keyboardDefault('editor_go_to_definition'),
+    editor_find_references: keyboardDefault('editor_find_references'),
     editor_navigate_back: keyboardDefault('editor_navigate_back'),
     editor_navigate_forward: keyboardDefault('editor_navigate_forward'),
   };
@@ -1289,6 +1485,37 @@ check('the shipped defaults bind F12, Ctrl-minus and Ctrl-Shift-minus', () => {
   assert.strictEqual(keyboardDefault('editor_go_to_definition'), 'f12');
   assert.strictEqual(keyboardDefault('editor_navigate_back'), 'ctrl+-');
   assert.strictEqual(keyboardDefault('editor_navigate_forward'), 'ctrl+shift+-');
+});
+
+check('the shipped default binds Shift-F12 to Find References, colliding with nothing', () => {
+  assert.strictEqual(keyboardDefault('editor_find_references'), 'shift+f12');
+  const defaults = fs.readFileSync(KEYBOARD_DEFAULTS, 'utf8');
+  const bindings = [...defaults.matchAll(/^\s+([a-z_]+): "([^"]+)"\.into\(\),$/gm)]
+    .map((match) => match[2].toLowerCase());
+  assert.strictEqual(
+    bindings.filter((binding) => binding === 'shift+f12').length, 1,
+    'no other configurable default claims the same chord',
+  );
+  const shortcuts = fs.readFileSync(SHORTCUT_RUNTIME, 'utf8');
+  assert.ok(
+    !/shift\+f12/i.test(shortcuts),
+    'and no hard-wired handler in shortcut-runtime.js claims it either',
+  );
+});
+
+check('Shift-F12 in an editor pane dispatches the find-references event', async () => {
+  const h = shortcutHarness({ kind: 'editor' });
+  await h.runtime.init();
+  const consumed = h.press({ code: 'F12', key: 'F12', shiftKey: true });
+  assert.strictEqual(consumed, true, 'the keystroke is claimed');
+  assert.deepStrictEqual(h.dispatched, ['termlab:editor-find-references']);
+});
+
+check('Shift-F12 in a terminal pane is left to the shell', async () => {
+  const h = shortcutHarness({ kind: 'terminal' });
+  await h.runtime.init();
+  h.press({ code: 'F12', key: 'F12', shiftKey: true });
+  assert.deepStrictEqual(h.dispatched, []);
 });
 
 check('F12 in an editor pane dispatches the event this module listens for', async () => {
@@ -1577,6 +1804,36 @@ check('Rust normalizes LocationLink to a Location on its target selection range'
   );
 });
 
+check('ReferencesResponse carries the same identity fields the frontend checks', () => {
+  const source = fs.readFileSync(LSP_TYPES, 'utf8');
+  const at = source.indexOf('pub(crate) struct ReferencesResponse');
+  assert.ok(at > 0, 'ReferencesResponse exists');
+  const block = source.slice(at, source.indexOf('}', at));
+  for (const field of ['document_id', 'source_version', 'locations']) {
+    assert.ok(block.includes(field), `ReferencesResponse must carry ${field}`);
+  }
+});
+
+check('the references request asks for the declaration too', () => {
+  const source = fs.readFileSync(
+    path.resolve(import.meta.dirname, '../../crates/termlab_tauri/src/lsp/session.rs'), 'utf8',
+  );
+  const at = source.indexOf('lsp::ReferenceParams');
+  assert.ok(at > 0, 'the session builds ReferenceParams');
+  assert.ok(
+    /include_declaration: true/.test(source.slice(at, at + 600)),
+    'the declaration is one of the results the list must show',
+  );
+});
+
+check('the palette and the bridge both reach the references command', () => {
+  const bridge = fs.readFileSync(LSP_BRIDGE, 'utf8');
+  assert.ok(/references:/.test(bridge) && /lsp_references/.test(bridge));
+  const palette = fs.readFileSync(path.join(APP, 'command-palette-runtime.js'), 'utf8');
+  assert.ok(/Find References/.test(palette), 'the action is reachable without a keyboard chord');
+  assert.ok(/termlab:editor-find-references/.test(palette), 'through the same window event');
+});
+
 check('DefinitionResponse carries the document identity the frontend checks', () => {
   const source = fs.readFileSync(LSP_TYPES, 'utf8');
   const at = source.indexOf('pub(crate) struct DefinitionResponse');
@@ -1703,6 +1960,7 @@ check('the chooser classes it renders are styled with tokens', () => {
     'tl-definition-chooser__item--active',
     'tl-definition-chooser__where',
     'tl-definition-chooser__preview',
+    'tl-definition-chooser__more',
   ];
   for (const name of names) {
     assert.ok(css.includes(`.${name}`), `${name} is rendered but never styled`);

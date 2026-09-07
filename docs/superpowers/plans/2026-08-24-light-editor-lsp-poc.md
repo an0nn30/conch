@@ -1206,8 +1206,8 @@ These are intentionally outside this POC and must not be smuggled into its imple
 1. Bundle and validate JSON, Python, Go, C/C++, and Java adapters, including their runtime/JDK/toolchain footprints and language-specific initialization behavior.
 2. Produce universal macOS resources and signing/notarization strategy for both arm64 and x86_64, including per-architecture native servers and Node runtimes.
 3. Add remote-file/project LSP transports and remote process lifecycle after the local ownership and trust model has production evidence.
-4. Vim parity blocked on backend features. The vim vocabulary a normal-mode user reaches for is mapped only where the feature actually ships (`gd`/`gD`/`<C-]>` definition, `K` hover, `]d`/`[d` diagnostics, `<C-o>`/`<C-i>` history). These stay unmapped, deliberately, until the request exists in `crates/termlab_tauri/src/lsp/` — mapping a key to nothing is worse than leaving it to vim:
-   - `gr` — `textDocument/references`, plus a results list surface to show them in.
+4. Vim parity blocked on backend features. The vim vocabulary a normal-mode user reaches for is mapped only where the feature actually ships (`gd`/`gD`/`<C-]>` definition, `gr` references, `K` hover, `]d`/`[d` diagnostics, `<C-o>`/`<C-i>` history). The rest stay unmapped, deliberately, until the request exists in `crates/termlab_tauri/src/lsp/` — mapping a key to nothing is worse than leaving it to vim:
+   - `gr` — SHIPPED. `textDocument/references` with `includeDeclaration: true` (`lsp_references`), reusing the definition chooser as its results surface: always shown (a single result included), grouped by file, capped at 500 rows with a `+N more` row. Also on `shift+f12` and the palette's "Find References".
    - `<leader>rn` — `textDocument/rename`, which needs the cross-document `WorkspaceEdit` application the POC explicitly does not do (completion already preserves-but-refuses cross-document edits for the same reason).
    - `ga` / `<leader>ca` — `textDocument/codeAction` and command execution.
    - `=` / `<leader>f` — `textDocument/formatting` and `rangeFormatting`.

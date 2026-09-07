@@ -1,4 +1,10 @@
-// The multiple-definition chooser: its CodeMirror field and its DOM.
+// The candidate chooser: its CodeMirror field and its DOM.
+//
+// Two callers, one list: several definitions to pick between, and a reference
+// list (which is always shown, one result included). The only differences are
+// the accessible label and an optional trailing row saying how many results
+// were left out of a capped list — neither is selectable, and neither changes
+// what a pick MEANS.
 //
 // Split out of lsp-navigation.js, which decides WHAT to navigate to; this half
 // only shows a list of candidates and reports which one was picked.
@@ -91,7 +97,7 @@
     const root = doc().createElement('div');
     root.className = 'tl-definition-chooser';
     root.setAttribute('role', 'listbox');
-    root.setAttribute('aria-label', 'Definitions');
+    root.setAttribute('aria-label', (value && value.label) ? String(value.label) : 'Definitions');
     const items = (value && value.items) || [];
     const active = Number.isInteger(value && value.index) ? value.index : 0;
     items.forEach((item, index) => {
@@ -118,19 +124,34 @@
       }
       root.appendChild(row);
     });
+    // The overflow row. Deliberately outside `items` — it is not a target, so
+    // it must not take an index, absorb an arrow key or be reachable by Enter.
+    if (value && value.footer) {
+      const more = doc().createElement('div');
+      more.className = 'tl-definition-chooser__more';
+      more.setAttribute('role', 'presentation');
+      more.textContent = String(value.footer);
+      root.appendChild(more);
+    }
     return root;
   }
 
   // --- the surface lsp-navigation drives --------------------------------------------
 
-  function open(view, items, anchor, origin) {
+  function open(view, items, anchor, origin, options) {
     if (!ensureField()) return false;
     // One overlay at a time: a hover or signature tooltip is about the symbol
     // the user is leaving, and two boxes at the same anchor is nobody's design.
     const tooltips = global.termlabLspTooltips;
     if (tooltips && typeof tooltips.dismiss === 'function') tooltips.dismiss(view);
+    const opts = options || {};
     setValue(view, {
-      items, index: 0, anchor, origin,
+      items,
+      index: 0,
+      anchor,
+      origin,
+      label: opts.label ? String(opts.label) : null,
+      footer: opts.footer ? String(opts.footer) : null,
     });
     return true;
   }
