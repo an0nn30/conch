@@ -409,7 +409,16 @@
         const key = (event.key || '').toLowerCase();
         const superPressed = isMacPlatform ? event.metaKey : (event.metaKey || event.ctrlKey);
         if (!superPressed || !event.shiftKey || key !== 'p') return false;
-        if (isTextInputTarget(event.target)) return false;
+        // Deliberately NO isTextInputTarget guard, unlike runShortcutFallbacks
+        // above. That guard protects bare and lightly-modified plugin combos
+        // from stealing typed text; cmd+shift+p (ctrl+shift+p off macOS) is a
+        // chord no text field can produce, and the palette has to be reachable
+        // from every surface. With the guard, a focused editor pane — whose
+        // CodeMirror content element is contenteditable — swallowed the chord
+        // outright, and the toggle-closed branch below was dead code besides:
+        // the palette focuses its own <input> on open, so the second press
+        // always landed on a text input. See
+        // scripts/tests/test_shortcut_palette_in_editor.mjs.
         if (isCommandPaletteOpen()) closeCommandPalette();
         else openCommandPalette();
         return true;
