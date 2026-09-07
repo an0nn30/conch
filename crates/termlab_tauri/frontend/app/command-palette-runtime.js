@@ -150,6 +150,23 @@
         () => {
           global.dispatchEvent(new global.CustomEvent('termlab:editor-show-hover'));
         });
+      // The vim <C-o>/<C-i> jump-trail diagnostic
+      // (features/editor/vim-jump-trace.js). Palette-only on purpose: these
+      // read a running app, they are not keys anyone should bind, and the
+      // trace is session-only with no setting behind it. Both no-op when the
+      // module is absent (a settings window, say) rather than throwing.
+      add('core:vim-jump-trail', 'Vim Navigation: Show Jump Trail', 'Editor',
+        'vim jump trail history back forward ctrl-o ctrl-i navigation depth diagnostic',
+        () => {
+          const trace = global.termlabVimJumpTrace;
+          if (trace && typeof trace.showTrail === 'function') trace.showTrail();
+        });
+      add('core:vim-jump-trace', 'Vim Navigation: Trace Keys (toggle)', 'Editor',
+        'vim jump trace keys diagnostic ctrl-o ctrl-i toggle debug navigation keydown',
+        () => {
+          const trace = global.termlabVimJumpTrace;
+          if (trace && typeof trace.toggleTrace === 'function') trace.toggleTrace();
+        });
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
       add('core:install-cli', "Install 'termlab' Command in PATH", 'Application',
         'install cli path shell command terminal termlab symlink',

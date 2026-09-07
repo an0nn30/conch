@@ -61,6 +61,17 @@
     });
   }
 
+  // Stage 2 of the jump-trail diagnostic (features/editor/vim-jump-trace.js):
+  // vim matched the key and reached OUR action. This is the one step neither
+  // the keyboard router nor the navigator can observe, and it is the whole
+  // difference between "the key never got here" and "the trail was empty".
+  // Off by default and session-only; the return value is deliberately ignored
+  // so a missing or failing trace can never change what a key does.
+  function traceAction(name) {
+    const trace = global.termlabVimJumpTrace;
+    if (trace && typeof trace.noteVimAction === 'function') trace.noteVimAction(name);
+  }
+
   // Bind `:w`, `:q` and `:wq` to this app's own paths.
   //
   // deps = { savePane(pane), closeTab(tabId), currentPane() }
@@ -180,6 +191,7 @@
 
     function map(keys, name, run, needsView) {
       Vim.defineAction(name, (cm) => {
+        traceAction(name);
         const view = viewOf(cm);
         if (needsView && !view) return;
         defer(() => run(view));

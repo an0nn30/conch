@@ -503,12 +503,26 @@
     return outcome;
   }
 
+  // Stage 3 of the jump-trail diagnostic (features/editor/vim-jump-trace.js):
+  // what the walk actually did — 'navigated', 'elsewhere', 'failed', or the
+  // 'none' the trace spells "empty". Attached to the promise rather than to
+  // step() itself so the outcome the caller sees is untouched, and guarded end
+  // to end so a missing trace module cannot break navigation.
+  function traced(direction, walk) {
+    const trace = global.termlabVimJumpTrace;
+    if (!trace || typeof trace.noteNavigation !== 'function') return walk;
+    return walk.then((outcome) => {
+      trace.noteNavigation(direction, outcome);
+      return outcome;
+    });
+  }
+
   function navigateBack() {
-    return step('back');
+    return traced('back', step('back'));
   }
 
   function navigateForward() {
-    return step('forward');
+    return traced('forward', step('forward'));
   }
 
   // --- events -----------------------------------------------------------------------------------

@@ -440,6 +440,26 @@
       };
 
       if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+        // Stage 1 of the vim jump-trail diagnostic
+        // (features/editor/vim-jump-trace.js): what the capture-phase router
+        // actually received for Ctrl-O / Ctrl-I.
+        //
+        // Deliberately ABOVE every consumer rather than beside the
+        // [termlab-keydbg] handlers below, which sit at 25 and therefore never
+        // see a key some higher handler already claimed — "who ate it" is the
+        // question, so the observer has to run first. It NEVER consumes
+        // (always returns false), so arming the trace cannot change which
+        // handler wins; the trace module itself is off unless the palette
+        // toggled it on, and filters everything but Ctrl-I/Ctrl-O.
+        keyboardRouter.register({
+          name: 'vim-jump-trace',
+          priority: 900,
+          onKeyDown: (event) => {
+            const trace = global.termlabVimJumpTrace;
+            if (trace && typeof trace.noteKey === 'function') trace.noteKey(event);
+            return false;
+          },
+        });
         keyboardRouter.register({
           name: 'shortcut-debug-down',
           priority: 25,
