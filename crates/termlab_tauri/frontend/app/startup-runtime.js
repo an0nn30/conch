@@ -40,6 +40,15 @@
         showStatus('Unhandled promise rejection: ' + String(event.reason));
       });
 
+      // The banner shows the message and forgets it. The same two events also
+      // go to ~/.config/termlab/logs/frontend.log with the stack and the pane
+      // they happened on, which is what a bug report can carry.
+      // features/diagnostics/error-log.js owns the format; a window without
+      // that module keeps exactly the banner it had before.
+      if (global.termlabErrorLog && typeof global.termlabErrorLog.install === 'function') {
+        global.termlabErrorLog.install(global);
+      }
+
       return { showStatus, hideStatus };
     }
 
