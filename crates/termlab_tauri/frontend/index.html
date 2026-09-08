@@ -217,6 +217,10 @@
   <script src="app/panels/tunnel-manager.js"></script>
   <script src="app/panels/tunnels-panel.js"></script>
   <script src="app/panels/notifications-panel.js"></script>
+  <!-- The on-disk diagnostic log (~/.config/termlab/logs/frontend.log). Early,
+       because vim-jump-trace.js and anything else that reports through it must
+       find window.termlabDiag already defined. -->
+  <script src="app/features/diagnostics/diag-log.js"></script>
   <script src="app/features/editor/language-map.js"></script>
   <!-- The markdown preview. Order matters and there is no module system: each
        of these reads language-map.js above and the two vendor bundles at the

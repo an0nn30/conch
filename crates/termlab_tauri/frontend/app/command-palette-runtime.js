@@ -176,6 +176,22 @@
           const trace = global.termlabVimJumpTrace;
           if (trace && typeof trace.toggleTrace === 'function') trace.toggleTrace();
         });
+      // Where the always-on diagnostic log lives
+      // (features/diagnostics/diag-log.js). The trace above is for watching a
+      // sequence live; this is the file a bug report attaches, and the whole
+      // point is that the owner does not have to have armed anything first.
+      add('core:diag-log-path', 'Show Diagnostic Log Location', 'Application',
+        'diagnostic log file bug report frontend logs path vim navigation',
+        async () => {
+          const diag = global.termlabDiag;
+          const path = diag && typeof diag.path === 'function' ? await diag.path() : null;
+          if (global.toast && typeof global.toast.info === 'function') {
+            global.toast.info(
+              'Diagnostic log',
+              path ? `Attach this file to a bug report: ${path}` : 'The diagnostic log is unavailable in this window.',
+            );
+          }
+        });
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
       add('core:install-cli', "Install 'termlab' Command in PATH", 'Application',
         'install cli path shell command terminal termlab symlink',

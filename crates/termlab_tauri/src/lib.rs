@@ -11,6 +11,7 @@ pub mod cli;
 pub(crate) mod cli_install;
 pub(crate) mod close_guard;
 mod commands;
+pub(crate) mod diag_log;
 mod editor_fs;
 pub(crate) mod extended_ansi;
 pub(crate) mod font_metrics;
@@ -1070,6 +1071,8 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 // root, which would destroy the backing file of every open remote
                 // editor. Both its callers are Rust — the setup hook above and
                 // close_guard::finish_exit — and neither runs with an editor live.
+                diag_log::app_diag_log,
+                diag_log::app_diag_log_path,
                 close_guard::window_close_guard_arm,
                 close_guard::confirm_window_close,
                 close_guard::quit_vote,

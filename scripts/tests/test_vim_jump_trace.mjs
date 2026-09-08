@@ -580,6 +580,37 @@ check('the diagnostic module is loaded by index.html, ahead of vim-mode', () => 
   assert.ok(trace < vimMode, 'loaded before its first caller, matching the rest of the editor block');
 });
 
+check('the on-disk diagnostic log is loaded by index.html, ahead of the trace', () => {
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  const diag = html.indexOf('app/features/diagnostics/diag-log.js');
+  const trace = html.indexOf('app/features/editor/vim-jump-trace.js');
+  assert.ok(
+    diag > 0,
+    'index.html must load diag-log.js or every record is dropped and a bug report has no file to attach',
+  );
+  assert.ok(diag < trace, 'window.termlabDiag has to exist before its first caller');
+});
+
+check('every trace stage reaches the file whether or not the toasts are armed', () => {
+  const source = fs.readFileSync(TRACE, 'utf8');
+  // The toast toggle is for WATCHING a sequence; the file is what a bug report
+  // carries, and the owner cannot have armed a trace for a press they had not
+  // yet made. So each note point must call `record(...)` BEFORE it consults
+  // `enabled`.
+  for (const stage of ['noteKey', 'noteVimAction', 'noteNavigation']) {
+    const at = source.indexOf(`function ${stage}(`);
+    assert.ok(at > 0, `${stage} exists`);
+    const body = source.slice(at, source.indexOf('\n  }', at));
+    const recordAt = body.indexOf('record(');
+    const enabledAt = body.indexOf('!enabled');
+    assert.ok(recordAt > 0, `${stage} writes to the diagnostic log`);
+    assert.ok(
+      enabledAt < 0 || recordAt < enabledAt,
+      `${stage} must write the file before it checks the toast toggle`,
+    );
+  }
+});
+
 let failed = 0;
 for (const { name, fn } of results) {
   try {

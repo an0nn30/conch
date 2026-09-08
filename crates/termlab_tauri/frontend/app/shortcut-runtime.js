@@ -1,4 +1,12 @@
 (function initTermLabShortcutRuntime(global) {
+  // The on-disk diagnostic log (features/diagnostics/diag-log.js). Guarded and
+  // fire-and-forget, so a window without it — or without Tauri at all, which is
+  // every headless harness — costs one property lookup and nothing else.
+  function diagLog(message) {
+    const diag = global.termlabDiag;
+    if (diag && typeof diag.log === 'function') diag.log('vim-nav', message);
+  }
+
   function create(deps) {
     const invoke = deps.invoke;
     const isMacPlatform = deps.isMacPlatform;
@@ -476,7 +484,11 @@
           priority: 25,
           onKeyDown: (event) => {
             if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return false;
-            console.log('[termlab-keydbg] keydown(capture)', formatKeyEventForDebug(event));
+            const described = formatKeyEventForDebug(event);
+            console.log('[termlab-keydbg] keydown(capture)', described);
+            // And to ~/.config/termlab/logs/frontend.log, because a WKWebView's
+            // console is not somewhere a bug report can be read from.
+            diagLog(`keydbg keydown(capture) ${described}`);
             return false;
           },
         });
@@ -485,7 +497,9 @@
           priority: 25,
           onKeyUp: (event) => {
             if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return false;
-            console.log('[termlab-keydbg] keyup(capture)', formatKeyEventForDebug(event));
+            const described = formatKeyEventForDebug(event);
+            console.log('[termlab-keydbg] keyup(capture)', described);
+            diagLog(`keydbg keyup(capture) ${described}`);
             return false;
           },
         });

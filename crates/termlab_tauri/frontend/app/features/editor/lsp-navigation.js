@@ -392,6 +392,28 @@
     if (store) store.record(origin);
   }
 
+  // Stage 0 of the jump-trail diagnostic (features/editor/vim-jump-trace.js).
+  // Guarded end to end and its return value ignored, so a missing or throwing
+  // trace module can never change what a recorder does.
+  function noteRecord(source, outcome, detail) {
+    const trace = global.termlabVimJumpTrace;
+    if (trace && typeof trace.noteRecord === 'function') {
+      trace.noteRecord(source, outcome, detail || null);
+    }
+  }
+
+  // What a pane IS, for the log. Pane identity as well as the path, because a
+  // trail recorded against a pane that has since been replaced and a trail
+  // that was never recorded look identical from the walk's end.
+  function describePane(pane) {
+    if (!pane) return 'pane=none';
+    const parts = [`pane=${String(pane.paneId)}`, `kind=${String(pane.kind)}`];
+    if (pane.remote) parts.push('remote');
+    parts.push(`path=${pane.filePath ? String(pane.filePath) : 'none'}`);
+    if (!pane.view) parts.push('noView');
+    return parts.join(' ');
+  }
+
   // A vim jump-class motion (G, gg, {, }, /search, n/N, marks, %, H/M/L) told
   // to us by vim-mode's jumplist hook. It means the same thing to Ctrl-O as a
   // definition jump does — "where I was before that" — so it goes on the same
@@ -403,14 +425,21 @@
   function recordJump(view, position) {
     const helper = global.termlabLspPosition;
     const pane = paneForView(view) || currentPane();
-    if (!helper || !pane || !pane.view || !pane.view.state) return false;
+    if (!helper || !pane || !pane.view || !pane.view.state) {
+      noteRecord('vim motion', 'skipped: no pane for the view', describePane(pane));
+      return false;
+    }
     const origin = captureLocation(pane, helper.offsetAt(pane.view.state.doc, position));
-    if (!origin) return false;
+    if (!origin) {
+      noteRecord('vim motion', 'skipped: origin not capturable', describePane(pane));
+      return false;
+    }
     origin.range = {
       start: { line: origin.position.line, character: origin.position.character },
       end: { line: origin.position.line, character: origin.position.character },
     };
     record(origin);
+    noteRecord('vim motion', 'recorded', describePane(pane));
     return true;
   }
 
@@ -433,22 +462,40 @@
   // belongs to the vim-motion recorder.
   function noteFocusedPaneChanged(previousPane, nextPane) {
     const next = editorDocumentPane(nextPane);
-    if (!next) return false;
+    if (!next) {
+      noteRecord('focus', 'skipped: not an editor document', describePane(nextPane));
+      return false;
+    }
     const from = lastEditorPane;
     lastEditorPane = next;
     // Tracked even while we are jumping — the destination is where the NEXT
     // manual switch will be leaving from — but not recorded.
-    if (jumping) return false;
-    if (!from || from === next || from.filePath === next.filePath) return false;
+    if (jumping) {
+      noteRecord('focus', 'skipped: jumping', describePane(next));
+      return false;
+    }
+    if (!from || from === next || from.filePath === next.filePath) {
+      noteRecord(
+        'focus',
+        from ? 'skipped: same document' : 'skipped: no previous editor',
+        `${describePane(from)} -> ${describePane(next)}`,
+      );
+      return false;
+    }
     const origin = captureLocation(from, null);
-    if (!origin) return false;
+    if (!origin) {
+      noteRecord('focus', 'skipped: origin not capturable', describePane(from));
+      return false;
+    }
     const store = history();
     // Defensive: a focus change that lands after a jump has already resolved
     // would otherwise stack the same location twice.
     if (store && typeof store.equals === 'function' && store.equals(store.peek('back'), origin)) {
+      noteRecord('focus', 'skipped: already on top of the trail', describePane(from));
       return false;
     }
     record(origin);
+    noteRecord('focus', 'recorded', `${describePane(from)} -> ${describePane(next)}`);
     return true;
   }
 
@@ -503,6 +550,11 @@
     }
     const outcome = await jumpTo(targets[0]);
     if (outcome === 'navigated') record(origin);
+    noteRecord(
+      'definition',
+      outcome === 'navigated' ? 'recorded' : `not recorded: jump was ${outcome}`,
+      `${describePane(pane)} origin=${origin ? 'captured' : 'null'} -> ${targets[0].path}`,
+    );
     return outcome;
   }
 
@@ -589,9 +641,15 @@
   async function step(direction) {
     const store = history();
     const entry = store ? store.peek(direction) : null;
-    if (!entry) return 'none';
-    const here = captureLocation(currentPane(), null);
-    const outcome = await jumpTo(store.entryTarget(entry));
+    if (!entry) {
+      noteRecord(`step ${direction}`, 'nothing to walk to', describePane(currentPane()));
+      return 'none';
+    }
+    const from = currentPane();
+    const here = captureLocation(from, null);
+    const target = store.entryTarget(entry);
+    noteRecord(`step ${direction}`, 'walking', `${describePane(from)} -> ${target.path}`);
+    const outcome = await jumpTo(target);
     if (outcome !== 'navigated' && outcome !== 'elsewhere') return outcome;
     store.advance(direction, here);
     return outcome;

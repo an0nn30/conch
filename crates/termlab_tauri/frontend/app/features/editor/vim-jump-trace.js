@@ -47,6 +47,18 @@
     return enabled;
   }
 
+  // The DURABLE half. Every note point below writes here as well as (maybe)
+  // toasting, and this half is NOT gated on `enabled`: the toast toggle is for
+  // watching a sequence live, but a bug report is written after the fact, and
+  // the owner cannot have armed a trace for a press they had not yet made.
+  // features/diagnostics/diag-log.js is fire-and-forget and swallows
+  // everything, so this can never change what a key does.
+  const CATEGORY = 'vim-nav';
+  function record(message) {
+    const diag = global.termlabDiag;
+    if (diag && typeof diag.log === 'function') diag.log(CATEGORY, message);
+  }
+
   function setEnabled(next) {
     enabled = next === true;
     return enabled;
@@ -90,13 +102,16 @@
   // Stage 1. Called for EVERY keydown the router sees, so it filters first and
   // never toasts for anything but Ctrl-I/Ctrl-O.
   function noteKey(event) {
-    if (!enabled || !isJumpKeyEvent(event)) return false;
+    if (!isJumpKeyEvent(event)) return false;
+    record(`1 router saw the key — ${describeKeyEvent(event)}`);
+    if (!enabled) return false;
     return toastInfo('Vim trace 1: router saw the key', describeKeyEvent(event));
   }
 
   // Stage 2. Every mapped vim action reports here, not just the two jump ones:
   // seeing `gd` fire and Ctrl-O not is itself the answer.
   function noteVimAction(name) {
+    record(`2 vim ran the mapping — ${String(name)}`);
     if (!enabled) return false;
     return toastInfo('Vim trace 2: vim ran the mapping', String(name));
   }
@@ -111,11 +126,21 @@
 
   // Stage 3.
   function noteNavigation(direction, outcome) {
+    const body = `${normalizeOutcome(outcome)} — ${formatTrail(historyState())}`;
+    record(`3 navigate ${String(direction)} — ${body}`);
     if (!enabled) return false;
-    return toastInfo(
-      `Vim trace 3: navigate ${String(direction)}`,
-      `${normalizeOutcome(outcome)} — ${formatTrail(historyState())}`,
-    );
+    return toastInfo(`Vim trace 3: navigate ${String(direction)}`, body);
+  }
+
+  // Stage 0: what the trail RECORDER did. Stages 1-3 can only ever say the
+  // trail was empty; this says why. File-only — it fires on ordinary file
+  // opens, which is far too often to toast — and reports the pane identity as
+  // well as the document, because "the trail is empty" and "the trail was
+  // recorded against a pane that no longer exists" look identical from the
+  // walk's end.
+  function noteRecord(source, outcome, detail) {
+    record(`0 record ${String(source)} — ${String(outcome)}${detail ? ` — ${String(detail)}` : ''}`);
+    return false;
   }
 
   function historyState() {
@@ -188,6 +213,7 @@
     noteKey,
     noteVimAction,
     noteNavigation,
+    noteRecord,
     showTrail,
   };
 })(window);
