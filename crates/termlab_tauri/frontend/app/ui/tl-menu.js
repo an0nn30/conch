@@ -94,7 +94,11 @@
       activeMenu.remove();
       activeMenu = null;
       if (!stolen && lastActiveElement && lastActiveElement.isConnected && typeof lastActiveElement.focus === 'function') {
-        lastActiveElement.focus();
+        // preventScroll for the same reason tl-dialog's restore uses it: a
+        // menu dismissed over a CodeMirror editor hands focus back to the
+        // document-tall `.cm-content`, and a bare focus() would scroll it
+        // to its top.
+        lastActiveElement.focus({ preventScroll: true });
       }
     }
     lastActiveElement = null;

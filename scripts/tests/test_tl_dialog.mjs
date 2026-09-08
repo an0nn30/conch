@@ -364,4 +364,43 @@ assert.equal(document.body.children.length, 0);
   console.log('tl-dialog footer button live-disabled gating: ok');
 }
 
+// Restoring focus on close must never scroll. When a dialog (the command
+// palette) opens from a CodeMirror editor, `document.activeElement` is
+// `.cm-content` — an element as tall as the whole document. A bare
+// `focus()` scrolls the focused element into view, and "into view" for an
+// element taller than its scroller means its TOP: the editor jumped to
+// line 1 every time the palette closed. `focus({ preventScroll: true })`
+// hands the keyboard back without moving the viewport.
+{
+  const editorContent = document.createElement('div');
+  editorContent.className = 'cm-content';
+  editorContent.isConnected = true;
+  const focusCalls = [];
+  editorContent.focus = function (opts) { focusCalls.push(opts); document.activeElement = this; };
+  document.activeElement = editorContent;
+
+  const handle = window.tlDialog.open({ title: 'restore focus without scrolling' });
+  assert.equal(window.tlDialog.count(), 1, 'dialog should be open');
+  handle.close();
+  assert.equal(window.tlDialog.count(), 0, 'dialog should be closed');
+  assert.ok(focusCalls.length >= 1, 'closing the dialog must hand focus back to the editor content');
+  const last = focusCalls[focusCalls.length - 1];
+  assert.ok(last && last.preventScroll === true,
+    'focus restore must pass { preventScroll: true } — a bare focus() scrolls the editor to its top');
+  console.log('tl-dialog focus restore is scroll-free: ok');
+
+  // Same contract for the context menu: dismissing a tl-menu opened over the
+  // editor restores focus to the editor content and must not scroll either.
+  focusCalls.length = 0;
+  document.activeElement = editorContent;
+  const menu = window.tlMenu.open({ x: 0, y: 0, items: [{ label: 'one', onSelect() {} }] });
+  assert.equal(menu.isConnected, true, 'menu should be open');
+  window.tlMenu.close();
+  assert.ok(focusCalls.length >= 1, 'closing the menu must hand focus back to the editor content');
+  const lastMenu = focusCalls[focusCalls.length - 1];
+  assert.ok(lastMenu && lastMenu.preventScroll === true,
+    'menu focus restore must pass { preventScroll: true }');
+  console.log('tl-menu focus restore is scroll-free: ok');
+}
+
 console.log('ok');
