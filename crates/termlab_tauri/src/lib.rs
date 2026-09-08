@@ -11,16 +11,19 @@ pub mod cli;
 pub(crate) mod cli_install;
 pub(crate) mod close_guard;
 mod commands;
+pub(crate) mod diag_log;
 mod editor_fs;
 pub(crate) mod extended_ansi;
 pub(crate) mod font_metrics;
 pub(crate) mod fonts;
 mod ipc;
+pub(crate) mod lsp;
 pub(crate) mod menu;
 pub(crate) mod open_path;
 pub(crate) mod panel_host;
 pub mod platform;
 pub(crate) mod plugins;
+pub(crate) mod project;
 pub(crate) mod pty;
 mod pty_backend;
 pub(crate) mod remote;
@@ -54,7 +57,7 @@ use termlab_core::config::{self, UserConfig};
 pub(crate) struct TauriState {
     ptys: Arc<Mutex<HashMap<String, PtyBackend>>>,
     active_panes: Arc<Mutex<HashMap<String, u32>>>,
-    config: RwLock<UserConfig>,
+    config: Arc<RwLock<UserConfig>>,
     /// The user's home directory, used as a stable label for the app's
     /// "workspace" (see `commands::get_workspace_dir`). Captured once via
     /// `dirs::home_dir()` at startup — not the process's actual working
@@ -297,6 +300,10 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
         QueueActor::bootstrap(TransferStore::new(config_dir.join("transfers.json")))
             .map_err(anyhow::Error::msg)?;
     let vault_path = config_dir.join("vault.enc");
+    let lsp_enablement = lsp::manager::Enablement::from_config(&config.editor.lsp);
+    let lsp_project_config_dir = config_dir.clone();
+    let lsp_cache_root = config_dir.join("lsp-cache");
+    let _ = std::fs::create_dir_all(&lsp_cache_root);
     let vault_state: vault_commands::VaultState =
         Arc::new(Mutex::new(termlab_vault::VaultManager::new(vault_path)));
 
@@ -334,7 +341,7 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
 
     log::info!("startup: window state loaded, building app");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -343,9 +350,10 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
         .manage(TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             active_panes: Arc::new(Mutex::new(HashMap::new())),
-            config: RwLock::new(config),
+            config: Arc::new(RwLock::new(config)),
             workspace_dir,
         })
+        .manage(settings::SettingsTransactionGate::default())
         .manage(Arc::clone(&remote_state))
         .manage(queue_handle.clone())
         .manage(Arc::clone(&plugin_state))
@@ -355,6 +363,8 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
         .manage(Mutex::new(chooser_window::ChooserRegistry::default()))
         .manage(Mutex::new(panel_host::PanelHostRegistry::default()))
         .manage(open_path::PendingOpens::default())
+        .manage(Mutex::new(project::ProjectRegistry::default()))
+        .manage(Mutex::new(project::search::SearchRegistry::default()))
         .setup(move |app| {
             log::info!("startup: webview created, running app setup");
 
@@ -363,6 +373,28 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 Arc::new(SystemQueueClock),
                 Arc::new(SftpTransferJobRunner::new(Arc::clone(&remote_state))),
             );
+
+            let architecture = if cfg!(target_arch = "aarch64") {
+                "arm64"
+            } else {
+                "x86_64"
+            };
+            let packaged_lsp_root = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|root| root.join("lsp").join(architecture))
+                .filter(|root| root.is_dir());
+            let factory = Arc::new(lsp::manager::RealSessionFactory::new(packaged_lsp_root));
+            let (lsp_manager, lsp_actor, lsp_events) = lsp::manager::LspManager::new(
+                factory,
+                lsp_project_config_dir.clone(),
+                lsp_cache_root.clone(),
+                lsp_enablement.clone(),
+            );
+            tauri::async_runtime::spawn(lsp_actor.run());
+            lsp::commands::spawn_event_forwarder(app.handle().clone(), lsp_events);
+            app.manage(lsp::commands::LspState::new(lsp_manager));
 
             // Inject the packaged bundled-themes dir (if this is a packaged
             // build) before anything else runs, so no command can resolve a
@@ -591,6 +623,9 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             menu::MENU_OPEN_FILE_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_OPEN_FILE)
             }
+            menu::MENU_OPEN_FOLDER_ID => {
+                menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_OPEN_FOLDER)
+            }
             menu::MENU_SAVE_FILE_AS_ID => {
                 menu::emit_menu_action_to_focused_window(app, menu::MENU_ACTION_SAVE_FILE_AS)
             }
@@ -663,6 +698,20 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
             menu::MENU_NEW_WINDOW_ID => {
                 if let Err(e) = windows::create_new_window(app) {
                     log::error!("Failed to create window from menu: {e}");
+                }
+            }
+            id if id.starts_with(menu::MENU_RECENT_PROJECT_PREFIX) => {
+                // (Fix round 1, F5) the path is carried IN the id — see
+                // MENU_RECENT_PROJECT_PREFIX's doc comment. No re-fetch of
+                // `list_recents()` here: that list can shift between the
+                // menu being built and this click landing, which is exactly
+                // the bug an index-based id used to have.
+                let path = &id[menu::MENU_RECENT_PROJECT_PREFIX.len()..];
+                if !path.is_empty() {
+                    menu::emit_menu_action_to_focused_window(
+                        app,
+                        &format!("{}{}", menu::MENU_ACTION_OPEN_RECENT_PROJECT, path),
+                    );
                 }
             }
             other => {
@@ -810,6 +859,11 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 // (OS kill / crash) — see panel_host::on_window_destroyed.
                 panel_host::on_window_destroyed(window);
 
+                // A project belongs to the window that opened it and to
+                // nothing else: dropping the entry here is what lets the same
+                // root be opened again in a fresh window.
+                project::on_window_destroyed(window);
+
                 // When the main window closes, also close child windows
                 // (settings, etc.) so they don't linger as orphans.
                 if label == "main" {
@@ -839,179 +893,215 @@ pub fn run(config: UserConfig, pending_paths: Vec<String>) -> anyhow::Result<()>
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::app_ready,
-            commands::open_devtools,
-            commands::set_zoom_level,
-            commands::save_window_metrics,
-            commands::get_zoom_level,
-            pty::spawn_shell,
-            pty::spawn_default_shell,
-            pty::write_to_pty,
-            pty::resize_pty,
-            pty::close_pty,
-            pty::get_local_pane_cwd,
-            pty::get_local_pane_process,
-            pty::get_host_identity,
-            commands::current_window_label,
-            commands::set_active_pane,
-            commands::get_saved_layout,
-            commands::save_window_layout,
-            commands::get_keyboard_shortcuts,
-            commands::get_theme_colors,
-            commands::get_terminal_config,
-            commands::get_app_config,
-            commands::get_about_info,
-            commands::get_home_dir,
-            commands::get_workspace_dir,
-            commands::clipboard_read_text,
-            commands::clipboard_write_text,
-            windows::open_new_window,
-            windows::open_settings_window,
-            open_path::take_pending_open_paths,
-            open_path::has_pending_open_paths,
-            chooser_window::open_file_chooser,
-            chooser_window::get_chooser_request,
-            chooser_window::resolve_file_chooser,
-            chooser_window::cancel_file_chooser,
-            chooser_window::chooser_ready,
-            chooser_window::focus_file_chooser,
-            panel_host::open_panel_host,
-            panel_host::get_panel_host_request,
-            panel_host::panel_host_ready,
-            panel_host::focus_panel_host,
-            panel_host::hide_panel_host,
-            panel_host::dock_panel_host,
-            panel_host::abort_panel_host,
-            panel_host::panel_host_broadcast,
-            panel_host::panel_host_action,
-            commands::rebuild_menu,
-            cli_install::install_cli_symlink,
-            cli_install::uninstall_cli_symlink,
-            settings::get_all_settings,
-            settings::default_keyboard_config,
-            settings::save_settings,
-            theme_catalog::list_terminal_themes,
-            fonts::list_system_fonts,
-            remote::ssh_commands::ssh_connect,
-            remote::ssh_commands::ssh_quick_connect,
-            remote::ssh_commands::ssh_write,
-            remote::ssh_commands::ssh_resize,
-            remote::ssh_commands::ssh_disconnect,
-            remote::ssh_commands::ssh_get_pane_cwd,
-            remote::ssh_commands::ssh_open_channel,
-            remote::server_commands::remote_get_servers,
-            remote::server_commands::remote_save_server,
-            remote::server_commands::remote_delete_server,
-            remote::server_commands::remote_add_folder,
-            remote::server_commands::remote_delete_folder,
-            remote::server_commands::remote_import_ssh_config,
-            remote::auth::auth_respond_host_key,
-            remote::auth::auth_respond_password,
-            remote::server_commands::remote_get_sessions,
-            remote::server_commands::remote_rename_folder,
-            remote::server_commands::remote_set_folder_expanded,
-            remote::server_commands::remote_move_server,
-            remote::server_commands::remote_duplicate_server,
-            share_commands::share_export_preview,
-            share_commands::share_export,
-            share_commands::share_pick_import_file,
-            share_commands::share_import_plan,
-            share_commands::share_import_apply,
-            remote::sftp_commands::sftp_list_dir,
-            remote::sftp_commands::sftp_stat,
-            remote::sftp_commands::sftp_read_file,
-            remote::sftp_commands::sftp_write_file,
-            remote::sftp_commands::sftp_mkdir,
-            remote::sftp_commands::sftp_rename,
-            remote::sftp_commands::sftp_remove,
-            remote::sftp_commands::sftp_realpath,
-            remote::detached_commands::sftp_connect_host,
-            remote::detached_commands::sftp_connect_host_with_password,
-            remote::detached_commands::sftp_disconnect,
-            remote::sftp_commands::local_list_dir,
-            remote::sftp_commands::local_stat,
-            remote::sftp_commands::local_mkdir,
-            remote::sftp_commands::local_rename,
-            remote::sftp_commands::local_remove,
-            remote::transfer_commands::transfer_download,
-            remote::transfer_commands::transfer_upload,
-            remote::transfer_commands::transfer_enqueue_recursive,
-            remote::transfer_commands::transfer_cancel_batch,
-            remote::transfer_commands::transfer_queue_snapshot,
-            remote::transfer_commands::transfer_pause,
-            remote::transfer_commands::transfer_resume,
-            remote::transfer_commands::transfer_pause_all,
-            remote::transfer_commands::transfer_resume_all,
-            remote::transfer_commands::transfer_cancel,
-            remote::transfer_commands::transfer_cancel_all,
-            remote::transfer_commands::transfer_retry,
-            remote::transfer_commands::transfer_resolve,
-            remote::transfer_commands::transfer_reorder,
-            remote::transfer_commands::transfer_set_priority,
-            remote::transfer_commands::transfer_clear_completed,
-            remote::transfer_commands::transfer_update_settings,
-            remote::tunnel_commands::tunnel_start,
-            remote::tunnel_commands::tunnel_stop,
-            remote::tunnel_commands::tunnel_save,
-            remote::tunnel_commands::tunnel_delete,
-            remote::tunnel_commands::tunnel_get_all,
-            plugins::scan_plugins,
-            plugins::enable_plugin,
-            plugins::disable_plugin,
-            plugins::dialog_respond_form,
-            plugins::dialog_respond_prompt,
-            plugins::dialog_respond_confirm,
-            plugins::plugin_respond_new_tab,
-            plugins::get_plugin_menu_items,
-            plugins::trigger_plugin_menu_action,
-            plugins::get_plugin_panels,
-            plugins::get_panel_widgets,
-            plugins::get_plugin_settings_sections,
-            plugins::commit_plugin_settings_drafts,
-            plugins::discard_plugin_settings_drafts,
-            plugins::register_plugin_view_binding,
-            plugins::plugin_view_closed,
-            plugins::plugin_widget_event,
-            plugins::request_plugin_render,
-            plugins::request_plugin_view_render,
-            vault_commands::vault_status,
-            vault_commands::vault_create,
-            vault_commands::vault_unlock,
-            vault_commands::vault_lock,
-            vault_commands::vault_list_accounts,
-            vault_commands::vault_get_account,
-            vault_commands::vault_add_account,
-            vault_commands::vault_update_account,
-            vault_commands::vault_delete_account,
-            vault_commands::vault_get_settings,
-            vault_commands::vault_update_settings,
-            vault_commands::vault_pick_key_file,
-            vault_commands::vault_check_path_exists,
-            vault_commands::vault_generate_key,
-            vault_commands::vault_list_keys,
-            vault_commands::vault_delete_key,
-            vault_commands::vault_migrate_legacy,
-            updater::check_for_update,
-            updater::install_update,
-            updater::restart_app,
-            editor_fs::editor_can_open,
-            editor_fs::editor_read_file,
-            editor_fs::editor_write_file,
-            editor_fs::editor_temp_path,
-            editor_fs::editor_temp_cleanup,
-            editor_fs::editor_read_image_base64,
-            // editor_temp_sweep is deliberately absent, and is no longer a
-            // #[tauri::command] at all: it deletes the entire remote-edit temp
-            // root, which would destroy the backing file of every open remote
-            // editor. Both its callers are Rust — the setup hook above and
-            // close_guard::finish_exit — and neither runs with an editor live.
-            close_guard::window_close_guard_arm,
-            close_guard::confirm_window_close,
-            close_guard::quit_vote,
-        ])
-        .run(tauri::generate_context!())
+        .invoke_handler({
+            let application_handler: Box<
+                dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync,
+            > = Box::new(tauri::generate_handler![
+                commands::app_ready,
+                commands::open_devtools,
+                commands::set_zoom_level,
+                commands::save_window_metrics,
+                commands::get_zoom_level,
+                pty::spawn_shell,
+                pty::spawn_default_shell,
+                pty::write_to_pty,
+                pty::resize_pty,
+                pty::close_pty,
+                pty::get_local_pane_cwd,
+                pty::get_local_pane_process,
+                pty::get_host_identity,
+                commands::current_window_label,
+                commands::set_active_pane,
+                commands::get_saved_layout,
+                commands::save_window_layout,
+                commands::get_keyboard_shortcuts,
+                commands::get_theme_colors,
+                commands::get_terminal_config,
+                commands::get_app_config,
+                commands::get_about_info,
+                commands::get_home_dir,
+                commands::get_workspace_dir,
+                commands::clipboard_read_text,
+                commands::clipboard_write_text,
+                windows::open_new_window,
+                windows::open_settings_window,
+                open_path::take_pending_open_paths,
+                open_path::pending_open_paths_kind,
+                chooser_window::open_file_chooser,
+                chooser_window::get_chooser_request,
+                chooser_window::resolve_file_chooser,
+                chooser_window::cancel_file_chooser,
+                chooser_window::chooser_ready,
+                chooser_window::focus_file_chooser,
+                panel_host::open_panel_host,
+                panel_host::get_panel_host_request,
+                panel_host::panel_host_ready,
+                panel_host::focus_panel_host,
+                panel_host::hide_panel_host,
+                panel_host::dock_panel_host,
+                panel_host::abort_panel_host,
+                panel_host::panel_host_broadcast,
+                panel_host::panel_host_action,
+                project::project_open,
+                project::project_adopt_pending,
+                project::project_info,
+                project::project_pick_folder,
+                project::project_reveal_path,
+                project::recents::project_recents,
+                project::search::project_search,
+                project::search::project_search_cancel,
+                project::git_status::project_git_status,
+                commands::rebuild_menu,
+                cli_install::install_cli_symlink,
+                cli_install::uninstall_cli_symlink,
+                settings::get_all_settings,
+                settings::save_settings,
+                settings::default_keyboard_config,
+                theme_catalog::list_terminal_themes,
+                fonts::list_system_fonts,
+                remote::ssh_commands::ssh_connect,
+                remote::ssh_commands::ssh_quick_connect,
+                remote::ssh_commands::ssh_write,
+                remote::ssh_commands::ssh_resize,
+                remote::ssh_commands::ssh_disconnect,
+                remote::ssh_commands::ssh_get_pane_cwd,
+                remote::ssh_commands::ssh_open_channel,
+                remote::server_commands::remote_get_servers,
+                remote::server_commands::remote_save_server,
+                remote::server_commands::remote_delete_server,
+                remote::server_commands::remote_add_folder,
+                remote::server_commands::remote_delete_folder,
+                remote::server_commands::remote_import_ssh_config,
+                remote::auth::auth_respond_host_key,
+                remote::auth::auth_respond_password,
+                remote::server_commands::remote_get_sessions,
+                remote::server_commands::remote_rename_folder,
+                remote::server_commands::remote_set_folder_expanded,
+                remote::server_commands::remote_move_server,
+                remote::server_commands::remote_duplicate_server,
+                share_commands::share_export_preview,
+                share_commands::share_export,
+                share_commands::share_pick_import_file,
+                share_commands::share_import_plan,
+                share_commands::share_import_apply,
+                remote::sftp_commands::sftp_list_dir,
+                remote::sftp_commands::sftp_stat,
+                remote::sftp_commands::sftp_read_file,
+                remote::sftp_commands::sftp_write_file,
+                remote::sftp_commands::sftp_mkdir,
+                remote::sftp_commands::sftp_rename,
+                remote::sftp_commands::sftp_remove,
+                remote::sftp_commands::sftp_realpath,
+                remote::detached_commands::sftp_connect_host,
+                remote::detached_commands::sftp_connect_host_with_password,
+                remote::detached_commands::sftp_disconnect,
+                remote::sftp_commands::local_list_dir,
+                remote::sftp_commands::local_stat,
+                remote::sftp_commands::local_mkdir,
+                remote::sftp_commands::local_rename,
+                remote::sftp_commands::local_remove,
+                remote::transfer_commands::transfer_download,
+                remote::transfer_commands::transfer_upload,
+                remote::transfer_commands::transfer_enqueue_recursive,
+                remote::transfer_commands::transfer_cancel_batch,
+                remote::transfer_commands::transfer_queue_snapshot,
+                remote::transfer_commands::transfer_pause,
+                remote::transfer_commands::transfer_resume,
+                remote::transfer_commands::transfer_pause_all,
+                remote::transfer_commands::transfer_resume_all,
+                remote::transfer_commands::transfer_cancel,
+                remote::transfer_commands::transfer_cancel_all,
+                remote::transfer_commands::transfer_retry,
+                remote::transfer_commands::transfer_resolve,
+                remote::transfer_commands::transfer_reorder,
+                remote::transfer_commands::transfer_set_priority,
+                remote::transfer_commands::transfer_clear_completed,
+                remote::transfer_commands::transfer_update_settings,
+                remote::tunnel_commands::tunnel_start,
+                remote::tunnel_commands::tunnel_stop,
+                remote::tunnel_commands::tunnel_save,
+                remote::tunnel_commands::tunnel_delete,
+                remote::tunnel_commands::tunnel_get_all,
+                plugins::scan_plugins,
+                plugins::enable_plugin,
+                plugins::disable_plugin,
+                plugins::dialog_respond_form,
+                plugins::dialog_respond_prompt,
+                plugins::dialog_respond_confirm,
+                plugins::plugin_respond_new_tab,
+                plugins::get_plugin_menu_items,
+                plugins::trigger_plugin_menu_action,
+                plugins::get_plugin_panels,
+                plugins::get_panel_widgets,
+                plugins::get_plugin_settings_sections,
+                plugins::commit_plugin_settings_drafts,
+                plugins::discard_plugin_settings_drafts,
+                plugins::register_plugin_view_binding,
+                plugins::plugin_view_closed,
+                plugins::plugin_widget_event,
+                plugins::request_plugin_render,
+                plugins::request_plugin_view_render,
+                vault_commands::vault_status,
+                vault_commands::vault_create,
+                vault_commands::vault_unlock,
+                vault_commands::vault_lock,
+                vault_commands::vault_list_accounts,
+                vault_commands::vault_get_account,
+                vault_commands::vault_add_account,
+                vault_commands::vault_update_account,
+                vault_commands::vault_delete_account,
+                vault_commands::vault_get_settings,
+                vault_commands::vault_update_settings,
+                vault_commands::vault_pick_key_file,
+                vault_commands::vault_check_path_exists,
+                vault_commands::vault_generate_key,
+                vault_commands::vault_list_keys,
+                vault_commands::vault_delete_key,
+                vault_commands::vault_migrate_legacy,
+                updater::check_for_update,
+                updater::install_update,
+                updater::restart_app,
+                editor_fs::editor_can_open,
+                editor_fs::editor_read_file,
+                editor_fs::editor_write_file,
+                editor_fs::editor_temp_path,
+                editor_fs::editor_temp_cleanup,
+                // editor_temp_sweep is deliberately absent, and is no longer a
+                // #[tauri::command] at all: it deletes the entire remote-edit temp
+                // root, which would destroy the backing file of every open remote
+                // editor. Both its callers are Rust — the setup hook above and
+                // close_guard::finish_exit — and neither runs with an editor live.
+                diag_log::app_diag_log,
+                diag_log::app_diag_log_path,
+                close_guard::window_close_guard_arm,
+                close_guard::confirm_window_close,
+                close_guard::quit_vote,
+            ]);
+            let lsp_handler = lsp::commands::invoke_handler::<tauri::Wry>();
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                if lsp::commands::is_lsp_command(invoke.message.command()) {
+                    lsp_handler(invoke)
+                } else {
+                    application_handler(invoke)
+                }
+            }
+        })
+        .build(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let manager = app_handle
+                .try_state::<lsp::commands::LspState>()
+                .map(|state| state.manager().clone());
+            if let Some(manager) = manager {
+                let _ = tauri::async_runtime::block_on(async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(4), manager.shutdown())
+                        .await
+                });
+            }
+        }
+    });
 
     Ok(())
 }
@@ -1025,7 +1115,7 @@ mod tests {
         let state = TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             active_panes: Arc::new(Mutex::new(HashMap::new())),
-            config: RwLock::new(UserConfig::default()),
+            config: Arc::new(RwLock::new(UserConfig::default())),
             workspace_dir: None,
         };
         assert!(state.ptys.lock().is_empty());

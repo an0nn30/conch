@@ -32,6 +32,7 @@ const FRONTEND = path.resolve(
 );
 const MANAGER_PATH = path.join(FRONTEND, 'layout/tool-window-manager.js');
 const RUNTIME_PATH = path.join(FRONTEND, 'tool-window-runtime.js');
+const SAVED_LAYOUT_TS_PATH = path.resolve(FRONTEND, '..', 'types', 'SavedLayout.ts');
 const MAIN_RUNTIME_PATH = path.join(FRONTEND, 'main-runtime.js');
 const HOST_RUNTIME_PATH = path.join(FRONTEND, 'panel-host-runtime.js');
 const BRIDGE_PATH = path.join(FRONTEND, 'core/panel-host-bridge.js');
@@ -894,6 +895,13 @@ function makeFakeManager() {
     setSidebarWidth: record('setSidebarWidth'),
     setSplitRatio: record('setSplitRatio'),
     setPanelVisibility: record('setPanelVisibility'),
+    // Added for the task-6 review's F3 project-boot-visibility coverage: a
+    // project window's boot path calls activate('file-explorer') directly
+    // (not through the legacy toggle path Part 1 exercises), which no
+    // existing Part 2 test reached before — a fake manager without this
+    // would throw "activate is not a function" the first time that path ran.
+    activate: record('activate'),
+    deactivate: record('deactivate'),
     register(id, opts) { calls.push({ name: 'register', args: [id, opts] }); },
     summonPendingWindowHosts: record('summonPendingWindowHosts'),
     notifyHostShown: record('notifyHostShown'),
@@ -942,6 +950,20 @@ async function loadRuntime(savedLayout, opts) {
   sandbox.global = sandbox;
   sandbox.toolWindowManager = twm;
   sandbox.toast = {};
+  // task-6 review, F3/F5(iv): create(deps) reads global.termlabProjectMode
+  // once, at create() time, to resolve this window's projectRoot — only set
+  // when a scenario asks for it, so every other Part 2 test keeps exercising
+  // the plain (non-project) window path unchanged.
+  if (options.projectRoot) {
+    sandbox.termlabProjectMode = { root: () => options.projectRoot };
+  }
+  // The EFFECTIVE zen decision startup-runtime.js would have already
+  // computed and published by the time tool-window-runtime.js's init() runs
+  // — read as window.__termlabEffectiveZen (== sandbox.__termlabEffectiveZen,
+  // since sandbox.window === sandbox here).
+  if (options.effectiveZen) {
+    sandbox.__termlabEffectiveZen = true;
+  }
   sandbox.termlabTransferRuntime = {
     ensureStarted(options) {
       twm.calls.push({ name: 'transferEnsureStarted', args: [options] });
@@ -1054,6 +1076,162 @@ async function loadRuntime(savedLayout, opts) {
   assert.ok(summonIdx > firstRegisterIdx, 'summoning happens AFTER registrations complete');
   const lastRegisterIdx = twm.calls.map((c) => c.name).lastIndexOf('register');
   assert.ok(summonIdx > lastRegisterIdx, 'summoning happens after the LAST registration');
+}
+
+// --- 16a. A project window boot always reveals the Files tool window
+// (task-6 review, F3/F5(iv)) -------------------------------------------
+// This is deliberately given a layout where active_tool_windows already
+// records a 'bottom' zone window (mirroring how save_window_layout writes
+// active_tool_windows on essentially every save) — the ORIGINAL, buggy
+// `knowsBottom` guard would have read this as "the layout already knows
+// about bottom" and skipped the reveal entirely, which is exactly the no-op
+// bug F3 found. The controller's ruling dropped that guard: the reveal is
+// now unconditional whenever this window has a project.
+{
+  const { twm } = await loadRuntime(
+    // 'bottom-left', not 'right-top': this is the realistic case — an
+    // existing install's saved layout already has file-explorer (or
+    // whatever else lives there) recorded in a bottom-prefixed zone, simply
+    // because that IS file-explorer's own default zone. The old
+    // `knowsBottom` guard treated this as "the layout already knows about
+    // bottom, leave it alone" and skipped the reveal — which is exactly the
+    // near-universal no-op F3 found. A key that does NOT start with
+    // 'bottom' would not have reproduced the bug (the guard was already
+    // passing in that case), so this is deliberately NOT a 'right-top' key.
+    { active_tool_windows: { 'bottom-left': 'file-explorer' } },
+    { projectRoot: '/repo' },
+  );
+  const reveal = twm.calls.find((c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom' && c.args[1] === true);
+  const activateCall = twm.calls.find((c) => c.name === 'activate' && c.args[0] === 'file-explorer');
+  assert.ok(reveal, 'a project window boot must reveal the bottom zone, even when the layout already records one');
+  assert.ok(activateCall, 'a project window boot must activate file-explorer');
+  const registration = twm.calls.find((c) => c.name === 'register' && c.args[0] === 'file-explorer');
+  assert.strictEqual(registration.args[1].title, 'Project', 'file-explorer is titled Project, not SFTP, in a project window');
+}
+
+// --- 16b. ...but a zen-effective project window does NOT end up revealed
+// (task-6 review, F3/F5(iv)) -------------------------------------------
+// The reveal above still fires unconditionally (it must — the zen-effective
+// check runs strictly after it in source order), but the zen block that
+// follows it re-hides 'left'/'right'/'bottom' whenever
+// window.__termlabEffectiveZen is true, and that re-hide must be the LAST
+// word on 'bottom' visibility for this scenario.
+{
+  const { twm } = await loadRuntime(
+    {},
+    { projectRoot: '/repo', effectiveZen: true },
+  );
+  const bottomVisibilityCalls = twm.calls.filter(
+    (c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom',
+  );
+  assert.ok(bottomVisibilityCalls.length >= 2,
+    'both the project reveal and the zen re-hide must have run against bottom');
+  const last = bottomVisibilityCalls[bottomVisibilityCalls.length - 1];
+  assert.strictEqual(last.args[1], false,
+    'the zen-effective hide must be the LAST setPanelVisibility(bottom, ...) call — zen wins over the project reveal');
+  // activate('file-explorer') still fires (the reveal block ran), but that's
+  // fine: a hidden zone's active tab is inert, and this is what
+  // summonPendingWindowHosts / a later zen-off toggle restores correctly.
+  assert.ok(twm.calls.some((c) => c.name === 'activate' && c.args[0] === 'file-explorer'));
+}
+
+// --- 16c. Task 12/F1: the Task 6 hand-off, implemented. A RETURNING
+// project (get_saved_layout reports has_project_layout: true) gets exactly
+// what it saved, not the unconditional reveal — a deliberately-closed
+// bottom panel must stay closed, and the saved active tab (here, a
+// restored Search) must not be stomped by a forced activate('file-explorer').
+// `has_project_layout` is absent (falsy) in 16a/16b above, which is exactly
+// what makes those two the FRESH-project branch of this same gate.
+//
+// FIX ROUND 2: the field is snake_case on the wire — SavedLayout has no
+// #[serde(rename_all)], and every sibling field (bottom_panel_visible,
+// active_tool_windows, ...) below is already read/written snake_case at the
+// runtime's actual field-access sites. This fixture must match that exact
+// wire shape, or a passing test proves nothing about the real payload.
+{
+  const { twm } = await loadRuntime(
+    {
+      has_project_layout: true,
+      bottom_panel_visible: false,
+      active_tool_windows: { 'bottom-left': 'project-search' },
+    },
+    { projectRoot: '/repo' },
+  );
+  const forcedReveal = twm.calls.find(
+    (c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom' && c.args[1] === true,
+  );
+  const forcedActivate = twm.calls.find((c) => c.name === 'activate' && c.args[0] === 'file-explorer');
+  assert.ok(!forcedReveal,
+    'a returning project with a saved closed bottom panel must not be force-reopened');
+  assert.ok(!forcedActivate,
+    'a returning project must not have file-explorer force-activated over its saved active tab');
+}
+
+// --- 16d. ...and a returning project that DID save the bottom panel open
+// still gets it open, but through the ORDINARY restore path every window
+// gets (setPanelVisibility using initialLayoutData.bottom_panel_visible),
+// not through the gated force-reveal — no separate forced activate either,
+// since register()'s own saved-active-window restore is what puts the
+// saved tab on top once it registers.
+{
+  const { twm } = await loadRuntime(
+    {
+      has_project_layout: true,
+      bottom_panel_visible: true,
+      active_tool_windows: { 'bottom-left': 'file-explorer' },
+    },
+    { projectRoot: '/repo' },
+  );
+  const restoreCall = twm.calls.find(
+    (c) => c.name === 'setPanelVisibility' && c.args[0] === 'bottom' && c.args[1] === true,
+  );
+  const forcedActivate = twm.calls.find((c) => c.name === 'activate' && c.args[0] === 'file-explorer');
+  assert.ok(restoreCall,
+    'the ordinary restore path still opens the bottom zone when the saved layout says visible');
+  assert.ok(!forcedActivate,
+    'no separate forced activate call — the gate stays off for a returning project regardless of what it saved');
+}
+
+// --- 16e. Serialization-contract check (fix round 2) -----------------------
+// The exact bug class 16c/16d's first version shipped: the JS read site used
+// `initialLayoutData.hasProjectLayout` (camelCase) while the Rust struct
+// (SavedLayout, no #[serde(rename_all)]) only ever emits `has_project_layout`
+// (snake_case) — an always-undefined read that no test caught, because the
+// mock in `loadRuntime` just echoes back whatever shape a test hands it,
+// camelCase included. This asserts every `initialLayoutData.<field>` the
+// runtime actually reads is a real field on the wire, by checking it appears
+// verbatim (as `<field>:`) in the ts-rs-generated SavedLayout.ts — so a
+// future Rust rename, or a frontend typo like this one, breaks THIS test
+// instead of silently reading undefined forever.
+{
+  const runtimeSource = fs.readFileSync(RUNTIME_PATH, 'utf8');
+  const savedLayoutSource = fs.readFileSync(SAVED_LAYOUT_TS_PATH, 'utf8');
+
+  const fieldsRead = new Set();
+  const fieldPattern = /initialLayoutData\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
+  let match;
+  while ((match = fieldPattern.exec(runtimeSource))) {
+    fieldsRead.add(match[1]);
+  }
+  assert.ok(
+    fieldsRead.size >= 10,
+    `sanity: expected to find the ~13 known SavedLayout fields the runtime reads, found ${fieldsRead.size}`,
+  );
+
+  const missing = [...fieldsRead].filter((field) => {
+    // Word-boundary check, not a bare .includes(): a bare substring check
+    // could false-negative-pass a field whose name happens to be a suffix
+    // of another real field (none currently collide, but the check should
+    // not rely on that staying true).
+    const boundary = new RegExp(`[,{\\s]${field}:`);
+    return !boundary.test(savedLayoutSource);
+  });
+  assert.deepStrictEqual(
+    missing,
+    [],
+    'every initialLayoutData field the runtime reads must be a real field on ' +
+    `SavedLayout's wire shape (types/SavedLayout.ts); missing: ${missing.join(', ')}`,
+  );
 }
 
 // --- 17. The four panel-host events are wired to the manager --------------

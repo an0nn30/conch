@@ -30,11 +30,71 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../../crates/termlab_tauri/frontend');
 const VIM_MODE = path.join(ROOT, 'app/features/editor/vim-mode.js');
 const EDITOR_PANE = path.join(ROOT, 'app/features/editor/editor-pane.js');
 const LANGUAGE_MAP = path.join(ROOT, 'app/features/editor/language-map.js');
+const COMPOSE = path.join(ROOT, 'app/manager-compose-runtime.js');
+const NODE_MODULES = path.join(ROOT, 'node_modules');
+const VIM_CORE_KEYMAP = path.join(NODE_MODULES, '@replit/codemirror-vim-core/vim.js');
+
+// `gd` is matched by the REAL vim engine, because the whole point of the
+// binding is that vim's own command table owns those two keys in normal mode.
+const REAL_VIM = await import(
+  pathToFileURL(path.join(NODE_MODULES, '@replit/codemirror-vim/dist/index.js')).href
+);
+
+// The smallest CodeMirror adapter the engine's normal-mode path touches when
+// it runs an action: somewhere to keep vim state, a cursor, and an operation
+// that gives the engine a `curOp` to tag. `cm6` is where the adapter puts the
+// EditorView, which is the one field the action reads.
+function vimAdapter(view) {
+  // The cursor is real enough to move: the engine skips recording a jump that
+  // did not go anywhere, so `G` only reaches the jumplist if the position
+  // actually changes.
+  let cursor = { line: 0, ch: 0 };
+  return {
+    cm6: view,
+    state: {},
+    curOp: null,
+    getCursor: () => ({ line: cursor.line, ch: cursor.ch }),
+    listSelections: () => [{ anchor: cursor, head: cursor }],
+    setCursor(line, ch) {
+      cursor = typeof line === 'object' && line !== null
+        ? { line: line.line, ch: line.ch || 0 }
+        : { line, ch: ch || 0 };
+    },
+    getOption: () => undefined,
+    setOption() {},
+    operation(fn) {
+      this.curOp = this.curOp || {};
+      try { return fn(); } finally { this.curOp = null; }
+    },
+    getLine: () => 'const value = 1;',
+    lineCount: () => 40,
+    firstLine: () => 0,
+    lastLine: () => 39,
+    getRange: () => '',
+    getSelection: () => '',
+    replaceRange() {},
+    focus() {},
+    scrollIntoView() {},
+    on() {},
+    off() {},
+    // vim's own jumplist stores bookmarks; the real adapter makes them from
+    // the document, and this is enough for the engine to run its half.
+    setBookmark: (pos) => ({ find: () => pos, clear() {} }),
+  };
+}
+
+// Type `keys` at the real engine and return whatever the last key resolved to.
+function typeKeys(adapter, keys) {
+  let result;
+  for (const key of keys) result = REAL_VIM.Vim.findKey(adapter, key, 'test');
+  return result;
+}
 
 // --- CM6 stand-in ----------------------------------------------------------
 //
@@ -71,7 +131,10 @@ function makeCM6(sandbox) {
   const CM = {
     Compartment,
     EditorView,
-    EditorState: { create: (spec) => ({ spec, doc: { toString: () => spec.doc } }) },
+    EditorState: {
+      create: (spec) => ({ spec, doc: { toString: () => spec.doc } }),
+      readOnly: { of: (value) => ({ ext: 'readOnly', value }) },
+    },
     lineNumbers: tagged('lineNumbers'),
     highlightActiveLineGutter: tagged('highlightActiveLineGutter'),
     highlightSpecialChars: tagged('highlightSpecialChars'),
@@ -400,13 +463,24 @@ check('setVimMode on a view it does not know is a no-op', () => {
   assert.strictEqual(effects.length, 0);
 });
 
+check('setReadOnly gates a live editor through its own compartment during ownership close', () => {
+  const h = makePaneHarness({ doc: 'x' });
+  h.sandbox.termlabEditorPane.setReadOnly(h.view, true);
+  assert.strictEqual(h.view.effects.length, 1);
+  assert.strictEqual(h.view.effects[0].contents.ext, 'readOnly');
+  assert.strictEqual(h.view.effects[0].contents.value, true);
+  h.view.termlabSetReadOnly(false);
+  assert.strictEqual(h.view.effects[1].reconfigure, h.view.effects[0].reconfigure);
+  assert.strictEqual(h.view.effects[1].contents.value, false);
+});
+
 check('the font, theme and language compartments still work alongside it', () => {
   const h = makePaneHarness({ doc: 'x', vimMode: true });
   const ids = h.extensions.filter((e) => e && typeof e.compartment === 'number').map((e) => e.compartment);
   assert.strictEqual(
     new Set(ids).size,
-    4,
-    'vim, language, theme and font are four distinct compartments',
+    5,
+    'vim, language, read-only, theme and font are five distinct compartments',
   );
   h.sandbox.termlabEditorPane.setFontSize(h.view, 15);
   assert.strictEqual(h.view.effects.length, 1);
@@ -504,6 +578,228 @@ check('setLanguage on a view it does not know is a no-op', () => {
   const effects = [];
   h.sandbox.termlabEditorPane.setLanguage({ dispatch: (tr) => effects.push(tr) }, 'a.py');
   assert.strictEqual(effects.length, 0);
+});
+
+// --- gd / gD: Go to Definition ---------------------------------------------
+//
+// Driven through the REAL engine: `Vim.findKey` is what CodeMirror calls for
+// every key in normal mode, so matching `g` then `d` here is the same match the
+// app performs. A DOM handler could not do this — vim's ViewPlugin consumes
+// normal-mode keys, and the LSP surfaces' Prec.highest handlers deliberately
+// fall through when nothing of theirs is open.
+
+// A sandbox whose CM6 carries the real Vim engine, plus the real vim-mode.js.
+function makeNavHarness(options = {}) {
+  const { sandbox, cm } = loadModules([VIM_MODE]);
+  cm.CM.Vim = REAL_VIM.Vim;
+  const jumps = [];
+  const calls = {
+    back: 0, forward: 0, hovers: [], nextProblem: 0, previousProblem: 0, recorded: [],
+  };
+  const deps = {
+    goToDefinition: (view) => { jumps.push(view); return Promise.resolve('navigated'); },
+    navigateBack: () => { calls.back += 1; return Promise.resolve('navigated'); },
+    navigateForward: () => { calls.forward += 1; return Promise.resolve('navigated'); },
+    showHover: (view) => { calls.hovers.push(view); return Promise.resolve(true); },
+    nextDiagnostic: () => { calls.nextProblem += 1; },
+    previousDiagnostic: () => { calls.previousProblem += 1; },
+    recordJump: (view, position) => { calls.recorded.push({ view, position }); return true; },
+  };
+  for (const omitted of options.omit || []) delete deps[omitted];
+  const registered = sandbox.termlabVimMode.registerNavigationCommands(deps);
+  return {
+    sandbox, cm, registered, jumps, calls,
+  };
+}
+
+check('the shipped vim keymap binds neither gd nor gD, so nothing is taken away', () => {
+  const source = fs.readFileSync(VIM_CORE_KEYMAP, 'utf8');
+  const entries = source.match(/\{ *keys: *'[^']+'/g) || [];
+  assert.ok(entries.length > 100, 'the default keymap was found at all');
+  for (const spelling of ["keys: 'gd'", "keys: 'gD'"]) {
+    assert.ok(
+      !source.includes(spelling),
+      `the package now binds ${spelling} itself — check what it does before overriding it`,
+    );
+  }
+});
+
+check('gd in normal mode asks for the definition at the cursor', async () => {
+  const h = makeNavHarness();
+  assert.strictEqual(h.registered, true);
+  const view = { id: 'the-view' };
+  const command = typeKeys(vimAdapter(view), ['g', 'd']);
+  assert.strictEqual(typeof command, 'function', 'the engine matched gd to a command');
+  command();
+  await tick();
+  assert.strictEqual(h.jumps.length, 1, 'exactly one definition request');
+  assert.strictEqual(h.jumps[0], view, 'for the view the keystroke was typed in');
+});
+
+check('gD does the same, since declaration folds into definition here', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'other-view' };
+  const command = typeKeys(vimAdapter(view), ['g', 'D']);
+  assert.strictEqual(typeof command, 'function');
+  command();
+  await tick();
+  assert.deepStrictEqual(h.jumps, [view]);
+});
+
+check('Ctrl-] jumps too, vim\'s own tag idiom', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'tag-view' };
+  const command = typeKeys(vimAdapter(view), ['<C-]>']);
+  assert.strictEqual(typeof command, 'function', 'the engine matched <C-]>');
+  command();
+  await tick();
+  assert.deepStrictEqual(h.jumps, [view]);
+});
+
+check('the real CodeMirror 6 adapter hands an action its view as cm6', () => {
+  const types = fs.readFileSync(
+    path.join(NODE_MODULES, '@replit/codemirror-vim/dist/index.d.ts'), 'utf8',
+  );
+  assert.ok(
+    /cm6: EditorView/.test(types),
+    'the action reads cm.cm6 — if the package renames it, gd silently stops working',
+  );
+});
+
+check('the jump is deferred, so it never runs inside vim\'s own operation', async () => {
+  const h = makeNavHarness();
+  const command = typeKeys(vimAdapter({ id: 'deferred' }), ['g', 'd']);
+  command();
+  assert.strictEqual(h.jumps.length, 0, 'not synchronously inside the operation');
+  await tick();
+  assert.strictEqual(h.jumps.length, 1);
+});
+
+// --- Ctrl-O / Ctrl-I: one history, vim semantics ----------------------------
+//
+// vim's own <C-o>/<C-i> walk a jumplist whose entries are per-DOCUMENT
+// bookmarks, fed only by vim motions — it can neither see a gd into another
+// file nor switch tabs, which is exactly why the owner pressed Ctrl-O after a
+// gd and nothing happened. These keys are remapped onto the window's own
+// cross-file history instead.
+
+check('Ctrl-O and Ctrl-I walk the window history, not vim\'s per-document one', async () => {
+  const h = makeNavHarness();
+  const adapter = vimAdapter({ id: 'view' });
+  typeKeys(adapter, ['<C-o>'])();
+  typeKeys(adapter, ['<C-i>'])();
+  await tick();
+  assert.strictEqual(h.calls.back, 1, 'Ctrl-O went back');
+  assert.strictEqual(h.calls.forward, 1, 'Ctrl-I went forward');
+});
+
+check('a vim jump motion is absorbed into that same history', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'jump-view' };
+  const adapter = vimAdapter(view);
+  // The engine's own hook, called by every `toJumplist` motion — G, gg, {, },
+  // /search, n/N, marks, %, H/M/L.
+  REAL_VIM.Vim.getVimGlobalState_().jumpList.add(
+    adapter, { line: 3, ch: 2 }, { line: 41, ch: 0 },
+  );
+  assert.strictEqual(h.calls.recorded.length, 1, 'the pre-motion position was recorded');
+  assert.strictEqual(h.calls.recorded[0].view, view);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(h.calls.recorded[0].position)), { line: 3, character: 2 },
+    'vim reports ch; the history speaks LSP characters',
+  );
+});
+
+check('absorbing does not break vim\'s own jumplist bookkeeping', () => {
+  makeNavHarness();
+  const adapter = vimAdapter({ id: 'native' });
+  const jumpList = REAL_VIM.Vim.getVimGlobalState_().jumpList;
+  jumpList.add(adapter, { line: 1, ch: 0 }, { line: 9, ch: 0 });
+  const mark = jumpList.find(adapter, -1);
+  assert.ok(mark, 'the engine still recorded its own entry underneath');
+});
+
+check('a real G motion feeds the history through the engine', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'motion-view' };
+  const adapter = vimAdapter(view);
+  const command = typeKeys(adapter, ['G']);
+  assert.strictEqual(typeof command, 'function', 'the engine matched G');
+  command();
+  assert.ok(h.calls.recorded.length >= 1, 'G is a jump, and jumps are remembered');
+  assert.strictEqual(h.calls.recorded[0].view, view);
+});
+
+// --- the parity keys --------------------------------------------------------
+
+check('K asks for hover at the cursor', async () => {
+  const h = makeNavHarness();
+  const view = { id: 'hover-view' };
+  typeKeys(vimAdapter(view), ['K'])();
+  await tick();
+  assert.deepStrictEqual(h.calls.hovers, [view]);
+});
+
+check(']d and [d step through diagnostics', async () => {
+  const h = makeNavHarness();
+  const adapter = vimAdapter({ id: 'diag-view' });
+  const next = typeKeys(adapter, [']', 'd']);
+  assert.strictEqual(typeof next, 'function', 'our ]d wins over the package\'s ]<character>');
+  next();
+  typeKeys(adapter, ['[', 'd'])();
+  await tick();
+  assert.strictEqual(h.calls.nextProblem, 1);
+  assert.strictEqual(h.calls.previousProblem, 1);
+});
+
+check('a key whose feature was not wired stays out of this window', async () => {
+  const h = makeNavHarness({ omit: ['showHover'] });
+  typeKeys(vimAdapter({ id: 'no-hover' }), ['K'])();
+  await tick();
+  assert.deepStrictEqual(h.calls.hovers, [], 'no hover was requested from this registration');
+});
+
+check('Ctrl-I is not Tab in a webview, so insert-mode Tab is untouched', () => {
+  const key = (event) => REAL_VIM.Vim.vimKeyFromEvent(event, {});
+  assert.strictEqual(key({ key: 'i', ctrlKey: true }), '<C-i>');
+  assert.strictEqual(key({ key: 'Tab' }), '<Tab>', 'a Tab keydown is its own key, not ^I');
+  const source = fs.readFileSync(VIM_MODE, 'utf8');
+  assert.ok(!/'<Tab>'/.test(source), 'nothing here claims Tab');
+  assert.ok(
+    !/context: 'insert'/.test(source),
+    'every mapping is normal-mode, so insert-mode completion and indent are untouched',
+  );
+});
+
+check('registerNavigationCommands reports false with no engine and with no dependency', () => {
+  const withoutEngine = loadModules([VIM_MODE]);
+  withoutEngine.cm.CM.Vim = undefined;
+  assert.strictEqual(
+    withoutEngine.sandbox.termlabVimMode.registerNavigationCommands({ goToDefinition() {} }),
+    false,
+  );
+  const withoutDep = loadModules([VIM_MODE]);
+  withoutDep.cm.CM.Vim = REAL_VIM.Vim;
+  assert.strictEqual(withoutDep.sandbox.termlabVimMode.registerNavigationCommands({}), false);
+});
+
+check('the compose runtime hands vim every feature it maps, and no view or pane map', () => {
+  const source = fs.readFileSync(COMPOSE, 'utf8');
+  assert.ok(/registerNavigationCommands/.test(source), 'the binding is wired at composition');
+  const at = source.indexOf('registerNavigationCommands');
+  const block = source.slice(at, at + 2600);
+  for (const dep of [
+    'goToDefinition', 'navigateBack', 'navigateForward', 'recordJump',
+    'showHover', 'nextDiagnostic', 'previousDiagnostic',
+  ]) {
+    assert.ok(new RegExp(`${dep}:`).test(block), `${dep} is not wired`);
+  }
+  assert.ok(/termlabLspNavigation/.test(block), 'navigation comes from the navigator');
+  assert.ok(/termlabLspTooltips/.test(block), 'K goes to the hover controller');
+  assert.ok(
+    /termlab:editor-next-problem/.test(block) && /termlab:editor-previous-problem/.test(block),
+    ']d and [d ride the same events F8 does, so both reach problems-navigation',
+  );
 });
 
 let failed = 0;

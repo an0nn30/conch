@@ -243,7 +243,11 @@
       refreshAriaHidden();
       const restoreEl = entry.restoreFocusEl;
       if (restoreEl && restoreEl.isConnected && typeof restoreEl.focus === 'function') {
-        restoreEl.focus();
+        // preventScroll: a bare focus() scrolls the element into view, and
+        // when the dialog opened from a CodeMirror editor the element is
+        // `.cm-content` — as tall as the document — so "into view" meant
+        // its top and the editor jumped to line 1 on every palette close.
+        restoreEl.focus({ preventScroll: true });
       }
       if (typeof opts.onClose === 'function') opts.onClose(result);
       if (!stack.length) {

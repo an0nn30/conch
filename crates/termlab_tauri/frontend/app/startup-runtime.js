@@ -40,6 +40,15 @@
         showStatus('Unhandled promise rejection: ' + String(event.reason));
       });
 
+      // The banner shows the message and forgets it. The same two events also
+      // go to ~/.config/termlab/logs/frontend.log with the stack and the pane
+      // they happened on, which is what a bug report can carry.
+      // features/diagnostics/error-log.js owns the format; a window without
+      // that module keeps exactly the banner it had before.
+      if (global.termlabErrorLog && typeof global.termlabErrorLog.install === 'function') {
+        global.termlabErrorLog.install(global);
+      }
+
       return { showStatus, hideStatus };
     }
 
@@ -120,6 +129,19 @@
         });
     }
 
+    // Completion's suggestions-as-you-type flag. Absent or unreadable config
+    // leaves the module's own default (on) alone rather than forcing it off:
+    // manual completion works either way, so a failed read must not silently
+    // disable a feature the user turned on.
+    function applySuggestionsWhileTyping(appCfg) {
+      const completion = global.termlabLspCompletion;
+      if (!appCfg || !completion || typeof completion.setSuggestionsWhileTyping !== 'function') {
+        return;
+      }
+      if (typeof appCfg.editor_lsp_suggestions_while_typing !== 'boolean') return;
+      completion.setSuggestionsWhileTyping(appCfg.editor_lsp_suggestions_while_typing);
+    }
+
     async function applyAppConfig(invoke) {
       let borderlessMode = false;
       // The editor's vim keymap, returned so main-runtime can seed the flag it
@@ -129,9 +151,73 @@
       try {
         const appCfg = await invoke('get_app_config');
         vimMode = appCfg && appCfg.editor_vim_mode === true;
+        applySuggestionsWhileTyping(appCfg);
         // Published for the post-fit window sizing in main-runtime.js, which
         // runs long after this and needs the configured columns/lines.
         window.__termlabAppConfig = appCfg;
+
+        // Adopt a queued directory as THIS window's project before the layout
+        // is read: `get_saved_layout` returns the per-project layout once the
+        // window is bound, and the tool-window runtime (which registers the
+        // Search window only for a project) runs later still.
+        //
+        // Gated on pending_open_paths_kind === 'project': a mixed queue (a
+        // directory queued alongside a file for the same window) classifies
+        // as "files" — the file's editor-only zen window is the stronger
+        // claim, and adopting unconditionally would still drain the
+        // directory (project_adopt_pending only takes directories out of the
+        // queue) and bind a project root onto what should stay a zen
+        // file-editor window.
+        if (global.termlabProjectMode && typeof global.termlabProjectMode.adopt === 'function') {
+          try {
+            const pendingKindForAdopt = await invoke('pending_open_paths_kind');
+            if (pendingKindForAdopt === 'project') {
+              const adopted = await global.termlabProjectMode.adopt(invoke);
+              // A peek that says "project" whose adopt then fails (folder
+              // removed mid-boot, permission denied, backend error) must not
+              // silently boot a plain terminal — the routing path (a
+              // directory opened from an already-running window) toasts by
+              // name for the same failure, so this seam should too. The one
+              // exception is a benign "another window already has this
+              // root" hand-off: project_adopt_pending destroys THIS window
+              // in that case, so there is nothing to explain.
+              const focusedExisting = typeof global.termlabProjectMode.adoptFocusedExisting === 'function'
+                && global.termlabProjectMode.adoptFocusedExisting();
+              if (!adopted && !focusedExisting && window.toast) {
+                window.toast.error(
+                  'Cannot Open Folder',
+                  'The project could not be opened — it may have been moved, deleted, or you may not have permission to access it.',
+                );
+              }
+            }
+          } catch (_) {}
+        }
+
+        // The adopt block above only ever resolves a project that arrived
+        // through PendingOpens — a directory queued by the CLI/IPC before
+        // this window existed. Opening a project from an ALREADY-RUNNING
+        // window (Open Folder in the menu/palette, or routing a directory
+        // dropped/opened in a running window) goes a completely different
+        // way: `project_open` builds a brand-new window and binds the
+        // registry entry for it directly (project_open_build, before the
+        // window is even shown) — nothing is ever queued into PendingOpens
+        // for that new window, so the adopt block above is a no-op for it.
+        // `project_info` resolves independently, by the CALLING window's own
+        // label against that same registry — ask it whenever adopt did not
+        // already win this window a project, so this seam covers BOTH ways a
+        // window can end up with one. Gated on `!isActive()` so a successful
+        // adopt is never redundantly re-queried or overwritten. Still read
+        // before the layout below, so the per-project layout applies either
+        // way a project was bound.
+        if (global.termlabProjectMode
+            && typeof global.termlabProjectMode.isActive === 'function'
+            && !global.termlabProjectMode.isActive()
+            && typeof global.termlabProjectMode.set === 'function') {
+          try {
+            global.termlabProjectMode.set(await invoke('project_info'));
+          } catch (_) {}
+        }
+
         if (global.termlabAppearance && typeof global.termlabAppearance.apply === 'function') {
           global.termlabAppearance.apply(appCfg && appCfg.appearance_mode);
         }
@@ -174,20 +260,41 @@
             // No window label: treat it as the main window and honour the
             // saved layout.
           }
-          // A window with queued CLI open paths (`termlab notes.md`) boots in
-          // zen regardless of the saved layout or window kind: it is about to
-          // become an editor-only window (main-runtime skips the terminal
-          // tab), and should read as a small editor app, not a terminal with
-          // chrome. `has_pending_open_paths` is a non-destructive peek — the
-          // destructive take happens later in main-runtime, after the editor
-          // service exists. Session-only, same as the new-window default:
-          // this window must never teach the shared layout to open in zen.
+          // A window with queued CLI FILE paths (`termlab notes.md`) boots in
+          // zen regardless of the saved layout: it is about to become an
+          // editor-only window. A window opening a PROJECT (`termlab .`) does
+          // the opposite — it keeps its panels, because the tree and the
+          // search panel are the point. `pending_open_paths_kind` is a
+          // non-destructive peek; the destructive take happens later in
+          // main-runtime, after the editor service exists. Session-only, same
+          // as the new-window default: this window must never teach the
+          // shared layout to open in zen.
           try {
-            if (await invoke('has_pending_open_paths')) {
+            const pendingKind = await invoke('pending_open_paths_kind');
+            if (pendingKind === 'files') {
               zenOn = true;
               window.__termlabZenIsSessionDefault = true;
             }
           } catch (_) {}
+          if (global.termlabProjectMode && global.termlabProjectMode.isActive()) {
+            zenOn = false;
+            window.__termlabZenIsSessionDefault = true;
+          }
+          // The EFFECTIVE decision, as opposed to __termlabInitialZenMode
+          // (the raw saved value) and __termlabZenIsSessionDefault (whether
+          // that decision belongs only to this window). Three other modules
+          // need "is this window actually in zen right now" rather than
+          // either of those: the zen-default toast (main-runtime.js) must
+          // not claim zen when a project window forced it off; the
+          // panel-hiding fallback (tool-window-runtime.js) must not hide
+          // panels a project window deliberately kept visible just because
+          // the saved layout says zen_mode; and the Zen Mode menu toggle
+          // (menu-actions.js) must seed its own active/inactive state from
+          // what actually happened, not from the pre-override saved value.
+          // __termlabInitialZenMode itself stays untouched — the save path
+          // (tool-window-runtime.js's saveLayoutNow) depends on the RAW
+          // value to correctly persist an inherited-not-live zen state.
+          window.__termlabEffectiveZen = zenOn;
           if (zenOn) {
             document.getElementById('app').classList.add('zen-mode');
           } else {

@@ -1,0 +1,801 @@
+// Go to Definition, Find References, the candidate chooser, and this window's
+// back/forward navigation history.
+//
+// Three responsibilities, one small module:
+//
+//   * ask for a definition or a reference list (through editor-service's
+//     requestFeature, which owns the flush/version barrier — never through
+//     Tauri directly);
+//   * take the user there THROUGH editor-service, which is the app-wide
+//     ownership authority: it focuses an already open tab, reserves an unopened
+//     file, and hands a document another WINDOW owns to Rust to focus instead
+//     of opening a second editable view of the same bytes. Nothing here opens,
+//     reads or reserves a file itself;
+//   * remember where the jump started, so Back and Forward can restore the tab,
+//     the caret and the selection.
+//
+// Two halves live next door, because neither is about deciding where to go:
+// lsp-navigation-history.js owns the bounded per-window stacks and what a
+// location is, and lsp-navigation-chooser.js owns the candidate list's
+// CodeMirror field and DOM. This file is the orchestration between them, the
+// definition request, and editor-service.
+//
+// Server URIs are converted by lsp-uri.js and by nothing else, and only
+// `file:` targets are accepted: a `jdt://` or `untitled:` target is reported as
+// unsupported rather than turned into a nonsense path.
+//
+// The chooser is a CodeMirror tooltip anchored at the requested position, so
+// CodeMirror places it and maps it; its keys are a Prec.highest domEventHandler
+// because vim is a ViewPlugin whose own keydown handler runs ahead of every
+// keymap, and Enter/Escape/arrows have to reach an open chooser first. With no
+// chooser open the handler returns false and vim is untouched.
+(function initTermLabLspNavigation(global) {
+  'use strict';
+
+  const PREVIEW_LIMIT = 120;
+  // How many references the chooser will list. A rename candidate in a large
+  // codebase can return thousands, and a tooltip is not a search panel: past
+  // this the list says how many it left out instead of trying to draw them.
+  const REFERENCE_LIMIT = 500;
+
+  let paneForViewHook = null;
+  let currentPaneHook = null;
+  let allPanesHook = null;
+  let requestFeatureHook = null;
+  let openLocalFileAtHook = null;
+  let windowLabel = null;
+  let windowHandlers = null;
+
+  // view -> { sequence }. Bumping the sequence cancels an in-flight request:
+  // its answer describes a caret the user has already left.
+  const entries = new WeakMap();
+
+  // Built once, on first use: two mounts of extensions() must install the same
+  // handlers, not two competing sets.
+  let mounted = null;
+
+  function cm() {
+    return global.CM6 || null;
+  }
+
+  function doc() {
+    return global.document;
+  }
+
+  function uriModule() {
+    return global.termlabLspUri || null;
+  }
+
+  function editorService() {
+    return global.termlabEditorService || null;
+  }
+
+  // --- pane and document lookup ------------------------------------------------
+
+  function paneForView(view) {
+    if (typeof paneForViewHook === 'function') return paneForViewHook(view) || null;
+    const access = global.__termlabPaneAccess;
+    if (!access || typeof access.allPanes !== 'function') return null;
+    const panes = access.allPanes();
+    if (!panes || typeof panes.values !== 'function') return null;
+    for (const pane of panes.values()) {
+      if (pane && pane.view === view) return pane;
+    }
+    return null;
+  }
+
+  function currentPane() {
+    if (typeof currentPaneHook === 'function') return currentPaneHook() || null;
+    const access = global.__termlabPaneAccess;
+    return access && typeof access.currentPane === 'function' ? access.currentPane() : null;
+  }
+
+  function allPanes() {
+    if (typeof allPanesHook === 'function') return allPanesHook() || null;
+    const access = global.__termlabPaneAccess;
+    return access && typeof access.allPanes === 'function' ? access.allPanes() : null;
+  }
+
+  // A pane that may be asked for a definition: a local editor with a committed
+  // document whose session advertises the feature. Remote panes are excluded
+  // here as well as in Rust — a remote buffer never enters the registry.
+  function documentStateFor(pane, feature) {
+    if (!pane || pane.kind !== 'editor' || !pane.view || pane.remote) return null;
+    const store = global.termlabLspState;
+    if (!store || typeof store.get !== 'function') return null;
+    const state = store.get(pane);
+    if (!state || !state.documentId) return null;
+    const capabilities = state.capabilities || (state.status && state.status.capabilities) || {};
+    if (capabilities[feature || 'definition'] !== true) return null;
+    return state;
+  }
+
+  // --- status ---------------------------------------------------------------------
+  //
+  // Every failure here is non-blocking by design: the current editor does not
+  // move, and the user is told why in a toast rather than in a dialog.
+
+  function status(title, body) {
+    if (global.toast && typeof global.toast.info === 'function') {
+      global.toast.info(title, body);
+    }
+  }
+
+  // --- history ------------------------------------------------------------------------
+  //
+  // The stacks, the bound, and what a location is: lsp-navigation-history.js.
+
+  function history() {
+    return global.termlabLspNavigationHistory || null;
+  }
+
+  function captureLocation(pane, pos) {
+    const store = history();
+    return store ? store.capture(pane, pos, windowLabel) : null;
+  }
+
+  function historyState() {
+    const store = history();
+    return store ? store.state() : { back: [], forward: [] };
+  }
+
+  // --- targets ---------------------------------------------------------------------------
+
+  function clamp(value, low, high) {
+    return Math.min(Math.max(value, low), high);
+  }
+
+  function positionAt(document, offset) {
+    const helper = global.termlabLspPosition;
+    return helper ? helper.positionAt(document, offset) : { line: 0, character: 0 };
+  }
+
+  function isFileUri(value) {
+    const uri = uriModule();
+    return !!(uri && typeof uri.isFileUri === 'function' && uri.isFileUri(value));
+  }
+
+  function basename(value) {
+    const at = String(value).lastIndexOf('/');
+    return at < 0 ? String(value) : String(value).slice(at + 1);
+  }
+
+  function dirname(value) {
+    const at = String(value).lastIndexOf('/');
+    return at <= 0 ? '/' : String(value).slice(0, at);
+  }
+
+  // The line the target sits on, when this window already has that file open.
+  // A file it has NOT opened gets no preview: reading arbitrary files off disk
+  // to decorate a list is a cost the chooser does not need to pay, and the row
+  // still says where the target lives.
+  function previewFor(filePath, line) {
+    const panes = allPanes();
+    if (!panes || typeof panes.values !== 'function') return null;
+    const helper = global.termlabLspPosition;
+    if (!helper) return null;
+    for (const pane of panes.values()) {
+      if (!pane || pane.kind !== 'editor' || pane.remote || pane.filePath !== filePath) continue;
+      const state = pane.view && pane.view.state;
+      if (!state || !state.doc) return null;
+      const text = helper.lineTextAt(state.doc, line).trim();
+      return text ? text.slice(0, PREVIEW_LIMIT) : null;
+    }
+    return null;
+  }
+
+  // The deepest directory every one of these paths lives under. A reference
+  // list spans files, so a bare basename is ambiguous ("index.ts" three times);
+  // naming each row relative to the shared root is what makes the list
+  // readable without printing an absolute path on every line. With one file
+  // the shared root is its own directory, so the row is just the file name.
+  function commonDirectory(paths) {
+    if (!paths.length) return '';
+    let prefix = dirname(paths[0]).split('/');
+    for (const value of paths) {
+      const parts = dirname(value).split('/');
+      let index = 0;
+      while (index < prefix.length && index < parts.length && prefix[index] === parts[index]) {
+        index += 1;
+      }
+      prefix = prefix.slice(0, index);
+    }
+    return prefix.join('/');
+  }
+
+  function relativeName(filePath, root) {
+    const value = String(filePath);
+    if (!root || root === '/') return value.slice(1) || value;
+    return value.indexOf(`${root}/`) === 0 ? value.slice(root.length + 1) : value;
+  }
+
+  // Server locations -> what the chooser and the jump both consume. Rust has
+  // already collapsed `LocationLink` onto its target selection range, so both
+  // result shapes arrive here as plain locations.
+  function normalizeLocations(response) {
+    const raw = (response && Array.isArray(response.locations)) ? response.locations : [];
+    const uri = uriModule();
+    const targets = [];
+    let rejected = 0;
+    for (const entry of raw) {
+      if (!entry || typeof entry.uri !== 'string' || !entry.range) continue;
+      if (!isFileUri(entry.uri)) {
+        rejected += 1;
+        continue;
+      }
+      const filePath = uri.uriToPath(entry.uri);
+      const line = Number.isInteger(entry.range.start && entry.range.start.line)
+        ? entry.range.start.line
+        : 0;
+      const character = Number.isInteger(entry.range.start && entry.range.start.character)
+        ? entry.range.start.character
+        : 0;
+      targets.push({
+        uri: entry.uri,
+        path: filePath,
+        range: entry.range,
+        name: basename(filePath),
+        context: dirname(filePath),
+        line: line + 1,
+        column: character + 1,
+        preview: previewFor(filePath, line),
+      });
+    }
+    return { targets, rejected };
+  }
+
+  // --- the jump -------------------------------------------------------------------------
+  //
+  // One route to a target, for definitions and for both history directions.
+  // Everything goes through editor-service: it focuses an open tab, opens an
+  // unopened file under a reservation, or reports that another window owns the
+  // document (in which case Rust has already focused that window and this one
+  // must not open a second view).
+
+  function openLocalFileAt(filePath, range) {
+    if (typeof openLocalFileAtHook === 'function') {
+      return Promise.resolve(openLocalFileAtHook(filePath, range, { focus: true }));
+    }
+    const service = editorService();
+    if (!service || typeof service.openLocalFileAt !== 'function') {
+      return Promise.resolve({ status: 'unavailable' });
+    }
+    return Promise.resolve(service.openLocalFileAt(filePath, range, { focus: true }));
+  }
+
+  // Non-zero while this module is taking the user somewhere. The focus change
+  // that follows is OUR doing — gd has already recorded its origin, and a walk
+  // with Ctrl-O/Ctrl-I must neither append an entry nor truncate the way
+  // forward — so the switch recorder stands down for the duration.
+  let jumping = 0;
+
+  async function jumpTo(target) {
+    let result = null;
+    jumping += 1;
+    try {
+      result = await openLocalFileAt(target.path, target.range);
+    } catch (error) {
+      status('Cannot Navigate', String(error));
+      return 'failed';
+    } finally {
+      jumping -= 1;
+    }
+    const outcome = result && result.status;
+    if (outcome === 'ownerElsewhere') return 'elsewhere';
+    if (outcome === 'focused' || outcome === 'opened') {
+      // The file is open, but only a completed reveal is a jump. A degraded
+      // open (no ownership bridge, so no pane to select in) reports `revealed`
+      // as false or not at all, and recording that as history would give Back
+      // a step that returns to a place the user was never taken to. No toast:
+      // nothing failed that the user asked for.
+      return result.revealed === true ? 'navigated' : 'unrevealed';
+    }
+    status(
+      'Cannot Navigate',
+      result && result.error
+        ? String(result.error)
+        : `${target.name || target.path} could not be opened.`,
+    );
+    return 'failed';
+  }
+
+  // --- the chooser ------------------------------------------------------------------------
+  //
+  // Its CodeMirror field and its DOM: lsp-navigation-chooser.js.
+
+  let chooserConfigured = false;
+
+  function chooser() {
+    const list = global.termlabLspNavigationChooser || null;
+    if (list && !chooserConfigured) {
+      chooserConfigured = true;
+      // What a picked row MEANS — jump there, and record where the jump began —
+      // is this file's business, not the list's.
+      list.configure({ onChoose: (view, index) => { choose(view, index); } });
+    }
+    return list;
+  }
+
+  function chooserState(view) {
+    const list = chooser();
+    return list ? list.state(view) : { open: false, index: 0, items: [] };
+  }
+
+  function closeChooser(view) {
+    const list = chooser();
+    if (list) list.close(view);
+  }
+
+  // Asked by lsp-tooltips before it opens anything of its own, the same way it
+  // asks CodeMirror whether the completion popup is up. The one-overlay rule
+  // has to hold in both directions: opening the chooser dismisses hover and
+  // signature help, and while it is open they stand down.
+  function chooserOpen(view) {
+    const list = chooser();
+    return !!list && list.isOpen(view);
+  }
+
+  function renderChooser(value, view) {
+    const list = chooser();
+    return list ? list.render(value, view) : doc().createElement('div');
+  }
+
+  function openChooser(view, targets, pos, origin, options) {
+    const list = chooser();
+    return !!list && list.open(view, targets, pos, origin, options);
+  }
+
+  function moveChooser(view, delta) {
+    const list = chooser();
+    return !!list && list.move(view, delta);
+  }
+
+  async function choose(view, index) {
+    const list = chooser();
+    const value = list ? list.valueOf(view) : null;
+    if (!value || !value.items.length) return 'none';
+    const at = Number.isInteger(index) ? index : value.index;
+    const target = value.items[at];
+    const origin = value.origin;
+    closeChooser(view);
+    if (!target) return 'none';
+    const outcome = await jumpTo(target);
+    if (outcome === 'navigated') record(origin);
+    return outcome;
+  }
+
+  // --- requests ----------------------------------------------------------------------------
+
+  function entryFor(view) {
+    let entry = entries.get(view);
+    if (!entry) {
+      entry = { sequence: 0 };
+      entries.set(view, entry);
+    }
+    return entry;
+  }
+
+  function requestFeature(pane, kind, position) {
+    if (typeof requestFeatureHook === 'function') {
+      return Promise.resolve(requestFeatureHook(pane, kind, position, null));
+    }
+    const service = editorService();
+    if (!service || typeof service.requestFeature !== 'function') return Promise.resolve(null);
+    return Promise.resolve(service.requestFeature(pane, kind, position, null));
+  }
+
+  // Only a jump that actually moved THIS window is history. A target another
+  // window owns leaves this editor exactly where it was, so recording it would
+  // give Back a step that undoes nothing.
+  function record(origin) {
+    const store = history();
+    if (store) store.record(origin);
+  }
+
+  // Stage 0 of the jump-trail diagnostic (features/editor/vim-jump-trace.js).
+  // Guarded end to end and its return value ignored, so a missing or throwing
+  // trace module can never change what a recorder does.
+  function noteRecord(source, outcome, detail) {
+    const trace = global.termlabVimJumpTrace;
+    if (trace && typeof trace.noteRecord === 'function') {
+      trace.noteRecord(source, outcome, detail || null);
+    }
+  }
+
+  // What a pane IS, for the log. Pane identity as well as the path, because a
+  // trail recorded against a pane that has since been replaced and a trail
+  // that was never recorded look identical from the walk's end.
+  function describePane(pane) {
+    if (!pane) return 'pane=none';
+    const parts = [`pane=${String(pane.paneId)}`, `kind=${String(pane.kind)}`];
+    if (pane.remote) parts.push('remote');
+    parts.push(`path=${pane.filePath ? String(pane.filePath) : 'none'}`);
+    if (!pane.view) parts.push('noView');
+    return parts.join(' ');
+  }
+
+  // A vim jump-class motion (G, gg, {, }, /search, n/N, marks, %, H/M/L) told
+  // to us by vim-mode's jumplist hook. It means the same thing to Ctrl-O as a
+  // definition jump does — "where I was before that" — so it goes on the same
+  // trail rather than into a second, per-file one.
+  //
+  // `position` is vim's PRE-motion cursor. The caret has usually already moved
+  // by the time we hear about it, so the entry is collapsed on that position
+  // rather than on whatever the live selection now is.
+  function recordJump(view, position) {
+    const helper = global.termlabLspPosition;
+    const pane = paneForView(view) || currentPane();
+    if (!helper || !pane || !pane.view || !pane.view.state) {
+      noteRecord('vim motion', 'skipped: no pane for the view', describePane(pane));
+      return false;
+    }
+    const origin = captureLocation(pane, helper.offsetAt(pane.view.state.doc, position));
+    if (!origin) {
+      noteRecord('vim motion', 'skipped: origin not capturable', describePane(pane));
+      return false;
+    }
+    origin.range = {
+      start: { line: origin.position.line, character: origin.position.character },
+      end: { line: origin.position.line, character: origin.position.character },
+    };
+    record(origin);
+    noteRecord('vim motion', 'recorded', describePane(pane));
+    return true;
+  }
+
+  // The document the window's active editor was last showing. Not "the
+  // previously focused pane": a detour through a terminal, the Problems list
+  // or a plugin view is not a jump, and must not lose the one that follows it.
+  let lastEditorPane = null;
+
+  function editorDocumentPane(pane) {
+    return pane && pane.kind === 'editor' && !pane.remote ? pane : null;
+  }
+
+  // Called for every focus change in the window (pane-manager's
+  // onFocusedPaneChanged — the one place a tab click, an explorer open, a
+  // palette open, a CLI open and a split-pane focus all cross).
+  //
+  // Opening a file by hand is a jump in vim's sense: `:e` and `:b` go on the
+  // jumplist, so Ctrl-O comes back from them. Only a change of DOCUMENT counts
+  // — two panes on one file are one document, and same-document cursor motion
+  // belongs to the vim-motion recorder.
+  function noteFocusedPaneChanged(previousPane, nextPane) {
+    const next = editorDocumentPane(nextPane);
+    if (!next) {
+      noteRecord('focus', 'skipped: not an editor document', describePane(nextPane));
+      return false;
+    }
+    const from = lastEditorPane;
+    lastEditorPane = next;
+    // Tracked even while we are jumping — the destination is where the NEXT
+    // manual switch will be leaving from — but not recorded.
+    if (jumping) {
+      noteRecord('focus', 'skipped: jumping', describePane(next));
+      return false;
+    }
+    if (!from || from === next || from.filePath === next.filePath) {
+      noteRecord(
+        'focus',
+        from ? 'skipped: same document' : 'skipped: no previous editor',
+        `${describePane(from)} -> ${describePane(next)}`,
+      );
+      return false;
+    }
+    const origin = captureLocation(from, null);
+    if (!origin) {
+      noteRecord('focus', 'skipped: origin not capturable', describePane(from));
+      return false;
+    }
+    const store = history();
+    // Defensive: a focus change that lands after a jump has already resolved
+    // would otherwise stack the same location twice.
+    if (store && typeof store.equals === 'function' && store.equals(store.peek('back'), origin)) {
+      noteRecord('focus', 'skipped: already on top of the trail', describePane(from));
+      return false;
+    }
+    record(origin);
+    noteRecord('focus', 'recorded', `${describePane(from)} -> ${describePane(next)}`);
+    return true;
+  }
+
+  function viewOrCurrent(view) {
+    if (view) return view;
+    const pane = currentPane();
+    return pane && pane.kind === 'editor' ? pane.view : null;
+  }
+
+  async function goToDefinition(view, pos) {
+    const target = viewOrCurrent(view);
+    if (!target || !target.state) return 'unavailable';
+    const pane = paneForView(target) || currentPane();
+    const state = documentStateFor(pane);
+    if (!state) return 'unavailable';
+    const at = Number.isInteger(pos)
+      ? clamp(pos, 0, target.state.doc.length)
+      : target.state.selection.main.head;
+    const origin = captureLocation(pane, at);
+
+    const entry = entryFor(target);
+    entry.sequence += 1;
+    const sequence = entry.sequence;
+    const documentId = state.documentId;
+
+    let response = null;
+    try {
+      response = await requestFeature(pane, 'definition', positionAt(target.state.doc, at));
+    } catch (error) {
+      status('Cannot Navigate', String(error));
+      return 'failed';
+    }
+    // A newer request has been made from this view; this answer describes a
+    // caret the user has left.
+    if (entryFor(target).sequence !== sequence) return 'stale';
+    if (!response || response.documentId !== documentId) return 'none';
+
+    const { targets, rejected } = normalizeLocations(response);
+    if (!targets.length) {
+      if (rejected) {
+        status(
+          'Definition Not Available',
+          'The definition is outside the local filesystem, so it cannot be opened here.',
+        );
+        return 'unsupported';
+      }
+      status('No Definition Found', 'The language server reported no definition for this symbol.');
+      return 'none';
+    }
+    if (targets.length > 1) {
+      if (openChooser(target, targets, at, origin)) return 'chooser';
+    }
+    const outcome = await jumpTo(targets[0]);
+    if (outcome === 'navigated') record(origin);
+    noteRecord(
+      'definition',
+      outcome === 'navigated' ? 'recorded' : `not recorded: jump was ${outcome}`,
+      `${describePane(pane)} origin=${origin ? 'captured' : 'null'} -> ${targets[0].path}`,
+    );
+    return outcome;
+  }
+
+  // Find References. Deliberately NOT a definition jump with a different
+  // request: references are a LIST by nature, so the chooser is ALWAYS shown —
+  // a single result included — and nothing is navigated until the user picks a
+  // row. Everything else (the request discipline, the stale rejection, the
+  // jump path, the history entry) is the definition path exactly.
+  async function findReferences(view, pos) {
+    const target = viewOrCurrent(view);
+    if (!target || !target.state) return 'unavailable';
+    const pane = paneForView(target) || currentPane();
+    const state = documentStateFor(pane, 'references');
+    if (!state) return 'unavailable';
+    const at = Number.isInteger(pos)
+      ? clamp(pos, 0, target.state.doc.length)
+      : target.state.selection.main.head;
+    const origin = captureLocation(pane, at);
+
+    const entry = entryFor(target);
+    entry.sequence += 1;
+    const sequence = entry.sequence;
+    const documentId = state.documentId;
+
+    let response = null;
+    try {
+      response = await requestFeature(pane, 'references', positionAt(target.state.doc, at));
+    } catch (error) {
+      status('Cannot Find References', String(error));
+      return 'failed';
+    }
+    if (entryFor(target).sequence !== sequence) return 'stale';
+    if (!response || response.documentId !== documentId) return 'none';
+
+    const { targets, rejected } = normalizeLocations(response);
+    if (!targets.length) {
+      if (rejected) {
+        status(
+          'References Not Available',
+          'Those references are outside the local filesystem, so they cannot be opened here.',
+        );
+        return 'unsupported';
+      }
+      status('No References Found', 'The language server reported no references for this symbol.');
+      return 'none';
+    }
+
+    // One file at a time, in file order, ascending by position inside it —
+    // the order a reader scans a result list in, and the order a second run of
+    // the same query has to produce.
+    targets.sort((left, right) => (
+      left.path === right.path
+        ? (left.line - right.line) || (left.column - right.column)
+        : (left.path < right.path ? -1 : 1)
+    ));
+    const root = commonDirectory(targets.map((item) => item.path));
+    for (const item of targets) item.name = relativeName(item.path, root);
+
+    const shown = targets.slice(0, REFERENCE_LIMIT);
+    const hidden = targets.length - shown.length;
+    const opened = openChooser(target, shown, at, origin, {
+      label: 'References',
+      footer: hidden > 0 ? `+${hidden} more` : null,
+    });
+    return opened ? 'chooser' : 'unavailable';
+  }
+
+  // --- back and forward -----------------------------------------------------------------------
+  //
+  // Two outcomes consume the entry, and the policy is deliberate:
+  //
+  //   'navigated'  — this window went there.
+  //   'elsewhere'  — the document has moved to another WINDOW since the entry
+  //                  was recorded (a Save As, or an owner that opened later),
+  //                  and that window has just been focused. That IS the
+  //                  navigation the user asked for, so the step completes.
+  //                  Leaving the entry on top instead would make every further
+  //                  Back focus the same window forever, with every older
+  //                  entry permanently out of reach.
+  //
+  // A genuine failure — the file was deleted, or nothing could be selected —
+  // consumes nothing: the file may come back, and a second press must not
+  // silently become a jump two places back.
+  async function step(direction) {
+    const store = history();
+    const entry = store ? store.peek(direction) : null;
+    if (!entry) {
+      noteRecord(`step ${direction}`, 'nothing to walk to', describePane(currentPane()));
+      return 'none';
+    }
+    const from = currentPane();
+    const here = captureLocation(from, null);
+    const target = store.entryTarget(entry);
+    noteRecord(`step ${direction}`, 'walking', `${describePane(from)} -> ${target.path}`);
+    const outcome = await jumpTo(target);
+    if (outcome !== 'navigated' && outcome !== 'elsewhere') return outcome;
+    store.advance(direction, here);
+    return outcome;
+  }
+
+  // Stage 3 of the jump-trail diagnostic (features/editor/vim-jump-trace.js):
+  // what the walk actually did — 'navigated', 'elsewhere', 'failed', or the
+  // 'none' the trace spells "empty". Attached to the promise rather than to
+  // step() itself so the outcome the caller sees is untouched, and guarded end
+  // to end so a missing trace module cannot break navigation.
+  function traced(direction, walk) {
+    const trace = global.termlabVimJumpTrace;
+    if (!trace || typeof trace.noteNavigation !== 'function') return walk;
+    return walk.then((outcome) => {
+      trace.noteNavigation(direction, outcome);
+      return outcome;
+    });
+  }
+
+  function navigateBack() {
+    return traced('back', step('back'));
+  }
+
+  function navigateForward() {
+    return traced('forward', step('forward'));
+  }
+
+  // --- events -----------------------------------------------------------------------------------
+
+  function chooserKey(event) {
+    if (!event || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null;
+    const key = event.key;
+    if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Enter') return key;
+    if (key === 'Escape' || key === 'Esc') return 'Escape';
+    return null;
+  }
+
+  function handleKeydown(event, view) {
+    const key = chooserKey(event);
+    if (!key) return false;
+    if (!chooserOpen(view)) return false;
+    if (key === 'ArrowDown') return moveChooser(view, 1);
+    if (key === 'ArrowUp') return moveChooser(view, -1);
+    if (key === 'Escape') {
+      closeChooser(view);
+      return true;
+    }
+    choose(view);
+    return true;
+  }
+
+  // Command-click. Deliberately NOT Ctrl-click: on macOS that gesture is the
+  // context menu. The click is not consumed — the caret still lands where the
+  // user clicked, and the definition request rides along.
+  function handleMousedown(event, view) {
+    if (!event || !event.metaKey || event.altKey || event.ctrlKey) return false;
+    if (Number.isInteger(event.button) && event.button !== 0) return false;
+    if (!view || typeof view.posAtCoords !== 'function') return false;
+    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    if (pos === null || pos === undefined) return false;
+    goToDefinition(view, pos);
+    return false;
+  }
+
+  // --- extensions -------------------------------------------------------------------------------
+
+  function extensions() {
+    const CM = cm();
+    const module = chooser();
+    const field = module ? module.field() : null;
+    if (!CM || !field) return [];
+    if (mounted) return mounted;
+    const list = [field];
+    if (
+      CM.Prec && typeof CM.Prec.highest === 'function'
+      && CM.EditorView && typeof CM.EditorView.domEventHandlers === 'function'
+    ) {
+      list.push(CM.Prec.highest(CM.EditorView.domEventHandlers({
+        keydown: (event, view) => handleKeydown(event, view),
+        mousedown: (event, view) => handleMousedown(event, view),
+      })));
+    }
+    mounted = list;
+    return mounted;
+  }
+
+  // --- lifecycle ---------------------------------------------------------------------------------
+
+  // F12, Shift-F12, Ctrl-minus and Ctrl-Shift-minus arrive as window events
+  // (shortcut-runtime dispatches `termlab:editor-go-to-definition`,
+  // `termlab:editor-find-references`, `termlab:editor-navigate-back` and
+  // `termlab:editor-navigate-forward` after it has decided the pane scope), so
+  // a terminal pane keeps those keys.
+  function installWindowHandlers() {
+    if (windowHandlers || typeof global.addEventListener !== 'function') return;
+    windowHandlers = {
+      'termlab:editor-go-to-definition': () => { goToDefinition(); },
+      'termlab:editor-find-references': () => { findReferences(); },
+      'termlab:editor-navigate-back': () => { navigateBack(); },
+      'termlab:editor-navigate-forward': () => { navigateForward(); },
+    };
+    for (const name of Object.keys(windowHandlers)) {
+      global.addEventListener(name, windowHandlers[name]);
+    }
+  }
+
+  function configure(options) {
+    const opts = options || {};
+    if (typeof opts.paneForView === 'function') paneForViewHook = opts.paneForView;
+    if (typeof opts.currentPane === 'function') currentPaneHook = opts.currentPane;
+    if (typeof opts.allPanes === 'function') allPanesHook = opts.allPanes;
+    if (typeof opts.requestFeature === 'function') requestFeatureHook = opts.requestFeature;
+    if (typeof opts.openLocalFileAt === 'function') openLocalFileAtHook = opts.openLocalFileAt;
+    if (opts.windowLabel) windowLabel = String(opts.windowLabel);
+    installWindowHandlers();
+  }
+
+  function dispose() {
+    if (windowHandlers && typeof global.removeEventListener === 'function') {
+      for (const name of Object.keys(windowHandlers)) {
+        global.removeEventListener(name, windowHandlers[name]);
+      }
+    }
+    windowHandlers = null;
+  }
+
+  global.termlabLspNavigation = {
+    configure,
+    dispose,
+    extensions,
+    goToDefinition,
+    findReferences,
+    navigateBack,
+    navigateForward,
+    recordJump,
+    noteFocusedPaneChanged,
+    historyState,
+    chooserState,
+    chooserOpen,
+    closeChooser,
+    moveChooser,
+    choose,
+    handleKeydown,
+    handleMousedown,
+    renderChooser,
+    normalizeLocations,
+    captureLocation,
+  };
+})(window);

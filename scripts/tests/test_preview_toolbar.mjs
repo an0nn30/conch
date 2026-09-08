@@ -103,7 +103,12 @@ function makeCM6() {
   return {
     Compartment,
     EditorView,
-    EditorState: { create: (spec) => ({ spec, doc: { toString: () => spec.doc } }) },
+    EditorState: {
+      create: (spec) => ({ spec, doc: { toString: () => spec.doc } }),
+      // The pane seeds a read-only compartment at construction (remote and
+      // plain buffers flip it later); the fake only has to hand back a tag.
+      readOnly: { of: (value) => ({ ext: 'readOnly', value }) },
+    },
     lineNumbers: tagged('lineNumbers'),
     highlightActiveLineGutter: tagged('highlightActiveLineGutter'),
     highlightSpecialChars: tagged('highlightSpecialChars'),

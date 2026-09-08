@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use termlab_core::config;
 use ts_rs::TS;
 
@@ -46,6 +47,12 @@ pub(crate) fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json:
         // payload is already re-fetched on every `config-changed` — which is
         // what lets the toggle reach open editor panes without a restart.
         "editor_vim_mode": cfg.editor.vim_mode,
+        // Whether completion opens on its own as you type. Carried on the
+        // same payload and for the same reason as the vim flag: it is
+        // re-fetched on every `config-changed`, so the toggle reaches open
+        // editor panes without a restart. Manual completion is unaffected
+        // by it.
+        "editor_lsp_suggestions_while_typing": cfg.editor.lsp.suggestions_while_typing,
         "ui_font_small": cfg.termlab.ui.font.small,
         "ui_font_list": cfg.termlab.ui.font.list,
         "ui_font_normal": cfg.termlab.ui.font.normal,
@@ -278,6 +285,14 @@ pub(crate) struct SavedLayout {
     left_split_ratio: f64,
     right_split_ratio: f64,
     bottom_split_ratio: f64,
+    /// True exactly when this window resolved to a project AND that project
+    /// already had its own `project_layouts` entry — i.e. it has been opened
+    /// (and its layout saved) at least once before. Always `false` for a
+    /// non-project window. The frontend's boot-reveal hand-off (Task 12/F1)
+    /// uses this to tell a fresh project (always reveal Files, per spec §1)
+    /// from a returning one (trust exactly what it saved, including a
+    /// deliberately-closed panel or a different active tab).
+    has_project_layout: bool,
 }
 
 #[tauri::command]
@@ -311,7 +326,7 @@ pub(crate) fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> 
 /// frontend loads. Pulled out as a pure function (no config I/O) for the same
 /// reason [`merge_window_layout`] below was: the save and load sides of every
 /// persisted layout field are then unit-testable as a matched pair.
-fn saved_layout_from_state(layout: &config::LayoutConfig) -> SavedLayout {
+fn saved_layout_from_state(layout: &config::LayoutConfig, has_project_layout: bool) -> SavedLayout {
     SavedLayout {
         window_width: layout.window_width as f64,
         window_height: layout.window_height as f64,
@@ -328,13 +343,68 @@ fn saved_layout_from_state(layout: &config::LayoutConfig) -> SavedLayout {
         left_split_ratio: layout.left_split_ratio as f64,
         right_split_ratio: layout.right_split_ratio as f64,
         bottom_split_ratio: layout.bottom_split_ratio as f64,
+        has_project_layout,
     }
 }
 
+/// The one seam every project-aware layout read OR write goes through to
+/// decide "which `LayoutConfig` is this window's": `root` is the CALLING
+/// window's project root (`None` for an ordinary window), never anything
+/// else. Read and write are deliberately separate functions rather than one
+/// `bool: for_write` — read never mutates `project_layouts` (an absent entry
+/// falls back to the shared layout WITHOUT creating one), write always
+/// resolves to an entry it can hand out `&mut` to. Extracted so the
+/// isolation invariant (a project window's save can never reach the shared
+/// entry, and vice versa) is a property of the TYPE SIGNATURE — a caller
+/// physically cannot get both a `&LayoutConfig` and stuff it in the wrong
+/// place — rather than a match arm a review has to re-verify by reading
+/// (branch review F2: the previous shape was provably correct only by a
+/// source grep, which passes just as well if the two arms are swapped).
+fn layout_to_read<'a>(
+    state: &'a config::PersistentState,
+    root: Option<&str>,
+) -> &'a config::LayoutConfig {
+    match root {
+        Some(root) => state.project_layouts.get(root).unwrap_or(&state.layout),
+        None => &state.layout,
+    }
+}
+
+/// The write-side twin of [`layout_to_read`]. A project root that has never
+/// saved before gets a fresh entry seeded from the CURRENT shared layout
+/// (the default project-window shape a brand new project boots with), so
+/// the first save doesn't have to special-case "entry didn't exist yet".
+fn layout_to_write<'a>(
+    state: &'a mut config::PersistentState,
+    root: Option<&str>,
+) -> &'a mut config::LayoutConfig {
+    match root {
+        Some(root) => {
+            let base = state.layout.clone();
+            state
+                .project_layouts
+                .entry(root.to_string())
+                .or_insert(base)
+        }
+        None => &mut state.layout,
+    }
+}
+
+/// The layout this window should boot with. A project window gets its
+/// PROJECT's saved layout; every other window gets the shared one. An absent
+/// project entry falls back to the shared layout, which the frontend then
+/// adjusts into the default project-window shape.
 #[tauri::command]
-pub(crate) fn get_saved_layout() -> SavedLayout {
+pub(crate) fn get_saved_layout(
+    window: tauri::WebviewWindow,
+    projects: tauri::State<'_, parking_lot::Mutex<crate::project::ProjectRegistry>>,
+) -> SavedLayout {
     let state = config::load_persistent_state().unwrap_or_default();
-    saved_layout_from_state(&state.layout)
+    let root = projects.lock().root_for(window.label());
+    let has_project_layout = root
+        .as_deref()
+        .is_some_and(|r| state.project_layouts.contains_key(r));
+    saved_layout_from_state(layout_to_read(&state, root.as_deref()), has_project_layout)
 }
 
 /// Merge a frontend-sent [`WindowLayout`] into `state` — every field is
@@ -394,20 +464,28 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     let logical_w = size.width as f64 / scale;
     let logical_h = size.height as f64 / scale;
 
+    let project_root = {
+        let projects = window
+            .app_handle()
+            .state::<parking_lot::Mutex<crate::project::ProjectRegistry>>();
+        projects.lock().root_for(window.label())
+    };
+
     // Loaded, mutated, and saved as one locked span (config::
     // update_persistent_state) — this command runs on the main thread, but
     // the panel-host bounds debounce thread also writes state.toml now, so
     // an unlocked load-mutate-save here could interleave with it and drop
     // one side's mutation (branch review F2).
     let _ = config::update_persistent_state(|state| {
-        // Recorded for diagnostics only. Nothing reads these back for sizing
-        // any more: windows open at the configured columns x lines (see
-        // estimate_window_px and app/core/window-size.js), so restoring the
-        // last session's pixels would defeat that setting — and made a
-        // window spawned from a full-screen one open full-screen.
+        // Recorded for diagnostics only (see the note above): nothing reads
+        // these back for sizing.
         state.layout.window_width = logical_w as f32;
         state.layout.window_height = logical_h as f32;
-        merge_window_layout(&mut state.layout, layout);
+        // A project window writes ONLY its project's entry. Otherwise a
+        // project's panel arrangement would become the shape every ordinary
+        // window opens in. Routed through `layout_to_write` (branch review
+        // F2) rather than a match arm here — see its doc comment.
+        merge_window_layout(layout_to_write(state, project_root.as_deref()), layout);
         true
     });
 }
@@ -579,7 +657,7 @@ mod window_layout_merge_tests {
         );
         assert_eq!(state.right_split_ratio, 0.5);
 
-        let saved = saved_layout_from_state(&state);
+        let saved = saved_layout_from_state(&state, false);
         assert_eq!(saved.bottom_split_ratio, 0.25);
     }
 
@@ -640,7 +718,7 @@ mod window_layout_merge_tests {
         };
         merge_window_layout(&mut state, layout);
 
-        let saved = saved_layout_from_state(&state);
+        let saved = saved_layout_from_state(&state, false);
         assert_eq!(
             saved.tool_window_view_modes, incoming,
             "a view mode the frontend saved must be readable again on the next \
@@ -652,7 +730,7 @@ mod window_layout_merge_tests {
     #[test]
     fn a_state_that_never_recorded_view_modes_reads_back_as_an_empty_map() {
         // Every state.toml written before this field existed.
-        let saved = saved_layout_from_state(&config::LayoutConfig::default());
+        let saved = saved_layout_from_state(&config::LayoutConfig::default(), false);
         assert!(saved.tool_window_view_modes.is_empty());
     }
 
@@ -676,5 +754,115 @@ mod window_layout_merge_tests {
         assert!(state.zen_mode);
         assert_eq!(state.tool_window_zones, zones_before);
         assert_eq!(state.right_panel_width, width_before);
+    }
+
+    /// F2 (fix round 1): the project/global isolation invariant, pinned by
+    /// exercising `layout_to_read`/`layout_to_write` directly rather than by
+    /// grepping `save_window_layout`'s source for a `match` shape. A source
+    /// grep (what this invariant was checked by before this round) passes
+    /// exactly as well if the two match arms are swapped — these tests
+    /// would not. Nested here (rather than a sibling module) so it can
+    /// reuse `empty_layout()` above.
+    mod layout_isolation_tests {
+        use super::*;
+
+        fn state_with_global(zen_mode: bool, bottom_panel_height: f32) -> config::PersistentState {
+            config::PersistentState {
+                layout: config::LayoutConfig {
+                    zen_mode,
+                    bottom_panel_height,
+                    ..config::LayoutConfig::default()
+                },
+                ..config::PersistentState::default()
+            }
+        }
+
+        #[test]
+        fn a_project_write_lands_only_in_that_projects_entry_the_global_layout_is_byte_identical() {
+            let mut state = state_with_global(false, 100.0);
+            let global_before = state.layout.clone();
+
+            let layout = WindowLayout {
+                zen_mode: Some(true),
+                ..empty_layout()
+            };
+            merge_window_layout(layout_to_write(&mut state, Some("/repo")), layout);
+
+            assert_eq!(
+                state.layout, global_before,
+                "a project window's write must not touch the shared layout at all"
+            );
+            assert_eq!(
+                state.project_layouts.get("/repo").map(|l| l.zen_mode),
+                Some(true),
+                "the write must land in that project's own entry"
+            );
+            assert!(
+                state.project_layouts.len() == 1,
+                "only the ONE project written to gets an entry"
+            );
+        }
+
+        #[test]
+        fn a_non_project_write_leaves_project_layouts_untouched() {
+            let mut state = state_with_global(false, 100.0);
+            state
+                .project_layouts
+                .insert("/other-repo".to_string(), config::LayoutConfig::default());
+            let projects_before = state.project_layouts.clone();
+
+            let layout = WindowLayout {
+                zen_mode: Some(true),
+                ..empty_layout()
+            };
+            merge_window_layout(layout_to_write(&mut state, None), layout);
+
+            assert!(
+                state.layout.zen_mode,
+                "the global layout DOES get the write"
+            );
+            assert_eq!(
+                state.project_layouts, projects_before,
+                "an ordinary window's write must never reach project_layouts"
+            );
+        }
+
+        #[test]
+        fn an_absent_project_entry_falls_back_to_the_global_layout_on_read() {
+            let state = state_with_global(false, 250.0);
+            let layout = layout_to_read(&state, Some("/never-opened"));
+            assert_eq!(
+                layout.bottom_panel_height, 250.0,
+                "no entry yet for this project — read the shared layout instead"
+            );
+            assert!(
+                !state.project_layouts.contains_key("/never-opened"),
+                "a READ must never create the entry it fell back from"
+            );
+        }
+
+        #[test]
+        fn a_present_project_entry_shadows_the_global_layout_on_read() {
+            let mut state = state_with_global(false, 250.0);
+            state.project_layouts.insert(
+                "/repo".to_string(),
+                config::LayoutConfig {
+                    bottom_panel_height: 42.0,
+                    ..config::LayoutConfig::default()
+                },
+            );
+            let layout = layout_to_read(&state, Some("/repo"));
+            assert_eq!(layout.bottom_panel_height, 42.0);
+        }
+
+        #[test]
+        fn a_non_project_read_always_returns_the_global_layout_regardless_of_project_layouts() {
+            let mut state = state_with_global(false, 250.0);
+            state
+                .project_layouts
+                .insert("/repo".to_string(), config::LayoutConfig::default());
+            let layout = layout_to_read(&state, None);
+            assert_eq!(layout.bottom_panel_height, 250.0);
+        }
     }
 }

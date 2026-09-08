@@ -23,7 +23,12 @@
     const showUpdateAvailableToast = deps.showUpdateAvailableToast;
     const initialLayout = global.__termlabInitialLayout || {};
     const zenState = {
-      active: global.__termlabInitialZenMode === true,
+      // The EFFECTIVE zen decision, not the raw saved value: a project
+      // window can inherit saved zen_mode=true while forcing zen off, and
+      // seeding from the raw flag would leave this window's state as
+      // active:true with no zen class applied — the first Zen Mode press
+      // would then take the "exit zen" branch and appear to do nothing.
+      active: global.__termlabEffectiveZen === true,
       leftVisible: initialLayout.files_panel_visible !== false,
       rightVisible: initialLayout.ssh_panel_visible !== false,
       bottomVisible: initialLayout.bottom_panel_visible !== false,
@@ -134,6 +139,50 @@
         Promise.resolve(dialog.openForOpen()).catch((error) => {
           showStatus('Failed to open file: ' + String(error));
         });
+        return;
+      }
+      if (action === 'open-folder') {
+        // Always a NEW window, even from inside a project window: a project
+        // owns its window, so re-targeting the current one would evict a
+        // project the user is still working in. project_open focuses an
+        // existing window when it already holds the same canonical root.
+        Promise.resolve(invoke('project_pick_folder'))
+          .then((picked) => {
+            if (!picked) return null;
+            return invoke('project_open', { path: picked });
+          })
+          // Opening a project records it as the newest recent — the native
+          // File menu (built once, at boot/last rebuild) would otherwise
+          // never learn about it. Fire-and-forget, the same pattern
+          // settings/data-service.js uses after a plugin toggle.
+          .then((opened) => {
+            if (opened) invoke('rebuild_menu').catch(() => {});
+          })
+          .catch((error) => {
+            if (global.toast) global.toast.error('Cannot Open Folder', String(error));
+          });
+        return;
+      }
+      if (action === 'search-in-project') {
+        // A no-op outside a project window: the tool window is only
+        // registered when the window has a project, and toggle/activate on an
+        // unregistered id is already a no-op in the manager.
+        const twm = global.toolWindowManager;
+        if (twm && typeof twm.activate === 'function') twm.activate('project-search');
+        const panel = document.getElementById('project-search-panel');
+        const field = panel ? panel.querySelector('.tl-project-search__input') : null;
+        if (field && typeof field.focus === 'function') field.focus();
+        return;
+      }
+      if (action.startsWith('open-recent-project:')) {
+        const projectPath = action.slice('open-recent-project:'.length);
+        Promise.resolve(invoke('project_open', { path: projectPath }))
+          // Reopening moves this entry back to the front — refresh the
+          // native menu so it reflects the new order without a restart.
+          .then(() => invoke('rebuild_menu').catch(() => {}))
+          .catch((error) => {
+            if (global.toast) global.toast.error('Cannot Open Project', projectPath + ': ' + String(error));
+          });
         return;
       }
       if (action === 'new-plain-shell-tab') {

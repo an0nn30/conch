@@ -218,6 +218,27 @@
       outline: 2px solid var(--dim-fg);
       outline-offset: -2px;
     }
+    /* The empty main area of a project window. Sized and positioned like a
+       tab tree root so it occupies exactly the space a tab would; hidden by
+       tab-manager.js as soon as the window has one. `display: flex` beats the
+       `hidden` attribute's UA rule, so the [hidden] case is spelled out. */
+    .tl-editor-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      pointer-events: none;
+      user-select: none;
+    }
+    .tl-editor-placeholder[hidden] { display: none; }
+    .tl-editor-placeholder__hint {
+      color: var(--text-secondary);
+      font-size: 13px;
+      text-align: center;
+      opacity: 0.75;
+    }
 
     /* --- Split pane layout --- */
     .tab-tree-root {

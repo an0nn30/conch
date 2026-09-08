@@ -1,0 +1,404 @@
+// Problems tool window — bottom zone.
+//
+// A view and nothing else: the snapshot, the filters and the selection all
+// live in features/problems/problems-store.js, and activation goes through
+// features/problems/problems-navigation.js, so a popped-out host and the
+// docked panel show the same list and F8 walks exactly what is on screen.
+//
+// The toolbar is built once and the list is rebuilt per render. That split is
+// not a micro-optimisation: re-creating the text field on every keystroke
+// would take the caret with it.
+//
+// Every string that came from a language server is written with textContent.
+// There is no HTML-string construction anywhere in this file.
+(function initTermLabProblemsPanel(global) {
+  'use strict';
+
+  const SEVERITY_TITLE = {
+    error: 'Errors',
+    warning: 'Warnings',
+    information: 'Information',
+    hint: 'Hints',
+  };
+
+  function model() {
+    return global.termlabProblemsModel || null;
+  }
+
+  function navigation() {
+    return global.termlabProblemsNavigation || null;
+  }
+
+  function el(tag, className) {
+    const node = global.document.createElement(tag);
+    if (className) node.className = className;
+    return node;
+  }
+
+  function statusText(state, sessions) {
+    if (state === 'loading') return 'Loading problems…';
+    if (state === 'disconnected') return 'No language server is running for this window.';
+    if (state === 'indexing') return 'Indexing project…';
+    if (state === 'failed') {
+      const reasons = (sessions || [])
+        .filter((status) => status && (status.state === 'failed' || status.state === 'unavailable'))
+        .map((status) => status.message)
+        .filter(Boolean);
+      const detail = reasons.length ? ` ${reasons.join(' · ')}` : '';
+      return `Language server failed.${detail}`;
+    }
+    return 'No problems have been reported.';
+  }
+
+  function init(options) {
+    const opts = options || {};
+    const panelEl = opts.panelEl;
+    if (!panelEl) throw new Error('Problems panel requires panelEl');
+    const store = opts.store || global.termlabProblemsStore;
+    if (!store || typeof store.subscribe !== 'function') {
+      throw new Error('Problems panel requires the shared problems store');
+    }
+
+    const collapsedGroups = new Set();
+    const collapsedFiles = new Set();
+    let rows = [];
+    let activeIndex = 0;
+    let statusEl = null;
+
+    // ---- chrome (built once) -------------------------------------------------
+
+    const root = el('div', 'tl-problems');
+    const toolbar = el('div', 'tl-problems__toolbar');
+    const toggles = new Map();
+    const severities = (model() && model().SEVERITY_ORDER) || ['error', 'warning', 'information', 'hint'];
+    for (const severity of severities) {
+      const button = el('button', 'tl-problems__toggle');
+      button.type = 'button';
+      button.setAttribute('data-severity-toggle', severity);
+      button.setAttribute('data-severity', severity);
+      button.setAttribute('aria-pressed', 'true');
+      button.title = SEVERITY_TITLE[severity] || severity;
+      const dot = el('span', 'tl-problems__severity');
+      dot.setAttribute('data-severity', severity);
+      dot.setAttribute('aria-hidden', 'true');
+      const count = el('span', 'tl-problems__toggle-count');
+      count.textContent = '0';
+      button.appendChild(dot);
+      button.appendChild(count);
+      button.addEventListener('click', () => {
+        const pressed = button.getAttribute('aria-pressed') !== 'false';
+        store.setSeverityEnabled(severity, !pressed);
+      });
+      toggles.set(severity, { button, count });
+      toolbar.appendChild(button);
+    }
+
+    const filter = el('input', 'tl-problems__filter');
+    filter.type = 'search';
+    filter.setAttribute('placeholder', 'Filter problems');
+    filter.setAttribute('aria-label', 'Filter problems');
+    filter.addEventListener('input', () => { store.setTextFilter(filter.value); });
+    toolbar.appendChild(filter);
+
+    // A fixed slot between the toolbar and the list, so the empty/indexing/
+    // disconnected/failed line can appear and disappear without the panel
+    // having to reorder anything.
+    const statusHost = el('div', 'tl-problems__status-host');
+
+    const list = el('div', 'tl-problems__list tl-scroll');
+    list.setAttribute('role', 'tree');
+    list.setAttribute('aria-label', 'Problems');
+
+    root.appendChild(toolbar);
+    root.appendChild(statusHost);
+    root.appendChild(list);
+    panelEl.appendChild(root);
+
+    // ---- rows ----------------------------------------------------------------
+
+    function countLabel(counts) {
+      return String(counts.total);
+    }
+
+    function makeRow(kind, level) {
+      const row = el('div', 'tl-problems__row');
+      row.setAttribute('role', 'treeitem');
+      row.setAttribute('data-problem-row', kind);
+      row.setAttribute('aria-level', String(level));
+      row.setAttribute('tabindex', '-1');
+      return row;
+    }
+
+    function renderGroupRow(descriptor) {
+      const group = descriptor.group;
+      const row = makeRow('group', 1);
+      row.classList.add('tl-problems__row--group');
+      row.setAttribute('aria-expanded', descriptor.expanded ? 'true' : 'false');
+      const twisty = el('span', 'tl-problems__twisty');
+      twisty.setAttribute('aria-hidden', 'true');
+      twisty.textContent = descriptor.expanded ? '▾' : '▸';
+      const label = el('span', 'tl-problems__label');
+      label.textContent = group.label;
+      row.appendChild(twisty);
+      row.appendChild(label);
+      if (group.adapters.length) {
+        const adapters = el('span', 'tl-problems__meta');
+        adapters.textContent = group.adapters.join(', ');
+        row.appendChild(adapters);
+      }
+      if (group.state && group.state !== 'ready') {
+        const state = el('span', 'tl-problems__state');
+        state.setAttribute('data-state', group.state);
+        state.textContent = group.message ? `${group.state} — ${group.message}` : group.state;
+        row.appendChild(state);
+      }
+      const count = el('span', 'tl-problems__count');
+      count.textContent = countLabel(group.counts);
+      row.appendChild(count);
+      row.title = group.root || '';
+      row.setAttribute(
+        'aria-label',
+        `${group.label}, ${group.counts.total} problems${group.root ? `, ${group.root}` : ''}`,
+      );
+      return row;
+    }
+
+    function renderFileRow(descriptor) {
+      const file = descriptor.file;
+      const row = makeRow('file', 2);
+      row.classList.add('tl-problems__row--file');
+      row.setAttribute('aria-expanded', descriptor.expanded ? 'true' : 'false');
+      row.setAttribute('data-problem-path', file.path);
+      const twisty = el('span', 'tl-problems__twisty');
+      twisty.setAttribute('aria-hidden', 'true');
+      twisty.textContent = descriptor.expanded ? '▾' : '▸';
+      const label = el('span', 'tl-problems__label');
+      label.textContent = file.relativePath;
+      const count = el('span', 'tl-problems__count');
+      count.textContent = countLabel(file.counts);
+      row.appendChild(twisty);
+      row.appendChild(label);
+      row.appendChild(count);
+      row.title = file.path;
+      row.setAttribute('aria-label', `${file.relativePath}, ${file.counts.total} problems`);
+      return row;
+    }
+
+    function renderItemRow(descriptor) {
+      const item = descriptor.item;
+      const where = (descriptor.file && descriptor.file.relativePath) || item.fileName;
+      const builder = model();
+      const severityLabel = builder ? builder.severityLabel(item.severity) : item.severity;
+      const row = makeRow('item', 3);
+      row.classList.add('tl-problems__row--item');
+      row.setAttribute('data-problem-id', item.id);
+      row.setAttribute('data-severity', item.severity);
+      const dot = el('span', 'tl-problems__severity');
+      dot.setAttribute('data-severity', item.severity);
+      dot.setAttribute('aria-hidden', 'true');
+      const message = el('span', 'tl-problems__message');
+      message.textContent = item.message;
+      const position = el('span', 'tl-problems__position');
+      position.textContent = `${item.line}:${item.column}`;
+      row.appendChild(dot);
+      row.appendChild(message);
+      row.appendChild(position);
+      const origin = item.source && item.code
+        ? `${item.source}(${item.code})`
+        : (item.source || item.code);
+      if (origin) {
+        const meta = el('span', 'tl-problems__meta');
+        meta.textContent = origin;
+        row.appendChild(meta);
+      }
+      row.setAttribute(
+        'aria-label',
+        `${severityLabel}: ${item.message}. ${where} line ${item.line}, column ${item.column}${origin ? `, ${origin}` : ''}`,
+      );
+      row.title = `${item.path}:${item.line}:${item.column}`;
+      return row;
+    }
+
+    function buildDescriptors(view) {
+      const out = [];
+      for (const group of view.groups || []) {
+        // problems-model.js already mints a stable, collision-free key for
+        // every group ('' for the catch-all, which no real root can be —
+        // projectsFrom skips falsy roots). Re-deriving one here is how two
+        // spellings of one identity drift apart, which is the whole reason
+        // lsp-uri.js exists.
+        const key = group.key;
+        const expanded = !collapsedGroups.has(key);
+        out.push({ kind: 'group', key, group, expanded });
+        if (!expanded) continue;
+        for (const file of group.files) {
+          const fileExpanded = !collapsedFiles.has(file.path);
+          out.push({
+            kind: 'file', key: file.path, group, file, expanded: fileExpanded,
+          });
+          if (!fileExpanded) continue;
+          for (const item of file.items) {
+            out.push({
+              kind: 'item', key: item.id, item, file, group,
+            });
+          }
+        }
+      }
+      return out;
+    }
+
+    function applyRovingTabIndex() {
+      if (activeIndex >= rows.length) activeIndex = rows.length - 1;
+      if (activeIndex < 0) activeIndex = 0;
+      rows.forEach((row, index) => {
+        row.setAttribute('tabindex', index === activeIndex ? '0' : '-1');
+        row.classList.toggle('is-active', index === activeIndex);
+      });
+    }
+
+    function render(state) {
+      const view = state.view;
+      const totals = view.totals || {};
+      for (const [severity, entry] of toggles) {
+        entry.count.textContent = String(totals[severity] === undefined ? 0 : totals[severity]);
+        entry.button.setAttribute(
+          'aria-pressed',
+          state.filters.severities[severity] === false ? 'false' : 'true',
+        );
+      }
+
+      if (state.panelState === 'ready') {
+        statusEl = null;
+        statusHost.replaceChildren();
+      } else {
+        statusEl = el('div', 'tl-problems__status');
+        statusEl.setAttribute('data-state', state.panelState);
+        statusEl.setAttribute('role', 'note');
+        statusEl.textContent = statusText(state.panelState, state.sessions);
+        statusHost.replaceChildren(statusEl);
+      }
+
+      const descriptors = buildDescriptors(view);
+      const selectedId = state.selectedId;
+      const built = [];
+      for (const descriptor of descriptors) {
+        let row;
+        if (descriptor.kind === 'group') row = renderGroupRow(descriptor);
+        else if (descriptor.kind === 'file') row = renderFileRow(descriptor);
+        else row = renderItemRow(descriptor);
+        row._descriptor = descriptor;
+        if (descriptor.kind === 'item' && descriptor.item.id === selectedId) {
+          row.classList.add('is-selected');
+          row.setAttribute('aria-selected', 'true');
+        }
+        built.push(row);
+      }
+      list.replaceChildren(...built);
+      rows = built;
+      applyRovingTabIndex();
+    }
+
+    // ---- interaction ---------------------------------------------------------
+
+    // `refocus` is not cosmetic: rendering replaces the row elements, and a
+    // browser moves focus to the body when the focused node leaves the
+    // document — so collapsing a group with the keyboard would silently drop
+    // the user out of the tree without it.
+    function toggleAt(index, refocus) {
+      const row = rows[index];
+      const descriptor = row && row._descriptor;
+      if (!descriptor || descriptor.kind === 'item') return false;
+      const collapsed = descriptor.kind === 'group' ? collapsedGroups : collapsedFiles;
+      if (collapsed.has(descriptor.key)) collapsed.delete(descriptor.key);
+      else collapsed.add(descriptor.key);
+      activeIndex = index;
+      render(store.getState());
+      if (refocus) {
+        const next = rows[activeIndex];
+        if (next && typeof next.focus === 'function') next.focus();
+      }
+      return true;
+    }
+
+    function activateAt(index, refocus) {
+      const row = rows[index];
+      const descriptor = row && row._descriptor;
+      if (!descriptor) return;
+      if (descriptor.kind !== 'item') {
+        toggleAt(index, refocus);
+        return;
+      }
+      activeIndex = index;
+      store.select(descriptor.item.id);
+      const nav = navigation();
+      if (nav && typeof nav.activate === 'function') nav.activate(descriptor.item, { focus: true });
+    }
+
+    function moveTo(index) {
+      if (!rows.length) return;
+      activeIndex = Math.min(Math.max(index, 0), rows.length - 1);
+      applyRovingTabIndex();
+      const row = rows[activeIndex];
+      if (row && typeof row.focus === 'function') row.focus();
+    }
+
+    list.addEventListener('keydown', (event) => {
+      const key = event.key;
+      if (key === 'ArrowDown') { moveTo(activeIndex + 1); event.preventDefault(); return; }
+      if (key === 'ArrowUp') { moveTo(activeIndex - 1); event.preventDefault(); return; }
+      if (key === 'Home') { moveTo(0); event.preventDefault(); return; }
+      if (key === 'End') { moveTo(rows.length - 1); event.preventDefault(); return; }
+      if (key === 'ArrowRight') {
+        const descriptor = rows[activeIndex] && rows[activeIndex]._descriptor;
+        if (descriptor && descriptor.kind !== 'item' && !descriptor.expanded) toggleAt(activeIndex, true);
+        else moveTo(activeIndex + 1);
+        event.preventDefault();
+        return;
+      }
+      if (key === 'ArrowLeft') {
+        const descriptor = rows[activeIndex] && rows[activeIndex]._descriptor;
+        if (descriptor && descriptor.kind !== 'item' && descriptor.expanded) toggleAt(activeIndex, true);
+        else moveTo(activeIndex - 1);
+        event.preventDefault();
+        return;
+      }
+      if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+        activateAt(activeIndex, true);
+        event.preventDefault();
+      }
+    });
+
+    list.addEventListener('click', (event) => {
+      const row = event.target && typeof event.target.closest === 'function'
+        ? event.target.closest('[data-problem-row]')
+        : null;
+      if (!row) return;
+      const index = rows.indexOf(row);
+      if (index < 0) return;
+      activateAt(index);
+    });
+
+    // ---- lifecycle -----------------------------------------------------------
+
+    const unsubscribe = store.subscribe((state) => { render(state); });
+    render(store.getState());
+    // Idempotent, and required rather than merely tidy: in a popped-out
+    // panel host this is the only caller — manager-compose-runtime, which
+    // configures the store in a main window, never runs there.
+    if (typeof store.configure === 'function') store.configure({});
+
+    return {
+      element: root,
+      refresh: () => render(store.getState()),
+      // The tool window manager owns the container this rendered into and
+      // tears it down itself; all this has to give back is the subscription,
+      // which would otherwise keep re-rendering a detached tree every time a
+      // server published — once per dock/undock cycle.
+      destroy() {
+        if (typeof unsubscribe === 'function') unsubscribe();
+      },
+    };
+  }
+
+  global.problemsPanel = { init };
+})(window);

@@ -14,6 +14,11 @@ name = "termlab_tauri"
 path = "src/lib.rs"
 
 [dependencies]
+async-lsp = { version = "0.2.4", default-features = false, features = ["omni-trait", "tokio"] }
+futures = "0.3"
+ropey = "1.6.1"
+toml = { workspace = true }
+tower = "0.5"
 ttf-parser = "0.25"
 base64 = { workspace = true }
 termlab_core = { workspace = true }
@@ -32,18 +37,26 @@ portable-pty = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["compat"] }
 log = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 env_logger = { workspace = true }
 uuid = { workspace = true }
+unicode-casefold = "=0.2.0"
+unicode-normalization = "0.1.24"
 dirs = { workspace = true }
 chrono = { workspace = true }
 hostname = { workspace = true }
+# ripgrep's directory walker. The project search must honour .gitignore /
+# .ignore / global excludes without depending on an `rg` binary existing on
+# the user's machine, and gitignore precedence is not worth re-implementing.
+ignore = "0.4"
 zeroize = { workspace = true }
 arboard = "3"
 font-kit = "0.14"
 ts-rs = { workspace = true }
+sha2 = "0.10"
 
 # SSH (via termlab_remote, only async-trait needed locally for TauriRemoteCallbacks)
 async-trait = "0.1"
@@ -63,6 +76,7 @@ core-foundation = "0.9"
 [dev-dependencies]
 tempfile = "3"
 tauri = { version = "2", features = ["test"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = ["vault_eager_import"]

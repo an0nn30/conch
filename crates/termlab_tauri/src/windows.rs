@@ -113,13 +113,16 @@ pub(crate) fn allocate_window_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>
     }
 }
 
-/// Build a window under an already-allocated `label`.
+/// Build a window under an already-allocated `label`, carrying `title` as its
+/// OS window title. Project windows open named after the project so the
+/// window is identifiable in the OS window list before its frontend boots.
 ///
 /// Must run on the main thread (see [`open_new_window`]'s note): the
 /// builder's `build()` posts to the main thread and waits.
-pub(crate) fn create_window_with_label<R: tauri::Runtime>(
+pub(crate) fn create_window_with_label_titled<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     label: &str,
+    title: &str,
 ) -> tauri::Result<()> {
     let label = label.to_string();
     let user_cfg = config::load_user_config().unwrap_or_default();
@@ -147,7 +150,7 @@ pub(crate) fn create_window_with_label<R: tauri::Runtime>(
     let theme = appearance_to_theme(&user_cfg.colors.appearance_mode);
 
     let new_win = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-        .title("TermLab")
+        .title(title)
         .inner_size(w, h)
         .resizable(true)
         .decorations(dec)
@@ -163,6 +166,14 @@ pub(crate) fn create_window_with_label<R: tauri::Runtime>(
         let _ = new_win.set_zoom(zoom as f64);
     }
     Ok(())
+}
+
+/// The untitled form every non-project caller wants.
+pub(crate) fn create_window_with_label<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+) -> tauri::Result<()> {
+    create_window_with_label_titled(app, label, "TermLab")
 }
 
 /// Allocate a label and build the window under it — the composition every

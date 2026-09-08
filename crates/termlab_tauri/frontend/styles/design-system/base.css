@@ -43,6 +43,20 @@
   --tl-warning-border: var(--tl-Notification-ToolWindow-warningBorderColor);
   --tl-warning-fg: var(--tl-Notification-ToolWindow-warningForeground);
 
+  /* Git status tints for the project tree. Every raw token below was checked
+     present in BOTH tokens-dark.css and tokens-light.css, so none of these
+     silently falls through to an inherited colour in one appearance:
+     Link-activeForeground (#6494ed / #3457C7), Label-successForeground
+     (#89ca78 / #2F8F5B) and Component-warningFocusColor (#8c812b / #8A6D1F).
+     Deleted reuses --tl-danger and untracked --tl-fg-muted, both already
+     semantic aliases defined above. Colour is never the only signal: every
+     tinted row also carries its state in its aria-label. */
+  --tl-git-modified: var(--tl-Link-activeForeground);
+  --tl-git-added: var(--tl-Label-successForeground);
+  --tl-git-deleted: var(--tl-danger);
+  --tl-git-conflicted: var(--tl-Component-warningFocusColor);
+  --tl-git-untracked: var(--tl-fg-muted);
+
   /* Active-tab fill + underline (styles/layout.css .tab-btn.active). The raw
      --tl-EditorTabs-underlinedTabBackground / --tl-DefaultTabs-underlineColor
      tokens only exist in tokens-dark.css — tokens-light.css defines no

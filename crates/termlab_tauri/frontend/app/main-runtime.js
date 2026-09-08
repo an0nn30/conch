@@ -422,6 +422,10 @@
           splitPane: (direction) => splitPane(direction),
           refreshWindowTitle: () => refreshWindowTitle(),
           getPaneManager: () => paneManager,
+          // For the Terminal tool window's xterm pane — see the terminalPanel
+          // block in orchestration-runtime.js.
+          terminalRuntime,
+          fitAndResizePane: (pane) => fitAndResizePane(pane),
           isDebugEnabled: () => shortcutDebugEnabled,
           debugLog: (...args) => console.log(...args),
           debouncedFitAndResize: () => {
@@ -447,7 +451,7 @@
       // no default terminal tab, just the editor(s) — `termlab notes.md`
       // should read as a small editor app. (startup-runtime already switched
       // this window into session-only zen via the non-destructive
-      // has_pending_open_paths peek.) The destructive take happens here,
+      // pending_open_paths_kind peek.) The destructive take happens here,
       // before any tab exists, so nothing races the editor tab. If nothing in
       // the queue actually opens — every path missing or a directory — fall
       // back to the normal terminal tab rather than presenting an empty
@@ -462,10 +466,24 @@
           }
         } catch (_) {}
       }
+      const projectRoot = window.termlabProjectMode && window.termlabProjectMode.isActive()
+        ? window.termlabProjectMode.root()
+        : null;
       if (cliOpenedEditors > 0) {
         // Closing this window's last tab opens a terminal tab instead of
         // closing the window; tab-manager.js consumes the flag once.
         window.__termlabEditorWindow = true;
+      } else if (projectRoot) {
+        // A project window boots with an EMPTY main area, on purpose. Its
+        // terminal used to be a tab here; it is now the Terminal tool window
+        // in the bottom zone (registered in tool-window-runtime.js, activated
+        // there for a fresh project, spawned lazily at the project root on
+        // first show). The main area is for files: tab-manager.js shows
+        // #editor-placeholder while there are no tabs, and editor tabs arrive
+        // as files are opened from the tree.
+        //
+        // Deliberately no createTab: reintroducing one here would put a
+        // second shell at the root in every project window.
       } else {
         const firstTabPromise = createTab().catch((e) => {
           showStatus('Failed to initialize first tab: ' + String(e));
@@ -516,6 +534,12 @@
         await new Promise((resolve) => requestAnimationFrame(resolve));
         await new Promise((resolve) => requestAnimationFrame(resolve));
 
+        // A project window has no main-area pane to measure (its terminal is
+        // the bottom-zone tool window now), so it skips this and keeps the
+        // metrics the last plain window persisted. Measuring the tool
+        // window's terminal instead would be actively wrong: the arithmetic
+        // derives the window's CHROME from the difference between the
+        // terminal host and the window, and a bottom-zone panel is not that.
         const pane = currentPane();
         const host = document.getElementById('terminal-host');
         if (!pane || !pane.term || !host) return;
@@ -550,8 +574,12 @@
       // Tell the user why this window has no panels — otherwise a window that
       // opens bare looks broken rather than deliberate. Only for windows that
       // got zen from the setting, never for one that inherited it from the
-      // saved layout.
-      if (window.__termlabZenIsSessionDefault === true && window.toast) {
+      // saved layout. __termlabEffectiveZen must also be true: a project
+      // window sets __termlabZenIsSessionDefault (it made its own
+      // session-only zen decision) while forcing zen OFF, and without this
+      // check the toast would claim "New windows open in zen mode by
+      // default" on a window that is visibly not in zen.
+      if (window.__termlabZenIsSessionDefault === true && window.__termlabEffectiveZen === true && window.toast) {
         window.toast.info('Zen mode', 'New windows open in zen mode by default. Change this in Settings → Appearance.');
       }
 

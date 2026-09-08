@@ -95,11 +95,12 @@
     }
 
     async function buildPaletteCommands() {
-      const [plugins, pluginItems, serverResp, tunnels] = await Promise.all([
+      const [plugins, pluginItems, serverResp, tunnels, recentProjects] = await Promise.all([
         invoke('scan_plugins').catch(() => []),
         invoke('get_plugin_menu_items').catch(() => []),
         invoke('remote_get_servers').catch(() => ({ folders: [], ungrouped: [], ssh_config: [] })),
         invoke('tunnel_get_all').catch(() => []),
+        invoke('project_recents').catch(() => []),
       ]);
 
       const commands = [];
@@ -116,9 +117,81 @@
       add('core:new-plain-shell-tab', 'New Plain Shell Tab', 'Terminal', 'tab terminal shell plain default login local pty', () => handleMenuAction('new-plain-shell-tab'));
       add('core:new-file', 'New File', 'Editor', 'new file editor untitled note', () => handleMenuAction('new-file'));
       add('core:open-file', 'Open File…', 'Editor', 'open file editor browse local remote sftp host chooser', () => handleMenuAction('open-file'));
+      add('core:open-folder', 'Open Folder as Project…', 'Project', 'open folder project directory workspace tree search git', () => handleMenuAction('open-folder'), 'Project');
+      add('core:search-in-project', 'Search in Project', 'Project', 'search find text grep project files contents', () => handleMenuAction('search-in-project'), 'Project');
+      for (const recent of (recentProjects || [])) {
+        add(
+          'core:reopen-project:' + recent.path,
+          'Reopen Project: ' + recent.name,
+          recent.path,
+          'project reopen recent open folder workspace',
+          () => {
+            invoke('project_open', { path: recent.path })
+              // Reopening moves this entry back to the front — refresh the
+              // native menu so it reflects the new order without a restart.
+              .then(() => invoke('rebuild_menu').catch(() => {}))
+              .catch((error) => {
+                if (window.toast) window.toast.error('Cannot Open Project', String(error));
+              });
+          },
+          'Project',
+        );
+      }
       // Editor-only, like the keybinding: handleMenuAction('save-file-as')
       // returns without acting when the focused pane is not an editor.
       add('core:save-file-as', 'Save File As…', 'Editor', 'save as file editor copy rename local remote sftp host upload', () => handleMenuAction('save-file-as'));
+      // Show Hover has no default chord: the shortcut router models single
+      // combinations, not VS Code-style multi-step chords, and there is no
+      // spare single combination worth claiming for it. The palette is how it
+      // stays reachable from the keyboard. features/editor/lsp-tooltips.js
+      // listens for the event and no-ops outside an LSP-capable editor.
+      add('core:editor-show-hover', 'Show Hover', 'Editor',
+        'hover documentation docs type signature lsp language server tooltip',
+        () => {
+          global.dispatchEvent(new global.CustomEvent('termlab:editor-show-hover'));
+        });
+      // Find References has a chord (shift+F12) and a vim key (gr); the
+      // palette entry is what makes it discoverable, and it goes through the
+      // same window event both of those do. lsp-navigation.js listens for it
+      // and no-ops outside an LSP-capable editor.
+      add('core:editor-find-references', 'Find References', 'Editor',
+        'references usages find all callers lsp language server symbol',
+        () => {
+          global.dispatchEvent(new global.CustomEvent('termlab:editor-find-references'));
+        });
+      // The vim <C-o>/<C-i> jump-trail diagnostic
+      // (features/editor/vim-jump-trace.js). Palette-only on purpose: these
+      // read a running app, they are not keys anyone should bind, and the
+      // trace is session-only with no setting behind it. Both no-op when the
+      // module is absent (a settings window, say) rather than throwing.
+      add('core:vim-jump-trail', 'Vim Navigation: Show Jump Trail', 'Editor',
+        'vim jump trail history back forward ctrl-o ctrl-i navigation depth diagnostic',
+        () => {
+          const trace = global.termlabVimJumpTrace;
+          if (trace && typeof trace.showTrail === 'function') trace.showTrail();
+        });
+      add('core:vim-jump-trace', 'Vim Navigation: Trace Keys (toggle)', 'Editor',
+        'vim jump trace keys diagnostic ctrl-o ctrl-i toggle debug navigation keydown',
+        () => {
+          const trace = global.termlabVimJumpTrace;
+          if (trace && typeof trace.toggleTrace === 'function') trace.toggleTrace();
+        });
+      // Where the always-on diagnostic log lives
+      // (features/diagnostics/diag-log.js). The trace above is for watching a
+      // sequence live; this is the file a bug report attaches, and the whole
+      // point is that the owner does not have to have armed anything first.
+      add('core:diag-log-path', 'Show Diagnostic Log Location', 'Application',
+        'diagnostic log file bug report frontend logs path vim navigation',
+        async () => {
+          const diag = global.termlabDiag;
+          const path = diag && typeof diag.path === 'function' ? await diag.path() : null;
+          if (global.toast && typeof global.toast.info === 'function') {
+            global.toast.info(
+              'Diagnostic log',
+              path ? `Attach this file to a bug report: ${path}` : 'The diagnostic log is unavailable in this window.',
+            );
+          }
+        });
       add('core:settings', 'Open Settings', 'Application', 'preferences config', () => handleMenuAction('settings'));
       add('core:install-cli', "Install 'termlab' Command in PATH", 'Application',
         'install cli path shell command terminal termlab symlink',

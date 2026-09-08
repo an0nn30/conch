@@ -13,6 +13,39 @@
     return client.invoke(command, args);
   }
 
+  function lspBridge() {
+    return global.termlabLspBridge || null;
+  }
+
+  function lspState() {
+    return global.termlabLspState || null;
+  }
+
+  function languageIdFor(filePath) {
+    const base = String(filePath || '').split('/').pop().toLowerCase();
+    const extension = base.includes('.') ? base.split('.').pop() : '';
+    if (['ts', 'tsx'].includes(extension)) return 'typescript';
+    if (['js', 'jsx', 'mjs', 'cjs'].includes(extension)) return 'javascript';
+    if (['json', 'jsonc'].includes(extension)) return 'json';
+    if (extension === 'py') return 'python';
+    if (extension === 'rs') return 'rust';
+    if (extension === 'go') return 'go';
+    if (extension === 'c') return 'c';
+    if (['cc', 'cpp', 'cxx', 'h', 'hpp', 'hxx'].includes(extension)) return 'cpp';
+    if (extension === 'java') return 'java';
+    // Empty/unknown deliberately lets the Rust catalog's file binding make
+    // the authoritative decision (or keep this as a plain local document).
+    return '';
+  }
+
+  function logLspError(operation, error) {
+    const bridge = lspBridge();
+    const normalized = bridge && typeof bridge.normalizeError === 'function'
+      ? bridge.normalizeError(error, operation)
+      : { message: 'Language features are unavailable; editing continues.' };
+    console.warn(`${normalized.message} (${operation})`);
+  }
+
   function toastError(title, body) {
     if (global.toast && typeof global.toast.error === 'function') {
       global.toast.error(title, body);
@@ -80,32 +113,149 @@
   // Opening a file that is already open focuses its tab instead of making a
   // second view of the same bytes — two editors on one path would each hold a
   // doc and the last save would silently win.
+  // Returns the pane it focused, or null. Callers that only care whether an
+  // editor was already open can test the result for truthiness; Go to
+  // Definition needs the pane itself, to select a range inside it.
   function focusExistingEditor(filePath) {
     // An untitled buffer has `filePath === null`, and two of those are not the
     // same file — they are two files that do not exist yet. Without this
     // guard, opening with a falsy path would match the first untitled pane and
     // hand the user their scratch buffer instead of the file they asked for.
-    if (!filePath) return false;
+    if (!filePath) return null;
     let found = null;
     eachEditorPane((pane) => {
       if (!found && pane.filePath && pane.filePath === filePath) found = pane;
     });
-    if (!found) return false;
+    if (!found) return null;
     const access = paneAccess();
     access.activateTab(found.tabId);
     access.setFocusedPane(found.paneId);
+    return found;
+  }
+
+  // A local pane exists before its reservation is committed. Keep that
+  // terminal ownership operation attached to the pane so a close cannot
+  // destroy the view and let a late manager response attach state to it.
+  const ownershipOpens = new WeakMap();
+
+  // Resolves with what happened, so a caller that has more to do at the target
+  // (Go to Definition selects a range there) can tell an opened pane from a
+  // focused one, and both from a document another WINDOW owns — where Rust has
+  // already focused the owner and this window must not reach further:
+  //
+  //   { status: 'opened' | 'focused', pane } | { status: 'ownerElsewhere' }
+  //   | { status: 'unavailable' } | { status: 'failed', error }
+  //
+  // Existing callers ignore the value; the flow is unchanged for them.
+  async function openLocalFile(filePath) {
+    if (bundleMissing()) return { status: 'unavailable' };
+    const existing = focusExistingEditor(filePath);
+    if (existing) return { status: 'focused', pane: existing };
+    const bridge = lspBridge();
+    let reservation = null;
+    try {
+      if (bridge && typeof bridge.reserveDocument === 'function') {
+        reservation = await bridge.reserveDocument(filePath);
+        if (!reservation || reservation.kind !== 'reserved') {
+          if (reservation && reservation.kind === 'focusOwner') await bridge.focusOwner(reservation);
+          return { status: 'ownerElsewhere', owner: reservation || null };
+        }
+      }
+      const canonicalPath = reservation && reservation.canonicalPath
+        ? reservation.canonicalPath
+        : filePath;
+      const contents = await invoke('editor_read_file', { path: canonicalPath });
+      let createdPane = null;
+      createEditorTab({
+        filePath: canonicalPath,
+        contents,
+        remote: null,
+        onPaneCreated: (pane) => { createdPane = pane; },
+      });
+      if (reservation && bridge) {
+        if (!createdPane) throw new Error('editor pane construction did not complete');
+        const ownershipOpen = { closing: false, promise: null };
+        ownershipOpen.promise = (async () => {
+          try {
+            const opened = await bridge.openDocument(
+              reservation.reservationId,
+              createdPane.paneId,
+              contents,
+              languageIdFor(canonicalPath),
+            );
+            reservation = null;
+            await attachOpenedDocument(createdPane, opened, contents).catch((error) => {
+              admissionFor(createdPane).desynchronized = true;
+              logLspError('reconcile opened document', error);
+            });
+            return { committed: true, documentId: opened.documentId };
+          } catch (error) {
+            await bridge.releaseDocument(reservation.reservationId).catch(() => {});
+            reservation = null;
+            logLspError('open document', error);
+            return { committed: false };
+          }
+        })();
+        ownershipOpens.set(createdPane, ownershipOpen);
+        await ownershipOpen.promise;
+        if (!ownershipOpen.closing && ownershipOpens.get(createdPane) === ownershipOpen) {
+          ownershipOpens.delete(createdPane);
+        }
+      }
+      return { status: 'opened', pane: createdPane };
+    } catch (error) {
+      if (reservation && bridge) {
+        await bridge.releaseDocument(reservation.reservationId).catch(() => {});
+      }
+      toastError('Cannot Open File', String(error));
+      return { status: 'failed', error };
+    }
+  }
+
+  // Select `range` in an open pane, centred, and (by default) put the keyboard
+  // back in the editor. Lives here rather than in a caller because the panes
+  // and their views are this module's to drive; where the range LANDS is
+  // lsp-position.js's answer, shared with every other surface that places one.
+  //
+  // With vim mounted on the view the range is NOT selected — the caret lands on
+  // its first character instead. CodeMirror's vim plugin reads a non-empty
+  // selection as visual mode, so selecting here silently put every jump's
+  // destination into visual mode: `<C-o>`/`<C-i>` (mapped normal-mode only)
+  // became unreachable while ordinary motions kept working, and a stray `d`
+  // would have deleted the selection. Landing a caret is also what vim itself
+  // does after a jump. This is the single chokepoint every navigation goes
+  // through — gd, a references pick, a history step, a jump to a problem — so
+  // it is the only place the rule has to hold.
+  function revealRange(pane, range, options) {
+    const CM = global.CM6;
+    const positions = global.termlabLspPosition;
+    if (!pane || !pane.view || !pane.view.state || !range || !range.start) return false;
+    if (!positions) return false;
+    const span = positions.spanOf(pane.view.state.doc, range);
+    const vim = global.termlabVimMode;
+    const vimMounted = !!(vim && typeof vim.isMountedOn === 'function' && vim.isMountedOn(pane.view));
+    const anchor = span.from;
+    const head = vimMounted ? span.from : span.to;
+    const spec = { selection: { anchor, head } };
+    if (CM && CM.EditorView && typeof CM.EditorView.scrollIntoView === 'function') {
+      spec.effects = CM.EditorView.scrollIntoView(anchor, { y: 'center' });
+    } else {
+      spec.scrollIntoView = true;
+    }
+    pane.view.dispatch(spec);
+    if (!options || options.focus !== false) {
+      if (typeof pane.view.focus === 'function') pane.view.focus();
+    }
     return true;
   }
 
-  async function openLocalFile(filePath) {
-    if (bundleMissing()) return;
-    if (focusExistingEditor(filePath)) return;
-    try {
-      const contents = await invoke('editor_read_file', { path: filePath });
-      createEditorTab({ filePath, contents, remote: null });
-    } catch (error) {
-      toastError('Cannot Open File', String(error));
-    }
+  // Open (or focus) a local file and land on `range`. The single entry point
+  // for "take me there": it keeps every navigation target inside the ownership
+  // protocol openLocalFile implements, and adds `revealed` to that answer.
+  async function openLocalFileAt(filePath, range, options) {
+    const result = await openLocalFile(filePath);
+    if (!result || !result.pane) return result;
+    return { ...result, revealed: revealRange(result.pane, range, options) };
   }
 
   // ---------------------------------------------------------------------------
@@ -392,28 +542,472 @@
     return !!error && error.name === 'SaveCancelled';
   }
 
+  // A pending CodeMirror ChangeSet is metadata, not a second copy of the
+  // document. Composing sets keeps every emitted offset relative to the one
+  // pre-change snapshot the manager versions.
+  const documentAdmissions = new WeakMap();
+
+  function admissionFor(pane) {
+    let admission = documentAdmissions.get(pane);
+    if (!admission) {
+      admission = {
+        sequence: 0,
+        processed: 0,
+        pending: null,
+        queue: [],
+        draining: null,
+        reconciling: null,
+        desynchronized: false,
+        expectedVersion: null,
+        closing: false,
+        closeInvalidated: false,
+        attachmentGeneration: 0,
+        barrierTickets: [],
+        operationTail: Promise.resolve(),
+      };
+      documentAdmissions.set(pane, admission);
+    }
+    return admission;
+  }
+
+  function promotePending(pane, admission, throughSequence) {
+    const pending = admission.pending;
+    if (!pending) return;
+    if (Number.isInteger(throughSequence) && pending.lastSequence > throughSequence) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    admission.pending = null;
+    admission.queue.push(pending);
+  }
+
+  function documentTransaction(pane, update) {
+    if (!pane || !update || !update.docChanged || !update.changes) return;
+    const admission = admissionFor(pane);
+    admission.sequence += 1;
+    if (admission.closing) admission.closeInvalidated = true;
+    let pending = admission.pending;
+    if (!pending) {
+      pending = {
+        changes: update.changes,
+        firstSequence: admission.sequence,
+        lastSequence: admission.sequence,
+        timer: null,
+      };
+      pending.timer = setTimeout(() => {
+        if (admission.pending !== pending) return;
+        promotePending(pane, admission);
+        drainThrough(pane, admission.sequence, false).catch((error) => logLspError('apply changes', error));
+      }, 40);
+      admission.pending = pending;
+      return;
+    }
+    if (pending.changes && typeof pending.changes.compose === 'function') {
+      pending.changes = pending.changes.compose(update.changes);
+      pending.lastSequence = admission.sequence;
+    } else {
+      // Test doubles and older CodeMirror shims may not expose compose. Flush
+      // the admitted snapshot before starting the next one rather than ever
+      // combining offsets from different snapshots.
+      promotePending(pane, admission);
+      const next = {
+        changes: update.changes,
+        firstSequence: admission.sequence,
+        lastSequence: admission.sequence,
+        timer: null,
+      };
+      next.timer = setTimeout(() => {
+        if (admission.pending !== next) return;
+        promotePending(pane, admission);
+        drainThrough(pane, admission.sequence, false).catch((error) => logLspError('apply changes', error));
+      }, 40);
+      admission.pending = next;
+      drainThrough(pane, pending.lastSequence, false).catch((error) => logLspError('apply changes', error));
+    }
+  }
+
+  async function flushChangeSet(pane, changes, admission) {
+    const bridge = lspBridge();
+    const stateStore = lspState();
+    const document = stateStore && stateStore.get(pane);
+    if (!bridge || !document || !changes || typeof changes.iterChanges !== 'function') return;
+    const edits = [];
+    changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+      edits.push({
+        fromUtf16: fromA,
+        toUtf16: toA,
+        insertedText: inserted && typeof inserted.toString === 'function' ? inserted.toString() : '',
+      });
+    });
+    if (!edits.length) return;
+    edits.sort((left, right) => right.fromUtf16 - left.fromUtf16 || right.toUtf16 - left.toUtf16);
+    const baseVersion = document.version;
+    const nextVersion = baseVersion + 1;
+    const attachmentGeneration = admission.attachmentGeneration;
+    const documentId = document.documentId;
+    const result = await bridge.applyChanges(document.documentId, {
+      documentId: document.documentId,
+      baseVersion,
+      nextVersion,
+      changes: edits,
+    });
+    const currentDocument = stateStore.get(pane);
+    if (
+      admission.attachmentGeneration !== attachmentGeneration
+      || !currentDocument
+      || currentDocument.documentId !== documentId
+    ) return;
+    if (result && result.kind === 'applied') {
+      stateStore.setVersion(pane, result.version);
+      return;
+    }
+    if (result && result.kind === 'resyncRequired' && pane.view) {
+      admission.desynchronized = true;
+      admission.expectedVersion = Number(result.expectedVersion);
+      return;
+    }
+    throw new Error('language manager returned an uncertain change outcome');
+  }
+
+  function discardAdmissionsThrough(admission, sequence) {
+    if (admission.pending && admission.pending.lastSequence <= sequence) {
+      if (admission.pending.timer) clearTimeout(admission.pending.timer);
+      admission.pending = null;
+    }
+    admission.queue = admission.queue.filter((entry) => entry.lastSequence > sequence);
+    admission.processed = Math.max(admission.processed, sequence);
+  }
+
+  async function resyncSnapshot(pane, admission, throughSequence, contents, expectedVersion) {
+    const stateStore = lspState();
+    const document = stateStore && stateStore.get(pane);
+    const bridge = lspBridge();
+    if (!document || !bridge) return;
+    const baseVersion = Number.isInteger(expectedVersion)
+      ? Math.max(document.version, expectedVersion)
+      : document.version;
+    const version = baseVersion + 1;
+    const attachmentGeneration = admission.attachmentGeneration;
+    const documentId = document.documentId;
+    const resynced = await bridge.resyncDocument(document.documentId, version, contents);
+    const currentDocument = stateStore.get(pane);
+    if (
+      admission.attachmentGeneration !== attachmentGeneration
+      || !currentDocument
+      || currentDocument.documentId !== documentId
+    ) return;
+    stateStore.setVersion(
+      pane,
+      resynced && Number.isInteger(resynced.version) ? resynced.version : version,
+    );
+    if (resynced && resynced.status) stateStore.updateStatus(resynced.status);
+    discardAdmissionsThrough(admission, throughSequence);
+    admission.desynchronized = false;
+    admission.expectedVersion = null;
+  }
+
+  async function drainQueue(pane, admission, targetSequence, snapshotContents) {
+    if (admission.reconciling) await admission.reconciling;
+    while (admission.queue.length && admission.queue[0].lastSequence <= targetSequence) {
+      if (admission.desynchronized) {
+        const contents = typeof snapshotContents === 'string'
+          ? snapshotContents
+          : (pane.view && pane.view.state.doc.toString());
+        if (typeof contents !== 'string') throw new Error('editor text is unavailable for resync');
+        await resyncSnapshot(
+          pane,
+          admission,
+          targetSequence,
+          contents,
+          admission.expectedVersion,
+        );
+        continue;
+      }
+      const entry = admission.queue.shift();
+      try {
+        await flushChangeSet(pane, entry.changes, admission);
+      } catch (error) {
+        admission.desynchronized = true;
+        logLspError('apply changes', error);
+      }
+      admission.processed = Math.max(admission.processed, entry.lastSequence);
+    }
+  }
+
+  async function drainThrough(pane, targetSequence, synchronize, snapshotContents) {
+    const admission = admissionFor(pane);
+    const earliestTicket = admission.barrierTickets[0];
+    const cappedTarget = earliestTicket
+      ? Math.min(targetSequence, earliestTicket.targetSequence)
+      : targetSequence;
+    promotePending(pane, admission, cappedTarget);
+    const stateStore = lspState();
+    if (!stateStore || !stateStore.get(pane)) return;
+    const hasEligibleQueue = () => (
+      admission.queue.length > 0 && admission.queue[0].lastSequence <= cappedTarget
+    );
+    while (admission.processed < cappedTarget || hasEligibleQueue() || admission.reconciling) {
+      if (!admission.draining) {
+        let current = null;
+        current = drainQueue(pane, admission, cappedTarget, snapshotContents).finally(() => {
+          if (admission.draining === current) admission.draining = null;
+        });
+        admission.draining = current;
+      }
+      await admission.draining;
+      promotePending(pane, admission, cappedTarget);
+      if (!hasEligibleQueue() && admission.processed < cappedTarget) break;
+    }
+    if (synchronize && admission.desynchronized) {
+      const contents = typeof snapshotContents === 'string'
+        ? snapshotContents
+        : (pane.view && pane.view.state.doc.toString());
+      if (typeof contents !== 'string') throw new Error('editor text is unavailable for resync');
+      await resyncSnapshot(pane, admission, cappedTarget, contents, admission.expectedVersion);
+    }
+  }
+
+  async function flushDocument(pane) {
+    const admission = admissionFor(pane);
+    const targetSequence = admission.sequence;
+    const contents = pane.view && pane.view.state.doc.toString();
+    promotePending(pane, admission, targetSequence);
+    await drainThrough(pane, targetSequence, true, contents);
+    return { targetSequence, contents };
+  }
+
+  function resumeBackgroundDrain(pane, admission) {
+    Promise.resolve().then(() => {
+      if (admission.closing) return;
+      const earliestTicket = admission.barrierTickets[0];
+      const targetSequence = earliestTicket
+        ? Math.min(admission.sequence, earliestTicket.targetSequence)
+        : admission.sequence;
+      const contents = pane.view && pane.view.state.doc.toString();
+      promotePending(pane, admission, targetSequence);
+      drainThrough(pane, targetSequence, false, contents)
+        .catch((error) => logLspError('apply changes', error));
+    });
+  }
+
+  function closeInProgressError() {
+    return new Error('editor close is in progress');
+  }
+
+  function withFixedBarrier(pane, operation) {
+    const admission = admissionFor(pane);
+    if (admission.closing) return Promise.reject(closeInProgressError());
+    const requestedTargetSequence = admission.sequence;
+    const requestedContents = pane.view && pane.view.state.doc.toString();
+    promotePending(pane, admission, requestedTargetSequence);
+    const ticket = {
+      targetSequence: requestedTargetSequence,
+      contents: requestedContents,
+    };
+    admission.barrierTickets.push(ticket);
+    const previous = admission.operationTail;
+    const current = previous.catch(() => {}).then(async () => {
+      const targetSequence = ticket.targetSequence;
+      const contents = ticket.contents;
+      let synchronizationError = null;
+      try {
+        await drainThrough(pane, targetSequence, true, contents);
+      } catch (error) {
+        synchronizationError = error;
+      }
+      const stateStore = lspState();
+      const document = stateStore && stateStore.get(pane);
+      const attachmentGeneration = admission.attachmentGeneration;
+      try {
+        return await operation({
+          targetSequence,
+          contents,
+          synchronizationError,
+          document,
+          version: document && document.version,
+          attachmentGeneration,
+        });
+      } finally {
+        const ticketIndex = admission.barrierTickets.indexOf(ticket);
+        if (ticketIndex >= 0) admission.barrierTickets.splice(ticketIndex, 1);
+        resumeBackgroundDrain(pane, admission);
+      }
+    });
+    admission.operationTail = current.then(() => undefined, () => undefined);
+    return current;
+  }
+
+  async function attachOpenedDocument(pane, opened, openedContents) {
+    const stateStore = lspState();
+    if (!stateStore || typeof stateStore.attach !== 'function') return null;
+    const admission = admissionFor(pane);
+    admission.attachmentGeneration += 1;
+    const state = stateStore.attach(pane, opened);
+    const throughSequence = admission.sequence;
+    const currentContents = pane.view && pane.view.state.doc.toString();
+    if (typeof currentContents !== 'string' || currentContents === openedContents) {
+      discardAdmissionsThrough(admission, throughSequence);
+      return state;
+    }
+    let reconcile = null;
+    reconcile = resyncSnapshot(pane, admission, throughSequence, currentContents).finally(() => {
+      if (admission.reconciling === reconcile) admission.reconciling = null;
+    });
+    admission.reconciling = reconcile;
+    await reconcile;
+    return stateStore.get(pane);
+  }
+
+  const closesInFlight = new WeakMap();
+
+  function restoreClosePreparation(panes) {
+    for (const pane of panes) {
+      const admission = admissionFor(pane);
+      admission.closing = false;
+      admission.closeInvalidated = false;
+      if (pane.view && typeof pane.view.termlabSetReadOnly === 'function') {
+        pane.view.termlabSetReadOnly(false);
+      }
+      resumeBackgroundDrain(pane, admission);
+    }
+  }
+
+  async function closeDocumentGroup(panes) {
+    const stateStore = lspState();
+    const priorOperations = new Map();
+    for (const pane of panes) {
+      const admission = admissionFor(pane);
+      admission.closing = true;
+      admission.closeInvalidated = false;
+      if (pane.view && typeof pane.view.termlabSetReadOnly === 'function') {
+        pane.view.termlabSetReadOnly(true);
+      }
+    }
+    for (const pane of panes) {
+      priorOperations.set(pane, admissionFor(pane).operationTail);
+    }
+    try {
+      for (const pane of panes) {
+        const ownershipOpen = ownershipOpens.get(pane);
+        if (ownershipOpen) {
+          ownershipOpen.closing = true;
+          await ownershipOpen.promise;
+          if (ownershipOpens.get(pane) === ownershipOpen) ownershipOpens.delete(pane);
+        }
+      }
+      await Promise.all(panes.map(async (pane) => {
+        await priorOperations.get(pane);
+        await flushDocument(pane);
+      }));
+      if (panes.some((pane) => admissionFor(pane).closeInvalidated)) {
+        restoreClosePreparation(panes);
+        return false;
+      }
+      const documents = panes
+        .map((pane) => stateStore && stateStore.get(pane))
+        .filter(Boolean);
+      const documentIds = documents.map((document) => document.documentId);
+      if (documentIds.length === 1) {
+        await lspBridge().closeDocument(documentIds[0]);
+      } else if (documentIds.length > 1) {
+        await lspBridge().closeDocuments(documentIds);
+      }
+      for (const pane of panes) {
+        documentAdmissions.delete(pane);
+        if (stateStore) stateStore.clear(pane);
+      }
+      return true;
+    } catch (error) {
+      restoreClosePreparation(panes);
+      logLspError('close document', error);
+      return false;
+    }
+  }
+
+  function closeDocuments(panes) {
+    const uniquePanes = Array.from(new Set((panes || []).filter(Boolean)));
+    if (!uniquePanes.length) return Promise.resolve(true);
+    const existing = uniquePanes.map((pane) => closesInFlight.get(pane)).filter(Boolean);
+    if (existing.length) {
+      const shared = existing[0];
+      return uniquePanes.every((pane) => closesInFlight.get(pane) === shared)
+        ? shared
+        : Promise.resolve(false);
+    }
+    let closing = null;
+    closing = closeDocumentGroup(uniquePanes).finally(() => {
+      for (const pane of uniquePanes) {
+        if (closesInFlight.get(pane) === closing) closesInFlight.delete(pane);
+      }
+    });
+    for (const pane of uniquePanes) closesInFlight.set(pane, closing);
+    return closing;
+  }
+
+  function closeDocument(pane) {
+    return closeDocuments([pane]);
+  }
+
+  async function requestFeature(pane, kind, position, trigger) {
+    const bridge = lspBridge();
+    const stateStore = lspState();
+    if (!bridge || typeof bridge[kind] !== 'function') return null;
+    if (admissionFor(pane).closing) return null;
+    return withFixedBarrier(pane, async (barrier) => {
+      const document = barrier.document;
+      if (!document || barrier.synchronizationError) {
+        if (barrier.synchronizationError) logLspError(kind, barrier.synchronizationError);
+        return null;
+      }
+      try {
+        const result = await bridge[kind](document.documentId, position, trigger || null);
+        const current = stateStore && stateStore.get(pane);
+        const admission = admissionFor(pane);
+        if (
+          admission.sequence !== barrier.targetSequence
+          || admission.attachmentGeneration !== barrier.attachmentGeneration
+          || !current
+          || current.documentId !== document.documentId
+          || current.version !== barrier.version
+        ) return null;
+        return result;
+      } catch (error) {
+        logLspError(kind, error);
+        return null;
+      }
+    });
+  }
+
   // One write. Rejects on failure so callers can decide what a failure means;
   // saveActiveEditor turns it into a toast, the close guards turn it into a
   // refusal to close.
   async function writeOnce(pane) {
-    const contents = pane.view.state.doc.toString();
-    await invoke('editor_write_file', { path: pane.filePath, contents });
+    return withFixedBarrier(pane, async (barrier) => {
+      const managerSynchronized = !barrier.synchronizationError;
+      if (barrier.synchronizationError) {
+        logLspError('flush before save', barrier.synchronizationError);
+      }
+      const contents = barrier.contents;
+      await invoke('editor_write_file', { path: pane.filePath, contents });
     // For a remote file the local write is a staging step, not the save: what
     // "saved" means is that the bytes reached the host. Uploading BEFORE the
     // dirty reset is what makes a failed upload leave the pane dirty, so the
     // close guards still refuse to discard the tab and the temp file is not
     // deleted out from under an edit that never got off this machine. A local
     // pane has no remote and so is unaffected.
-    if (pane.remote) await uploadRemote(pane);
+      if (pane.remote) await uploadRemote(pane);
+      const document = barrier.document;
+      if (managerSynchronized && document && lspBridge()) {
+        await lspBridge().didSave(document.documentId).catch((error) => logLspError('did save', error));
+      }
     // `dirty` is a plain boolean, not a diff against the document, and the
     // update listener stops firing once it is set. So a keystroke that lands
     // between the snapshot above and this line is on screen but not in the
     // file — clearing the flag unconditionally would mark it saved and, once
     // the close guards read pane.dirty, discard it without a prompt. Only
     // reset when the buffer still matches the bytes that were written.
-    if (pane.view && pane.view.state.doc.toString() === contents) {
-      pane.view.termlabResetDirty();
-    }
+      if (pane.view && pane.view.state.doc.toString() === contents) {
+        pane.view.termlabResetDirty();
+      }
+    });
   }
 
   // The write currently in flight for a pane, if any. Two overlapping writes
@@ -437,6 +1031,7 @@
   // guards need to save panes that are not focused.
   async function savePane(pane, options) {
     if (!pane || pane.kind !== 'editor' || !pane.view) return;
+    if (admissionFor(pane).closing) throw closeInProgressError();
 
     // THE CHOKE POINT. A pane with no path cannot be written anywhere, so
     // every save path — ⌘S, `:w`, `:wq`, the close guards' Save — asks where
@@ -529,6 +1124,14 @@
     });
     savesInFlight.set(pane, inFlight);
     await inFlight;
+
+    // A save is the one project-tree refresh trigger the app knows about
+    // precisely; git-tints.js listens for it.
+    if (typeof global.dispatchEvent === 'function' && typeof global.CustomEvent === 'function') {
+      global.dispatchEvent(new global.CustomEvent('termlab:editor-saved', {
+        detail: { path: pane.filePath || null },
+      }));
+    }
   }
 
   async function saveActiveEditor() {
@@ -779,7 +1382,17 @@
   // Everything fallible, then the atomic rebind. Never called directly —
   // saveAs owns the in-flight guard around it.
   async function writeElsewhere(pane, target) {
-    const contents = pane.view.state.doc.toString();
+    return withFixedBarrier(pane, async (barrier) => {
+      if (barrier.synchronizationError) {
+        logLspError('flush before Save As', barrier.synchronizationError);
+        throw barrier.synchronizationError;
+      }
+      return writeElsewhereAtBarrier(pane, target, barrier);
+    });
+  }
+
+  async function writeElsewhereAtBarrier(pane, target, barrier) {
+    const contents = barrier.contents;
     // Captured BEFORE anything is written: after the rebind, `pane.remote` is
     // the new binding and this file would be unreachable.
     const oldTemp = pane.remote && pane.filePath ? pane.filePath : null;
@@ -787,6 +1400,11 @@
     let nextFilePath;
     let nextRemote;
     let displayName;
+    let targetReservation = null;
+    let targetCommitted = false;
+    const bridge = lspBridge();
+    const stateStore = lspState();
+    const sourceDocument = barrier.document;
     if (target.scope === 'remote') {
       nextRemote = {
         paneId: target.paneId,
@@ -803,65 +1421,118 @@
       });
     } else {
       nextRemote = null;
-      nextFilePath = target.path;
+      if (bridge && typeof bridge.reserveDocument === 'function') {
+        targetReservation = await bridge.reserveDocument(target.path);
+        if (!targetReservation || targetReservation.kind !== 'reserved') {
+          if (targetReservation && targetReservation.kind === 'focusOwner') {
+            await bridge.focusOwner(targetReservation);
+          }
+          throw new Error(`"${basename(target.path)}" is open in another tab; close it before saving over it.`);
+        }
+      }
+      nextFilePath = targetReservation && targetReservation.canonicalPath
+        ? targetReservation.canonicalPath
+        : target.path;
       displayName = basename(target.path);
     }
 
-    if (pathHeldByAnotherPane(pane, nextFilePath)) {
-      throw new Error(`"${displayName}" is open in another tab; close it before saving over it.`);
-    }
-
-    await invoke('editor_write_file', { path: nextFilePath, contents });
-    if (nextRemote) {
-      try {
-        await uploadTo(nextRemote, nextFilePath);
-      } catch (error) {
-        // The staged file at nextFilePath is deliberately NOT deleted. It may
-        // be the temp path of a remote file another tab holds (editor_temp_path
-        // is a pure function of host+path), and editor_temp_cleanup also
-        // removes the parent directories it empties — so deleting here could
-        // take out a file this pane never owned. Litter in the temp root is
-        // the cheaper mistake.
-        throw error;
+    try {
+      if (pathHeldByAnotherPane(pane, nextFilePath)) {
+        throw new Error(`"${displayName}" is open in another tab; close it before saving over it.`);
       }
-    }
 
-    // ----- the rebind: one synchronous block, no awaits -----
-    pane.filePath = nextFilePath;
-    pane.remote = nextRemote;
+      await invoke('editor_write_file', { path: nextFilePath, contents });
+      if (nextRemote) {
+        await uploadTo(nextRemote, nextFilePath);
+      }
+
+      // Commit ownership after every target-side failure point, while the
+      // pane still has its old identity. Any failure here therefore leaves
+      // both the source binding and buffer intact.
+      if (targetReservation && bridge) {
+        if (sourceDocument) {
+          const transferred = await bridge.transferDocument(
+            sourceDocument.documentId,
+            targetReservation.reservationId,
+            pane.paneId,
+          );
+          targetCommitted = true;
+          await attachOpenedDocument(pane, transferred, contents).catch((error) => {
+            admissionFor(pane).desynchronized = true;
+            logLspError('reconcile transferred document', error);
+          });
+        } else {
+          const opened = await bridge.openDocument(
+            targetReservation.reservationId,
+            pane.paneId,
+            contents,
+            languageIdFor(nextFilePath),
+          );
+          targetCommitted = true;
+          await attachOpenedDocument(pane, opened, contents).catch((error) => {
+            admissionFor(pane).desynchronized = true;
+            logLspError('reconcile saved document', error);
+          });
+        }
+      } else if (nextRemote && sourceDocument && bridge) {
+        await bridge.closeDocument(sourceDocument.documentId);
+        if (stateStore) stateStore.clear(pane);
+      }
+
+      // ----- the rebind: one synchronous block, no awaits -----
+      pane.filePath = nextFilePath;
+      pane.remote = nextRemote;
     // Same rule as writeOnce: only claim the buffer is saved if it still
     // matches the bytes that were written. A keystroke during the upload
     // leaves the rebound pane honestly dirty. This runs before the cosmetic
-    // steps below so the dirty flag reflects the bytes that actually landed,
-    // regardless of whether relabelling succeeds.
-    if (pane.view && pane.view.state.doc.toString() === contents) {
-      pane.view.termlabResetDirty();
-    }
+      // steps below so the dirty flag reflects the bytes that actually landed,
+      // regardless of whether relabelling succeeds.
+      if (pane.view && pane.view.state.doc.toString() === contents) {
+        try {
+          pane.view.termlabResetDirty();
+        } catch (error) {
+          console.error('Save As: resetting the committed pane dirty state failed', error);
+        }
+      }
     // The write (and upload, if any) already succeeded once execution
     // reaches here — announce that now, not after the cosmetic steps below.
-    if (nextRemote) toastSuccess('Saved', `${nextRemote.hostLabel}:${nextRemote.remotePath}`);
+      if (nextRemote) {
+        try {
+          toastSuccess('Saved', `${nextRemote.hostLabel}:${nextRemote.remotePath}`);
+        } catch (error) {
+          console.error('Save As: announcing the committed remote save failed', error);
+        }
+      }
     // The bytes landed and the identity above is already committed: nothing
     // past this point may turn a real save into "Save As Failed". A bad tab
     // caption or language guess is cosmetic, so it is caught and logged
     // rather than thrown — otherwise a throw here would reject the whole
     // operation with a message claiming the rebind never happened, when it
     // already had.
-    try {
-      refreshTabLabel(pane);
-      setPaneLanguage(pane.view, displayName);
-      // Same event, same reasoning as the language above: the pane's name has
-      // changed, so what it renders as has to change with it. `notes.md` saved
-      // as `notes.txt` drops out of preview here.
-      applyPreviewMode(pane);
-    } catch (error) {
-      console.error('Save As: relabelling the rebound pane failed', error);
-    }
-    // ----- end of the rebind -----
+      try {
+        refreshTabLabel(pane);
+        setPaneLanguage(pane.view, displayName);
+        // Same event, same reasoning as the language above: the pane's name has
+        // changed, so what it renders as has to change with it. `notes.md` saved
+        // as `notes.txt` drops out of preview here.
+        applyPreviewMode(pane);
+      } catch (error) {
+        console.error('Save As: relabelling the rebound pane failed', error);
+      }
+      // ----- end of the rebind -----
 
-    // Only now, and only a temp file this pane owned. Before the rebind this
-    // would delete the pane's own backing file while it still pointed at it.
-    if (oldTemp && oldTemp !== nextFilePath) {
-      invoke('editor_temp_cleanup', { path: oldTemp }).catch(() => {});
+      // Only now, and only a temp file this pane owned. Before the rebind this
+      // would delete the pane's own backing file while it still pointed at it.
+      if (oldTemp && oldTemp !== nextFilePath) {
+        try {
+          invoke('editor_temp_cleanup', { path: oldTemp }).catch(() => {});
+        } catch (_) {}
+      }
+    } catch (error) {
+      if (targetReservation && !targetCommitted && bridge) {
+        await bridge.releaseDocument(targetReservation.reservationId).catch(() => {});
+      }
+      throw error;
     }
   }
 
@@ -875,6 +1546,7 @@
    */
   async function saveAs(pane, target) {
     if (!pane || pane.kind !== 'editor' || !pane.view) return;
+    if (admissionFor(pane).closing) throw closeInProgressError();
     if (!target || (target.scope !== 'local' && target.scope !== 'remote')) {
       throw new Error(`Save As: unknown target scope ${target && target.scope}`);
     }
@@ -926,6 +1598,8 @@
 
   global.termlabEditorService = {
     openLocalFile,
+    openLocalFileAt,
+    revealRange,
     openRemoteFile,
     openUntitled,
     saveActiveEditor,
@@ -937,5 +1611,10 @@
     discardRemoteTemp,
     cancelPendingChooser,
     uploadRemote,
+    documentTransaction,
+    flushDocument,
+    closeDocument,
+    closeDocuments,
+    requestFeature,
   };
 })(window);

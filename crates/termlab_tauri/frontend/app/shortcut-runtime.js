@@ -1,4 +1,12 @@
 (function initTermLabShortcutRuntime(global) {
+  // The on-disk diagnostic log (features/diagnostics/diag-log.js). Guarded and
+  // fire-and-forget, so a window without it — or without Tauri at all, which is
+  // every headless harness — costs one property lookup and nothing else.
+  function diagLog(message) {
+    const diag = global.termlabDiag;
+    if (diag && typeof diag.log === 'function') diag.log('vim-nav', message);
+  }
+
   function create(deps) {
     const invoke = deps.invoke;
     const isMacPlatform = deps.isMacPlatform;
@@ -58,6 +66,15 @@
       // so gating it on already having one would make it unreachable from a
       // fresh window. The cost is that cmd+o no longer reaches the shell.
       open_file: 'open-file',
+      editor_completion: 'editor-completion',
+      editor_signature_help: 'editor-signature-help',
+      editor_go_to_definition: 'editor-go-to-definition',
+      editor_find_references: 'editor-find-references',
+      editor_navigate_back: 'editor-navigate-back',
+      editor_navigate_forward: 'editor-navigate-forward',
+      editor_next_problem: 'editor-next-problem',
+      editor_previous_problem: 'editor-previous-problem',
+      search_in_project: 'search-in-project',
       // Handled inline in runShortcutFallbacks rather than through
       // handleMenuAction: it is not a menu item, and it is consumed only by a
       // pane that has a preview (see togglePreviewOnFocusedPane).
@@ -67,7 +84,56 @@
     // Core actions that mean something only inside a focused editor pane. A
     // hit on one of these with any other pane focused is DROPPED rather than
     // consumed — see runShortcutFallbacks.
-    const EDITOR_SCOPED_ACTIONS = ['save-file', 'save-file-as'];
+    const EDITOR_SCOPED_ACTIONS = [
+      'save-file',
+      'save-file-as',
+      'editor-completion',
+      'editor-signature-help',
+      'editor-go-to-definition',
+      'editor-find-references',
+      'editor-navigate-back',
+      'editor-navigate-forward',
+      'editor-next-problem',
+      'editor-previous-problem',
+    ];
+
+    // Core actions that mean something only in a window that has a project.
+    // The Search tool window is only ever registered when
+    // termlabProjectMode.isActive() — see tool-window-runtime.js — so
+    // claiming the combo in a plain terminal window would swallow it for
+    // nothing: menu-actions.js's 'search-in-project' branch would just no-op
+    // against an id toolWindowManager never registered. Dropped, exactly
+    // like EDITOR_SCOPED_ACTIONS, so cmd+shift+f still reaches the shell (or
+    // any tool-window/plugin binding on the same combo) there.
+    const PROJECT_SCOPED_ACTIONS = ['search-in-project'];
+
+    // The Terminal tool window hosts a real xterm that is NOT the focused
+    // pane — it has no tab, so getCurrentPane() keeps reporting whatever the
+    // main area last focused (in a project window, typically an editor). Left
+    // to that alone, cmd+s typed into the panel terminal would save a file
+    // instead of reaching the shell. Asking the panel directly is what makes
+    // it count as a terminal context, exactly like a terminal tab.
+    function terminalToolWindowFocused() {
+      const panel = global.termlabTerminalPanel;
+      return !!(panel && typeof panel.hasFocus === 'function' && panel.hasFocus());
+    }
+
+    function hasProject() {
+      const projectMode = global.termlabProjectMode;
+      return !!(projectMode && typeof projectMode.isActive === 'function' && projectMode.isActive());
+    }
+
+    function runCoreAction(action) {
+      if (action === 'select-tab-left') cycleTab(-1);
+      else if (action === 'select-tab-right') cycleTab(1);
+      else if (action === 'navigate-pane-up') navigatePane('up');
+      else if (action === 'navigate-pane-down') navigatePane('down');
+      else if (action === 'navigate-pane-left') navigatePane('left');
+      else if (action === 'navigate-pane-right') navigatePane('right');
+      else if (action.startsWith('editor-')) {
+        global.dispatchEvent(new global.CustomEvent(`termlab:${action}`));
+      } else handleMenuAction(action);
+    }
 
     // Cycle the focused pane's markdown preview, reporting whether there was
     // one to cycle.
@@ -124,7 +190,7 @@
       if (/^Digit([0-9])$/.test(code)) return code[5];
       if (/^Key([A-Z])$/.test(code)) return code.slice(3).toLowerCase();
       const map = {
-        Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[',
+        Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', Space: 'space',
         BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'",
         Comma: ',', Period: '.', Slash: '/',
       };
@@ -278,10 +344,14 @@
         let suppressedCoreAction = null;
         if (coreHit && EDITOR_SCOPED_ACTIONS.indexOf(coreHit.action) !== -1) {
           const pane = getCurrentPane();
-          if (!pane || pane.kind !== 'editor') {
+          if (terminalToolWindowFocused() || !pane || pane.kind !== 'editor') {
             suppressedCoreAction = coreHit.action;
             coreHit = null;
           }
+        }
+        if (coreHit && PROJECT_SCOPED_ACTIONS.indexOf(coreHit.action) !== -1 && !hasProject()) {
+          suppressedCoreAction = coreHit.action;
+          coreHit = null;
         }
         // Same drop-don't-consume treatment as the saves above. Recording the
         // suppression matters here for a second reason: 'toggle-preview' is
@@ -295,13 +365,7 @@
           coreHit = null;
         }
         if (coreHit) {
-          if (coreHit.action === 'select-tab-left') cycleTab(-1);
-          else if (coreHit.action === 'select-tab-right') cycleTab(1);
-          else if (coreHit.action === 'navigate-pane-up') navigatePane('up');
-          else if (coreHit.action === 'navigate-pane-down') navigatePane('down');
-          else if (coreHit.action === 'navigate-pane-left') navigatePane('left');
-          else if (coreHit.action === 'navigate-pane-right') navigatePane('right');
-          else handleMenuAction(coreHit.action);
+          runCoreAction(coreHit.action);
           return true;
         }
 
@@ -311,7 +375,7 @@
           && !(suppressedCoreAction && s.kind === 'core' && s.action === suppressedCoreAction));
         if (fKeyHit) {
           if (fKeyHit.kind === 'core') {
-            handleMenuAction(fKeyHit.action);
+            runCoreAction(fKeyHit.action);
           } else if (fKeyHit.kind === 'tool-window') {
             if (window.toolWindowManager) {
               window.toolWindowManager.toggle(fKeyHit.windowId);
@@ -355,7 +419,16 @@
         const key = (event.key || '').toLowerCase();
         const superPressed = isMacPlatform ? event.metaKey : (event.metaKey || event.ctrlKey);
         if (!superPressed || !event.shiftKey || key !== 'p') return false;
-        if (isTextInputTarget(event.target)) return false;
+        // Deliberately NO isTextInputTarget guard, unlike runShortcutFallbacks
+        // above. That guard protects bare and lightly-modified plugin combos
+        // from stealing typed text; cmd+shift+p (ctrl+shift+p off macOS) is a
+        // chord no text field can produce, and the palette has to be reachable
+        // from every surface. With the guard, a focused editor pane — whose
+        // CodeMirror content element is contenteditable — swallowed the chord
+        // outright, and the toggle-closed branch below was dead code besides:
+        // the palette focuses its own <input> on open, so the second press
+        // always landed on a text input. See
+        // scripts/tests/test_shortcut_palette_in_editor.mjs.
         if (isCommandPaletteOpen()) closeCommandPalette();
         else openCommandPalette();
         return true;
@@ -374,6 +447,10 @@
         if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return false;
         if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return false;
         if (isTextInputTarget(event.target) || isTextInputTarget(document.activeElement)) return false;
+        // The panel terminal has macOptionIsMeta on like every other xterm in
+        // the app, so it produces the sequence itself; writing to the focused
+        // PANE here would send it to the wrong terminal entirely.
+        if (terminalToolWindowFocused()) return false;
         const pane = getCurrentPane();
         if (!pane || pane.kind !== 'terminal' || !pane.term) return false;
         const seq = event.key === 'ArrowLeft' ? '\x1b[1;3D' : '\x1b[1;3C';
@@ -382,12 +459,36 @@
       };
 
       if (keyboardRouter && typeof keyboardRouter.register === 'function') {
+        // Stage 1 of the vim jump-trail diagnostic
+        // (features/editor/vim-jump-trace.js): what the capture-phase router
+        // actually received for Ctrl-O / Ctrl-I.
+        //
+        // Deliberately ABOVE every consumer rather than beside the
+        // [termlab-keydbg] handlers below, which sit at 25 and therefore never
+        // see a key some higher handler already claimed — "who ate it" is the
+        // question, so the observer has to run first. It NEVER consumes
+        // (always returns false), so arming the trace cannot change which
+        // handler wins; the trace module itself is off unless the palette
+        // toggled it on, and filters everything but Ctrl-I/Ctrl-O.
+        keyboardRouter.register({
+          name: 'vim-jump-trace',
+          priority: 900,
+          onKeyDown: (event) => {
+            const trace = global.termlabVimJumpTrace;
+            if (trace && typeof trace.noteKey === 'function') trace.noteKey(event);
+            return false;
+          },
+        });
         keyboardRouter.register({
           name: 'shortcut-debug-down',
           priority: 25,
           onKeyDown: (event) => {
             if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return false;
-            console.log('[termlab-keydbg] keydown(capture)', formatKeyEventForDebug(event));
+            const described = formatKeyEventForDebug(event);
+            console.log('[termlab-keydbg] keydown(capture)', described);
+            // And to ~/.config/termlab/logs/frontend.log, because a WKWebView's
+            // console is not somewhere a bug report can be read from.
+            diagLog(`keydbg keydown(capture) ${described}`);
             return false;
           },
         });
@@ -396,7 +497,9 @@
           priority: 25,
           onKeyUp: (event) => {
             if (!shortcutDebugEnabled || !shouldDebugKeyEvent(event)) return false;
-            console.log('[termlab-keydbg] keyup(capture)', formatKeyEventForDebug(event));
+            const described = formatKeyEventForDebug(event);
+            console.log('[termlab-keydbg] keyup(capture)', described);
+            diagLog(`keydbg keyup(capture) ${described}`);
             return false;
           },
         });

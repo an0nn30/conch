@@ -82,6 +82,16 @@
             if (layoutRuntime && layoutRuntime.rebuildTreeDOM) return layoutRuntime.rebuildTreeDOM(tab);
             return rebuildTreeDOM(tab);
           },
+          // Every focus change in the window, whatever caused it — a tab
+          // click, an open from the explorer, the palette or the CLI, a
+          // split-pane focus. The navigator turns a change of DOCUMENT into a
+          // jump-trail entry, so Ctrl-O comes back from a file you opened by
+          // hand; it ignores the ones it caused itself.
+          onFocusedPaneChanged: (previousPane, nextPane) => {
+            const navigation = global.termlabLspNavigation;
+            if (!navigation || typeof navigation.noteFocusedPaneChanged !== 'function') return;
+            navigation.noteFocusedPaneChanged(previousPane, nextPane);
+          },
           onTerminalFocused: (paneId, pane) => {
             if (global.filesPanel) global.filesPanel.onTabChanged(pane);
             publishActivePaneChanged(pane);
@@ -123,7 +133,7 @@
               console.error('write_to_pty error:', event);
             });
           },
-          spawnShell: (paneId, cols, rows) => invoke('spawn_shell', { paneId, cols, rows }),
+          spawnShell: (paneId, cols, rows, cwd) => invoke('spawn_shell', { paneId, cols, rows, cwd: cwd || null }),
           spawnDefaultShell: (paneId, cols, rows) => invoke('spawn_default_shell', { paneId, cols, rows }),
           allocatePaneId: () => allocPaneId(),
           splitLeaf: (treeRoot, sourcePaneId, newPaneId, direction) => (
@@ -260,7 +270,7 @@
               console.error(cmd + ' error:', event);
             });
           },
-          spawnShell: (paneId, cols, rows) => invoke('spawn_shell', { paneId, cols, rows }),
+          spawnShell: (paneId, cols, rows, cwd) => invoke('spawn_shell', { paneId, cols, rows, cwd: cwd || null }),
           spawnDefaultShell: (paneId, cols, rows) => invoke('spawn_default_shell', { paneId, cols, rows }),
           onSshData: (_pane, paneId, data) => {
             if (shortcutDebugEnabled) {
@@ -347,6 +357,87 @@
           return true;
         },
       };
+      if (global.termlabLspBridge && typeof global.termlabLspBridge.configure === 'function') {
+        global.termlabLspBridge.configure({
+          windowLabel: currentWindowLabel,
+          paneAccess: global.__termlabPaneAccess,
+          onReservationFailed: (canonicalPath) => {
+            const editor = global.termlabEditorService;
+            if (editor && typeof editor.openLocalFile === 'function') {
+              return editor.openLocalFile(canonicalPath);
+            }
+            return null;
+          },
+        });
+      }
+      // Completion needs two lookups nothing else can build: view -> pane
+      // (CodeMirror hands its source a view, and only `panes` maps one back to
+      // a pane) and the focused pane for the configured editor_completion
+      // shortcut. The request itself goes through editor-service, which owns
+      // the flush/version barrier, and from there through lsp-bridge.
+      if (global.termlabLspCompletion && typeof global.termlabLspCompletion.configure === 'function') {
+        global.termlabLspCompletion.configure({
+          paneForView: (view) => {
+            for (const pane of panes.values()) {
+              if (pane && pane.view === view) return pane;
+            }
+            return null;
+          },
+          currentPane: () => paneManager.currentPane(),
+        });
+      }
+      // Hover and signature help need the same two lookups completion does:
+      // view -> pane for the pointer and keyboard hooks CodeMirror hands a
+      // view, and the focused pane for the configured editor_signature_help
+      // shortcut and the palette's Show Hover action.
+      if (global.termlabLspTooltips && typeof global.termlabLspTooltips.configure === 'function') {
+        global.termlabLspTooltips.configure({
+          paneForView: (view) => {
+            for (const pane of panes.values()) {
+              if (pane && pane.view === view) return pane;
+            }
+            return null;
+          },
+          currentPane: () => paneManager.currentPane(),
+        });
+      }
+      // Go to Definition needs the same view -> pane lookup for its own
+      // CodeMirror hooks, plus two things neither completion nor the tooltips
+      // do: the whole pane map (the chooser previews a target line from a file
+      // this window already has open) and this window's label (a history entry
+      // records the owner it was taken against). The jump itself goes through
+      // editor-service, which owns reservation and cross-window focus.
+      if (global.termlabLspNavigation && typeof global.termlabLspNavigation.configure === 'function') {
+        global.termlabLspNavigation.configure({
+          paneForView: (view) => {
+            for (const pane of panes.values()) {
+              if (pane && pane.view === view) return pane;
+            }
+            return null;
+          },
+          currentPane: () => paneManager.currentPane(),
+          allPanes: () => panes,
+          windowLabel: currentWindowLabel,
+        });
+      }
+      // Diagnostics need the whole pane map rather than one lookup: a
+      // publication is workspace-wide, so every local editor pane in this
+      // window is a candidate owner for the URIs it carries.
+      if (global.termlabLspDiagnostics && typeof global.termlabLspDiagnostics.configure === 'function') {
+        global.termlabLspDiagnostics.configure({ allPanes: () => panes });
+      }
+      // The Problems tool window is registered lazily (its renderFn only runs
+      // when the zone activates), but its store and F8/Shift-F8 navigation are
+      // window-wide and must be live whether or not the panel is on screen.
+      if (global.termlabProblemsStore && typeof global.termlabProblemsStore.configure === 'function') {
+        global.termlabProblemsStore.configure({});
+      }
+      if (global.termlabProblemsNavigation
+        && typeof global.termlabProblemsNavigation.configure === 'function') {
+        global.termlabProblemsNavigation.configure({
+          paneAccess: global.__termlabPaneAccess,
+        });
+      }
     }
 
     // vim's `:w` and `:q` have to mean what Cmd+S and closing the tab mean, and
@@ -381,6 +472,69 @@
         // Save/Cancel prompt. closePane and view.destroy() do not ask.
         closeTab: (tabId) => managerDelegates.closeTab(tabId),
         currentPane: () => paneManager.currentPane(),
+      });
+    }
+
+    // `gd`/`gD` -> Go to Definition, `gr` -> Find References. Registered
+    // against the vim engine rather
+    // than as a key handler, because in normal mode vim owns the keystroke —
+    // and unconditionally, like the ex commands, because the binding lives on
+    // the engine and must be in place before the first editor pane exists and
+    // stay correct when the vim_mode setting is toggled later. The view comes
+    // from vim's own adapter, so no pane map is needed here.
+    if (
+      global.termlabVimMode
+      && typeof global.termlabVimMode.registerNavigationCommands === 'function'
+    ) {
+      const navigator = () => global.termlabLspNavigation || null;
+      // Diagnostics travel as the app's own shortcut events rather than as a
+      // direct call, so `]d` and F8 end up in exactly the same place —
+      // problems-navigation listens for these and owns the traversal.
+      const problemEvent = (name) => {
+        if (typeof global.dispatchEvent !== 'function' || typeof global.CustomEvent !== 'function') {
+          return;
+        }
+        global.dispatchEvent(new global.CustomEvent(name));
+      };
+      global.termlabVimMode.registerNavigationCommands({
+        goToDefinition: (view) => {
+          const navigation = navigator();
+          if (!navigation || typeof navigation.goToDefinition !== 'function') return null;
+          return navigation.goToDefinition(view);
+        },
+        // `gr`. Same seam as gd, and the same guard: a window whose navigation
+        // module is missing gets no dead key.
+        findReferences: (view) => {
+          const navigation = navigator();
+          if (!navigation || typeof navigation.findReferences !== 'function') return null;
+          return navigation.findReferences(view);
+        },
+        // Ctrl-O / Ctrl-I. vim's own jumplist holds per-document bookmarks and
+        // cannot cross files, so these walk the window's history instead — and
+        // recordJump keeps that history fed with vim's in-file jump motions,
+        // so the trail stays single and coherent.
+        navigateBack: () => {
+          const navigation = navigator();
+          return navigation ? navigation.navigateBack() : null;
+        },
+        navigateForward: () => {
+          const navigation = navigator();
+          return navigation ? navigation.navigateForward() : null;
+        },
+        recordJump: (view, position) => {
+          const navigation = navigator();
+          return navigation && typeof navigation.recordJump === 'function'
+            ? navigation.recordJump(view, position)
+            : false;
+        },
+        showHover: (view) => {
+          const tooltips = global.termlabLspTooltips;
+          return tooltips && typeof tooltips.showHover === 'function'
+            ? tooltips.showHover(view)
+            : null;
+        },
+        nextDiagnostic: () => problemEvent('termlab:editor-next-problem'),
+        previousDiagnostic: () => problemEvent('termlab:editor-previous-problem'),
       });
     }
 

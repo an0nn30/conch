@@ -23,6 +23,19 @@
     const setFocusedPane = deps.setFocusedPane;
     const closePane = deps.closePane;
     const getPluginViewPaneById = deps.getPluginViewPaneById;
+    // Read once at create() time: project mode is adopted during boot,
+    // before this runtime is created, so the root is already settled by the
+    // time file-explorer registers below.
+    const projectMode = global.termlabProjectMode || null;
+    const projectRoot = projectMode && typeof projectMode.root === 'function' ? projectMode.root() : null;
+    // Everything the Terminal tool window needs to build a real pane on the
+    // same PTY path terminal tabs use: the window's pane map and pane-id
+    // allocator, its terminal runtime, its per-pane fit. Threaded from
+    // main-runtime through orchestration-runtime rather than reached for,
+    // like every other dependency here — and absent in a panel host's
+    // registrations-only boot, which is why terminal-panel.js renders a note
+    // instead of throwing when it is.
+    const terminalPanelDeps = deps.terminalPanel || null;
     const registeredPluginToolWindows = new Set();
     let resizeDragDepth = 0;
     let transferRuntimeStartup = null;
@@ -115,14 +128,14 @@
       }
     }
 
-    // The five built-in tool windows, in registration order (the order is
+    // The built-in tool windows, in registration order (the order is
     // load-bearing — see the comment on 'notifications'). Shared verbatim
     // between the main window's init() and a panel host's registrationsOnly
     // boot: a host mounts a panel through the SAME renderFn the docked panel
     // would have used, so there is exactly one definition of each.
     function registerBuiltInToolWindows() {
       global.toolWindowManager.register('file-explorer', {
-        title: 'SFTP',
+        title: projectRoot ? 'Project' : 'SFTP',
         icon: 'sftp',
         type: 'built-in',
         defaultZone: 'bottom',
@@ -142,6 +155,7 @@
               layoutService,
               fitActiveTab: debouncedFitAndResize,
               getActiveTab: () => getCurrentTab(),
+              projectRoot,
             });
           }
         },
@@ -213,6 +227,107 @@
               panelEl,
             });
           }
+        },
+      });
+
+      // Registered after SFTP and Transfers for the same reason Notifications
+      // is registered after Tunnels: the first registrant activates its zone
+      // on a layout that has never configured one, and Problems must never be
+      // the window a user finds open on first launch. It starts inactive with
+      // a strip button, and F8/Shift-F8 work whether or not it has been
+      // opened — the store and the navigation are wired in
+      // manager-compose-runtime.js, not here.
+      global.toolWindowManager.register('problems', {
+        title: 'Problems',
+        icon: null, // no vendored severity icon yet; the label suffices
+        type: 'built-in',
+        defaultZone: 'bottom',
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'problems-panel';
+          container.appendChild(panelEl);
+          if (global.problemsPanel) {
+            return global.problemsPanel.init({ panelEl });
+          }
+          return undefined;
+        },
+      });
+
+      // Project windows only, and registered after every existing bottom-zone
+      // registrant for the reason Problems is: the first registrant activates
+      // its zone on a layout that has never configured one, and Search must
+      // never be the panel a user finds open. It starts inactive with a strip
+      // button; cmd+shift+f activates it.
+      if (projectRoot) {
+        global.toolWindowManager.register('project-search', {
+          title: 'Search',
+          icon: null,
+          type: 'built-in',
+          defaultZone: 'bottom',
+          renderFn: (container) => {
+            const panelEl = document.createElement('div');
+            panelEl.id = 'project-search-panel';
+            container.appendChild(panelEl);
+            if (global.projectSearchPanel) {
+              return global.projectSearchPanel.init({
+                panelEl,
+                invoke,
+                listen: listenOnCurrentWindow,
+              });
+            }
+            return undefined;
+          },
+        });
+      }
+
+      // The Terminal tool window. In EVERY window, unlike Search — a shell is
+      // not a project feature — but registered after every existing
+      // bottom-zone registrant for the same reason they are ordered:
+      // registration order decides who claims a zone on a layout that has
+      // never configured one.
+      //
+      // 'bottom-right' rather than 'bottom': the bottom zone is a left/right
+      // pair, and a project window wants its tree AND a shell at once, not
+      // one tab hiding the other. The tree keeps 'bottom-left'.
+      //
+      // autoActivate:false — order alone cannot keep this one out of the way,
+      // because it is the ONLY registrant of 'bottom-right' and would
+      // therefore claim it on every fresh profile, including plain terminal
+      // windows that already have terminal tabs and must find this hidden.
+      // The fresh-project block in init() activates it explicitly instead,
+      // and a saved layout that recorded it as open still restores it.
+      //
+      // poppable:false — the panel owns a PTY keyed by THIS window's label
+      // and pane id (crates/termlab_tauri/src/pty.rs's session_key). A panel
+      // host is a different OS window with no pane registry, no terminal
+      // runtime and no PTY of its own, so there is nothing there to host.
+      global.toolWindowManager.register('terminal', {
+        title: 'Terminal',
+        icon: 'terminal',
+        type: 'built-in',
+        defaultZone: 'bottom-right',
+        autoActivate: false,
+        poppable: false,
+        renderFn: (container) => {
+          const panelEl = document.createElement('div');
+          panelEl.id = 'terminal-panel';
+          container.appendChild(panelEl);
+          if (!global.termlabTerminalPanel) return undefined;
+          const terminalDeps = terminalPanelDeps || {};
+          return global.termlabTerminalPanel.init({
+            panelEl,
+            invoke,
+            listen: listenOnCurrentWindow,
+            // A project window's shell starts at the root; everywhere else a
+            // null cwd means "whatever spawn_shell defaults to".
+            cwd: projectRoot,
+            paneId: typeof terminalDeps.allocPaneId === 'function' ? terminalDeps.allocPaneId() : null,
+            panes: typeof terminalDeps.getPanes === 'function' ? terminalDeps.getPanes() : null,
+            initTerminal: terminalDeps.initTerminal,
+            setupTmuxRightClickBridge: terminalDeps.setupTmuxRightClickBridge,
+            createPaneResizeObserver: terminalDeps.createPaneResizeObserver,
+            fitAndResizePane: terminalDeps.fitAndResizePane,
+          });
         },
       });
 
@@ -612,7 +727,83 @@
 
         registerBuiltInToolWindows();
 
-        if (initialLayoutData && initialLayoutData.zen_mode === true) {
+        // Spec section 1: a FRESH project window (one with no project_layouts
+        // entry yet) opens with the Files tool window visible in its zone,
+        // unconditionally. The zen-effective block immediately below still
+        // wins over this — it re-hides 'bottom' (and 'left'/'right') whenever
+        // __termlabEffectiveZen is true — so a zen-effective project window
+        // never gets its panels revealed here only to have them hidden a
+        // moment later.
+        //
+        // CONTROLLER RULING (task-6 review, F3): this block used to reveal
+        // the panel only when the layout this window booted with had never
+        // recorded a bottom-zone window (a `knowsBottom` guard), intending to
+        // respect a user who had deliberately closed the panel in this
+        // project. In practice that guard was a no-op for nearly every
+        // install: the saved layout was GLOBAL, not per-project, and
+        // register() unconditionally writes a zone assignment for every
+        // built-in tool window — including file-explorer itself — the
+        // moment ANY window has ever run, so `knowsBottom` read true for
+        // essentially every existing user and the reveal never fired.
+        // Dropped entirely per this ruling in favor of always-reveal, with a
+        // named IOU: "Task 12's per-project layouts are the intended home
+        // for 'this project's panel was deliberately closed'; until that
+        // lands, always-reveal is the correct default."
+        //
+        // TASK 12/F1: that hand-off, implemented. `has_project_layout` (from
+        // get_saved_layout, Rust-side — SNAKE_CASE on the wire: SavedLayout
+        // has no #[serde(rename_all)], same as every sibling field this
+        // block and the restore code above it already read, e.g.
+        // `bottom_panel_visible`, `active_tool_windows`) is true exactly when
+        // THIS project already has its own project_layouts entry — i.e. it
+        // has been opened, and its layout saved, at least once before.
+        // Gating on it: a fresh project (no entry yet) still always reveals,
+        // per spec §1. A returning project gets exactly what it saved
+        // instead — a deliberately-closed bottom panel stays closed (the
+        // panel-visibility restore a few lines above already applied it),
+        // and a restored Search (or any other) active tab is not stomped by
+        // forcing file-explorer active here — register()'s own saved-active-
+        // window restore (via setPersistedActiveZoneWindows, above) already
+        // put the right tab on top once file-explorer's own register() call
+        // is done.
+        //
+        // FIX ROUND 2: this read a camelCase `hasProjectLayout`, which never
+        // matched the wire's `has_project_layout` — the flag was always
+        // undefined and this gate silently collapsed to the pre-fix
+        // `if (projectRoot)`. See the serialization-contract test in
+        // test_panel_host.mjs for how this class of bug is now caught.
+        if (projectRoot && !(initialLayoutData && initialLayoutData.has_project_layout)) {
+          global.toolWindowManager.setPanelVisibility('bottom', true, { save: false });
+          // { save: false }: this re-asserts state the layout this window
+          // just booted with already agrees with (Task 12/F7) — a project
+          // window now has its OWN project_layouts entry, and an unsuppressed
+          // save here would write it from transient boot state, before the
+          // effective-zen adjustment a few lines below has had its say.
+          global.toolWindowManager.activate('file-explorer', { save: false });
+          // TERMINAL TOOL WINDOW: a project window's shell lives here now
+          // rather than in a main-area tab (main-runtime.js's project branch
+          // creates no tab at all any more), so a fresh project has to come
+          // up with it open — cd'd at the root, per the registration above.
+          // It sits in 'bottom-right', the other half of the same zone, so
+          // this activates ALONGSIDE the Files reveal instead of replacing
+          // it. Same `{ save: false }` reasoning as the line above: this is
+          // boot state being asserted, not a user's arrangement being
+          // recorded, and the effective-zen adjustment below has not run yet.
+          //
+          // Gated by the SAME has_project_layout check: a returning project
+          // gets exactly what it saved, so a user who hid the terminal panel
+          // in this project finds it still hidden.
+          global.toolWindowManager.activate('terminal', { save: false });
+        }
+
+        // Reads the EFFECTIVE zen decision (startup-runtime.js), not the raw
+        // saved layout: a project window can inherit a saved zen_mode=true
+        // and still force zen off (it keeps its panels on purpose), and the
+        // raw value here would hide them anyway with no zen class present to
+        // explain why — a project window with no file tree and no search
+        // panel, which is exactly the outcome the project override exists to
+        // prevent.
+        if (window.__termlabEffectiveZen === true) {
           global.toolWindowManager.setPanelVisibility('left', false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', false, { save: false });
           global.toolWindowManager.setPanelVisibility('bottom', false, { save: false });
@@ -808,6 +999,27 @@
         });
 
         initPluginToolWindows();
+      }
+
+      // No filesystem watcher in v1: freshness comes from explicit triggers.
+      // Window focus is the one that matters — the user has just come back
+      // from an editor, a terminal, or another app that changed files.
+      if (projectRoot) {
+        global.addEventListener('focus', () => {
+          if (!global.filesPanel || !global.filesPanel.isProjectMode()) return;
+          const tree = global.filesPanel.projectTree();
+          if (tree) tree.refreshAll();
+          global.filesPanel.checkProjectRootPresence();
+        });
+      }
+
+      // The LSP-root pass-through: subscribed once per window, here, because
+      // this init() runs after startup-runtime's applyAppConfig has already
+      // resolved project mode (adopt/fallback) and before any editor tab —
+      // including a CLI-queued one restored at boot — is created, so no
+      // document can reach `choosingProject` before this listener exists.
+      if (projectRoot && global.termlabProjectLspRoot) {
+        global.termlabProjectLspRoot.install({});
       }
 
       return {

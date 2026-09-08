@@ -1,9 +1,9 @@
 //! Editor configuration: the light editor's own preferences.
 //!
 //! Deliberately separate from `[terminal]`: the editor borrows the terminal's
-//! font, but its behaviour is its own. Today that is a single opt-in — vim
-//! keybindings — which is off unless asked for, because turning modal editing
-//! on for someone who did not ask makes every keystroke do the wrong thing.
+//! font, but its behaviour is its own. Vim keybindings remain opt-in, while
+//! LSP support defaults on so existing config files gain the later editor
+//! capabilities without a migration step.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,8 @@ pub struct EditorConfig {
     /// do. The value is read when an editor pane is created and re-applied
     /// live on `config-changed`, so toggling it does not need a restart.
     pub vim_mode: bool,
+    /// Editor language-service preferences, separate from terminal settings.
+    pub lsp: LspConfig,
 
     /// Which view mode a markdown file opens in: "editor", "split" or
     /// "preview". Defaults to "editor" so nothing changes for anyone who has
@@ -30,7 +32,56 @@ impl Default for EditorConfig {
     fn default() -> Self {
         Self {
             vim_mode: false,
+            lsp: LspConfig::default(),
             preview_default_mode: "editor".to_string(),
+        }
+    }
+}
+
+/// Product-level language-service preferences. Server discovery and lifecycle
+/// deliberately live elsewhere; this type only preserves user intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LspConfig {
+    pub enabled: bool,
+    pub suggestions_while_typing: bool,
+    pub languages: LspLanguageConfig,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            suggestions_while_typing: true,
+            languages: LspLanguageConfig::default(),
+        }
+    }
+}
+
+/// Stable per-language feature flags. TypeScript also covers JavaScript; the
+/// clangd adapter covers C and C++.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LspLanguageConfig {
+    pub typescript: bool,
+    pub json: bool,
+    pub python: bool,
+    pub rust: bool,
+    pub go: bool,
+    pub clangd: bool,
+    pub java: bool,
+}
+
+impl Default for LspLanguageConfig {
+    fn default() -> Self {
+        Self {
+            typescript: true,
+            json: true,
+            python: true,
+            rust: true,
+            go: true,
+            clangd: true,
+            java: true,
         }
     }
 }

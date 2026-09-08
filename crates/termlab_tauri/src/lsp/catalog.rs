@@ -1,0 +1,3257 @@
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{ErrorKind, Read};
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::root::LanguageId;
+use super::types::LspUnavailableReason;
+
+const ARM64: u32 = 0x0100_000c;
+const X86_64: u32 = 0x0100_0007;
+const MACHO_64_LE: u32 = 0xfeed_facf;
+const LC_BUILD_VERSION: u32 = 0x32;
+const LC_SEGMENT_64: u32 = 0x19;
+const LC_MAIN: u32 = 0x8000_0028;
+const LC_UNIXTHREAD: u32 = 0x5;
+const PLATFORM_MACOS: u32 = 1;
+const MH_EXECUTE: u32 = 2;
+const INSTALLED_RECEIPT_SCHEMA: u32 = 1;
+/// The exact artifact set a valid receipt must name, mirroring
+/// `packaging/lsp/manifest.toml`. This is the ONE place a version bump is
+/// written: `validate_receipt_identity` accepts nothing else, the test
+/// fixtures generate receipts from it, and
+/// `packaging_manifest_pins_match_the_receipt_identity_pins` asserts the
+/// committed manifest agrees. Duplicating a pin instead of reading this
+/// constant reopens the gap where a bump can go green in tests while the
+/// runtime rejects the shipped receipt.
+const RECEIPT_ARTIFACT_PINS: &[(&str, &str)] = &[
+    ("node", "24.19.0"),
+    ("typescript-language-server", "6.0.0"),
+    ("typescript", "6.0.3"),
+    ("rust-analyzer", "2026-08-24"),
+];
+const MACH_HEADER_64_SIZE: usize = 32;
+const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+const MAX_RESOURCE_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_LOAD_COMMANDS: u32 = 1024;
+const MAX_LOAD_COMMAND_BYTES: u32 = 1024 * 1024;
+const HASH_BUFFER_SIZE: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PocAvailability {
+    Bundled,
+    NotBundledYet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackagedMetadata {
+    pub version: &'static str,
+    pub upstream_url: &'static str,
+    pub license: &'static str,
+    pub notices_file: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdapterTimeouts {
+    pub initialize: Duration,
+    pub shutdown: Duration,
+    pub smoke_test: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootStrategy {
+    JavaScript,
+    Json,
+    Python,
+    Rust,
+    Go,
+    Clangd,
+    Java,
+}
+
+impl RootStrategy {
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::JavaScript => "javascript",
+            Self::Json => "json",
+            Self::Python => "python",
+            Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Clangd => "clangd",
+            Self::Java => "java",
+        }
+    }
+
+    pub(crate) const fn markers(self) -> &'static [&'static str] {
+        match self {
+            Self::JavaScript => &[
+                "tsconfig.json",
+                "jsconfig.json",
+                "package.json",
+                "pnpm-workspace.yaml",
+                "lerna.json",
+                "nx.json",
+            ],
+            Self::Json => &["package.json", "tsconfig.json", "jsconfig.json", ".git"],
+            Self::Python => &[
+                "pyproject.toml",
+                "setup.cfg",
+                "setup.py",
+                "tox.ini",
+                "Pipfile",
+                "poetry.lock",
+                "uv.lock",
+                ".git",
+            ],
+            Self::Rust => &["Cargo.toml"],
+            Self::Go => &["go.work", "go.mod"],
+            Self::Clangd => &[
+                "compile_commands.json",
+                "compile_flags.txt",
+                ".clangd",
+                "CMakeLists.txt",
+                "meson.build",
+                ".git",
+            ],
+            Self::Java => &[
+                "pom.xml",
+                "settings.gradle",
+                "settings.gradle.kts",
+                "build.gradle",
+                "build.gradle.kts",
+                ".project",
+                ".git",
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilePattern {
+    Extension(&'static str),
+    FileName(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileBinding {
+    pub pattern: FilePattern,
+    pub language: LanguageId,
+    pub lsp_language_id: &'static str,
+}
+
+impl FileBinding {
+    fn matches(self, path: &Path) -> bool {
+        match self.pattern {
+            FilePattern::Extension(extension) => path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension)),
+            FilePattern::FileName(file_name) => path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(file_name)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedFileBinding {
+    pub adapter_id: &'static str,
+    pub language: LanguageId,
+    pub lsp_language_id: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerNormalizationPolicy {
+    MergeWithServer,
+    StaticOnly,
+}
+
+impl TriggerNormalizationPolicy {
+    fn normalize(self, static_triggers: &[&str], server_triggers: &[String]) -> Vec<String> {
+        let mut normalized = Vec::new();
+        let mut append = |trigger: &str| {
+            if !trigger.is_empty() && !normalized.iter().any(|value| value == trigger) {
+                normalized.push(trigger.to_owned());
+            }
+        };
+        for trigger in static_triggers {
+            append(trigger);
+        }
+        if self == Self::MergeWithServer {
+            for trigger in server_triggers {
+                append(trigger);
+            }
+        }
+        normalized
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandArgument {
+    Literal(&'static str),
+    ResourcePath(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgramLayout {
+    Node {
+        executable_relative_path: &'static str,
+        arguments: &'static [CommandArgument],
+        required_files: &'static [&'static str],
+    },
+    Native {
+        executable_relative_path: &'static str,
+        arguments: &'static [CommandArgument],
+    },
+    Java {
+        executable_relative_path: &'static str,
+        arguments: &'static [CommandArgument],
+        required_files: &'static [&'static str],
+    },
+}
+
+impl ProgramLayout {
+    fn executable_relative_path(self) -> &'static str {
+        match self {
+            Self::Node {
+                executable_relative_path,
+                ..
+            }
+            | Self::Native {
+                executable_relative_path,
+                ..
+            }
+            | Self::Java {
+                executable_relative_path,
+                ..
+            } => executable_relative_path,
+        }
+    }
+
+    fn arguments(self) -> &'static [CommandArgument] {
+        match self {
+            Self::Node { arguments, .. }
+            | Self::Native { arguments, .. }
+            | Self::Java { arguments, .. } => arguments,
+        }
+    }
+
+    fn required_files(self) -> &'static [&'static str] {
+        match self {
+            Self::Node { required_files, .. } | Self::Java { required_files, .. } => required_files,
+            Self::Native { .. } => &[],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdapterDescriptor {
+    pub adapter_id: &'static str,
+    pub display_name: &'static str,
+    pub file_bindings: &'static [FileBinding],
+    pub root_strategy: RootStrategy,
+    pub program: ProgramLayout,
+    pub initialization_options_json: &'static str,
+    pub workspace_configuration_json: &'static str,
+    pub completion_trigger_characters: &'static [&'static str],
+    pub trigger_normalization: TriggerNormalizationPolicy,
+    pub metadata: PackagedMetadata,
+    pub availability: PocAvailability,
+    pub timeouts: AdapterTimeouts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedFileIdentity {
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedResourceFile {
+    pub path: PathBuf,
+    pub identity: ResolvedFileIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedServerCommand {
+    pub adapter_id: &'static str,
+    pub resource_root: PathBuf,
+    pub program: PathBuf,
+    pub args: Vec<PathBuf>,
+    pub resource_files: Vec<ResolvedResourceFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdapterCachePaths {
+    pub cache_dir: PathBuf,
+    pub data_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostOperatingSystem {
+    MacOs,
+    Linux,
+    Windows,
+    Other,
+}
+
+impl HostOperatingSystem {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::MacOs => "macOS",
+            Self::Linux => "linux",
+            Self::Windows => "windows",
+            Self::Other => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostArchitecture {
+    Arm64,
+    X86_64,
+    Other,
+}
+
+impl HostArchitecture {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Arm64 => "arm64",
+            Self::X86_64 => "x86_64",
+            Self::Other => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostPlatform {
+    operating_system: HostOperatingSystem,
+    architecture: HostArchitecture,
+}
+
+impl HostPlatform {
+    pub(crate) const fn new(
+        operating_system: HostOperatingSystem,
+        architecture: HostArchitecture,
+    ) -> Self {
+        Self {
+            operating_system,
+            architecture,
+        }
+    }
+
+    fn current() -> Self {
+        Self::new(
+            if cfg!(target_os = "macos") {
+                HostOperatingSystem::MacOs
+            } else if cfg!(target_os = "linux") {
+                HostOperatingSystem::Linux
+            } else if cfg!(target_os = "windows") {
+                HostOperatingSystem::Windows
+            } else {
+                HostOperatingSystem::Other
+            },
+            if cfg!(target_arch = "aarch64") {
+                HostArchitecture::Arm64
+            } else if cfg!(target_arch = "x86_64") {
+                HostArchitecture::X86_64
+            } else {
+                HostArchitecture::Other
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CatalogUnavailable {
+    NotBundledYet {
+        adapter_id: String,
+    },
+    MissingResource {
+        adapter_id: String,
+        relative_path: PathBuf,
+    },
+    ResourceIsNotAFile {
+        adapter_id: String,
+        relative_path: PathBuf,
+    },
+    ProgramNotExecutable {
+        adapter_id: String,
+        relative_path: PathBuf,
+    },
+    ResourceOutsideRoot {
+        adapter_id: String,
+        relative_path: PathBuf,
+    },
+    UnsupportedArchitecture {
+        adapter_id: String,
+        expected: String,
+        actual: String,
+    },
+    UnsupportedPlatform {
+        adapter_id: String,
+        expected: String,
+        actual: String,
+    },
+    InvalidExecutable {
+        adapter_id: String,
+        relative_path: PathBuf,
+    },
+    MissingReceipt {
+        adapter_id: String,
+    },
+    CorruptResource {
+        adapter_id: String,
+        relative_path: PathBuf,
+    },
+    CacheRootInsideProject {
+        adapter_id: String,
+        cache_root: PathBuf,
+    },
+    NoResourceRoot,
+}
+
+impl CatalogUnavailable {
+    pub(crate) fn lsp_reason(&self) -> LspUnavailableReason {
+        match self {
+            Self::NotBundledYet { adapter_id } => LspUnavailableReason::NotBundledYet {
+                adapter_id: adapter_id.clone(),
+            },
+            Self::UnsupportedPlatform {
+                expected, actual, ..
+            } => LspUnavailableReason::UnsupportedPlatform {
+                expected: expected.clone(),
+                actual: actual.clone(),
+            },
+            Self::UnsupportedArchitecture {
+                expected, actual, ..
+            } => LspUnavailableReason::UnsupportedArchitecture {
+                expected: expected.clone(),
+                actual: actual.clone(),
+            },
+            Self::MissingReceipt { adapter_id } => LspUnavailableReason::MissingResource {
+                adapter_id: adapter_id.clone(),
+                relative_path: "manifest.json".to_owned(),
+            },
+            Self::MissingResource {
+                adapter_id,
+                relative_path,
+            } => LspUnavailableReason::MissingResource {
+                adapter_id: adapter_id.clone(),
+                relative_path: relative_path.display().to_string(),
+            },
+            Self::CorruptResource {
+                adapter_id,
+                relative_path,
+            }
+            | Self::ResourceIsNotAFile {
+                adapter_id,
+                relative_path,
+            }
+            | Self::ProgramNotExecutable {
+                adapter_id,
+                relative_path,
+            }
+            | Self::ResourceOutsideRoot {
+                adapter_id,
+                relative_path,
+            }
+            | Self::InvalidExecutable {
+                adapter_id,
+                relative_path,
+            } => LspUnavailableReason::CorruptResource {
+                adapter_id: adapter_id.clone(),
+                relative_path: relative_path.display().to_string(),
+            },
+            Self::CacheRootInsideProject { .. } | Self::NoResourceRoot => {
+                LspUnavailableReason::CorruptResource {
+                    adapter_id: self.adapter_id().to_owned(),
+                    relative_path: "resource-root".to_owned(),
+                }
+            }
+        }
+    }
+
+    fn adapter_id(&self) -> &str {
+        match self {
+            Self::NotBundledYet { adapter_id }
+            | Self::MissingResource { adapter_id, .. }
+            | Self::ResourceIsNotAFile { adapter_id, .. }
+            | Self::ProgramNotExecutable { adapter_id, .. }
+            | Self::ResourceOutsideRoot { adapter_id, .. }
+            | Self::UnsupportedArchitecture { adapter_id, .. }
+            | Self::UnsupportedPlatform { adapter_id, .. }
+            | Self::InvalidExecutable { adapter_id, .. } => adapter_id,
+            Self::MissingReceipt { adapter_id }
+            | Self::CorruptResource { adapter_id, .. }
+            | Self::CacheRootInsideProject { adapter_id, .. } => adapter_id,
+            Self::NoResourceRoot => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for CatalogUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotBundledYet { adapter_id } => {
+                write!(formatter, "{adapter_id} is not bundled yet")
+            }
+            Self::MissingResource { relative_path, .. } => {
+                write!(
+                    formatter,
+                    "bundled resource {} is missing",
+                    relative_path.display()
+                )
+            }
+            Self::ResourceIsNotAFile { relative_path, .. } => {
+                write!(
+                    formatter,
+                    "bundled resource {} is not a file",
+                    relative_path.display()
+                )
+            }
+            Self::ProgramNotExecutable { relative_path, .. } => write!(
+                formatter,
+                "bundled program {} is not executable",
+                relative_path.display()
+            ),
+            Self::ResourceOutsideRoot { relative_path, .. } => write!(
+                formatter,
+                "bundled resource {} escapes the resource root",
+                relative_path.display()
+            ),
+            Self::UnsupportedArchitecture {
+                expected, actual, ..
+            } => write!(formatter, "expected {expected} program but found {actual}"),
+            Self::UnsupportedPlatform {
+                expected, actual, ..
+            } => write!(formatter, "expected {expected} program but found {actual}"),
+            Self::InvalidExecutable { relative_path, .. } => write!(
+                formatter,
+                "bundled program {} is not a supported Mach-O executable",
+                relative_path.display()
+            ),
+            Self::MissingReceipt { .. } => write!(formatter, "bundled LSP receipt is missing"),
+            Self::CorruptResource { relative_path, .. } => write!(
+                formatter,
+                "bundled resource {} failed integrity validation",
+                relative_path.display()
+            ),
+            Self::CacheRootInsideProject { cache_root, .. } => write!(
+                formatter,
+                "TermLab cache root {} is inside the project source tree",
+                cache_root.display()
+            ),
+            Self::NoResourceRoot => write!(formatter, "no bundled LSP resource root is available"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogUnavailable {}
+
+/// Versioned, packaging-generated receipt stored at `lsp/manifest.json`.
+/// It deliberately names every installed file by relative path and immutable
+/// digest so runtime resolution can fail closed without executing a program.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InstalledLspReceipt {
+    pub schema: u32,
+    pub platform: String,
+    pub architecture: String,
+    pub artifacts: Vec<ReceiptArtifact>,
+    pub files: Vec<ReceiptFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ReceiptArtifact {
+    pub id: String,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReceiptFile {
+    pub relative_path: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct BundledServerCatalog;
+
+impl BundledServerCatalog {
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+
+    pub(crate) fn descriptor(&self, language: LanguageId) -> &'static AdapterDescriptor {
+        DESCRIPTORS
+            .iter()
+            .find(|descriptor| {
+                descriptor
+                    .file_bindings
+                    .iter()
+                    .any(|binding| binding.language == language)
+            })
+            .expect("every curated LanguageId has an immutable catalog descriptor")
+    }
+
+    pub(crate) fn file_binding(&self, path: &Path) -> Option<ResolvedFileBinding> {
+        DESCRIPTORS.iter().find_map(|descriptor| {
+            descriptor
+                .file_bindings
+                .iter()
+                .copied()
+                .find(|binding| binding.matches(path))
+                .map(|binding| ResolvedFileBinding {
+                    adapter_id: descriptor.adapter_id,
+                    language: binding.language,
+                    lsp_language_id: binding.lsp_language_id,
+                })
+        })
+    }
+
+    pub(crate) fn normalize_completion_triggers(
+        &self,
+        language: LanguageId,
+        server_triggers: &[String],
+    ) -> Vec<String> {
+        let descriptor = self.descriptor(language);
+        descriptor
+            .trigger_normalization
+            .normalize(descriptor.completion_trigger_characters, server_triggers)
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        language: LanguageId,
+        resource_root: &Path,
+    ) -> Result<ResolvedServerCommand, CatalogUnavailable> {
+        self.resolve_for_host(language, resource_root, HostPlatform::current())
+    }
+
+    pub(crate) fn resolve_for_host(
+        &self,
+        language: LanguageId,
+        resource_root: &Path,
+        host: HostPlatform,
+    ) -> Result<ResolvedServerCommand, CatalogUnavailable> {
+        let descriptor = self.descriptor(language);
+        if descriptor.availability == PocAvailability::NotBundledYet {
+            return Err(CatalogUnavailable::NotBundledYet {
+                adapter_id: descriptor.adapter_id.to_owned(),
+            });
+        }
+
+        validate_host(host, descriptor.adapter_id)?;
+
+        let root = canonical_directory(resource_root, descriptor.adapter_id)?;
+        validate_architecture_layout(&root, descriptor.adapter_id)?;
+        let receipt = load_receipt(&root, descriptor.adapter_id)?;
+        validate_receipt_identity(&receipt, descriptor.adapter_id)?;
+        let mut validated_resources = HashMap::new();
+        let program_relative_path = Path::new(descriptor.program.executable_relative_path());
+        let program = validated_resource(
+            &receipt,
+            &root,
+            program_relative_path,
+            descriptor.adapter_id,
+            &mut validated_resources,
+        )?;
+        require_executable(&program, program_relative_path, descriptor.adapter_id)?;
+        validate_macos_arm64_executable(&program, program_relative_path, descriptor.adapter_id)?;
+        let mut resource_files = vec![resolved_resource_file(
+            &receipt,
+            program.clone(),
+            program_relative_path,
+            descriptor.adapter_id,
+        )?];
+
+        for required in descriptor.program.required_files() {
+            let required_path = Path::new(required);
+            validated_resource(
+                &receipt,
+                &root,
+                required_path,
+                descriptor.adapter_id,
+                &mut validated_resources,
+            )?;
+        }
+
+        let mut args = Vec::new();
+        for argument in descriptor.program.arguments() {
+            match argument {
+                CommandArgument::Literal(value) => args.push(PathBuf::from(value)),
+                CommandArgument::ResourcePath(relative_path) => {
+                    let relative_path = Path::new(relative_path);
+                    let absolute = validated_resource(
+                        &receipt,
+                        &root,
+                        relative_path,
+                        descriptor.adapter_id,
+                        &mut validated_resources,
+                    )?;
+                    resource_files.push(resolved_resource_file(
+                        &receipt,
+                        absolute.clone(),
+                        relative_path,
+                        descriptor.adapter_id,
+                    )?);
+                    args.push(absolute);
+                }
+            }
+        }
+
+        Ok(ResolvedServerCommand {
+            adapter_id: descriptor.adapter_id,
+            resource_root: root,
+            program,
+            args,
+            resource_files,
+        })
+    }
+
+    pub(crate) fn cache_paths(
+        &self,
+        language: LanguageId,
+        canonical_project_root: &Path,
+        termlab_cache_root: &Path,
+    ) -> Result<AdapterCachePaths, CatalogUnavailable> {
+        let descriptor = self.descriptor(language);
+        let cache_root = canonical_directory(termlab_cache_root, descriptor.adapter_id)?;
+        let canonical_project_root =
+            canonical_directory(canonical_project_root, descriptor.adapter_id)?;
+        if cache_root.starts_with(&canonical_project_root) {
+            return Err(CatalogUnavailable::CacheRootInsideProject {
+                adapter_id: descriptor.adapter_id.to_owned(),
+                cache_root,
+            });
+        }
+        let mut hash = Sha256::new();
+        hash.update(descriptor.adapter_id.as_bytes());
+        hash.update([0]);
+        hash.update(canonical_project_root.as_os_str().as_encoded_bytes());
+        let root_key = format!("{:x}", hash.finalize());
+        let base = cache_root
+            .join("lsp")
+            .join(descriptor.adapter_id)
+            .join(root_key);
+
+        Ok(AdapterCachePaths {
+            cache_dir: base.join("cache"),
+            data_dir: base.join("data"),
+        })
+    }
+}
+
+fn resolved_resource_file(
+    receipt: &InstalledLspReceipt,
+    path: PathBuf,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<ResolvedResourceFile, CatalogUnavailable> {
+    let relative_path_text = relative_path.to_string_lossy();
+    let file = receipt
+        .files
+        .iter()
+        .find(|file| file.relative_path == relative_path_text)
+        .ok_or_else(|| CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        })?;
+    Ok(ResolvedResourceFile {
+        path,
+        identity: ResolvedFileIdentity {
+            size: file.size,
+            sha256: file.sha256.to_ascii_lowercase(),
+        },
+    })
+}
+
+fn validated_resource(
+    receipt: &InstalledLspReceipt,
+    root: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+    validated: &mut HashMap<PathBuf, PathBuf>,
+) -> Result<PathBuf, CatalogUnavailable> {
+    if let Some(path) = validated.get(relative_path) {
+        return Ok(path.clone());
+    }
+    let path = resource_path(root, relative_path, adapter_id)?;
+    require_file(&path, relative_path, adapter_id)?;
+    validate_receipt_file(receipt, &path, relative_path, adapter_id)?;
+    validated.insert(relative_path.to_owned(), path.clone());
+    Ok(path)
+}
+
+fn validate_host(host: HostPlatform, adapter_id: &str) -> Result<(), CatalogUnavailable> {
+    if host.operating_system != HostOperatingSystem::MacOs {
+        return Err(CatalogUnavailable::UnsupportedPlatform {
+            adapter_id: adapter_id.to_owned(),
+            expected: "macOS".to_owned(),
+            actual: host.operating_system.name().to_owned(),
+        });
+    }
+    if host.architecture != HostArchitecture::Arm64 {
+        return Err(CatalogUnavailable::UnsupportedArchitecture {
+            adapter_id: adapter_id.to_owned(),
+            expected: "arm64".to_owned(),
+            actual: host.architecture.name().to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn load_receipt(
+    architecture_root: &Path,
+    adapter_id: &str,
+) -> Result<InstalledLspReceipt, CatalogUnavailable> {
+    let corrupt = || CatalogUnavailable::CorruptResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: PathBuf::from("manifest.json"),
+    };
+    let lsp_root = architecture_root.parent().ok_or_else(corrupt)?;
+    let receipt_path = lsp_root.join("manifest.json");
+    let file = match open_receipt_without_following_symlink(&receipt_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(CatalogUnavailable::MissingReceipt {
+                adapter_id: adapter_id.to_owned(),
+            });
+        }
+        Err(_) => return Err(corrupt()),
+    };
+    let metadata = file.metadata().map_err(|_| corrupt())?;
+    if !metadata.is_file() || metadata.len() > MAX_RECEIPT_BYTES {
+        return Err(corrupt());
+    }
+    let mut contents = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_RECEIPT_BYTES + 1)
+        .read_to_end(&mut contents)
+        .map_err(|_| corrupt())?;
+    if contents.len() as u64 != metadata.len() || contents.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(corrupt());
+    }
+    serde_json::from_slice(&contents).map_err(|_| corrupt())
+}
+
+#[cfg(unix)]
+fn open_receipt_without_following_symlink(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_receipt_without_following_symlink(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().read(true).open(path)
+}
+
+fn validate_architecture_layout(
+    architecture_root: &Path,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    let is_valid = architecture_root
+        .file_name()
+        .is_some_and(|name| name == "arm64")
+        && architecture_root
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "lsp");
+    if is_valid {
+        Ok(())
+    } else {
+        Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: PathBuf::from("manifest.json"),
+        })
+    }
+}
+
+fn validate_receipt_identity(
+    receipt: &InstalledLspReceipt,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    if receipt.schema != INSTALLED_RECEIPT_SCHEMA
+        || receipt.platform != "macos"
+        || receipt.architecture != "arm64"
+        || receipt.artifacts.len() != RECEIPT_ARTIFACT_PINS.len()
+        || !RECEIPT_ARTIFACT_PINS.iter().all(|(id, version)| {
+            receipt
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.id == *id && artifact.version == *version)
+                .count()
+                == 1
+        })
+        || receipt
+            .files
+            .iter()
+            .any(|file| !is_safe_receipt_path(&file.relative_path) || !is_sha256(&file.sha256))
+        || receipt
+            .files
+            .iter()
+            .map(|file| &file.relative_path)
+            .collect::<HashSet<_>>()
+            .len()
+            != receipt.files.len()
+    {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: PathBuf::from("manifest.json"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_receipt_file(
+    receipt: &InstalledLspReceipt,
+    path: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    let relative_path_text = relative_path.to_string_lossy();
+    let files = receipt
+        .files
+        .iter()
+        .filter(|file| file.relative_path == relative_path_text);
+    let mut files = files.peekable();
+    let Some(file) = files.next() else {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        });
+    };
+    let declared_size = file.size;
+    let metadata = fs::metadata(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
+    if files.next().is_some()
+        || declared_size == 0
+        || declared_size > MAX_RESOURCE_FILE_BYTES
+        || declared_size != metadata.len()
+        || !is_sha256(&file.sha256)
+    {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        });
+    }
+    let actual_hash = stream_sha256(path, declared_size, adapter_id, relative_path)?;
+    if actual_hash != file.sha256.to_ascii_lowercase() {
+        return Err(CatalogUnavailable::CorruptResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn stream_sha256(
+    path: &Path,
+    declared_size: u64,
+    adapter_id: &str,
+    relative_path: &Path,
+) -> Result<String, CatalogUnavailable> {
+    let mut file = fs::File::open(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; HASH_BUFFER_SIZE];
+    let mut total = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| corrupt_executable(adapter_id, relative_path))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .filter(|size| *size <= declared_size && *size <= MAX_RESOURCE_FILE_BYTES)
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        hasher.update(&buffer[..read]);
+    }
+    if total != declared_size {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_safe_receipt_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceResolutionMode {
+    Production,
+    DebugOrTest,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResourceRootCandidates<'a> {
+    pub test_injected_root: Option<&'a Path>,
+    pub packaged_root: Option<&'a Path>,
+    pub debug_environment_root: Option<&'a Path>,
+    pub debug_checkout_root: Option<&'a Path>,
+}
+
+pub(crate) struct ResourceRootResolver;
+
+impl ResourceRootResolver {
+    /// Resolves only explicitly supplied candidates. AppHandle integration
+    /// supplies the packaged resource path later, keeping this policy pure.
+    pub(crate) fn resolve(
+        candidates: ResourceRootCandidates<'_>,
+        mode: ResourceResolutionMode,
+    ) -> Result<PathBuf, CatalogUnavailable> {
+        let root = candidates
+            .test_injected_root
+            .or(candidates.packaged_root)
+            .or_else(|| {
+                (mode == ResourceResolutionMode::DebugOrTest)
+                    .then_some(candidates.debug_environment_root)
+                    .flatten()
+            })
+            .or_else(|| {
+                (mode == ResourceResolutionMode::DebugOrTest)
+                    .then_some(candidates.debug_checkout_root)
+                    .flatten()
+            })
+            .ok_or(CatalogUnavailable::NoResourceRoot)?;
+        canonical_directory(root, "resource-root").map_err(|_| CatalogUnavailable::NoResourceRoot)
+    }
+
+    /// Applies the production/debug policy without requiring a Tauri
+    /// `AppHandle`; the caller supplies its packaged resource path.
+    pub(crate) fn resolve_runtime(
+        test_injected_root: Option<&Path>,
+        packaged_root: Option<&Path>,
+    ) -> Result<PathBuf, CatalogUnavailable> {
+        let debug_environment_root = debug_environment_root();
+        let debug_checkout_root = debug_checkout_root();
+        Self::resolve(
+            ResourceRootCandidates {
+                test_injected_root,
+                packaged_root,
+                debug_environment_root: debug_environment_root.as_deref(),
+                debug_checkout_root: debug_checkout_root.as_deref(),
+            },
+            if cfg!(any(debug_assertions, test)) {
+                ResourceResolutionMode::DebugOrTest
+            } else {
+                ResourceResolutionMode::Production
+            },
+        )
+    }
+}
+
+fn canonical_directory(path: &Path, adapter_id: &str) -> Result<PathBuf, CatalogUnavailable> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| CatalogUnavailable::MissingResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: path.to_owned(),
+        })?;
+    if canonical.is_dir() {
+        Ok(canonical)
+    } else {
+        Err(CatalogUnavailable::ResourceIsNotAFile {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: path.to_owned(),
+        })
+    }
+}
+
+fn resource_path(
+    root: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<PathBuf, CatalogUnavailable> {
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(CatalogUnavailable::ResourceOutsideRoot {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        });
+    }
+
+    let candidate = root.join(relative_path);
+    if let Ok(canonical) = candidate.canonicalize() {
+        if !canonical.starts_with(root) {
+            return Err(CatalogUnavailable::ResourceOutsideRoot {
+                adapter_id: adapter_id.to_owned(),
+                relative_path: relative_path.to_owned(),
+            });
+        }
+        return Ok(canonical);
+    }
+    Ok(candidate)
+}
+
+fn require_file(
+    path: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(CatalogUnavailable::ResourceIsNotAFile {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        }),
+        Err(_) => Err(CatalogUnavailable::MissingResource {
+            adapter_id: adapter_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+        }),
+    }
+}
+
+fn require_executable(
+    path: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        let _ = relative_path;
+        let _ = adapter_id;
+        return Ok(());
+    }
+    Err(CatalogUnavailable::ProgramNotExecutable {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })
+}
+
+fn validate_macos_arm64_executable(
+    path: &Path,
+    relative_path: &Path,
+    adapter_id: &str,
+) -> Result<(), CatalogUnavailable> {
+    let metadata = fs::metadata(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
+    let file_size = metadata.len();
+    if file_size > MAX_RESOURCE_FILE_BYTES || file_size < MACH_HEADER_64_SIZE as u64 {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    let mut file = fs::File::open(path).map_err(|_| CatalogUnavailable::MissingResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    })?;
+    let mut header = [0u8; MACH_HEADER_64_SIZE];
+    file.read_exact(&mut header)
+        .map_err(|_| corrupt_executable(adapter_id, relative_path))?;
+    if read_u32(&header, 0) != Some(MACHO_64_LE) {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    let cpu_type =
+        read_u32(&header, 4).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+    if cpu_type != ARM64 {
+        return Err(CatalogUnavailable::UnsupportedArchitecture {
+            adapter_id: adapter_id.to_owned(),
+            expected: "arm64".to_owned(),
+            actual: cpu_type_name(cpu_type).to_owned(),
+        });
+    }
+    if read_u32(&header, 12) != Some(MH_EXECUTE) {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    let ncmds =
+        read_u32(&header, 16).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+    let sizeofcmds =
+        read_u32(&header, 20).ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+    if ncmds == 0
+        || ncmds > MAX_LOAD_COMMANDS
+        || sizeofcmds > MAX_LOAD_COMMAND_BYTES
+        || sizeofcmds < ncmds.saturating_mul(8)
+        || sizeofcmds % 8 != 0
+    {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    let command_table_end = (MACH_HEADER_64_SIZE as u64)
+        .checked_add(sizeofcmds as u64)
+        .filter(|end| *end <= file_size)
+        .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+    let mut table = vec![0u8; sizeofcmds as usize];
+    file.read_exact(&mut table)
+        .map_err(|_| corrupt_executable(adapter_id, relative_path))?;
+    let mut offset = 0usize;
+    let mut platform = None;
+    let mut build_versions = 0usize;
+    let mut executable_text = None;
+    let mut main_entryoff = None;
+    let mut file_backed_segments = Vec::new();
+    for _ in 0..ncmds {
+        let command = read_u32(&table, offset)
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        let size = read_u32(&table, offset + 4)
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?
+            as usize;
+        let command_end = offset
+            .checked_add(size)
+            .filter(|end| size >= 8 && size % 8 == 0 && *end <= table.len())
+            .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+        let command_bytes = &table[offset..command_end];
+        if command == LC_BUILD_VERSION {
+            if size < 24 || read_u32(command_bytes, 20).is_none() {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            let ntools = read_u32(command_bytes, 20).unwrap() as usize;
+            if 24usize.checked_add(
+                ntools
+                    .checked_mul(8)
+                    .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?,
+            ) != Some(size)
+            {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            build_versions += 1;
+            platform = read_u32(command_bytes, 8);
+        } else if command == LC_SEGMENT_64 {
+            let segment = validate_segment_64(command_bytes, file_size, command_table_end)
+                .ok_or_else(|| corrupt_executable(adapter_id, relative_path))?;
+            if segment.file_range.is_some_and(|range| {
+                file_backed_segments
+                    .iter()
+                    .any(|existing| range.overlaps(*existing))
+            }) {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+            if let Some(range) = segment.file_range {
+                file_backed_segments.push(range);
+            }
+            if let Some(text) = segment.executable_text {
+                if executable_text.replace(text).is_some() {
+                    return Err(corrupt_executable(adapter_id, relative_path));
+                }
+            }
+        } else if command == LC_MAIN {
+            if size != 24
+                || main_entryoff
+                    .replace(read_u64(command_bytes, 8).unwrap_or(u64::MAX))
+                    .is_some()
+            {
+                return Err(corrupt_executable(adapter_id, relative_path));
+            }
+        } else if command == LC_UNIXTHREAD {
+            // This POC supports LC_MAIN only. ARM64 LC_UNIXTHREAD requires
+            // validating flavor/count and the program counter's VM address.
+            return Err(corrupt_executable(adapter_id, relative_path));
+        }
+        offset = command_end;
+    }
+    if offset as u64 != command_table_end - MACH_HEADER_64_SIZE as u64
+        || build_versions != 1
+        || executable_text.is_none()
+        || main_entryoff.is_none_or(|entry| !executable_text.unwrap().contains(entry))
+    {
+        return Err(corrupt_executable(adapter_id, relative_path));
+    }
+    match platform {
+        Some(PLATFORM_MACOS) => Ok(()),
+        Some(actual) => Err(CatalogUnavailable::UnsupportedPlatform {
+            adapter_id: adapter_id.to_owned(),
+            expected: "macOS".to_owned(),
+            actual: platform_name(actual).to_owned(),
+        }),
+        None => Err(corrupt_executable(adapter_id, relative_path)),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileRange {
+    start: u64,
+    end: u64,
+}
+
+impl FileRange {
+    fn contains(self, offset: u64) -> bool {
+        self.start <= offset && offset < self.end
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
+}
+
+struct ValidatedSegment {
+    file_range: Option<FileRange>,
+    executable_text: Option<FileRange>,
+}
+
+fn validate_segment_64(
+    bytes: &[u8],
+    file_size: u64,
+    command_table_end: u64,
+) -> Option<ValidatedSegment> {
+    const SEGMENT_64_SIZE: usize = 72;
+    const SECTION_64_SIZE: usize = 80;
+    const VM_PROT_EXECUTE: u32 = 0x4;
+    const SECTION_TYPE_MASK: u32 = 0xff;
+    const S_ZEROFILL: u32 = 0x1;
+    const S_GB_ZEROFILL: u32 = 0xc;
+    const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
+    if bytes.len() < SEGMENT_64_SIZE
+        || bytes.len()
+            != SEGMENT_64_SIZE + read_u32(bytes, 64).unwrap_or(u32::MAX) as usize * SECTION_64_SIZE
+    {
+        return None;
+    }
+    let fileoff = read_u64(bytes, 40).unwrap_or(u64::MAX);
+    let filesize = read_u64(bytes, 48).unwrap_or(u64::MAX);
+    let vmaddr = read_u64(bytes, 24).unwrap_or(u64::MAX);
+    let vmsize = read_u64(bytes, 32).unwrap_or(u64::MAX);
+    if fileoff
+        .checked_add(filesize)
+        .is_none_or(|end| end > file_size)
+    {
+        return None;
+    }
+    let nsects = read_u32(bytes, 64).unwrap_or(0) as usize;
+    let range = FileRange {
+        start: fileoff,
+        end: fileoff.checked_add(filesize)?,
+    };
+    let vm_range = FileRange {
+        start: vmaddr,
+        end: vmaddr.checked_add(vmsize)?,
+    };
+    let mut text_section = None;
+    let mut file_backed_sections = Vec::new();
+    let header_and_commands = FileRange {
+        start: 0,
+        end: command_table_end,
+    };
+    let segment_name = c_string(&bytes[8..24]);
+    for index in 0..nsects {
+        let section = &bytes[SEGMENT_64_SIZE + index * SECTION_64_SIZE
+            ..SEGMENT_64_SIZE + (index + 1) * SECTION_64_SIZE];
+        let offset = read_u32(section, 48).unwrap_or(u32::MAX) as u64;
+        let size = read_u64(section, 40).unwrap_or(u64::MAX);
+        let address = read_u64(section, 32).unwrap_or(u64::MAX);
+        let section_type = read_u32(section, 64).unwrap_or(u32::MAX) & SECTION_TYPE_MASK;
+        let zero_fill = matches!(
+            section_type,
+            S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+        );
+        let section_file_range = if zero_fill {
+            None
+        } else {
+            Some(FileRange {
+                start: offset,
+                end: offset.checked_add(size)?,
+            })
+        };
+        if c_string(&section[16..32]) != segment_name
+            || !read_u32(section, 52).is_some_and(|align| align <= 31)
+            || !address
+                .checked_add(size)
+                .is_some_and(|end| vm_range.start <= address && end <= vm_range.end)
+            || section_file_range.is_some_and(|section_range| {
+                section_range.end > file_size
+                    || section_range.start < range.start
+                    || section_range.end > range.end
+                    || section_range.overlaps(header_and_commands)
+                    || file_backed_sections
+                        .iter()
+                        .any(|existing| section_range.overlaps(*existing))
+            })
+            || (zero_fill && offset != 0)
+        {
+            return None;
+        }
+        if let Some(section_range) = section_file_range {
+            file_backed_sections.push(section_range);
+        }
+        if !zero_fill
+            && segment_name == b"__TEXT"
+            && (c_string(&section[..16]) == b"__text" && c_string(&section[16..32]) == b"__TEXT")
+        {
+            if text_section
+                .replace(FileRange {
+                    start: offset,
+                    end: offset.checked_add(size)?,
+                })
+                .is_some()
+            {
+                return None;
+            }
+        }
+    }
+    let executable_text = if segment_name == b"__TEXT" {
+        if read_u32(bytes, 60).unwrap_or(0) & VM_PROT_EXECUTE == 0 {
+            return None;
+        }
+        Some(text_section?)
+    } else {
+        None
+    };
+    Some(ValidatedSegment {
+        file_range: (range.start < range.end).then_some(range),
+        executable_text,
+    })
+}
+
+fn c_string(bytes: &[u8]) -> &[u8] {
+    bytes.split(|byte| *byte == 0).next().unwrap_or(bytes)
+}
+
+fn corrupt_executable(adapter_id: &str, relative_path: &Path) -> CatalogUnavailable {
+    CatalogUnavailable::CorruptResource {
+        adapter_id: adapter_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+    }
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset + 4)
+        .and_then(|slice| slice.try_into().ok())
+        .map(u32::from_le_bytes)
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    bytes
+        .get(offset..offset + 8)
+        .and_then(|slice| slice.try_into().ok())
+        .map(u64::from_le_bytes)
+}
+
+fn cpu_type_name(cpu_type: u32) -> &'static str {
+    match cpu_type {
+        ARM64 => "arm64",
+        X86_64 => "x86_64",
+        _ => "unknown",
+    }
+}
+
+fn platform_name(platform: u32) -> &'static str {
+    match platform {
+        PLATFORM_MACOS => "macOS",
+        2 => "iOS",
+        3 => "tvOS",
+        4 => "watchOS",
+        _ => "unknown",
+    }
+}
+
+#[cfg(any(debug_assertions, test))]
+fn debug_environment_root() -> Option<PathBuf> {
+    std::env::var_os("TERMLAB_LSP_RESOURCE_DIR").map(PathBuf::from)
+}
+
+#[cfg(not(any(debug_assertions, test)))]
+fn debug_environment_root() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn debug_checkout_root() -> Option<PathBuf> {
+    Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/lsp/dist/arm64"))
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_checkout_root() -> Option<PathBuf> {
+    None
+}
+
+const TYPESCRIPT_ARGUMENTS: &[CommandArgument] = &[
+    CommandArgument::ResourcePath("typescript/node_modules/typescript-language-server/lib/cli.mjs"),
+    CommandArgument::Literal("--stdio"),
+];
+
+/// The packaged layout produced by `scripts/lsp/fetch-macos-arm64.sh` from the
+/// pins in `packaging/lsp/manifest.toml`. `typescript-language-server` resolves
+/// a TypeScript installation by locating `lib/tsserver.js` and spawning it, so
+/// naming it here makes a tree that carries the server but no usable TypeScript
+/// fail closed at resolution rather than at the first completion request.
+const TYPESCRIPT_REQUIRED_FILES: &[&str] = &[
+    "typescript/node_modules/typescript-language-server/lib/cli.mjs",
+    "typescript/node_modules/typescript/lib/tsserver.js",
+    "typescript/node_modules/typescript/lib/typescript.js",
+];
+
+const TYPESCRIPT_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("js"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("mjs"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cjs"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("jsx"),
+        language: LanguageId::JavaScript,
+        lsp_language_id: "javascriptreact",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("ts"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("mts"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cts"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescript",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("tsx"),
+        language: LanguageId::TypeScript,
+        lsp_language_id: "typescriptreact",
+    },
+];
+
+const JSON_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("json"),
+        language: LanguageId::Json,
+        lsp_language_id: "json",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("jsonc"),
+        language: LanguageId::Json,
+        lsp_language_id: "jsonc",
+    },
+    FileBinding {
+        pattern: FilePattern::FileName("package.json"),
+        language: LanguageId::Json,
+        lsp_language_id: "json",
+    },
+];
+
+const PYTHON_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("py"),
+        language: LanguageId::Python,
+        lsp_language_id: "python",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("pyi"),
+        language: LanguageId::Python,
+        lsp_language_id: "python",
+    },
+];
+
+const RUST_FILE_BINDINGS: &[FileBinding] = &[FileBinding {
+    pattern: FilePattern::Extension("rs"),
+    language: LanguageId::Rust,
+    lsp_language_id: "rust",
+}];
+
+const GO_FILE_BINDINGS: &[FileBinding] = &[FileBinding {
+    pattern: FilePattern::Extension("go"),
+    language: LanguageId::Go,
+    lsp_language_id: "go",
+}];
+
+const CLANGD_FILE_BINDINGS: &[FileBinding] = &[
+    FileBinding {
+        pattern: FilePattern::Extension("c"),
+        language: LanguageId::C,
+        lsp_language_id: "c",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("h"),
+        language: LanguageId::C,
+        lsp_language_id: "c",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cc"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cp"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cpp"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("cxx"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("hpp"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("hh"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+    FileBinding {
+        pattern: FilePattern::Extension("hxx"),
+        language: LanguageId::Cpp,
+        lsp_language_id: "cpp",
+    },
+];
+
+const JAVA_FILE_BINDINGS: &[FileBinding] = &[FileBinding {
+    pattern: FilePattern::Extension("java"),
+    language: LanguageId::Java,
+    lsp_language_id: "java",
+}];
+
+const DESCRIPTORS: &[AdapterDescriptor] = &[
+    AdapterDescriptor {
+        adapter_id: "typescript",
+        display_name: "TypeScript and JavaScript",
+        file_bindings: TYPESCRIPT_FILE_BINDINGS,
+        root_strategy: RootStrategy::JavaScript,
+        program: ProgramLayout::Node {
+            executable_relative_path: "node/bin/node",
+            arguments: TYPESCRIPT_ARGUMENTS,
+            required_files: TYPESCRIPT_REQUIRED_FILES,
+        },
+        initialization_options_json: "{}",
+        workspace_configuration_json: "{\"typescript\":{},\"javascript\":{}}",
+        completion_trigger_characters: &[".", "'", "\"", "/", "@", "<"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
+        metadata: PackagedMetadata {
+            version: "typescript-language-server 6.0.0; typescript 6.0.3; node 24.19.0",
+            upstream_url: "https://github.com/typescript-language-server/typescript-language-server",
+            license: "MIT; TypeScript Apache-2.0; Node MIT",
+            notices_file: "THIRD_PARTY_NOTICES.md",
+        },
+        availability: PocAvailability::Bundled,
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
+    },
+    AdapterDescriptor {
+        adapter_id: "json",
+        display_name: "JSON",
+        file_bindings: JSON_FILE_BINDINGS,
+        root_strategy: RootStrategy::Json,
+        program: ProgramLayout::Node {
+            executable_relative_path: "node/bin/node",
+            arguments: &[
+                CommandArgument::ResourcePath(
+                    "json/node_modules/vscode-langservers-extracted/bin/vscode-json-languageserver",
+                ),
+                CommandArgument::Literal("--stdio"),
+            ],
+            required_files: &[
+                "json/node_modules/vscode-langservers-extracted/bin/vscode-json-languageserver",
+            ],
+        },
+        initialization_options_json: "{}",
+        workspace_configuration_json: "{\"json\":{}}",
+        completion_trigger_characters: &["\"", ":", ","],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
+        metadata: PackagedMetadata {
+            version: "not bundled",
+            upstream_url: "https://github.com/microsoft/vscode-languageserver-node",
+            license: "MIT",
+            notices_file: "THIRD_PARTY_NOTICES.md",
+        },
+        availability: PocAvailability::NotBundledYet,
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
+    },
+    AdapterDescriptor {
+        adapter_id: "python",
+        display_name: "Python",
+        file_bindings: PYTHON_FILE_BINDINGS,
+        root_strategy: RootStrategy::Python,
+        program: ProgramLayout::Node {
+            executable_relative_path: "node/bin/node",
+            arguments: &[
+                CommandArgument::ResourcePath("python/node_modules/pyright/langserver.index.js"),
+                CommandArgument::Literal("--stdio"),
+            ],
+            required_files: &["python/node_modules/pyright/langserver.index.js"],
+        },
+        initialization_options_json: "{}",
+        workspace_configuration_json: "{\"python\":{}}",
+        completion_trigger_characters: &[".", "'", "\"", "/", "@"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
+        metadata: PackagedMetadata {
+            version: "not bundled",
+            upstream_url: "https://github.com/microsoft/pyright",
+            license: "MIT",
+            notices_file: "THIRD_PARTY_NOTICES.md",
+        },
+        availability: PocAvailability::NotBundledYet,
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
+    },
+    AdapterDescriptor {
+        adapter_id: "rust",
+        display_name: "Rust",
+        file_bindings: RUST_FILE_BINDINGS,
+        root_strategy: RootStrategy::Rust,
+        program: ProgramLayout::Native {
+            executable_relative_path: "rust-analyzer/rust-analyzer",
+            arguments: &[],
+        },
+        initialization_options_json: "{}",
+        workspace_configuration_json: "{\"rust-analyzer\":{}}",
+        completion_trigger_characters: &[".", ":", "<"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
+        metadata: PackagedMetadata {
+            version: "2026-08-24",
+            upstream_url: "https://github.com/rust-lang/rust-analyzer",
+            license: "MIT OR Apache-2.0",
+            notices_file: "THIRD_PARTY_NOTICES.md",
+        },
+        availability: PocAvailability::Bundled,
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
+    },
+    AdapterDescriptor {
+        adapter_id: "go",
+        display_name: "Go",
+        file_bindings: GO_FILE_BINDINGS,
+        root_strategy: RootStrategy::Go,
+        program: ProgramLayout::Native {
+            executable_relative_path: "gopls/gopls",
+            arguments: &[],
+        },
+        initialization_options_json: "{}",
+        workspace_configuration_json: "{\"gopls\":{}}",
+        completion_trigger_characters: &["."],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
+        metadata: PackagedMetadata {
+            version: "not bundled",
+            upstream_url: "https://github.com/golang/tools/tree/master/gopls",
+            license: "BSD-3-Clause",
+            notices_file: "THIRD_PARTY_NOTICES.md",
+        },
+        availability: PocAvailability::NotBundledYet,
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
+    },
+    AdapterDescriptor {
+        adapter_id: "clangd",
+        display_name: "C and C++",
+        file_bindings: CLANGD_FILE_BINDINGS,
+        root_strategy: RootStrategy::Clangd,
+        program: ProgramLayout::Native {
+            executable_relative_path: "clangd/clangd",
+            arguments: &[],
+        },
+        initialization_options_json: "{}",
+        workspace_configuration_json: "{\"clangd\":{}}",
+        completion_trigger_characters: &[".", ":", ">"],
+        trigger_normalization: TriggerNormalizationPolicy::MergeWithServer,
+        metadata: PackagedMetadata {
+            version: "not bundled",
+            upstream_url: "https://clangd.llvm.org/",
+            license: "Apache-2.0 WITH LLVM-exception",
+            notices_file: "THIRD_PARTY_NOTICES.md",
+        },
+        availability: PocAvailability::NotBundledYet,
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(60),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(10),
+        },
+    },
+    AdapterDescriptor {
+        adapter_id: "java",
+        display_name: "Java",
+        file_bindings: JAVA_FILE_BINDINGS,
+        root_strategy: RootStrategy::Java,
+        program: ProgramLayout::Java {
+            executable_relative_path: "jre/bin/java",
+            arguments: &[
+                CommandArgument::Literal("-jar"),
+                CommandArgument::ResourcePath("jdtls/plugins/org.eclipse.equinox.launcher.jar"),
+            ],
+            required_files: &["jdtls/plugins/org.eclipse.equinox.launcher.jar"],
+        },
+        initialization_options_json: "{}",
+        workspace_configuration_json: "{\"java\":{}}",
+        completion_trigger_characters: &["."],
+        trigger_normalization: TriggerNormalizationPolicy::StaticOnly,
+        metadata: PackagedMetadata {
+            version: "not bundled",
+            upstream_url: "https://projects.eclipse.org/projects/eclipse.jdt.ls",
+            license: "EPL-2.0",
+            notices_file: "THIRD_PARTY_NOTICES.md",
+        },
+        availability: PocAvailability::NotBundledYet,
+        timeouts: AdapterTimeouts {
+            initialize: Duration::from_secs(120),
+            shutdown: Duration::from_secs(3),
+            smoke_test: Duration::from_secs(20),
+        },
+    },
+];
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use sha2::{Digest, Sha256};
+    use tempfile::TempDir;
+
+    use super::{
+        ARM64, BundledServerCatalog, CatalogUnavailable, HostArchitecture, HostOperatingSystem,
+        HostPlatform, LC_BUILD_VERSION, LC_MAIN, LC_SEGMENT_64, MH_EXECUTE, PLATFORM_MACOS,
+        ResourceResolutionMode, ResourceRootCandidates, ResourceRootResolver, resource_path,
+    };
+    use crate::lsp::root::LanguageId;
+
+    #[test]
+    fn typescript_command_uses_the_private_bundled_node_runtime() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        let command = catalog
+            .resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host())
+            .expect("resolve TypeScript command");
+        let root = resources.canonical_root();
+
+        assert_eq!(command.adapter_id, "typescript");
+        assert_eq!(command.program, root.join("node/bin/node"));
+        assert_eq!(
+            command.args,
+            vec![
+                root.join("typescript/node_modules/typescript-language-server/lib/cli.mjs"),
+                PathBuf::from("--stdio"),
+            ]
+        );
+        assert!(command.program.is_absolute());
+        assert!(command.args[0].is_absolute());
+        assert!(command.program.starts_with(&root));
+        assert!(command.args[0].starts_with(&root));
+        assert_eq!(command.resource_root, root);
+        assert_eq!(command.resource_files.len(), 2);
+        assert_eq!(command.resource_files[0].path, command.program);
+        assert_eq!(
+            command.resource_files[0].identity.size,
+            fs::metadata(&command.program).unwrap().len()
+        );
+        assert_eq!(
+            command.resource_files[0].identity.sha256,
+            format!("{:x}", Sha256::digest(fs::read(&command.program).unwrap()))
+        );
+        assert_eq!(command.resource_files[1].path, command.args[0]);
+        assert_eq!(command.resource_files[1].identity.size, 11);
+        assert_eq!(
+            command.resource_files[1].identity.sha256,
+            "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+        );
+        assert!(
+            command
+                .resource_files
+                .iter()
+                .all(|resource| resource.path != command.args[1])
+        );
+    }
+
+    #[test]
+    fn javascript_and_typescript_share_the_typescript_adapter() {
+        let catalog = BundledServerCatalog::new();
+
+        assert_eq!(
+            catalog.descriptor(LanguageId::JavaScript).adapter_id,
+            catalog.descriptor(LanguageId::TypeScript).adapter_id
+        );
+    }
+
+    #[test]
+    fn typed_file_bindings_unambiguously_choose_javascript_and_typescript_lsp_ids() {
+        let catalog = BundledServerCatalog::new();
+
+        for (name, language_id) in [
+            ("component.js", "javascript"),
+            ("component.jsx", "javascriptreact"),
+            ("component.ts", "typescript"),
+            ("component.tsx", "typescriptreact"),
+        ] {
+            let binding = catalog
+                .file_binding(Path::new(name))
+                .expect("typed file binding");
+            assert_eq!(binding.adapter_id, "typescript", "{name}");
+            assert_eq!(binding.lsp_language_id, language_id, "{name}");
+        }
+        assert_eq!(
+            catalog.descriptor(LanguageId::Rust).root_strategy.id(),
+            "rust"
+        );
+        assert_eq!(
+            catalog.descriptor(LanguageId::Json).root_strategy.id(),
+            "json"
+        );
+        assert_eq!(catalog.descriptor(LanguageId::Go).root_strategy.id(), "go");
+        assert!(
+            catalog
+                .descriptor(LanguageId::C)
+                .root_strategy
+                .markers()
+                .contains(&".clangd")
+        );
+        assert!(
+            catalog
+                .descriptor(LanguageId::Java)
+                .root_strategy
+                .markers()
+                .contains(&".project")
+        );
+        assert_eq!(
+            catalog.normalize_completion_triggers(
+                LanguageId::TypeScript,
+                &[".".into(), "?".into(), "?".into()],
+            ),
+            vec![".", "'", "\"", "/", "@", "<", "?"]
+        );
+    }
+
+    #[test]
+    fn descriptors_own_initialize_shutdown_and_smoke_test_timeouts() {
+        let catalog = BundledServerCatalog::new();
+
+        let typescript = catalog.descriptor(LanguageId::TypeScript);
+        assert_eq!(typescript.timeouts.initialize, Duration::from_secs(60));
+        assert_eq!(typescript.timeouts.shutdown, Duration::from_secs(3));
+        assert_eq!(typescript.timeouts.smoke_test, Duration::from_secs(10));
+        assert_eq!(
+            catalog.descriptor(LanguageId::Java).timeouts.initialize,
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn rust_uses_its_bundled_native_server() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        let command = catalog
+            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+            .expect("resolve Rust command");
+        let root = resources.canonical_root();
+
+        assert_eq!(command.adapter_id, "rust");
+        assert_eq!(command.program, root.join("rust-analyzer/rust-analyzer"));
+        assert!(command.args.is_empty());
+        assert!(command.program.is_absolute());
+        assert!(command.program.starts_with(&root));
+        assert_eq!(command.resource_files.len(), 1);
+        assert_eq!(command.resource_files[0].path, command.program);
+    }
+
+    #[test]
+    fn curated_but_unbundled_languages_return_not_bundled_yet() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        for (language, adapter_id) in [
+            (LanguageId::Json, "json"),
+            (LanguageId::Python, "python"),
+            (LanguageId::Go, "go"),
+            (LanguageId::C, "clangd"),
+            (LanguageId::Cpp, "clangd"),
+            (LanguageId::Java, "java"),
+        ] {
+            assert_eq!(
+                catalog.resolve_for_host(language, resources.root(), poc_host()),
+                Err(CatalogUnavailable::NotBundledYet {
+                    adapter_id: adapter_id.to_owned(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_never_consults_path_for_a_bundled_program() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        let command = catalog
+            .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+            .expect("resolve bundled Rust command");
+
+        assert_eq!(
+            command.program,
+            resources
+                .canonical_root()
+                .join("rust-analyzer/rust-analyzer")
+        );
+        assert!(command.program.is_absolute());
+    }
+
+    #[test]
+    fn missing_or_non_executable_program_is_reported_as_unavailable() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        fs::remove_file(resources.root().join("rust-analyzer/rust-analyzer"))
+            .expect("remove bundled program");
+
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::MissingResource {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+
+        resources.install_rust_analyzer(false);
+        resources.write_receipt();
+        #[cfg(unix)]
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::ProgramNotExecutable {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+        #[cfg(not(unix))]
+        assert!(
+            catalog
+                .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn resolution_requires_a_versioned_receipt_and_rejects_corrupt_required_files() {
+        let resources = ResourceTree::new_without_receipt();
+        let catalog = BundledServerCatalog::new();
+
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::MissingReceipt {
+                adapter_id: "rust".to_owned(),
+            })
+        );
+
+        resources.write_receipt();
+        fs::write(
+            resources
+                .root()
+                .join("typescript/node_modules/typescript/lib/typescript.js"),
+            b"corrupt runtime",
+        )
+        .expect("corrupt TypeScript runtime");
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "typescript".to_owned(),
+                relative_path: PathBuf::from(
+                    "typescript/node_modules/typescript/lib/typescript.js"
+                ),
+            })
+        );
+
+        let empty_cli_resources = ResourceTree::new();
+        fs::write(
+            empty_cli_resources
+                .root()
+                .join("typescript/node_modules/typescript-language-server/lib/cli.mjs"),
+            b"",
+        )
+        .expect("empty TypeScript language server CLI");
+        empty_cli_resources.write_receipt();
+        assert_eq!(
+            catalog.resolve_for_host(
+                LanguageId::TypeScript,
+                empty_cli_resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "typescript".to_owned(),
+                relative_path: PathBuf::from(
+                    "typescript/node_modules/typescript-language-server/lib/cli.mjs",
+                ),
+            })
+        );
+
+        assert_eq!(
+            CatalogUnavailable::MissingReceipt {
+                adapter_id: "rust".to_owned(),
+            }
+            .lsp_reason(),
+            crate::lsp::types::LspUnavailableReason::MissingResource {
+                adapter_id: "rust".to_owned(),
+                relative_path: "manifest.json".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn validation_rejects_header_only_truncated_and_non_executable_macho_programs() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        resources.install_rust_analyzer_bytes(&macho_header_only(), true);
+        resources.write_receipt();
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+
+        resources.install_rust_analyzer_bytes(&macho_with_file_type(1), true);
+        resources.write_receipt();
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+    }
+
+    #[test]
+    fn receipt_is_loaded_only_from_the_lsp_parent_and_requires_the_exact_artifact_set() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        let receipt_path = resources.lsp_root().join("manifest.json");
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        receipt["artifacts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "node", "version": "24.19.0"
+            }));
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(matches!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+
+        resources.write_receipt();
+        fs::remove_file(&receipt_path).unwrap();
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::MissingReceipt {
+                adapter_id: "rust".into()
+            })
+        );
+    }
+
+    #[test]
+    fn receipt_requires_global_file_path_uniqueness_and_an_lsp_arm64_root() {
+        let resources = ResourceTree::new();
+        let receipt_path = resources.lsp_root().join("manifest.json");
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        let unused_typescript_file = receipt["files"].as_array().unwrap()[1].clone();
+        receipt["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(unused_typescript_file);
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+
+        let wrong_layout = ResourceTree::new_with_architecture_directory("x86_64");
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(LanguageId::Rust, wrong_layout.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_symlink_escape_is_rejected() {
+        let resources = ResourceTree::new();
+        let outside = TempDir::new().unwrap();
+        let receipt_path = resources.lsp_root().join("manifest.json");
+        fs::remove_file(&receipt_path).unwrap();
+        fs::write(outside.path().join("manifest.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("manifest.json"), &receipt_path).unwrap();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("manifest.json")
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_structurally_incomplete_macho_load_commands() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        let cases = [
+            ("missing segment", 32usize, 0u32),
+            ("bad command alignment", 36usize, 151u32),
+            ("build tools overflow", 204usize, 1u32),
+            ("duplicate build version", 208usize, LC_BUILD_VERSION),
+            ("missing entry", 208usize, 0u32),
+        ];
+        for (_, offset, value) in cases {
+            let mut bytes = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            resources.install_rust_analyzer_bytes(&bytes, true);
+            resources.write_receipt();
+            assert!(matches!(
+                catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+                Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("rust-analyzer/rust-analyzer")
+            ));
+        }
+        let mut bytes = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+        bytes[80..88].copy_from_slice(&9999u64.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+        assert!(matches!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_accepts_a_normal_multi_segment_executable_and_requires_main_in_text() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        let fixture = macho_with_data_segment();
+        fixture.assert_invariants();
+        resources.install_rust_analyzer_bytes(&fixture.bytes, true);
+        resources.write_receipt();
+        assert!(
+            catalog
+                .resolve_for_host(LanguageId::Rust, resources.root(), poc_host())
+                .is_ok()
+        );
+
+        let mut invalid_entry = fixture.bytes;
+        invalid_entry[fixture.main_command_offset + 8..fixture.main_command_offset + 16]
+            .copy_from_slice(&fixture.data_file_range.start.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&invalid_entry, true);
+        resources.write_receipt();
+        assert!(matches!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::CorruptResource { relative_path, .. }) if relative_path == PathBuf::from("rust-analyzer/rust-analyzer")
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_bad_file_backed_and_zero_fill_data_sections() {
+        let resources = ResourceTree::new();
+        let fixture = macho_with_data_segment();
+        for (offset, value) in [
+            (fixture.data_section_offset + 48, 999u32),
+            (fixture.bss_section_offset + 64, 0u32),
+        ] {
+            let mut bytes = fixture.bytes.clone();
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            resources.install_rust_analyzer_bytes(&bytes, true);
+            resources.write_receipt();
+            assert!(matches!(
+                BundledServerCatalog::new().resolve_for_host(
+                    LanguageId::Rust,
+                    resources.root(),
+                    poc_host()
+                ),
+                Err(CatalogUnavailable::CorruptResource { .. })
+            ));
+        }
+        let mut bytes = fixture.bytes;
+        bytes[fixture.bss_section_offset + 32..fixture.bss_section_offset + 40]
+            .copy_from_slice(&(fixture.data_vm_range.end - 16).to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_file_backed_section_overlapping_header_and_load_commands() {
+        let resources = ResourceTree::new();
+        let fixture = macho_with_data_segment();
+        let mut bytes = fixture.bytes;
+        let overlapping_text_offset = fixture.command_table_end as u64 - 8;
+        bytes[fixture.text_section_offset + 48..fixture.text_section_offset + 52]
+            .copy_from_slice(&(overlapping_text_offset as u32).to_le_bytes());
+        bytes[fixture.main_command_offset + 8..fixture.main_command_offset + 16]
+            .copy_from_slice(&overlapping_text_offset.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_overlapping_file_backed_segment_ranges() {
+        let resources = ResourceTree::new();
+        let fixture = macho_with_data_segment();
+        let mut bytes = fixture.bytes;
+        let overlapping_data_offset = fixture.text_file_range.end - 128;
+        bytes[fixture.data_segment_offset + 40..fixture.data_segment_offset + 48]
+            .copy_from_slice(&overlapping_data_offset.to_le_bytes());
+        bytes[fixture.data_section_offset + 48..fixture.data_section_offset + 52]
+            .copy_from_slice(&(overlapping_data_offset as u32).to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_overlapping_file_backed_section_ranges() {
+        let resources = ResourceTree::new();
+        let fixture = macho_with_data_segment();
+        let mut bytes = fixture.bytes;
+        let overlapping_bss_offset = fixture.data_file_range.start + 32;
+        bytes[fixture.bss_section_offset + 48..fixture.bss_section_offset + 52]
+            .copy_from_slice(&(overlapping_bss_offset as u32).to_le_bytes());
+        bytes[fixture.bss_section_offset + 64..fixture.bss_section_offset + 68]
+            .copy_from_slice(&0u32.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&bytes, true);
+        resources.write_receipt();
+
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_mismatched_section_owner_and_zero_fill_text() {
+        let resources = ResourceTree::new();
+        let text_section = 32 + 72;
+        let mut mismatched_owner = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+        mismatched_owner[text_section + 16..text_section + 32].fill(0);
+        mismatched_owner[text_section + 16..text_section + 22].copy_from_slice(b"__DATA");
+        resources.install_rust_analyzer_bytes(&mismatched_owner, true);
+        resources.write_receipt();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+
+        let mut zero_fill_text = macho_bytes(ARM64, MH_EXECUTE, PLATFORM_MACOS);
+        zero_fill_text[text_section + 48..text_section + 52].copy_from_slice(&0u32.to_le_bytes());
+        zero_fill_text[text_section + 64..text_section + 68].copy_from_slice(&1u32.to_le_bytes());
+        resources.install_rust_analyzer_bytes(&zero_fill_text, true);
+        resources.write_receipt();
+        assert!(matches!(
+            BundledServerCatalog::new().resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                poc_host()
+            ),
+            Err(CatalogUnavailable::CorruptResource { .. })
+        ));
+    }
+
+    #[test]
+    fn actual_host_resolution_is_gated_without_impersonating_macos_arm64() {
+        let resources = ResourceTree::new();
+        let result = BundledServerCatalog::new().resolve(LanguageId::Rust, resources.root());
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(result.is_ok());
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        assert!(matches!(
+            result,
+            Err(CatalogUnavailable::UnsupportedPlatform { .. })
+                | Err(CatalogUnavailable::UnsupportedArchitecture { .. })
+        ));
+    }
+
+    #[test]
+    fn resolution_fails_before_resource_lookup_on_an_unsupported_host() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        assert_eq!(
+            catalog.resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                HostPlatform::new(HostOperatingSystem::Linux, HostArchitecture::Arm64),
+            ),
+            Err(CatalogUnavailable::UnsupportedPlatform {
+                adapter_id: "rust".to_owned(),
+                expected: "macOS".to_owned(),
+                actual: "linux".to_owned(),
+            })
+        );
+        assert_eq!(
+            catalog.resolve_for_host(
+                LanguageId::Rust,
+                resources.root(),
+                HostPlatform::new(HostOperatingSystem::MacOs, HostArchitecture::X86_64),
+            ),
+            Err(CatalogUnavailable::UnsupportedArchitecture {
+                adapter_id: "rust".to_owned(),
+                expected: "arm64".to_owned(),
+                actual: "x86_64".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_non_files_and_paths_that_escape_the_resource_root() {
+        let resources = ResourceTree::new();
+        let root = resources.canonical_root();
+        let catalog = BundledServerCatalog::new();
+        fs::remove_file(root.join("rust-analyzer/rust-analyzer")).expect("remove program");
+        fs::create_dir(root.join("rust-analyzer/rust-analyzer"))
+            .expect("replace program with directory");
+
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, &root, poc_host()),
+            Err(CatalogUnavailable::ResourceIsNotAFile {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("rust-analyzer/rust-analyzer"),
+            })
+        );
+        assert_eq!(
+            resource_path(&root, Path::new("../outside"), "rust"),
+            Err(CatalogUnavailable::ResourceOutsideRoot {
+                adapter_id: "rust".to_owned(),
+                relative_path: PathBuf::from("../outside"),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_programs_with_the_wrong_architecture_or_platform() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+
+        resources.install_rust_analyzer_with_header(0x0100_0007, 1, true);
+        resources.write_receipt();
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::UnsupportedArchitecture {
+                adapter_id: "rust".to_owned(),
+                expected: "arm64".to_owned(),
+                actual: "x86_64".to_owned(),
+            })
+        );
+
+        resources.install_rust_analyzer_with_header(0x0100_000c, 2, true);
+        resources.write_receipt();
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::Rust, resources.root(), poc_host()),
+            Err(CatalogUnavailable::UnsupportedPlatform {
+                adapter_id: "rust".to_owned(),
+                expected: "macOS".to_owned(),
+                actual: "iOS".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn release_resolution_ignores_debug_environment_and_checkout_roots() {
+        let packaged = ResourceTree::new();
+        let debug_environment = ResourceTree::new();
+        let debug_checkout = ResourceTree::new();
+
+        let root = ResourceRootResolver::resolve(
+            ResourceRootCandidates {
+                test_injected_root: None,
+                packaged_root: Some(packaged.root()),
+                debug_environment_root: Some(debug_environment.root()),
+                debug_checkout_root: Some(debug_checkout.root()),
+            },
+            ResourceResolutionMode::Production,
+        )
+        .expect("resolve packaged resource root in production");
+
+        assert_eq!(root, packaged.canonical_root());
+    }
+
+    #[test]
+    fn an_explicit_test_root_fails_closed_instead_of_falling_back() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let packaged = ResourceTree::new();
+
+        assert_eq!(
+            ResourceRootResolver::resolve(
+                ResourceRootCandidates {
+                    test_injected_root: Some(&temporary.path().join("missing")),
+                    packaged_root: Some(packaged.root()),
+                    debug_environment_root: None,
+                    debug_checkout_root: None,
+                },
+                ResourceResolutionMode::Production,
+            ),
+            Err(CatalogUnavailable::NoResourceRoot)
+        );
+    }
+
+    #[test]
+    fn cache_paths_are_deterministic_adapter_scoped_and_outside_the_project() {
+        let project = TempDir::new().expect("project directory");
+        let second_project = TempDir::new().expect("second project directory");
+        let cache = TempDir::new().expect("cache directory");
+        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let second_canonical_project = second_project
+            .path()
+            .canonicalize()
+            .expect("second canonical project");
+        let canonical_cache = cache.path().canonicalize().expect("canonical cache");
+        let catalog = BundledServerCatalog::new();
+
+        let typescript = catalog
+            .cache_paths(LanguageId::TypeScript, &canonical_project, &canonical_cache)
+            .expect("TypeScript cache paths");
+        let rust = catalog
+            .cache_paths(LanguageId::Rust, &canonical_project, &canonical_cache)
+            .expect("Rust cache paths");
+        let second_typescript = catalog
+            .cache_paths(
+                LanguageId::TypeScript,
+                &second_canonical_project,
+                &canonical_cache,
+            )
+            .expect("second TypeScript cache paths");
+
+        assert_eq!(
+            typescript,
+            catalog
+                .cache_paths(LanguageId::TypeScript, &canonical_project, &canonical_cache)
+                .expect("repeat TypeScript cache paths")
+        );
+        assert!(typescript.cache_dir.starts_with(&canonical_cache));
+        assert!(typescript.data_dir.starts_with(&canonical_cache));
+        assert!(!typescript.cache_dir.starts_with(&canonical_project));
+        assert_ne!(typescript.cache_dir, rust.cache_dir);
+        assert_ne!(typescript.data_dir, rust.data_dir);
+        assert_ne!(typescript.cache_dir, second_typescript.cache_dir);
+        assert_ne!(typescript.data_dir, second_typescript.data_dir);
+    }
+
+    #[test]
+    fn cache_paths_reject_a_cache_root_inside_the_project_even_via_a_symlink() {
+        let project = TempDir::new().expect("project directory");
+        let cache_link = TempDir::new().expect("link holder");
+        let nested_cache = project.path().join(".termlab-cache");
+        fs::create_dir(&nested_cache).expect("nested cache directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nested_cache, cache_link.path().join("cache"))
+            .expect("cache symlink");
+
+        let catalog = BundledServerCatalog::new();
+        let result = catalog.cache_paths(
+            LanguageId::Rust,
+            &project.path().canonicalize().expect("canonical project"),
+            &cache_link.path().join("cache"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CatalogUnavailable::CacheRootInsideProject { .. })
+        ));
+    }
+
+    struct ResourceTree {
+        directory: TempDir,
+        lsp_root: PathBuf,
+        architecture_root: PathBuf,
+    }
+
+    impl ResourceTree {
+        fn new() -> Self {
+            let tree = Self::new_without_receipt();
+            tree.write_receipt();
+            tree
+        }
+
+        fn new_without_receipt() -> Self {
+            Self::new_without_receipt_with_architecture_directory("arm64")
+        }
+
+        fn new_with_architecture_directory(architecture_directory: &str) -> Self {
+            let tree =
+                Self::new_without_receipt_with_architecture_directory(architecture_directory);
+            tree.write_receipt();
+            tree
+        }
+
+        fn new_without_receipt_with_architecture_directory(architecture_directory: &str) -> Self {
+            let directory = TempDir::new().expect("resource directory");
+            let lsp_root = directory.path().join("lsp");
+            let tree = Self {
+                architecture_root: lsp_root.join(architecture_directory),
+                lsp_root,
+                directory,
+            };
+            tree.install_node();
+            tree.install_typescript_files();
+            tree.install_rust_analyzer(true);
+            tree
+        }
+
+        fn root(&self) -> &Path {
+            &self.architecture_root
+        }
+
+        fn lsp_root(&self) -> &Path {
+            &self.lsp_root
+        }
+
+        fn canonical_root(&self) -> PathBuf {
+            self.root().canonicalize().expect("canonical resource root")
+        }
+
+        fn install_node(&self) {
+            write_macho_binary(&self.root().join("node/bin/node"), 0x0100_000c, 1, true);
+        }
+
+        fn install_typescript_files(&self) {
+            write_file(
+                &self
+                    .root()
+                    .join("typescript/node_modules/typescript-language-server/lib/cli.mjs"),
+                b"export {};\n",
+            );
+            write_file(
+                &self
+                    .root()
+                    .join("typescript/node_modules/typescript/lib/tsserver.js"),
+                b"module.exports = {};\n",
+            );
+            write_file(
+                &self
+                    .root()
+                    .join("typescript/node_modules/typescript/lib/typescript.js"),
+                b"module.exports = {};\n",
+            );
+        }
+
+        fn install_rust_analyzer(&self, executable: bool) {
+            self.install_rust_analyzer_with_header(0x0100_000c, 1, executable);
+        }
+
+        fn install_rust_analyzer_with_header(
+            &self,
+            cpu_type: u32,
+            platform: u32,
+            executable: bool,
+        ) {
+            write_macho_binary(
+                &self.root().join("rust-analyzer/rust-analyzer"),
+                cpu_type,
+                platform,
+                executable,
+            );
+        }
+
+        fn install_rust_analyzer_bytes(&self, bytes: &[u8], executable: bool) {
+            write_file(&self.root().join("rust-analyzer/rust-analyzer"), bytes);
+            set_executable(&self.root().join("rust-analyzer/rust-analyzer"), executable);
+        }
+
+        fn write_receipt(&self) {
+            write_receipt(self.lsp_root(), self.root());
+        }
+    }
+
+    fn write_file(path: &Path, contents: &[u8]) {
+        fs::create_dir_all(path.parent().expect("parent directory")).expect("create parent");
+        fs::write(path, contents).expect("write file");
+    }
+
+    fn write_macho_binary(path: &Path, cpu_type: u32, platform: u32, executable: bool) {
+        write_file(path, &macho_bytes(cpu_type, 2, platform));
+        set_executable(path, executable);
+    }
+
+    fn macho_header_only() -> Vec<u8> {
+        let mut bytes = macho_bytes(0x0100_000c, 2, 1);
+        bytes.truncate(32);
+        bytes
+    }
+
+    fn macho_with_file_type(file_type: u32) -> Vec<u8> {
+        macho_bytes(0x0100_000c, file_type, 1)
+    }
+
+    fn macho_bytes(cpu_type: u32, file_type: u32, platform: u32) -> Vec<u8> {
+        let segment_size = 72 + 80;
+        let build_size = 24;
+        let main_size = 24;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
+        bytes.extend_from_slice(&cpu_type.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&file_type.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&((segment_size + build_size + main_size) as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
+        bytes.extend_from_slice(&(segment_size as u32).to_le_bytes());
+        bytes.extend_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        bytes.extend_from_slice(&0x1_0000_0000u64.to_le_bytes());
+        bytes.extend_from_slice(&512u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&512u64.to_le_bytes());
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"__text\0\0\0\0\0\0\0\0\0\0");
+        bytes.extend_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        bytes.extend_from_slice(&0x1_0000_00e8u64.to_le_bytes());
+        bytes.extend_from_slice(&16u64.to_le_bytes());
+        bytes.extend_from_slice(&232u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0x32u32.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&platform.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&LC_MAIN.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&232u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.resize(512, 0);
+        bytes
+    }
+
+    struct MultiSegmentMachoFixture {
+        bytes: Vec<u8>,
+        command_table_end: usize,
+        pagezero_segment_offset: usize,
+        text_segment_offset: usize,
+        text_section_offset: usize,
+        data_segment_offset: usize,
+        data_section_offset: usize,
+        bss_section_offset: usize,
+        thread_bss_section_offset: usize,
+        linkedit_segment_offset: usize,
+        main_command_offset: usize,
+        text_file_range: std::ops::Range<u64>,
+        data_file_range: std::ops::Range<u64>,
+        linkedit_file_range: std::ops::Range<u64>,
+        text_vm_range: std::ops::Range<u64>,
+        data_vm_range: std::ops::Range<u64>,
+        linkedit_vm_range: std::ops::Range<u64>,
+    }
+
+    impl MultiSegmentMachoFixture {
+        fn assert_invariants(&self) {
+            let u32_at =
+                |offset| u32::from_le_bytes(self.bytes[offset..offset + 4].try_into().unwrap());
+            let u64_at =
+                |offset| u64::from_le_bytes(self.bytes[offset..offset + 8].try_into().unwrap());
+            assert_eq!(u32_at(16), 6);
+            assert_eq!(self.command_table_end, 32 + u32_at(20) as usize);
+            assert!(self.command_table_end as u64 <= u32_at(self.text_section_offset + 48) as u64);
+            assert_eq!(u64_at(self.pagezero_segment_offset + 40), 0);
+            assert_eq!(u64_at(self.pagezero_segment_offset + 48), 0);
+            assert_eq!(
+                u64_at(self.text_segment_offset + 40),
+                self.text_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.text_segment_offset + 48),
+                self.text_file_range.end - self.text_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 40),
+                self.data_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 48),
+                self.data_file_range.end - self.data_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 40),
+                self.linkedit_file_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 48),
+                self.linkedit_file_range.end - self.linkedit_file_range.start
+            );
+            assert_eq!(self.text_file_range.end, self.data_file_range.start);
+            assert_eq!(self.data_file_range.end, self.linkedit_file_range.start);
+            assert_eq!(self.text_vm_range.end, self.data_vm_range.start);
+            assert_eq!(self.data_vm_range.end, self.linkedit_vm_range.start);
+            assert_eq!(
+                u64_at(self.text_segment_offset + 24),
+                self.text_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.text_segment_offset + 32),
+                self.text_vm_range.end - self.text_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 24),
+                self.data_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.data_segment_offset + 32),
+                self.data_vm_range.end - self.data_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 24),
+                self.linkedit_vm_range.start
+            );
+            assert_eq!(
+                u64_at(self.linkedit_segment_offset + 32),
+                self.linkedit_vm_range.end - self.linkedit_vm_range.start
+            );
+            assert_eq!(
+                u32_at(self.data_section_offset + 48) as u64,
+                self.data_file_range.start
+            );
+            assert!(
+                u32_at(self.data_section_offset + 48) as u64
+                    + u64_at(self.data_section_offset + 40)
+                    <= self.data_file_range.end
+            );
+            assert_eq!(u32_at(self.bss_section_offset + 48), 0);
+            assert_eq!(u32_at(self.bss_section_offset + 64) & 0xff, 1);
+            assert_eq!(u32_at(self.thread_bss_section_offset + 48), 0);
+            assert_eq!(u32_at(self.thread_bss_section_offset + 64) & 0xff, 0x12);
+            let entryoff = u64_at(self.main_command_offset + 8);
+            let text_start = u32_at(self.text_section_offset + 48) as u64;
+            let text_end = text_start + u64_at(self.text_section_offset + 40);
+            assert!(text_start <= entryoff && entryoff < text_end);
+            assert_eq!(self.bytes.len() as u64, self.linkedit_file_range.end);
+        }
+    }
+
+    fn macho_with_data_segment() -> MultiSegmentMachoFixture {
+        let text_file_range = 0..0x800;
+        let data_file_range = 0x800..0x900;
+        let linkedit_file_range = 0x900..0xa00;
+        let text_vm_range = 0x1_0000_0000..0x1_0000_2000;
+        let data_vm_range = 0x1_0000_2000..0x1_0000_3000;
+        let linkedit_vm_range = 0x1_0000_3000..0x1_0000_4000;
+        let text_section = macho_section(
+            "__text",
+            "__TEXT",
+            text_vm_range.start + 0x400,
+            64,
+            0x400,
+            4,
+            0,
+        );
+        let data_section = macho_section(
+            "__data",
+            "__DATA",
+            data_vm_range.start,
+            64,
+            data_file_range.start as u32,
+            3,
+            0,
+        );
+        let bss_section =
+            macho_section("__bss", "__DATA", data_vm_range.start + 0x100, 128, 0, 3, 1);
+        let thread_bss_section = macho_section(
+            "__thread_bss",
+            "__DATA",
+            data_vm_range.start + 0x200,
+            128,
+            0,
+            3,
+            0x12,
+        );
+        let commands = [
+            macho_segment("__PAGEZERO", 0, 0x1_0000_0000, 0, 0, 0, 0, &[]),
+            macho_segment(
+                "__TEXT",
+                text_vm_range.start,
+                text_vm_range.end - text_vm_range.start,
+                text_file_range.start,
+                text_file_range.end - text_file_range.start,
+                7,
+                5,
+                &[text_section],
+            ),
+            macho_segment(
+                "__DATA",
+                data_vm_range.start,
+                data_vm_range.end - data_vm_range.start,
+                data_file_range.start,
+                data_file_range.end - data_file_range.start,
+                7,
+                3,
+                &[data_section, bss_section, thread_bss_section],
+            ),
+            macho_segment(
+                "__LINKEDIT",
+                linkedit_vm_range.start,
+                linkedit_vm_range.end - linkedit_vm_range.start,
+                linkedit_file_range.start,
+                linkedit_file_range.end - linkedit_file_range.start,
+                7,
+                1,
+                &[],
+            ),
+            macho_build_version(PLATFORM_MACOS),
+            macho_main(0x400),
+        ];
+        let sizeofcmds = commands.iter().map(Vec::len).sum::<usize>();
+        let command_offsets = commands
+            .iter()
+            .scan(32usize, |offset, command| {
+                let current = *offset;
+                *offset += command.len();
+                Some(current)
+            })
+            .collect::<Vec<_>>();
+        let mut bytes = Vec::with_capacity(linkedit_file_range.end as usize);
+        bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
+        bytes.extend_from_slice(&ARM64.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&MH_EXECUTE.to_le_bytes());
+        bytes.extend_from_slice(&(commands.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(sizeofcmds as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for command in commands {
+            bytes.extend_from_slice(&command);
+        }
+        bytes.resize(linkedit_file_range.end as usize, 0);
+        MultiSegmentMachoFixture {
+            bytes,
+            command_table_end: 32 + sizeofcmds,
+            pagezero_segment_offset: command_offsets[0],
+            text_segment_offset: command_offsets[1],
+            text_section_offset: command_offsets[1] + 72,
+            data_segment_offset: command_offsets[2],
+            data_section_offset: command_offsets[2] + 72,
+            bss_section_offset: command_offsets[2] + 72 + 80,
+            thread_bss_section_offset: command_offsets[2] + 72 + 160,
+            linkedit_segment_offset: command_offsets[3],
+            main_command_offset: command_offsets[5],
+            text_file_range,
+            data_file_range,
+            linkedit_file_range,
+            text_vm_range,
+            data_vm_range,
+            linkedit_vm_range,
+        }
+    }
+
+    fn macho_section(
+        name: &str,
+        segment: &str,
+        addr: u64,
+        size: u64,
+        offset: u32,
+        align: u32,
+        flags: u32,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut name_bytes = [0u8; 16];
+        name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&name_bytes);
+        let mut segment_bytes = [0u8; 16];
+        segment_bytes[..segment.len()].copy_from_slice(segment.as_bytes());
+        bytes.extend_from_slice(&segment_bytes);
+        bytes.extend_from_slice(&addr.to_le_bytes());
+        bytes.extend_from_slice(&size.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+        bytes.extend_from_slice(&align.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn macho_segment(
+        name: &str,
+        vmaddr: u64,
+        vmsize: u64,
+        fileoff: u64,
+        filesize: u64,
+        maxprot: u32,
+        initprot: u32,
+        sections: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
+        bytes.extend_from_slice(&(72u32 + sections.len() as u32 * 80).to_le_bytes());
+        let mut name_bytes = [0u8; 16];
+        name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&name_bytes);
+        bytes.extend_from_slice(&vmaddr.to_le_bytes());
+        bytes.extend_from_slice(&vmsize.to_le_bytes());
+        bytes.extend_from_slice(&fileoff.to_le_bytes());
+        bytes.extend_from_slice(&filesize.to_le_bytes());
+        bytes.extend_from_slice(&maxprot.to_le_bytes());
+        bytes.extend_from_slice(&initprot.to_le_bytes());
+        bytes.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for section in sections {
+            bytes.extend_from_slice(section);
+        }
+        bytes
+    }
+
+    fn macho_build_version(platform: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&LC_BUILD_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&platform.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
+
+    fn macho_main(entryoff: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&LC_MAIN.to_le_bytes());
+        bytes.extend_from_slice(&24u32.to_le_bytes());
+        bytes.extend_from_slice(&entryoff.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes
+    }
+
+    fn poc_host() -> HostPlatform {
+        HostPlatform::new(HostOperatingSystem::MacOs, HostArchitecture::Arm64)
+    }
+
+    fn set_executable(path: &Path, executable: bool) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(
+                path,
+                fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+            )
+            .expect("set executable permission");
+        }
+        #[cfg(not(unix))]
+        let _ = (path, executable);
+    }
+
+    /// `packaging/lsp/manifest.toml` drives what
+    /// `scripts/lsp/fetch-macos-arm64.sh` downloads and records in the receipt;
+    /// `RECEIPT_ARTIFACT_PINS` is what the runtime will accept. Comparing the
+    /// parsed manifest against that constant — rather than against a third copy
+    /// of the versions written here — is what makes a half-finished version
+    /// bump fail in CI instead of shipping a receipt the runtime rejects.
+    #[test]
+    fn packaging_manifest_pins_match_the_receipt_identity_pins() {
+        #[derive(serde::Deserialize)]
+        struct PackagingManifest {
+            schema: u32,
+            platform: String,
+            artifact: Vec<PackagingArtifact>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PackagingArtifact {
+            id: String,
+            version: String,
+            url: String,
+            sha256: String,
+            license: String,
+        }
+
+        let manifest: PackagingManifest =
+            toml::from_str(include_str!("../../../../packaging/lsp/manifest.toml"))
+                .expect("packaging/lsp/manifest.toml parses");
+
+        assert_eq!(manifest.schema, 1, "packaging manifest schema");
+        assert_eq!(
+            manifest.platform, "macos-arm64",
+            "packaging manifest platform"
+        );
+
+        let mut manifest_pins: Vec<(&str, &str)> = manifest
+            .artifact
+            .iter()
+            .map(|artifact| (artifact.id.as_str(), artifact.version.as_str()))
+            .collect();
+        manifest_pins.sort_unstable();
+        let mut runtime_pins = super::RECEIPT_ARTIFACT_PINS.to_vec();
+        runtime_pins.sort_unstable();
+        assert_eq!(
+            manifest_pins, runtime_pins,
+            "packaging/lsp/manifest.toml must pin exactly what RECEIPT_ARTIFACT_PINS accepts — \
+             a bump to one without the other ships a receipt the runtime rejects at launch"
+        );
+
+        for artifact in &manifest.artifact {
+            assert!(
+                artifact.url.starts_with("https://"),
+                "artifact {} must be fetched over https",
+                artifact.id
+            );
+            assert!(
+                super::is_sha256(&artifact.sha256),
+                "artifact {} must pin a SHA-256",
+                artifact.id
+            );
+            assert!(
+                !artifact.license.is_empty(),
+                "artifact {} must declare a license for THIRD_PARTY_NOTICES.md",
+                artifact.id
+            );
+        }
+    }
+
+    /// `typescript-language-server` spawns `lib/tsserver.js`; without it the
+    /// server starts and then fails its own initialize, so the catalog must
+    /// refuse the tree before launching anything.
+    #[test]
+    fn typescript_resolution_requires_the_packaged_tsserver() {
+        let resources = ResourceTree::new();
+        let catalog = BundledServerCatalog::new();
+        let relative_path = "typescript/node_modules/typescript/lib/tsserver.js";
+
+        fs::remove_file(resources.root().join(relative_path)).expect("remove tsserver");
+
+        assert_eq!(
+            catalog.resolve_for_host(LanguageId::TypeScript, resources.root(), poc_host()),
+            Err(CatalogUnavailable::MissingResource {
+                adapter_id: "typescript".to_owned(),
+                relative_path: PathBuf::from(relative_path),
+            })
+        );
+    }
+
+    fn write_receipt(lsp_root: &Path, root: &Path) {
+        let files = [
+            "node/bin/node",
+            "typescript/node_modules/typescript-language-server/lib/cli.mjs",
+            "typescript/node_modules/typescript/lib/tsserver.js",
+            "typescript/node_modules/typescript/lib/typescript.js",
+            "rust-analyzer/rust-analyzer",
+        ]
+        .into_iter()
+        .map(|relative_path| {
+            let bytes = fs::read(root.join(relative_path)).expect("receipt file contents");
+            serde_json::json!({
+                "relativePath": relative_path,
+                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                "size": bytes.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+        // Built from RECEIPT_ARTIFACT_PINS rather than repeated literals, so a
+        // version bump that misses the runtime constant cannot be masked by a
+        // fixture that was updated alongside the test.
+        let artifacts = super::RECEIPT_ARTIFACT_PINS
+            .iter()
+            .map(|(id, version)| serde_json::json!({ "id": id, "version": version }))
+            .collect::<Vec<_>>();
+        fs::write(
+            lsp_root.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": 1,
+                "platform": "macos",
+                "architecture": "arm64",
+                "artifacts": artifacts,
+                "files": files,
+            }))
+            .expect("receipt JSON"),
+        )
+        .expect("write receipt");
+    }
+}

@@ -1,0 +1,239 @@
+/* Project tree (app/panels/project-tree.js).
+
+   Dense, like every other tree in the app: rows are --tl-row-h tall and each
+   sits on one line. Indentation is applied inline per row (depth * 12px) so
+   the stylesheet does not need a rule per level. Git tints arrive in
+   [data-git-state] (see the git tokens in base.css) and are always paired
+   with the state word in the row's aria-label, so colour is never the only
+   signal. */
+
+.tl-project-tree {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  color: var(--tl-fg);
+  background: var(--tl-panel-bg);
+  font: 400 var(--tl-font-size-ui) var(--tl-font-ui);
+}
+
+.tl-project-tree__toolbar {
+  flex: 0 0 var(--tl-toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  min-width: 0;
+  padding: 0 var(--tl-space-2);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+.tl-project-tree__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tl-fg-muted);
+}
+
+.tl-project-tree__button {
+  height: var(--tl-row-h);
+  padding: 0 var(--tl-space-2);
+  color: var(--tl-fg);
+  background: var(--tl-control-bg);
+  border: 1px solid var(--tl-control-border);
+  border-radius: var(--tl-radius);
+  cursor: pointer;
+}
+
+.tl-project-tree__button:hover {
+  background: var(--tl-row-hover);
+}
+
+.tl-project-tree__button:focus-visible {
+  outline: 2px solid var(--tl-accent);
+  outline-offset: 1px;
+}
+
+.tl-project-tree__button[aria-pressed="true"] {
+  border-color: var(--tl-accent);
+}
+
+.tl-project-tree__notice-host {
+  flex: 0 0 auto;
+}
+
+/* Permanent wrapper for the missing-root notice only (see project-tree.js's
+   render()). display: contents keeps it invisible in the box model so a
+   sibling notice mounted directly in .tl-project-tree__notice-host — the
+   Task 7 trust banner — is unaffected by whether this slot is empty or
+   holds the missing-root banner. */
+.tl-project-tree__missing-slot {
+  display: contents;
+}
+
+.tl-project-tree__missing {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  padding: var(--tl-space-2);
+  color: var(--tl-warning-fg);
+  background: var(--tl-warning-bg);
+  border-bottom: 1px solid var(--tl-warning-border);
+}
+
+.tl-project-tree__missing-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.tl-project-tree__list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tl-project-tree__list:focus-visible {
+  outline: 2px solid var(--tl-accent);
+  outline-offset: -2px;
+}
+
+.tl-project-tree__row {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-1);
+  height: var(--tl-row-h);
+  padding-right: var(--tl-space-2);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tl-project-tree__row:hover {
+  background: var(--tl-row-hover);
+}
+
+.tl-project-tree__row.is-active {
+  background: var(--tl-selection-bg);
+  color: var(--tl-selection-fg);
+}
+
+.tl-project-tree__row:focus-visible {
+  outline: 2px solid var(--tl-accent);
+  outline-offset: -2px;
+}
+
+/* A directory whose last listing attempt failed: visually distinct from a
+   directory that is merely empty, and always paired with a "failed to load"
+   suffix on the row's aria-label (see renderRow in project-tree.js) — that
+   spoken word is what actually discriminates the two states for a screen
+   reader; aria-expanded="false" alone does not, since an empty directory
+   collapses to the same value. */
+.tl-project-tree__row[data-state="error"] {
+  color: var(--tl-danger);
+}
+
+.tl-project-tree__row[data-state="error"] .tl-project-tree__twisty {
+  color: var(--tl-danger);
+}
+
+.tl-project-tree__twisty {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+  color: var(--tl-fg-muted);
+}
+
+.tl-project-tree__icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tl-project-tree__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The files panel's mode header — the one control that switches a project
+   window between the project tree and the classic local+remote explorer, so
+   SFTP is never more than one click away from a project. */
+.fp-project-header {
+  flex: 0 0 var(--tl-toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  min-width: 0;
+  padding: 0 var(--tl-space-2);
+  border-bottom: 1px solid var(--tl-border);
+}
+
+.fp-project-header__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tl-fg);
+}
+
+/* The one trust ask per project. A banner, never a modal: editing is not
+   blocked by the decision, so the UI must not block on it either. Same
+   warning treatment as the sibling missing-root notice
+   (.tl-project-tree__missing) — --tl-warning-fg on --tl-warning-bg, not the
+   plain foreground token. */
+.tl-project-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--tl-space-2);
+  padding: var(--tl-space-2);
+  color: var(--tl-warning-fg);
+  background: var(--tl-warning-bg);
+  border-bottom: 1px solid var(--tl-warning-border);
+}
+
+.tl-project-banner__copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-1);
+}
+
+.tl-project-banner__title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-project-banner__text {
+  min-width: 0;
+}
+
+/* Git tints. A renamed path reads as modified — the tree says "this changed",
+   and which kind of change belongs in a diff view. */
+.tl-project-tree__row[data-git-state="modified"] .tl-project-tree__label,
+.tl-project-tree__row[data-git-state="renamed"] .tl-project-tree__label {
+  color: var(--tl-git-modified);
+}
+
+.tl-project-tree__row[data-git-state="added"] .tl-project-tree__label {
+  color: var(--tl-git-added);
+}
+
+.tl-project-tree__row[data-git-state="deleted"] .tl-project-tree__label {
+  color: var(--tl-git-deleted);
+  text-decoration: line-through;
+}
+
+.tl-project-tree__row[data-git-state="conflicted"] .tl-project-tree__label {
+  color: var(--tl-git-conflicted);
+  font-style: italic;
+}
+
+.tl-project-tree__row[data-git-state="untracked"] .tl-project-tree__label {
+  color: var(--tl-git-untracked);
+}

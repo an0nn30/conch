@@ -635,9 +635,86 @@ mod tests {
     }
 
     #[test]
+    fn old_shaped_state_toml_loads_through_the_real_disk_path_with_project_fields_defaulted() {
+        // (fix round 1, F9) The persistent.rs back-compat test parses a TOML
+        // string directly with `toml::from_str`. That proves serde's
+        // `#[serde(default)]` contract but says nothing about the REAL path
+        // an old install's file actually goes through — file existence
+        // checks, `load_persistent_state_at`'s read, `update_persistent_state_at`'s
+        // load-mutate-save cycle. This exercises that path end to end
+        // against an old-shaped file genuinely sitting on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        std::fs::write(
+            &path,
+            b"loaded_plugins = [\"my-plugin\"]\n\n[layout]\nzoom_factor = 1.5\n",
+        )
+        .unwrap();
+
+        let state = load_persistent_state_at(&path).unwrap();
+        assert!(state.recent_projects.is_empty());
+        assert!(state.project_layouts.is_empty());
+        assert_eq!(
+            state.layout.zoom_factor, 1.5,
+            "the existing keys still load"
+        );
+
+        // The real update path too: a project-mode-shaped mutation lands
+        // correctly, and the pre-existing fields survive the round trip.
+        update_persistent_state_at(&path, |s| {
+            s.recent_projects.push(RecentProject {
+                path: "/repo".into(),
+                last_opened_ms: 9,
+            });
+            true
+        })
+        .unwrap();
+        let reloaded = load_persistent_state_at(&path).unwrap();
+        assert_eq!(reloaded.recent_projects.len(), 1);
+        assert_eq!(reloaded.recent_projects[0].path, "/repo");
+        assert_eq!(
+            reloaded.layout.zoom_factor, 1.5,
+            "a field this update never touched survives the load-mutate-save round trip"
+        );
+        assert_eq!(reloaded.loaded_plugins, vec!["my-plugin".to_string()]);
+    }
+
+    #[test]
     fn editor_vim_mode_reads_from_the_editor_table() {
         let cfg: UserConfig = toml::from_str("[editor]\nvim_mode = true").unwrap();
         assert!(cfg.editor.vim_mode);
+    }
+
+    #[test]
+    fn old_editor_config_gets_lsp_defaults() {
+        let cfg: UserConfig = toml::from_str("[editor]\nvim_mode = true\n").unwrap();
+        assert!(cfg.editor.lsp.enabled);
+        assert!(cfg.editor.lsp.languages.typescript);
+        assert!(cfg.editor.lsp.languages.json);
+        assert!(cfg.editor.lsp.languages.python);
+        assert!(cfg.editor.lsp.languages.rust);
+        assert!(cfg.editor.lsp.languages.go);
+        assert!(cfg.editor.lsp.languages.clangd);
+        assert!(cfg.editor.lsp.languages.java);
+        assert_eq!(cfg.termlab.keyboard.editor_completion, "ctrl+space");
+        assert_eq!(cfg.termlab.keyboard.editor_go_to_definition, "f12");
+        assert_eq!(cfg.termlab.keyboard.editor_find_references, "shift+f12");
+    }
+
+    #[test]
+    fn explicit_lsp_language_disables_survive_a_round_trip() {
+        let cfg: UserConfig = toml::from_str(
+            "[editor.lsp]\nenabled = false\nsuggestions_while_typing = false\n\n[editor.lsp.languages]\ntypescript = false\njava = false\n",
+        )
+        .unwrap();
+        let serialized = toml::to_string(&cfg).unwrap();
+        let round_tripped: UserConfig = toml::from_str(&serialized).unwrap();
+
+        assert!(!round_tripped.editor.lsp.enabled);
+        assert!(!round_tripped.editor.lsp.suggestions_while_typing);
+        assert!(!round_tripped.editor.lsp.languages.typescript);
+        assert!(!round_tripped.editor.lsp.languages.java);
+        assert!(round_tripped.editor.lsp.languages.rust);
     }
 
     #[test]
@@ -646,6 +723,20 @@ mod tests {
         let cfg: UserConfig = toml::from_str("").unwrap();
         assert!(!cfg.editor.vim_mode);
         assert!(!UserConfig::default().editor.vim_mode);
+    }
+
+    #[test]
+    fn search_in_project_defaults_to_cmd_shift_f_and_survives_an_override() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.termlab.keyboard.search_in_project, "cmd+shift+f");
+        let overridden: UserConfig =
+            toml::from_str("[termlab.keyboard]\nsearch_in_project = \"ctrl+alt+f\"\n")
+                .expect("parse");
+        assert_eq!(overridden.termlab.keyboard.search_in_project, "ctrl+alt+f");
+        // Back-compat: a config written before this key existed still parses.
+        let legacy: UserConfig =
+            toml::from_str("[termlab.keyboard]\nnew_tab = \"cmd+t\"\n").expect("parse");
+        assert_eq!(legacy.termlab.keyboard.search_in_project, "cmd+shift+f");
     }
 
     #[test]

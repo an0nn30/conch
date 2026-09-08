@@ -30,6 +30,14 @@
     save_file: 'Save File',
     save_file_as: 'Save File As',
     open_file: 'Open File',
+    editor_completion: 'Trigger Completion',
+    editor_signature_help: 'Show Signature Help',
+    editor_go_to_definition: 'Go to Definition',
+    editor_find_references: 'Find References',
+    editor_navigate_back: 'Navigate Back',
+    editor_navigate_forward: 'Navigate Forward',
+    editor_next_problem: 'Next Problem',
+    editor_previous_problem: 'Previous Problem',
     toggle_preview: 'Toggle Markdown Preview',
   };
 
@@ -43,7 +51,21 @@
     },
     {
       label: 'Editor',
-      keys: ['new_file', 'open_file', 'save_file', 'save_file_as', 'toggle_preview'],
+      keys: [
+        'new_file',
+        'open_file',
+        'save_file',
+        'save_file_as',
+        'toggle_preview',
+        'editor_completion',
+        'editor_signature_help',
+        'editor_go_to_definition',
+        'editor_find_references',
+        'editor_navigate_back',
+        'editor_navigate_forward',
+        'editor_next_problem',
+        'editor_previous_problem',
+      ],
     },
     {
       label: 'Tools',
@@ -107,6 +129,20 @@
     let collapsedSidebarGroups = new Set();
 
     function ensureSettingsShape(settings) {
+      if (!settings.editor || typeof settings.editor !== 'object') settings.editor = {};
+      if (!settings.editor.lsp || typeof settings.editor.lsp !== 'object') settings.editor.lsp = {};
+      if (!settings.editor.lsp.languages || typeof settings.editor.lsp.languages !== 'object') {
+        settings.editor.lsp.languages = {};
+      }
+      if (typeof settings.editor.lsp.enabled !== 'boolean') settings.editor.lsp.enabled = true;
+      if (typeof settings.editor.lsp.suggestions_while_typing !== 'boolean') {
+        settings.editor.lsp.suggestions_while_typing = true;
+      }
+      for (const key of ['typescript', 'json', 'python', 'rust', 'go', 'clangd', 'java']) {
+        if (typeof settings.editor.lsp.languages[key] !== 'boolean') {
+          settings.editor.lsp.languages[key] = true;
+        }
+      }
       if (!settings.termlab) settings.termlab = {};
       if (!settings.termlab.ui || typeof settings.termlab.ui !== 'object') {
         settings.termlab.ui = {};

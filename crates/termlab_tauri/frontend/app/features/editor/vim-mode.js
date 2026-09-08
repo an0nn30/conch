@@ -50,6 +50,25 @@
     return [CM.vim()];
   }
 
+  // Whether CodeMirror's vim plugin is mounted on this view.
+  //
+  // The plugin's constructor does `this.view.cm = this.cm` — it hangs its CM5
+  // adapter off the view — and its `destroy()` does `delete this.view.cm`. So
+  // the presence of `view.cm` tracks the vim compartment exactly, including a
+  // vim_mode toggled off in Settings while a pane is open. That is a vendor
+  // fact, which is why it lives here rather than in the callers.
+  //
+  // It exists because a NON-EMPTY selection is visual mode as far as the engine
+  // is concerned. Anything that moves the caret by selecting a range — the
+  // editor's Go to Definition reveal, a Find References pick, a Ctrl-O/Ctrl-I
+  // step, a jump to a problem — therefore drops a vim user into visual mode
+  // without asking, where every normal-mode-only mapping (all of ours) is
+  // unreachable and a stray `d` deletes the selection. Callers ask this before
+  // they select, and land a caret instead.
+  function isMountedOn(view) {
+    return !!(view && view.cm && view.cm.state && view.cm.state.vim);
+  }
+
   // vim runs an ex command inside `cm.operation(...)` (see vim.js's
   // exCommandDispatcher.processCommand), and `:q` ends in a closeTab that
   // destroys the very CodeMirror view the operation belongs to. Deferring to a
@@ -59,6 +78,17 @@
     Promise.resolve().then(fn).catch((error) => {
       console.error('vim ex command failed:', error);
     });
+  }
+
+  // Stage 2 of the jump-trail diagnostic (features/editor/vim-jump-trace.js):
+  // vim matched the key and reached OUR action. This is the one step neither
+  // the keyboard router nor the navigator can observe, and it is the whole
+  // difference between "the key never got here" and "the trail was empty".
+  // Off by default and session-only; the return value is deliberately ignored
+  // so a missing or failing trace can never change what a key does.
+  function traceAction(name) {
+    const trace = global.termlabVimJumpTrace;
+    if (trace && typeof trace.noteVimAction === 'function') trace.noteVimAction(name);
   }
 
   // Bind `:w`, `:q` and `:wq` to this app's own paths.
@@ -138,8 +168,147 @@
     return true;
   }
 
+  // The vim keys for the IDE features this app actually ships.
+  //
+  // These have to be vim COMMANDS, not DOM handlers. In normal mode vim's
+  // ViewPlugin owns the keystroke, and the Prec.highest handlers the LSP
+  // surfaces install deliberately fall through when nothing of theirs is open,
+  // so `g` then `d` never reach them as a pair. The engine's own command table
+  // is the only correct hook, and the only one that understands multi-key
+  // sequences.
+  //
+  //   gd, gD, <C-]>  go to definition   (nothing in the package binds these)
+  //   gr             find references    (the package binds no gr either)
+  //   <C-o>, <C-i>   back / forward     (remapped, see absorbJumpList below)
+  //   K              hover              (the package binds no K)
+  //   ]d, [d         next/prev problem  (mapCommand unshifts, so these beat
+  //                                      the package's ]<character> motion)
+  //
+  // Everything is normal-mode only, so insert-mode Tab, Ctrl-Space and
+  // Ctrl-O ("one normal command") keep their meanings. A key is mapped only
+  // when its feature was actually wired, so a window without one gets no dead
+  // key.
+  //
+  // Each action defers to a microtask for the same reason the ex commands do:
+  // it runs inside vim's own operation, and the work dispatches transactions
+  // into that very view — and may build a whole new tab.
+  let registeredNavigation = false;
+  function registerNavigationCommands(deps) {
+    const CM = global.CM6;
+    const Vim = CM && CM.Vim;
+    if (
+      !Vim || typeof Vim.defineAction !== 'function' || typeof Vim.mapCommand !== 'function'
+    ) return false;
+    const d = deps || {};
+    if (typeof d.goToDefinition !== 'function') return false;
+    if (registeredNavigation) return true;
+    registeredNavigation = true;
+
+    // The adapter hands an action its CodeMirror 6 view as `cm6` (the CM5
+    // adapter calls it `cm`); the caret is read off the view by the feature
+    // itself, which is what keeps this seam to one line per key.
+    const viewOf = (cm) => (cm && (cm.cm6 || cm.cm)) || null;
+
+    function map(keys, name, run, needsView) {
+      Vim.defineAction(name, (cm) => {
+        traceAction(name);
+        const view = viewOf(cm);
+        if (needsView && !view) return;
+        defer(() => run(view));
+      });
+      for (const spelling of keys) {
+        Vim.mapCommand(spelling, 'action', name, {}, { context: 'normal' });
+      }
+    }
+
+    // `gD` (declaration) and `<C-]>` (tag jump) are the same action here: the
+    // definition payload folds declaration into definition, and the package
+    // binds neither.
+    map(['gd', 'gD', '<C-]>'], 'termlabGoToDefinition', d.goToDefinition, true);
+    // `gr`. Unlike gd this NEVER navigates on its own — it opens the reference
+    // list and waits for a pick — so it is mapped only where the feature is
+    // wired, like every optional key below it.
+    if (typeof d.findReferences === 'function') {
+      map(['gr'], 'termlabFindReferences', d.findReferences, true);
+    }
+    if (typeof d.navigateBack === 'function') {
+      map(['<C-o>'], 'termlabJumpBack', () => d.navigateBack(), false);
+    }
+    if (typeof d.navigateForward === 'function') {
+      map(['<C-i>'], 'termlabJumpForward', () => d.navigateForward(), false);
+    }
+    if (typeof d.showHover === 'function') {
+      map(['K'], 'termlabShowHover', d.showHover, true);
+    }
+    if (typeof d.nextDiagnostic === 'function') {
+      map([']d'], 'termlabNextDiagnostic', () => d.nextDiagnostic(), false);
+    }
+    if (typeof d.previousDiagnostic === 'function') {
+      map(['[d'], 'termlabPreviousDiagnostic', () => d.previousDiagnostic(), false);
+    }
+    if (typeof d.recordJump === 'function') absorbJumpList(Vim, d.recordJump);
+    return true;
+  }
+
+  // One history, not two.
+  //
+  // vim keeps its own jumplist, and it cannot serve this app: its entries are
+  // CodeMirror BOOKMARKS belonging to one document, so a jump that changed
+  // file has nothing to come back to, and walking an entry recorded in another
+  // view would put the caret at a line number borrowed from a different file.
+  // That is exactly why Ctrl-O did nothing after a cross-file `gd`.
+  //
+  // So <C-o>/<C-i> consult the window's own cross-file history and ONLY that —
+  // no fall-through to vim's native walk, which could never be right here —
+  // and this wrapper feeds that history from the same event vim feeds its own
+  // list from: `jumpList.add(cm, oldCur, newCur)`, called by every motion the
+  // keymap marks `toJumplist` (G, gg, {, }, /search, n/N, marks, %, H/M/L).
+  // The engine keeps its own list underneath, untouched and now unread.
+  //
+  // `getVimGlobalState_` is the package's own accessor for that state. It is
+  // labelled a testing hook, so this is guarded end to end: if a future
+  // version moves it, the in-file half of the history is lost and the LSP
+  // half still works, rather than the editor breaking.
+  function absorbJumpList(Vim, recordJump) {
+    if (typeof Vim.getVimGlobalState_ !== 'function') return false;
+    let jumpList = null;
+    try {
+      const state = Vim.getVimGlobalState_();
+      jumpList = state && state.jumpList;
+    } catch (_) {
+      return false;
+    }
+    if (!jumpList || typeof jumpList.add !== 'function') return false;
+    // The recorder lives ON the list, and the wrapper reads it at call time.
+    // The engine's state object outlives any one registration (it is created
+    // when the package is first imported), so a second window — or a reload —
+    // must be able to take the recording over rather than wrap a wrapper and
+    // leave the first, now-dead recorder in the chain.
+    jumpList.termlabRecordJump = recordJump;
+    if (jumpList.termlabAbsorbed) return true;
+    const original = jumpList.add;
+    jumpList.termlabAbsorbed = true;
+    jumpList.add = function absorbedAdd(cm, oldCur) {
+      try {
+        const view = cm && (cm.cm6 || cm.cm);
+        const record = jumpList.termlabRecordJump;
+        // vim counts columns in `ch`; the history speaks LSP characters, which
+        // is the same unit under a different name.
+        if (view && oldCur && typeof record === 'function') {
+          record(view, { line: oldCur.line, character: oldCur.ch });
+        }
+      } catch (error) {
+        console.error('vim jump was not recorded in the navigation history', error);
+      }
+      return original.apply(this, arguments);
+    };
+    return true;
+  }
+
   global.termlabVimMode = {
+    isMountedOn,
     vimExtensions,
     registerExCommands,
+    registerNavigationCommands,
   };
 })(window);

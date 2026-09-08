@@ -11,6 +11,7 @@
   const fontCompartments = new WeakMap();
   const themeCompartments = new WeakMap();
   const vimCompartments = new WeakMap();
+  const readOnlyCompartments = new WeakMap();
   // Save As renames a live pane, so the language can no longer be fixed at
   // creation: a scratch saved as `deploy.py` has to start highlighting as
   // Python without losing the document, the selection or the undo history.
@@ -37,6 +38,53 @@
       : [];
   }
 
+  // LSP completion. Returns [] when the module or the bundle's autocomplete
+  // export is missing, so a stale vendor bundle costs completion and nothing
+  // else. The extensions carry their own precedence (Prec.highest on the
+  // keymap) — where they sit in this list is not what makes them heard.
+  function completionExtensions() {
+    return global.termlabLspCompletion
+      && typeof global.termlabLspCompletion.extensions === 'function'
+      ? global.termlabLspCompletion.extensions()
+      : [];
+  }
+
+  // LSP diagnostics. Same contract as completionExtensions: [] when the
+  // module or the bundle's lint exports are missing, so a stale vendor bundle
+  // costs squiggles and nothing else. No precedence concerns — these are
+  // decorations and a gutter, not key handlers.
+  function diagnosticsExtensions() {
+    return global.termlabLspDiagnostics
+      && typeof global.termlabLspDiagnostics.extensions === 'function'
+      ? global.termlabLspDiagnostics.extensions()
+      : [];
+  }
+
+  // LSP hover and signature help. Same contract as the two above: [] when the
+  // module or the bundle's tooltip exports are missing, so a stale vendor
+  // bundle costs the overlays and nothing else. These DO carry precedence —
+  // the Escape handler is a Prec.highest domEventHandler, for the same reason
+  // the completion one is — but it travels with the extension, not with the
+  // position in this list.
+  function tooltipExtensions() {
+    return global.termlabLspTooltips
+      && typeof global.termlabLspTooltips.extensions === 'function'
+      ? global.termlabLspTooltips.extensions()
+      : [];
+  }
+
+  // Go to Definition's chooser. Same contract as the three above: [] when the
+  // module or the bundle's tooltip exports are missing, so a stale vendor
+  // bundle costs the chooser and nothing else. It carries its own precedence —
+  // its keydown handler must beat vim while the chooser is open — so where it
+  // sits in the list below is not what makes it heard.
+  function navigationExtensions() {
+    return global.termlabLspNavigation
+      && typeof global.termlabLspNavigation.extensions === 'function'
+      ? global.termlabLspNavigation.extensions()
+      : [];
+  }
+
   function languageExtension(filename) {
     const CM = global.CM6;
     const map = global.termlabEditorLanguageMap;
@@ -59,11 +107,15 @@
     if (!CM || !hostEl) return null;
     const opts = options || {};
     const onDirtyChange = typeof opts.onDirtyChange === 'function' ? opts.onDirtyChange : () => {};
+    const onDocumentTransaction = typeof opts.onDocumentTransaction === 'function'
+      ? opts.onDocumentTransaction
+      : () => {};
 
     const fontComp = new CM.Compartment();
     const themeComp = new CM.Compartment();
     const vimComp = new CM.Compartment();
     const languageComp = new CM.Compartment();
+    const readOnlyComp = new CM.Compartment();
     const themeExtensions = global.termlabEditorTheme
       ? global.termlabEditorTheme.buildTheme()
       : [];
@@ -73,6 +125,9 @@
       if (!update.docChanged || dirty) return;
       dirty = true;
       onDirtyChange(true);
+    });
+    const transactionWatcher = CM.EditorView.updateListener.of((update) => {
+      if (update.docChanged) onDocumentTransaction(update);
     });
 
     // Both halves no-op until a preview exists, which for a non-markdown pane
@@ -95,13 +150,25 @@
       state: CM.EditorState.create({
         doc: typeof opts.doc === 'string' ? opts.doc : '',
         extensions: [
-          // FIRST, and it has to stay first. CodeMirror resolves keymaps in
-          // extension order, so anything ahead of vim wins the keystroke:
-          // put this after CM.keymap.of([...defaultKeymap]) below and `i`
-          // types an "i" instead of entering insert mode, `dd` deletes
-          // nothing, and the feature looks broken rather than absent.
+          // FIRST, and it has to stay first. vim is a ViewPlugin with a
+          // `keydown` DOM handler, and the view runs plugin handlers in
+          // plugin order — which is extension order at equal precedence.
+          // Anything ahead of vim that consumes keydown wins the keystroke,
+          // so a plugin placed above this one could stop `i` entering insert
+          // mode. (The *keymap* below is a different mechanism: every keymap
+          // in the state shares one DOM handler that @codemirror/view
+          // registers at Prec.default, BEHIND vim's plugin. That is why the
+          // completion extensions cannot own their keys with a keymap and use
+          // a Prec.highest domEventHandler instead.)
           // test_editor_vim_glue.mjs pins the position.
           vimComp.of(vimExtensions(opts.vimMode === true)),
+          // Position here is not what makes these heard: the completion key
+          // handler carries its own Prec.highest, which is what puts it ahead
+          // of vim's plugin while the popup is open.
+          ...completionExtensions(),
+          ...diagnosticsExtensions(),
+          ...tooltipExtensions(),
+          ...navigationExtensions(),
           CM.lineNumbers(),
           CM.highlightActiveLineGutter(),
           CM.highlightSpecialChars(),
@@ -121,23 +188,36 @@
             CM.indentWithTab,
           ]),
           languageComp.of(languageExtension(opts.filename || '')),
+          readOnlyComp.of(CM.EditorState.readOnly.of(false)),
           themeComp.of(themeExtensions),
           fontComp.of([]),
           dirtyWatcher,
+          transactionWatcher,
           previewWatcher,
         ],
       }),
     });
 
+    // Before anything can ask this view for a position: while its pane is
+    // hidden (an inactive tab is `display: none`) a coordinate lookup walks a
+    // DOM with no boxes and throws inside CodeMirror. features/editor/
+    // editor-view-guards.js explains the failure in full; a window without
+    // that module simply keeps the old behaviour.
+    if (global.termlabEditorViewGuards && typeof global.termlabEditorViewGuards.install === 'function') {
+      global.termlabEditorViewGuards.install(view);
+    }
+
     fontCompartments.set(view, fontComp);
     themeCompartments.set(view, themeComp);
     vimCompartments.set(view, vimComp);
     languageCompartments.set(view, languageComp);
+    readOnlyCompartments.set(view, readOnlyComp);
     // Callers clear dirty after a save; expose the reset without exposing state.
     view.termlabResetDirty = () => {
       dirty = false;
       onDirtyChange(false);
     };
+    view.termlabSetReadOnly = (readOnly) => setReadOnly(view, readOnly);
     return view;
   }
 
@@ -406,6 +486,13 @@
     view.dispatch({ effects: comp.reconfigure(vimExtensions(enabled === true)) });
   }
 
+  function setReadOnly(view, readOnly) {
+    const CM = global.CM6;
+    const comp = readOnlyCompartments.get(view);
+    if (!CM || !view || !comp || !CM.EditorState || !CM.EditorState.readOnly) return;
+    view.dispatch({ effects: comp.reconfigure(CM.EditorState.readOnly.of(readOnly === true)) });
+  }
+
   // Re-derive the highlighting from a new name on a view that is already
   // open. Save As is the only caller: the pane keeps its document, so this is
   // a compartment reconfigure rather than a fresh state (which would discard
@@ -425,6 +512,7 @@
     setFontSize,
     refreshTheme,
     setVimMode,
+    setReadOnly,
     setLanguage,
     setPreviewMode,
     togglePreview,
