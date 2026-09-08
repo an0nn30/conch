@@ -46,6 +46,12 @@ function vimAdapter(view) {
     curOp: null,
     getCursor: () => ({ line: cursor.line, ch: cursor.ch }),
     listSelections: () => [{ anchor: cursor, head: cursor }],
+    // `v` (toggleVisualMode) writes the selection back through this, so the
+    // engine can be driven into visual mode.
+    setSelections(ranges) {
+      const range = ranges && ranges[0];
+      if (range && range.head) cursor = { line: range.head.line, ch: range.head.ch || 0 };
+    },
     setCursor(line, ch) {
       cursor = typeof line === 'object' && line !== null
         ? { line: line.line, ch: line.ch || 0 }
@@ -144,6 +150,40 @@ check('Ctrl-I resolves to our forward action against the shipped bundle', async 
   await tick();
   assert.strictEqual(h.calls.forward, 1, 'Ctrl-I walked the window history forward');
   assert.strictEqual(h.calls.back, 0);
+});
+
+// The bug this pins: `gd` used to land the caret on the definition by SELECTING
+// its range, and CodeMirror's vim plugin reads a non-empty selection as visual
+// mode. Our jump keys are mapped `{ context: 'normal' }`, so in visual mode
+// they resolve to nothing at all while every ordinary motion (`j`, `w`, `G` —
+// bound in every context) keeps working. That is exactly the shape of the
+// report: "Ctrl-O does nothing, all the other vim keys are fine".
+//
+// The fix is on the reveal side (editor-service.js collapses the selection when
+// vim is mounted). This check records WHY that is the fix, against the shipped
+// engine: in visual mode our action is unreachable, and no amount of work in
+// the navigator can change that.
+check('our jump keys are normal-mode only, so a reveal must not leave vim in visual mode', async () => {
+  const h = harness();
+  const adapter = vimAdapter({ id: 'view' });
+  const enter = h.Vim.findKey(adapter, 'v', 'test');
+  assert.strictEqual(typeof enter, 'function', 'the engine matched `v`');
+  enter();
+  assert.strictEqual(
+    adapter.state.vim.visualMode, true,
+    'the engine is in visual mode',
+  );
+  const back = h.Vim.findKey(adapter, '<C-o>', 'test');
+  if (typeof back === 'function') back();
+  await tick();
+  assert.strictEqual(
+    h.calls.back, 0,
+    'in visual mode <C-o> reaches nothing of ours — which is why a reveal may not leave the editor there',
+  );
+  const forward = h.Vim.findKey(adapter, '<C-i>', 'test');
+  if (typeof forward === 'function') forward();
+  await tick();
+  assert.strictEqual(h.calls.forward, 0, 'and neither does <C-i>');
 });
 
 check("the bundle's own key translation still spells the two combinations <C-o>/<C-i>", () => {

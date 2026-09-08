@@ -50,6 +50,25 @@
     return [CM.vim()];
   }
 
+  // Whether CodeMirror's vim plugin is mounted on this view.
+  //
+  // The plugin's constructor does `this.view.cm = this.cm` — it hangs its CM5
+  // adapter off the view — and its `destroy()` does `delete this.view.cm`. So
+  // the presence of `view.cm` tracks the vim compartment exactly, including a
+  // vim_mode toggled off in Settings while a pane is open. That is a vendor
+  // fact, which is why it lives here rather than in the callers.
+  //
+  // It exists because a NON-EMPTY selection is visual mode as far as the engine
+  // is concerned. Anything that moves the caret by selecting a range — the
+  // editor's Go to Definition reveal, a Find References pick, a Ctrl-O/Ctrl-I
+  // step, a jump to a problem — therefore drops a vim user into visual mode
+  // without asking, where every normal-mode-only mapping (all of ours) is
+  // unreachable and a stray `d` deletes the selection. Callers ask this before
+  // they select, and land a caret instead.
+  function isMountedOn(view) {
+    return !!(view && view.cm && view.cm.state && view.cm.state.vim);
+  }
+
   // vim runs an ex command inside `cm.operation(...)` (see vim.js's
   // exCommandDispatcher.processCommand), and `:q` ends in a closeTab that
   // destroys the very CodeMirror view the operation belongs to. Deferring to a
@@ -287,6 +306,7 @@
   }
 
   global.termlabVimMode = {
+    isMountedOn,
     vimExtensions,
     registerExCommands,
     registerNavigationCommands,

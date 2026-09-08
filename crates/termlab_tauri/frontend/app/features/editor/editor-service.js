@@ -216,14 +216,26 @@
   // back in the editor. Lives here rather than in a caller because the panes
   // and their views are this module's to drive; where the range LANDS is
   // lsp-position.js's answer, shared with every other surface that places one.
+  //
+  // With vim mounted on the view the range is NOT selected — the caret lands on
+  // its first character instead. CodeMirror's vim plugin reads a non-empty
+  // selection as visual mode, so selecting here silently put every jump's
+  // destination into visual mode: `<C-o>`/`<C-i>` (mapped normal-mode only)
+  // became unreachable while ordinary motions kept working, and a stray `d`
+  // would have deleted the selection. Landing a caret is also what vim itself
+  // does after a jump. This is the single chokepoint every navigation goes
+  // through — gd, a references pick, a history step, a jump to a problem — so
+  // it is the only place the rule has to hold.
   function revealRange(pane, range, options) {
     const CM = global.CM6;
     const positions = global.termlabLspPosition;
     if (!pane || !pane.view || !pane.view.state || !range || !range.start) return false;
     if (!positions) return false;
     const span = positions.spanOf(pane.view.state.doc, range);
+    const vim = global.termlabVimMode;
+    const vimMounted = !!(vim && typeof vim.isMountedOn === 'function' && vim.isMountedOn(pane.view));
     const anchor = span.from;
-    const head = span.to;
+    const head = vimMounted ? span.from : span.to;
     const spec = { selection: { anchor, head } };
     if (CM && CM.EditorView && typeof CM.EditorView.scrollIntoView === 'function') {
       spec.effects = CM.EditorView.scrollIntoView(anchor, { y: 'center' });
