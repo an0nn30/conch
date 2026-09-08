@@ -1,11 +1,13 @@
 # Light Editor LSP — POC Acceptance Checklist
 
-> **Status: automated evidence recorded; manual matrices pending owner — the final
-> acceptance commit (the plan's Step 7, `docs: record light editor LSP POC
-> verification`) follows the owner's hands-on pass.** This document is committed
-> as `docs: record automated POC acceptance evidence` because the plan reserves
-> the Step 7 message for the point at which *every* required result, manual
-> included, has been recorded.
+> **Status: squash-merged to `main` as `813e809` on 2026-09-08 after the owner's
+> hands-on pass, and the packaged-bundle gates (commands 5–8) were re-run green
+> against that exact `main` commit the same day — see "Post-merge
+> re-verification" below.** The manual matrices were exercised by the owner
+> directly before merging; their per-cell results are not transcribed into this
+> document, so the "Manual matrices" section still reads as pending. The plan's
+> Step 7 acceptance commit (`docs: record light editor LSP POC verification`)
+> stays reserved for the point at which those cells are recorded.
 
 Acceptance evidence for
 [`docs/superpowers/plans/2026-08-24-light-editor-lsp-poc.md`](../plans/2026-08-24-light-editor-lsp-poc.md)
@@ -106,6 +108,60 @@ termlab_tauri  (lib test) 10 warnings (9 duplicates)
 ```
 
 ---
+
+## Post-merge re-verification — 2026-09-08
+
+The packaged-bundle gates (commands 5–8 above) re-run against `main` after the
+squash-merge, so the evidence below is for the tree that actually shipped to
+`main`, not the pre-merge branch tip.
+
+| Field | Value |
+|---|---|
+| Date | 2026-09-08 |
+| Machine | arm64 macOS 26.6.2 (Apple Silicon) |
+| Built from | `main` @ `813e809d93828a206f108c1edfaf6195add37bf0` (`813e809`) — its tree is byte-identical to the pre-merge branch tip `396020c` |
+| App build identifier | `dist/TermLab.app`; `CFBundleShortVersionString` 3.0.0, `CFBundleVersion` 3.0.0-rc.2; main binary arm64 |
+| Bundle source | `packaging/lsp/dist/` is git-ignored and was absent in this checkout; it was copied from the branch worktree rather than re-fetched. Commands 5, 6 and 7 each independently re-verified all 144 files against the manifest, so provenance does not rest on the copy |
+
+| # | Command | Exit | Literal result | Verdict |
+|---|---|---|---|---|
+| 5 | `scripts/lsp/fetch-macos-arm64.sh --verify-only packaging/lsp/dist/arm64` | 0 | `receipt: verified 144 files against …/packaging/lsp/dist/manifest.json` | PASS |
+| 6 | `make app` | 0 | `Built dist/TermLab.app`; the Makefile re-verified the 144-file receipt inside `Contents/Resources/lsp` after staging | PASS |
+| 7 | `scripts/lsp/smoke-macos-arm64.sh dist/TermLab.app` | 0 | `packaged LSP smoke test passed for …/dist/TermLab.app` — see detail | PASS |
+| 8 | `codesign --verify --deep --strict --verbose=2 dist/TermLab.app` | 0 | `valid on disk` / `satisfies its Designated Requirement` | PASS |
+
+### Smoke detail (command 7, post-merge)
+
+`PATH` scrubbed to `/usr/bin:/bin:/usr/sbin:/sbin`, so neither server could fall
+back to a host toolchain:
+
+```
+lsp-smoke: node executable is arm64 and bundled: Contents/Resources/lsp/arm64/node/bin/node
+lsp-smoke: rust-analyzer executable is arm64 and bundled: Contents/Resources/lsp/arm64/rust-analyzer/rust-analyzer
+lsp-smoke: launching typescript-language-server with PATH=/usr/bin:/bin:/usr/sbin:/sbin
+smoke: initialize answered by server
+lsp-smoke: typescript-language-server answered initialize and shut down cleanly
+lsp-smoke: launching rust-analyzer with PATH=/usr/bin:/bin:/usr/sbin:/sbin
+smoke: initialize answered by rust-analyzer 0.3.3025-standalone (5c156cdfb0 2026-08-23)
+lsp-smoke: rust-analyzer answered initialize and shut down cleanly
+```
+
+### What command 8 does and does not certify
+
+The signature is **ad-hoc** (`codesign -dv`: `Signature=adhoc`, `TeamIdentifier=not
+set`), which is what `make app` produces (`codesign --force --deep --sign -`).
+That satisfies the gate as written and matches the 2026-08-27 run, but it is not
+a Developer ID signature and cannot be notarized. Shipping a signed, notarized
+bundle is part of open decision 2 (release wiring).
+
+### Decision 2 has widened since the original run
+
+`main` now builds Windows and `release.yml` publishes an x64 NSIS/MSI installer,
+but the LSP packaging is macOS-arm64-only (`scripts/lsp/fetch-macos-arm64.sh`,
+`packaging/lsp/dist/arm64`) and `packaging/lsp/dist/` is git-ignored — so the
+Windows installers ship the same empty `lsp/` as the DMGs and fail closed in
+the same way. Whatever resolves decision 2 has to either cover Windows or state
+explicitly that language features are macOS-only for this release.
 
 ## Manual matrices — PENDING OWNER
 
