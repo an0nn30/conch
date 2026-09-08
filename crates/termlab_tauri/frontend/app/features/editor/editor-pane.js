@@ -198,6 +198,15 @@
       }),
     });
 
+    // Before anything can ask this view for a position: while its pane is
+    // hidden (an inactive tab is `display: none`) a coordinate lookup walks a
+    // DOM with no boxes and throws inside CodeMirror. features/editor/
+    // editor-view-guards.js explains the failure in full; a window without
+    // that module simply keeps the old behaviour.
+    if (global.termlabEditorViewGuards && typeof global.termlabEditorViewGuards.install === 'function') {
+      global.termlabEditorViewGuards.install(view);
+    }
+
     fontCompartments.set(view, fontComp);
     themeCompartments.set(view, themeComp);
     vimCompartments.set(view, vimComp);
